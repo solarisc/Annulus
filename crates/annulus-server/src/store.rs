@@ -1087,3 +1087,33 @@ impl Server {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE: &str = r#"{"salt":[1,2],"kdf":{"memory_kib":8,"iterations":1,"parallelism":1},"by_password":{"nonce":"AA","ciphertext":"AA"},"by_recovery":{"nonce":[1],"ciphertext":[2]}}"#;
+
+    #[test]
+    fn a_key_file_needs_every_part_and_at_most_four_kib() {
+        assert!(check_key_file(FILE.as_bytes()).is_ok());
+        let padded = |size: usize| format!("{FILE:<size$}");
+        assert!(check_key_file(padded(MAX_KEY_FILE).as_bytes()).is_ok());
+        assert!(check_key_file(padded(MAX_KEY_FILE + 1).as_bytes()).is_err());
+        for (part, empty) in [
+            ("\"salt\":[1,2]", "\"salt\":[]"),
+            ("\"memory_kib\":8", "\"memory_kib\":0"),
+            ("\"iterations\":1", "\"iterations\":0"),
+            ("\"parallelism\":1", "\"parallelism\":0"),
+            ("{\"nonce\":\"AA\"", "{\"nonce\":\"\""),
+            ("\"ciphertext\":\"AA\"", "\"ciphertext\":\"\""),
+            ("\"nonce\":[1]", "\"nonce\":[]"),
+            ("\"ciphertext\":[2]", "\"ciphertext\":[]"),
+            (",\"by_recovery\"", ",\"other\""),
+        ] {
+            let broken = FILE.replacen(part, empty, 1);
+            assert_ne!(broken, FILE, "{part}");
+            assert!(check_key_file(broken.as_bytes()).is_err(), "{empty}");
+        }
+    }
+}

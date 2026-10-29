@@ -621,6 +621,28 @@ mod vaults {
     }
 
     #[test]
+    fn a_real_vault_key_file_passes_the_servers_check_on_a_password_change() {
+        let (laptop, _) = Vault::create(temp("rewrap"), "pw", CHEAP_KDF).unwrap();
+        let base = http_server();
+        let mut http = crate::http::HttpServer::new(&base, None).unwrap();
+        let session = account::register(
+            &mut http,
+            &cheap(),
+            "ana",
+            "pw",
+            laptop.key_file_bytes(),
+            "laptop",
+        )
+        .unwrap();
+        http.set_token(Some(session.token));
+        let rewrapped = laptop.password_kit().rewrap("pw", "new pw").unwrap();
+        account::change_password(&mut http, &cheap(), "pw", "new pw", rewrapped.clone()).unwrap();
+        let mut phone = crate::http::HttpServer::new(&base, None).unwrap();
+        let session = account::login(&mut phone, &cheap(), "ana", "new pw", "phone").unwrap();
+        assert_eq!(session.wrapped_keys, rewrapped);
+    }
+
+    #[test]
     fn hosts_and_rules_reach_a_device_that_joins_and_edits_come_back() {
         let server = server();
         let (mut laptop, _) = Vault::create(temp("laptop"), "pw", CHEAP_KDF).unwrap();
