@@ -109,6 +109,13 @@ fn settings(app: &mut NativeApp) {
     section(app, super::Section::Settings);
 }
 
+fn settings_account(app: &mut NativeApp) {
+    settings(app);
+    app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
+    // Made up, so no photo shows the CI machine's name.
+    "Work laptop".clone_into(&mut app.sync.device);
+}
+
 fn locked(app: &mut NativeApp) {
     app.vault = None;
 }
@@ -291,6 +298,15 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: settings,
+        acts: &[],
+    },
+    Scene {
+        name: "settings-account",
+        width: 1100,
+        height: 800,
+        scale: 1.0,
+        populated: true,
+        setup: settings_account,
         acts: &[],
     },
     Scene {
@@ -595,6 +611,80 @@ fn every_scene_renders_without_layout_faults() {
 "
         )
     );
+}
+
+/// Draws one frame of `app` with input `events`; returns what the toolkit reported.
+fn drive(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) -> FrameOutput {
+    let mut renderer = Cpu(None);
+    let viewport = Rect::new(0.0, 0.0, 1100.0, 800.0);
+    let mut output = FrameOutput::default();
+    renderer.frame((1100, 800, 1.0), false, &mut |canvas| {
+        state.begin_frame(events, time);
+        let mut ui = Ui::new(canvas, Theme::new(Appearance::Dark), state, viewport);
+        app.frame(&mut ui);
+        output = state.end_frame();
+    });
+    output
+}
+
+/// End to end through the deployed sync server: the new UI's Settings create an account
+/// from typed input (server, name, the vault's password) and the vault syncs to it.
+#[test]
+#[ignore = "needs the deployed sync server (ANNULUS_E2E_SYNC_URL)"]
+fn e2e_the_new_settings_create_a_sync_account_and_sync() {
+    let url = std::env::var("ANNULUS_E2E_SYNC_URL").expect("ANNULUS_E2E_SYNC_URL");
+    let vault = fixture_vault("e2e-account", true);
+    let path = vault.path().to_path_buf();
+    let mut app = NativeApp::new(Some(vault));
+    app.vault_path = Some(path);
+    app.section = super::Section::Settings;
+    let mut state = UiState::default();
+    let started = std::time::Instant::now();
+    let clock = || started.elapsed().as_secs_f64();
+    let mut output = drive(&mut app, &mut state, &[], clock());
+    let name = format!("e2e-{}", std::process::id());
+    let clear_device = vec![
+        Event::Key(Key::Char('a'), Modifiers::CTRL),
+        Event::Key(Key::Backspace, Modifiers::NONE),
+    ];
+    for (field, text) in [
+        ("Server, e.g. https://sync.example.com", url.as_str()),
+        ("Account name", name.as_str()),
+        ("This device's name", "e2e device"),
+        ("This vault's master password", "pw"),
+    ] {
+        let mut events = vec![
+            Event::PointerMoved(zone_center(&output.zones, field)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ];
+        drive(&mut app, &mut state, &events, clock());
+        events = clear_device.clone();
+        events.push(Event::Text(text.to_owned()));
+        output = drive(&mut app, &mut state, &events, clock());
+    }
+    let press_on = |zones: &[Zone], name: &str| {
+        vec![
+            Event::PointerMoved(zone_center(zones, name)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ]
+    };
+    let events = press_on(&output.zones, "Create account");
+    drive(&mut app, &mut state, &events, clock());
+    loop {
+        assert!(clock() < 90.0, "no sync; message: {:?}", app.sync.message);
+        drive(&mut app, &mut state, &[], clock());
+        let synced = app.vault.as_ref().is_some_and(|vault| {
+            let state = vault.sync_state();
+            state.account.is_some() && state.last_synced > 0 && state.pending_count() == 0
+        });
+        if synced {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(app.sync.message.as_ref().filter(|(error, _)| *error), None);
 }
 
 #[test]

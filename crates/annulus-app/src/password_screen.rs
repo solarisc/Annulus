@@ -28,7 +28,7 @@ pub struct PasswordScreen {
 }
 
 /// Why the new password cannot be used, if it cannot.
-fn problem(new: &str, confirm: &str) -> Option<&'static str> {
+pub(crate) fn problem(new: &str, confirm: &str) -> Option<&'static str> {
     if new.chars().count() < MIN_PASSWORD {
         Some("Use at least 10 characters.")
     } else if new != confirm {

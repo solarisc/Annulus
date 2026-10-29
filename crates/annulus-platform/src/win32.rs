@@ -46,19 +46,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HTCAPTION,
     HTCLIENT, HTMAXBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM,
-    IDC_SIZENS, IDC_SIZEWE, IsZoomed, LoadCursorW, MINMAXINFO, MSG, NCCALCSIZE_PARAMS,
+    IDC_SIZENS, IDC_SIZEWE, IsZoomed, KillTimer, LoadCursorW, MINMAXINFO, MSG, NCCALCSIZE_PARAMS,
     PostQuitMessage, RegisterClassExW, SM_CXPADDEDBORDER, SM_CYSIZEFRAME, SW_MAXIMIZE, SW_MINIMIZE,
     SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CHAR,
-    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WM_CHAR, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
     WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::d2d::{D2d, D2dCanvas};
+
+/// The timer that brings a frame the app asked for later.
+const REPAINT_TIMER: usize = 1;
 
 /// `WM_MOUSELEAVE`, which the bindings file under `UI::Controls`.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -526,6 +529,11 @@ impl Host {
                     );
                     LRESULT(0)
                 }
+                WM_TIMER => {
+                    let _ = KillTimer(Some(hwnd), REPAINT_TIMER);
+                    self.invalidate();
+                    LRESULT(0)
+                }
                 WM_DESTROY => {
                     PostQuitMessage(0);
                     LRESULT(0)
@@ -647,6 +655,13 @@ impl Host {
         }
         if output.repaint || self.target.is_none() {
             self.invalidate();
+        }
+        if let Some(after) = output.repaint_after {
+            let ms = u32::try_from(after.as_millis()).unwrap_or(u32::MAX).max(1);
+            // SAFETY: a timer on our own window; WM_TIMER below repaints and stops it.
+            unsafe {
+                let _ = SetTimer(Some(self.hwnd), REPAINT_TIMER, ms, None);
+            }
         }
     }
 }

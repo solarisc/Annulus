@@ -876,14 +876,20 @@ const LOCK_MINUTES: [(u32, &str); 5] = [
     (60, "After 1 hour"),
 ];
 
-/// Draws Settings; returns whether anything changed.
+/// Draws the account card into a rectangle and returns the height it took.
+pub type AccountCard<'a> = &'a mut dyn FnMut(&mut Ui<'_>, Rect) -> f32;
+
+/// Draws Settings, with the account card (`account`, which returns the height it took)
+/// first; `account_h` is that height from the frame before. Returns whether a setting
+/// changed and the account card's height now.
 #[allow(clippy::too_many_lines)] // One card per section, top to bottom.
 pub fn settings(
     ui: &mut Ui<'_>,
     rect: Rect,
-    settings: &mut Settings,
-    profiles: &[Profile],
-) -> bool {
+    (settings, profiles): (&mut Settings, &[Profile]),
+    account: Option<AccountCard<'_>>,
+    account_h: f32,
+) -> (bool, f32) {
     let mut area = pages::page(rect);
     pages::header(
         ui,
@@ -893,11 +899,17 @@ pub fn settings(
         "Saved on this device; your vault syncs separately.",
     );
     let row_h = 58.0;
-    let content = 5.0 * (18.0 + space::S + space::XL + 2.0 * space::S) + 7.0 * row_h;
+    let content =
+        5.0 * (18.0 + space::S + space::XL + 2.0 * space::S) + 7.0 * row_h + account_h + space::XL;
     let offset = ui.scroll_view(Id::new("settings.scroll"), area, content);
     ui.push_clip(area);
     let mut column = Rect::new(area.x, area.y - offset, area.w - 12.0, content);
     let mut changed = false;
+    let mut drawn_h = 0.0;
+    if let Some(account) = account {
+        drawn_h = account(ui, column);
+        column.take_top(drawn_h + space::XL);
+    }
 
     let mut card = pages::card(ui, &mut column, "Appearance", row_h + 2.0 * space::S);
     let control = pages::setting(
@@ -1052,5 +1064,5 @@ pub fn settings(
         changed = true;
     }
     ui.pop_clip();
-    changed
+    (changed, drawn_h)
 }

@@ -23,7 +23,7 @@ use annulus_vault::sync::{SyncAccount, SyncCopy};
 use annulus_vault::vault::Vault;
 use zeroize::Zeroizing;
 
-use crate::hosts_screen::HostsScreen;
+use crate::job::Pace;
 
 /// Seconds between background syncs while nothing changes locally.
 const PERIOD: f64 = 60.0;
@@ -32,7 +32,7 @@ const PERIOD: f64 = 60.0;
 const AFTER_EDIT: f64 = 3.0;
 
 /// What a worker thread sends back.
-enum Done {
+pub(crate) enum Done {
     /// An account was created; the vault signs in to it.
     Registered(SyncAccount),
     /// Signed in; the new vault replaces the local one (whose records it adopted).
@@ -56,22 +56,22 @@ enum Done {
 
 /// The account part of Settings, kept while the vault is unlocked.
 pub struct SyncScreen {
-    server: String,
-    account: String,
-    device: String,
-    password: SecretText,
-    work: Option<(String, Receiver<Done>)>,
-    message: Option<(bool, String)>,
-    devices: Vec<Device>,
-    trash: Vec<TrashItem>,
+    pub(crate) server: String,
+    pub(crate) account: String,
+    pub(crate) device: String,
+    pub(crate) password: SecretText,
+    pub(crate) work: Option<(String, Receiver<Done>)>,
+    pub(crate) message: Option<(bool, String)>,
+    pub(crate) devices: Vec<Device>,
+    pub(crate) trash: Vec<TrashItem>,
     /// When the last round started, in the clock of `Pace::now`.
-    last_round: f64,
+    pub(crate) last_round: f64,
     /// When a local change was first seen unpushed.
-    dirty_since: Option<f64>,
+    pub(crate) dirty_since: Option<f64>,
     /// The thread that waits for changes from other devices (live sync).
-    watcher: Option<Watcher>,
+    pub(crate) watcher: Option<Watcher>,
     /// The last sync round failed (it retries); shown in the status pill.
-    round_failed: bool,
+    pub(crate) round_failed: bool,
 }
 
 /// How sync is doing, for the pill in the tab strip (F-SYNC-004).
@@ -101,7 +101,7 @@ pub fn pill(last_synced: u64, pending: usize, failed: bool, now: u64) -> (Pill, 
 
 /// Waits on the server for changes from other devices and flags them, so a round runs at
 /// once instead of at the next minute.
-struct Watcher {
+pub(crate) struct Watcher {
     /// Which account it watches: server, name, device.
     account: (String, String, u64),
     stop: Arc<AtomicBool>,
@@ -115,11 +115,11 @@ impl Drop for Watcher {
 }
 
 impl Watcher {
-    fn start(ctx: &egui::Context, account: &SyncAccount, since: u64) -> Self {
+    fn start(pace: &dyn Pace, account: &SyncAccount, since: u64) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let news = Arc::new(AtomicBool::new(false));
         let (server, token) = (account.server.clone(), account.token.expose().to_owned());
-        let (thread_stop, thread_news, ctx) = (stop.clone(), news.clone(), ctx.clone());
+        let (thread_stop, thread_news, wake) = (stop.clone(), news.clone(), pace.waker());
         std::thread::spawn(move || {
             let Ok(http) = HttpServer::new(&server, Some(token)) else {
                 return;
@@ -130,7 +130,7 @@ impl Watcher {
                     Ok(latest) if latest > since => {
                         since = latest;
                         thread_news.store(true, Ordering::Relaxed);
-                        ctx.request_repaint();
+                        wake();
                     }
                     Ok(_) => {}
                     Err(SyncError::Unauthorized) => return,
@@ -169,14 +169,14 @@ impl Default for SyncScreen {
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 days ago".
-fn ago(then: u64, now: u64) -> String {
+pub(crate) fn ago(then: u64, now: u64) -> String {
     let seconds = now.saturating_sub(then);
     match seconds {
         0..60 => "just now".to_owned(),
@@ -193,17 +193,12 @@ impl SyncScreen {
         self.round_failed
     }
 
-    fn start(
-        &mut self,
-        ctx: &egui::Context,
-        label: &str,
-        job: impl FnOnce() -> Done + Send + 'static,
-    ) {
+    fn start(&mut self, pace: &dyn Pace, label: &str, job: impl FnOnce() -> Done + Send + 'static) {
         let (tx, rx) = channel();
-        let ctx = ctx.clone();
+        let wake = pace.waker();
         std::thread::spawn(move || {
             let _ = tx.send(job());
-            ctx.request_repaint();
+            wake();
         });
         self.work = Some((label.to_owned(), rx));
     }
@@ -211,12 +206,7 @@ impl SyncScreen {
     /// Runs background syncs and applies finished work; call every frame while unlocked.
     /// Returns true when the vault was replaced (after signing in), so running port
     /// forwards, whose ids changed, are stopped.
-    pub fn tick(
-        &mut self,
-        ctx: &egui::Context,
-        hosts: &mut HostsScreen,
-        vault_path: &Path,
-    ) -> bool {
+    pub fn tick(&mut self, ctx: &dyn Pace, hosts: &mut Vault, vault_path: &Path) -> bool {
         let mut replaced = false;
         if let Some((_, rx)) = &self.work
             && let Ok(done) = rx.try_recv()
@@ -224,7 +214,7 @@ impl SyncScreen {
             self.work = None;
             replaced = self.finish(done, hosts, vault_path);
         }
-        let state = hosts.vault().sync_state();
+        let state = hosts.sync_state();
         let Some(signed_in) = state.account.clone() else {
             self.watcher = None;
             return replaced;
@@ -249,7 +239,7 @@ impl SyncScreen {
             // Another device pushed: sync now.
             self.last_round = f64::NEG_INFINITY;
         }
-        let now = ctx.input(|input| input.time);
+        let now = ctx.now();
         if state.pending_count() == 0 {
             self.dirty_since = None;
         } else if self.dirty_since.is_none() {
@@ -262,29 +252,29 @@ impl SyncScreen {
         if due && self.work.is_none() {
             self.last_round = now;
             self.dirty_since = None;
-            let copy = hosts.vault().sync_copy();
+            let copy = hosts.sync_copy();
             self.start(ctx, "Syncing", move || run_round(&signed_in, copy));
         }
         // Wake up for the next round only (idle wakeups, P-06).
         let next = self.dirty_since.map_or(self.last_round + PERIOD, |since| {
             (since + AFTER_EDIT).min(self.last_round + PERIOD)
         });
-        ctx.request_repaint_after(Duration::from_secs_f64((next - now).clamp(0.1, PERIOD)));
+        ctx.later(Duration::from_secs_f64((next - now).clamp(0.1, PERIOD)));
         replaced
     }
 
     /// Applies finished work; true when the vault was replaced.
-    fn finish(&mut self, done: Done, hosts: &mut HostsScreen, vault_path: &Path) -> bool {
+    fn finish(&mut self, done: Done, hosts: &mut Vault, vault_path: &Path) -> bool {
         match done {
             Done::Registered(account) => {
-                self.message = Some(match hosts.vault_mut().set_sync_account(Some(account)) {
+                self.message = Some(match hosts.set_sync_account(Some(account)) {
                     Ok(()) => (false, "Account created. This device is signed in.".into()),
                     Err(error) => (true, format!("Could not save the account: {error}")),
                 });
                 self.last_round = f64::NEG_INFINITY;
             }
             Done::Relinked(key_file, account) => {
-                self.message = Some(match hosts.vault_mut().relink(&key_file, account) {
+                self.message = Some(match hosts.relink(&key_file, account) {
                     Ok(()) => (false, "Signed in again. Nothing was merged: this vault already belongs to the account.".into()),
                     Err(error) => (true, format!("Could not sign in: {error}")),
                 });
@@ -299,7 +289,7 @@ impl SyncScreen {
                     let mut copy = *copy;
                     copy.mark_synced();
                     // A local edit since the snapshot: drop this result, the next round redoes it.
-                    let _ = hosts.vault_mut().commit_sync(copy);
+                    let _ = hosts.commit_sync(copy);
                     self.message = (!report.conflicts.is_empty()).then(|| {
                         (
                             false,
@@ -311,7 +301,7 @@ impl SyncScreen {
                     });
                 }
                 Err(SyncError::Unauthorized) => {
-                    let _ = hosts.vault_mut().set_sync_account(None);
+                    let _ = hosts.set_sync_account(None);
                     self.message = Some((
                         true,
                         "This device was signed out of the account. Everything on it is kept."
@@ -337,7 +327,7 @@ impl SyncScreen {
             },
             Done::Restored(copy, result) => match result {
                 Ok(()) => {
-                    self.message = Some(match hosts.vault_mut().commit_sync(*copy) {
+                    self.message = Some(match hosts.commit_sync(*copy) {
                         Ok(true) => (
                             false,
                             "Restored. Other devices get it at their next sync.".into(),
@@ -366,10 +356,10 @@ impl SyncScreen {
         mut vault: Vault,
         backup: &Path,
         generation: u64,
-        hosts: &mut HostsScreen,
+        hosts: &mut Vault,
         vault_path: &Path,
     ) -> bool {
-        if hosts.vault().generation() != generation {
+        if hosts.generation() != generation {
             // Edited while signing in: the merge would miss that edit.
             let _ = std::fs::remove_file(vault.path());
             self.message = Some((
@@ -385,7 +375,7 @@ impl SyncScreen {
             ));
             return false;
         }
-        hosts.replace_vault(vault);
+        *hosts = vault;
         self.message = Some((
             false,
             format!(
@@ -398,16 +388,10 @@ impl SyncScreen {
     }
 
     /// Draws the section.
-    pub fn ui(
-        &mut self,
-        ui: &mut Ui,
-        palette: &Palette,
-        hosts: &mut HostsScreen,
-        vault_path: &Path,
-    ) {
+    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut Vault, vault_path: &Path) {
         ui.heading("Sync");
         ui.add_space(space::S);
-        let state = hosts.vault().sync_state().clone();
+        let state = hosts.sync_state().clone();
         if let Some(account) = &state.account {
             self.signed_in_ui(
                 ui,
@@ -436,13 +420,7 @@ impl SyncScreen {
         }
     }
 
-    fn sign_in_ui(
-        &mut self,
-        ui: &mut Ui,
-        palette: &Palette,
-        hosts: &mut HostsScreen,
-        vault_path: &Path,
-    ) {
+    fn sign_in_ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut Vault, vault_path: &Path) {
         ui.label(
             RichText::new("Keep hosts and rules in sync through a server you run yourself. Everything is encrypted on this device with your master password; the server cannot read it.")
                 .size(text::SECONDARY)
@@ -504,20 +482,108 @@ impl SyncScreen {
         );
     }
 
-    fn take_password(&mut self) -> Zeroizing<String> {
+    /// Starts a sync round at the next tick.
+    pub(crate) fn sync_now(&mut self) {
+        self.last_round = f64::NEG_INFINITY;
+    }
+
+    /// Loads the account's devices.
+    pub(crate) fn load_devices(&mut self, pace: &dyn Pace, account: &SyncAccount) {
+        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        self.start(pace, "Loading devices", move || {
+            Done::Devices(
+                HttpServer::new(&server, Some(token))
+                    .and_then(|http| http.devices())
+                    .map(|list| list.devices),
+            )
+        });
+    }
+
+    /// Loads what was deleted on any device and can be restored.
+    pub(crate) fn load_deleted(&mut self, pace: &dyn Pace, account: &SyncAccount, vault: &Vault) {
+        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let copy = vault.sync_copy();
+        self.start(pace, "Loading deleted items", move || {
+            Done::Trash(load_trash(&server, token, &copy))
+        });
+    }
+
+    /// Restores deleted item `index` of the loaded list.
+    pub(crate) fn restore(
+        &mut self,
+        pace: &dyn Pace,
+        account: &SyncAccount,
+        vault: &Vault,
+        index: usize,
+    ) {
+        if index >= self.trash.len() {
+            return;
+        }
+        let item = self.trash.remove(index);
+        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let copy = vault.sync_copy();
+        self.start(pace, "Restoring", move || {
+            let mut replica = VaultReplica(copy);
+            let result = HttpServer::new(&server, Some(token)).and_then(|mut http| {
+                restore_item(&mut http, &mut replica, &item.id, &item.version)
+            });
+            Done::Restored(Box::new(replica.0), result)
+        });
+    }
+
+    /// Signs this device out; everything on it is kept.
+    pub(crate) fn sign_out(&mut self, vault: &mut Vault) {
+        self.devices.clear();
+        self.trash.clear();
+        self.message = Some(match vault.set_sync_account(None) {
+            Ok(()) => (
+                false,
+                "Signed out. Everything on this device is kept.".into(),
+            ),
+            Err(error) => (true, error.to_string()),
+        });
+    }
+
+    /// Signs another device out of the account.
+    pub(crate) fn revoke(&mut self, pace: &dyn Pace, account: &SyncAccount, id: u64) {
+        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        self.start(pace, "Signing the device out", move || {
+            let http = match HttpServer::new(&server, Some(token)) {
+                Ok(http) => http,
+                Err(error) => return Done::Devices(Err(error)),
+            };
+            Done::Devices(
+                http.revoke(id)
+                    .and_then(|()| http.devices())
+                    .map(|list| list.devices),
+            )
+        });
+    }
+
+    /// The name of deleted item `index`.
+    pub(crate) fn deleted_name(&self, index: usize) -> Option<&str> {
+        self.trash.get(index).map(|item| item.name.as_str())
+    }
+
+    pub(crate) fn take_password(&mut self) -> Zeroizing<String> {
         let password = Zeroizing::new(self.password.expose().to_owned());
         egui::TextBuffer::clear(&mut self.password);
         password
     }
 
-    fn create(&mut self, ctx: &egui::Context, hosts: &HostsScreen) {
+    /// Sets the master password typed in the new UI's field, for `create` and `join`.
+    pub(crate) fn set_password(&mut self, password: &str) {
+        self.password = SecretText::from(password);
+    }
+
+    pub(crate) fn create(&mut self, ctx: &dyn Pace, hosts: &Vault) {
         let password = self.take_password();
         let (server, name, device) = (
             self.server.trim().to_owned(),
             self.account.trim().to_owned(),
             self.device.trim().to_owned(),
         );
-        let key_file = hosts.vault().key_file_bytes();
+        let key_file = hosts.key_file_bytes();
         self.message = None;
         self.start(ctx, "Creating the account", move || {
             // The account password must be the vault's, so other devices can unwrap the key.
@@ -546,20 +612,20 @@ impl SyncScreen {
         });
     }
 
-    fn join(&mut self, ctx: &egui::Context, hosts: &HostsScreen, vault_path: &Path) {
+    pub(crate) fn join(&mut self, ctx: &dyn Pace, hosts: &Vault, vault_path: &Path) {
         let password = self.take_password();
         let (server, name, device) = (
             self.server.trim().to_owned(),
             self.account.trim().to_owned(),
             self.device.trim().to_owned(),
         );
-        let local_hosts = hosts.vault().hosts().to_vec();
-        let local_forwards = hosts.vault().forwards().to_vec();
-        let local_keys = hosts.vault().ssh_keys().to_vec();
-        let local_snippets = hosts.vault().snippets().to_vec();
-        let local_groups = hosts.vault().groups().to_vec();
-        let generation = hosts.vault().generation();
-        let copy = hosts.vault().sync_copy();
+        let local_hosts = hosts.hosts().to_vec();
+        let local_forwards = hosts.forwards().to_vec();
+        let local_keys = hosts.ssh_keys().to_vec();
+        let local_snippets = hosts.snippets().to_vec();
+        let local_groups = hosts.groups().to_vec();
+        let generation = hosts.generation();
+        let copy = hosts.sync_copy();
         let path = vault_path.to_path_buf();
         self.message = None;
         self.start(ctx, "Signing in", move || {
@@ -622,7 +688,7 @@ impl SyncScreen {
     }
 
     /// The deleted items with their Restore buttons.
-    fn trash_ui(&mut self, ui: &mut Ui, account: &SyncAccount, hosts: &HostsScreen) {
+    fn trash_ui(&mut self, ui: &mut Ui, account: &SyncAccount, hosts: &Vault) {
         let mut restore = None;
         for (index, item) in self.trash.iter().enumerate() {
             ui.horizontal(|ui| {
@@ -635,7 +701,7 @@ impl SyncScreen {
         if let Some(index) = restore {
             let item = self.trash.remove(index);
             let (server, token) = (account.server.clone(), account.token.expose().to_owned());
-            let copy = hosts.vault().sync_copy();
+            let copy = hosts.sync_copy();
             self.start(ui.ctx(), "Restoring", move || {
                 let mut replica = VaultReplica(copy);
                 let result = HttpServer::new(&server, Some(token)).and_then(|mut http| {
@@ -650,7 +716,7 @@ impl SyncScreen {
         &mut self,
         ui: &mut Ui,
         palette: &Palette,
-        hosts: &mut HostsScreen,
+        hosts: &mut Vault,
         account: &SyncAccount,
         last_synced: u64,
         pending: usize,
@@ -695,7 +761,7 @@ impl SyncScreen {
                 .clicked()
             {
                 let (server, token) = (account.server.clone(), account.token.expose().to_owned());
-                let copy = hosts.vault().sync_copy();
+                let copy = hosts.sync_copy();
                 self.start(ui.ctx(), "Loading deleted items", move || {
                     Done::Trash(load_trash(&server, token, &copy))
                 });
@@ -703,7 +769,7 @@ impl SyncScreen {
             if ui.button("Sign out").clicked() {
                 self.devices.clear();
                 self.trash.clear();
-                self.message = Some(match hosts.vault_mut().set_sync_account(None) {
+                self.message = Some(match hosts.set_sync_account(None) {
                     Ok(()) => (
                         false,
                         "Signed out. Everything on this device is kept.".into(),
@@ -750,7 +816,7 @@ impl SyncScreen {
 }
 
 /// A deleted item and the version to bring back.
-struct TrashItem {
+pub(crate) struct TrashItem {
     id: String,
     name: String,
     version: annulus_proto::Record,

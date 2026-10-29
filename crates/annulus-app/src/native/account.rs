@@ -1,0 +1,471 @@
+//! Account & sync and the master password, in Settings (UI-SPEC §6, F-SYNC-001…006,
+//! F-SEC-002). The work is `sync_screen::SyncScreen`'s and the vault's; this draws it.
+
+use std::path::Path;
+
+use annulus_config::tokens::space;
+use annulus_sync::account;
+use annulus_sync::http::HttpServer;
+use annulus_ui::gfx::{Align, Rect};
+use annulus_ui::icons;
+use annulus_ui::kit::{Id, Ui};
+use annulus_ui::widgets::{BODY, BODY_STRONG, CONTROL, FieldStyle, Kind, SMALL, button_width};
+use annulus_vault::vault::{Vault, VaultError};
+use zeroize::Zeroizing;
+
+use crate::job::{Job, Pace, Poll};
+use crate::password_screen;
+use crate::sync_screen::{SyncScreen, ago, now_secs, pill};
+
+/// The forms' typed text, wiped when dropped.
+#[derive(Default)]
+pub struct AccountView {
+    password: Zeroizing<String>,
+    current: Zeroizing<String>,
+    new: Zeroizing<String>,
+    confirm: Zeroizing<String>,
+    changing: bool,
+    change: Option<Job<Result<Vec<u8>, String>>>,
+    change_message: Option<(bool, String)>,
+}
+
+/// A small primary-or-secondary button at the left of `row`, which shrinks.
+fn push_button(
+    ui: &mut Ui<'_>,
+    row: &mut Rect,
+    id: &str,
+    label: &str,
+    kind: Kind,
+    enabled: bool,
+) -> bool {
+    let width = button_width(ui.gfx, label, None);
+    let rect = row.take_left(width);
+    row.take_left(space::S);
+    let kind = if enabled { kind } else { Kind::Ghost };
+    ui.button(Id::new(id), rect, label, None, kind).clicked && enabled
+}
+
+impl AccountView {
+    /// Draws the account card from `rect.y` down; returns the height it took.
+    #[allow(clippy::too_many_lines)] // Signed out and signed in, top to bottom.
+    pub fn draw(
+        &mut self,
+        ui: &mut Ui<'_>,
+        rect: Rect,
+        (sync, vault, pace, vault_path): (&mut SyncScreen, &mut Vault, &dyn Pace, &Path),
+    ) -> f32 {
+        let t = ui.theme;
+        let top = rect.y;
+        let mut column = rect;
+        ui.section_label(column.take_top(18.0), "Account & sync");
+        column.take_top(space::S);
+        let card_top = column.y;
+        let mut inner = Rect::new(
+            column.x + space::L,
+            column.y + space::M,
+            column.w - 2.0 * space::L,
+            2000.0,
+        );
+        let busy = sync.work.as_ref().map(|(label, _)| label.clone());
+        let account = vault.sync_state().account.clone();
+        // The card's fill goes under its content: drawn after, from the height used.
+        let mut body = Vec::new();
+        match &account {
+            None => {
+                ui.gfx.text(
+                    inner.take_top(20.0),
+                    "Sync this vault through your own Annulus server.",
+                    BODY_STRONG,
+                    t.text,
+                    Align::Start,
+                );
+                ui.gfx.text(inner.take_top(18.0), "The server stores only ciphertext; your master password never leaves this device.", SMALL, t.text2, Align::Start);
+                inner.take_top(space::M);
+                let half = (inner.w - space::M) / 2.0;
+                let mut row = inner.take_top(CONTROL);
+                let left = row.take_left(half);
+                row.take_left(space::M);
+                ui.text_field(
+                    Id::new("account.server"),
+                    left,
+                    &mut sync.server,
+                    FieldStyle {
+                        placeholder: "Server, e.g. https://sync.example.com",
+                        ..FieldStyle::default()
+                    },
+                );
+                ui.text_field(
+                    Id::new("account.name"),
+                    row,
+                    &mut sync.account,
+                    FieldStyle {
+                        placeholder: "Account name",
+                        ..FieldStyle::default()
+                    },
+                );
+                inner.take_top(space::S);
+                let mut row = inner.take_top(CONTROL);
+                let left = row.take_left(half);
+                row.take_left(space::M);
+                ui.text_field(
+                    Id::new("account.device"),
+                    left,
+                    &mut sync.device,
+                    FieldStyle {
+                        placeholder: "This device's name",
+                        ..FieldStyle::default()
+                    },
+                );
+                ui.text_field(
+                    Id::new("account.password"),
+                    row,
+                    &mut self.password,
+                    FieldStyle {
+                        placeholder: "This vault's master password",
+                        icon: Some(icons::KEY),
+                        ..FieldStyle::default()
+                    },
+                );
+                inner.take_top(space::M);
+                let ready = busy.is_none()
+                    && !sync.server.trim().is_empty()
+                    && !sync.account.trim().is_empty()
+                    && !self.password.is_empty();
+                let mut row = inner.take_top(CONTROL);
+                let sign_in = push_button(
+                    ui,
+                    &mut row,
+                    "account.join",
+                    "Sign in",
+                    Kind::Primary,
+                    ready,
+                );
+                let create = push_button(
+                    ui,
+                    &mut row,
+                    "account.create",
+                    "Create account",
+                    Kind::Secondary,
+                    ready,
+                );
+                if sign_in || create {
+                    sync.set_password(&self.password);
+                    self.password = Zeroizing::new(String::new());
+                    if sign_in {
+                        sync.join(pace, vault, vault_path);
+                    } else {
+                        sync.create(pace, vault);
+                    }
+                }
+                inner.take_top(space::S);
+                ui.gfx.text(inner.take_top(18.0), "Signing in on a device with hosts merges them into the account; the old vault file is kept.", SMALL, t.text2, Align::Start);
+            }
+            Some(account) => {
+                let state = vault.sync_state();
+                let (_, words) = pill(
+                    state.last_synced,
+                    state.pending_count(),
+                    sync.round_failed,
+                    now_secs(),
+                );
+                ui.gfx.text(
+                    inner.take_top(20.0),
+                    &format!("{} on {}", account.name, account.server),
+                    BODY_STRONG,
+                    t.text,
+                    Align::Start,
+                );
+                ui.gfx
+                    .text(inner.take_top(18.0), &words, SMALL, t.text2, Align::Start);
+                inner.take_top(space::M);
+                let idle = busy.is_none();
+                let mut row = inner.take_top(CONTROL);
+                if push_button(
+                    ui,
+                    &mut row,
+                    "account.sync",
+                    "Sync now",
+                    Kind::Primary,
+                    idle,
+                ) {
+                    sync.sync_now();
+                }
+                if push_button(
+                    ui,
+                    &mut row,
+                    "account.devices",
+                    "Devices",
+                    Kind::Secondary,
+                    idle,
+                ) {
+                    sync.load_devices(pace, account);
+                }
+                if push_button(
+                    ui,
+                    &mut row,
+                    "account.deleted",
+                    "Deleted items",
+                    Kind::Secondary,
+                    idle,
+                ) {
+                    sync.load_deleted(pace, account, vault);
+                }
+                if push_button(ui, &mut row, "account.out", "Sign out", Kind::Danger, idle) {
+                    sync.sign_out(vault);
+                }
+                let mut revoke = None;
+                for device in &sync.devices {
+                    inner.take_top(space::S);
+                    let mut line = inner.take_top(28.0);
+                    let name = if device.current {
+                        format!("{} (this device)", device.name)
+                    } else {
+                        device.name.clone()
+                    };
+                    if !device.current {
+                        let out = line.take_right(button_width(ui.gfx, "Sign out", None));
+                        if ui
+                            .button(
+                                Id::new(("account.revoke", device.id)),
+                                out,
+                                "Sign out",
+                                None,
+                                Kind::Ghost,
+                            )
+                            .clicked
+                        {
+                            revoke = Some(device.id);
+                        }
+                    }
+                    let icon = line.take_left(16.0).centered(16.0, 16.0);
+                    ui.gfx.icon(icons::DEVICE, icon, t.text2);
+                    line.take_left(space::S);
+                    body.push((
+                        line,
+                        format!("{name} \u{b7} seen {}", ago(device.last_seen, now_secs())),
+                    ));
+                }
+                if let Some(id) = revoke {
+                    sync.revoke(pace, account, id);
+                }
+                let mut restore = None;
+                let mut index = 0;
+                while let Some(name) = sync.deleted_name(index) {
+                    inner.take_top(space::S);
+                    let mut line = inner.take_top(28.0);
+                    let again = line.take_right(button_width(ui.gfx, "Restore", None));
+                    if ui
+                        .button(
+                            Id::new(("account.restore", index)),
+                            again,
+                            "Restore",
+                            None,
+                            Kind::Ghost,
+                        )
+                        .clicked
+                    {
+                        restore = Some(index);
+                    }
+                    let icon = line.take_left(16.0).centered(16.0, 16.0);
+                    ui.gfx.icon(icons::TRASH, icon, t.text2);
+                    line.take_left(space::S);
+                    body.push((line, name.to_owned()));
+                    index += 1;
+                }
+                if let Some(index) = restore {
+                    sync.restore(pace, account, vault, index);
+                }
+            }
+        }
+        if let Some(label) = &busy {
+            inner.take_top(space::S);
+            ui.gfx.text(
+                inner.take_top(18.0),
+                &format!("{label}\u{2026}"),
+                SMALL,
+                t.accent,
+                Align::Start,
+            );
+        }
+        if let Some((error, message)) = &sync.message {
+            inner.take_top(space::S);
+            ui.gfx.text(
+                inner.take_top(18.0),
+                message,
+                SMALL,
+                if *error { t.error } else { t.ok },
+                Align::Start,
+            );
+        }
+        for (line, text) in body {
+            ui.gfx.text(line, &text, BODY, t.text, Align::Start);
+        }
+        let card = Rect::new(column.x, card_top, column.w, inner.y - card_top + space::M);
+        ui.gfx.stroke_rect(card, 12.0, 1.0, t.line);
+        let mut after = Rect::new(column.x, card.b() + space::XL, column.w, 10.0);
+        after.h = self.password_card(ui, after, vault, pace);
+        after.b() - top
+    }
+
+    /// The master password row, and its change form once opened.
+    #[allow(clippy::too_many_lines)] // The row, the form and its result.
+    fn password_card(
+        &mut self,
+        ui: &mut Ui<'_>,
+        rect: Rect,
+        vault: &mut Vault,
+        pace: &dyn Pace,
+    ) -> f32 {
+        let t = ui.theme;
+        if let Some(job) = &self.change {
+            match job.poll() {
+                Poll::Running => {}
+                Poll::Done(result) => {
+                    self.change = None;
+                    self.change_message = Some(
+                        match result.and_then(|key_file| {
+                            vault.set_key_file(&key_file).map_err(|e| e.to_string())
+                        }) {
+                            Ok(()) => (false, "Master password changed.".into()),
+                            Err(message) => (true, message),
+                        },
+                    );
+                    self.changing = false;
+                }
+                Poll::Lost => {
+                    self.change = None;
+                    self.change_message = Some((true, "The change did not finish.".into()));
+                }
+            }
+        }
+        let mut column = rect;
+        ui.section_label(column.take_top(18.0), "Master password");
+        column.take_top(space::S);
+        let card_top = column.y;
+        let mut inner = Rect::new(
+            column.x + space::L,
+            column.y + space::M,
+            column.w - 2.0 * space::L,
+            1000.0,
+        );
+        let mut row = inner.take_top(CONTROL);
+        let change = row.take_right(button_width(ui.gfx, "Change", None));
+        ui.gfx.text(
+            row,
+            "Unlocks this vault, and your account when you sync.",
+            BODY,
+            t.text,
+            Align::Start,
+        );
+        if !self.changing
+            && ui
+                .button(
+                    Id::new("password.open"),
+                    change,
+                    "Change",
+                    None,
+                    Kind::Secondary,
+                )
+                .clicked
+        {
+            self.changing = true;
+        }
+        if self.changing {
+            for (id, buffer, placeholder) in [
+                ("password.current", &mut self.current, "Current password"),
+                (
+                    "password.new",
+                    &mut self.new,
+                    "New password (10+ characters)",
+                ),
+                (
+                    "password.confirm",
+                    &mut self.confirm,
+                    "Type the new one again",
+                ),
+            ] {
+                inner.take_top(space::S);
+                ui.text_field(
+                    Id::new(id),
+                    inner.take_top(CONTROL),
+                    buffer,
+                    FieldStyle {
+                        placeholder,
+                        icon: Some(icons::KEY),
+                        ..FieldStyle::default()
+                    },
+                );
+            }
+            inner.take_top(space::M);
+            let mut row = inner.take_top(CONTROL);
+            let problem = password_screen::problem(&self.new, &self.confirm);
+            let ready = self.change.is_none() && problem.is_none() && !self.current.is_empty();
+            if push_button(
+                ui,
+                &mut row,
+                "password.save",
+                "Change password",
+                Kind::Primary,
+                ready,
+            ) {
+                let current = std::mem::take(&mut self.current);
+                let new = std::mem::take(&mut self.new);
+                self.confirm = Zeroizing::new(String::new());
+                let kit = vault.password_kit();
+                let account = vault.sync_state().account.clone();
+                self.change = Some(Job::start(pace, move || {
+                    let key_file = kit.rewrap(&current, &new).map_err(|error| match error {
+                        VaultError::WrongPassword => "The current password is wrong.".to_owned(),
+                        other => other.to_string(),
+                    })?;
+                    if let Some(account) = account {
+                        let mut http = HttpServer::new(
+                            &account.server,
+                            Some(account.token.expose().to_owned()),
+                        )
+                        .map_err(|error| error.to_string())?;
+                        account::change_password(
+                            &mut http,
+                            &account::default_ksf(),
+                            &new,
+                            key_file.clone(),
+                        )
+                        .map_err(|error| {
+                            format!("The account could not be updated, so nothing changed: {error}")
+                        })?;
+                    }
+                    Ok(key_file)
+                }));
+            }
+            if push_button(ui, &mut row, "password.cancel", "Cancel", Kind::Ghost, true) {
+                self.changing = false;
+            }
+            if let Some(problem) = problem.filter(|_| !self.new.is_empty()) {
+                ui.gfx.text(row, problem, SMALL, t.text2, Align::Start);
+            }
+        }
+        if self.change.is_some() {
+            inner.take_top(space::S);
+            ui.gfx.text(
+                inner.take_top(18.0),
+                "Changing the password\u{2026}",
+                SMALL,
+                t.accent,
+                Align::Start,
+            );
+        }
+        if let Some((error, message)) = &self.change_message {
+            inner.take_top(space::S);
+            ui.gfx.text(
+                inner.take_top(18.0),
+                message,
+                SMALL,
+                if *error { t.error } else { t.ok },
+                Align::Start,
+            );
+        }
+        let card = Rect::new(column.x, card_top, column.w, inner.y - card_top + space::M);
+        ui.gfx.stroke_rect(card, 12.0, 1.0, t.line);
+        card.b() - rect.y
+    }
+}

@@ -374,6 +374,8 @@ pub struct FrameOutput {
     pub repaint: bool,
     /// The zones drawn, top-most last: hit-testing, the accessibility tree, tests.
     pub zones: Vec<Zone>,
+    /// Draw another frame after this long even with no input (a sync round, auto-lock).
+    pub repaint_after: Option<std::time::Duration>,
     /// Layout faults the widgets noticed (a button label cut off): the scene tests fail on
     /// any.
     pub faults: Vec<String>,
@@ -381,6 +383,7 @@ pub struct FrameOutput {
 
 /// Toolkit state that lives across frames.
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent per-frame flags.
 pub struct UiState {
     /// The zones of the frame on screen, top-most last.
     zones: Vec<Zone>,
@@ -396,11 +399,13 @@ pub struct UiState {
     focus_ring: bool,
     activated: Option<Id>,
     typed: Vec<Typed>,
+    input_seen: bool,
     wheel: (f32, f32),
     time: f64,
     anims: HashMap<Id, Anim>,
     scroll: HashMap<Id, f32>,
     repaint: bool,
+    repaint_after: Option<std::time::Duration>,
     cursor: Cursor,
     edits: HashMap<Id, EditState>,
     pub(crate) popup: Option<Popup>,
@@ -421,9 +426,13 @@ impl UiState {
         self.double_clicks.clear();
         self.activated = None;
         self.typed.clear();
+        self.input_seen = events
+            .iter()
+            .any(|event| !matches!(event, Event::Modifiers(_)));
         self.faults.clear();
         self.wheel = (0.0, 0.0);
         self.repaint = false;
+        self.repaint_after = None;
         self.cursor = Cursor::Default;
         for event in events {
             match event {
@@ -520,6 +529,7 @@ impl UiState {
         FrameOutput {
             cursor: self.cursor,
             repaint: self.repaint,
+            repaint_after: self.repaint_after,
             zones: self.zones.clone(),
             faults: std::mem::take(&mut self.faults),
         }
@@ -735,6 +745,18 @@ impl<'a> Ui<'a> {
         }
     }
 
+    /// Whether any input arrived for this frame (the idle timer of auto-lock).
+    #[must_use]
+    pub fn had_input(&self) -> bool {
+        self.state.input_seen
+    }
+
+    /// Seconds on the window's clock, for this frame.
+    #[must_use]
+    pub fn time(&self) -> f64 {
+        self.state.time
+    }
+
     /// The modifier keys held now.
     #[must_use]
     pub fn modifiers(&self) -> Modifiers {
@@ -783,6 +805,15 @@ impl<'a> Ui<'a> {
         if self.gfx.text(rect, text, font, color, align) {
             self.fault(format!("cut off: {text:?} in {:.0}x{:.0}", rect.w, rect.h));
         }
+    }
+
+    /// Asks for a frame after `after`, with no input; the soonest request of a frame wins.
+    pub fn request_repaint_after(&mut self, after: std::time::Duration) {
+        self.state.repaint_after = Some(
+            self.state
+                .repaint_after
+                .map_or(after, |earlier| earlier.min(after)),
+        );
     }
 
     /// Asks for another frame right away.

@@ -3,6 +3,7 @@
 //!
 //! [ADR-0017]: ../../../docs/adr/0017-native-ui.md
 
+mod account;
 mod ask;
 pub mod demo;
 pub mod hosts;
@@ -154,6 +155,8 @@ pub enum SyncBadge {
     Synced,
     /// Changes are waiting to be sent.
     Pending(usize),
+    /// The last round failed; it retries.
+    Failed,
 }
 
 /// The whole window's state.
@@ -192,6 +195,12 @@ pub struct NativeApp {
     logs: screens::LogsView,
     /// The command palette, while open (Ctrl+Shift+K).
     palette: Option<palette::PaletteView>,
+    /// Account sync, while the vault is unlocked.
+    sync: crate::sync_screen::SyncScreen,
+    account: account::AccountView,
+    account_h: f32,
+    /// When input last arrived, on the window's clock (auto-lock).
+    last_input: f64,
     next_uid: u64,
 }
 
@@ -230,6 +239,10 @@ impl NativeApp {
             known: screens::KnownView::default(),
             logs: screens::LogsView::default(),
             palette: None,
+            sync: crate::sync_screen::SyncScreen::default(),
+            account: account::AccountView::default(),
+            account_h: 0.0,
+            last_input: 0.0,
             next_uid: 1,
         }
     }
@@ -394,11 +407,7 @@ impl NativeApp {
                 }
             }
             Action::NewLocal => self.open_local(),
-            Action::Lock => {
-                self.vault = None;
-                self.lock = lock::LockView::new(lock::Mode::Unlock);
-                self.active = 0;
-            }
+            Action::Lock => self.lock_vault(),
             Action::Settings => {
                 self.section = Section::Settings;
                 self.active = 0;
@@ -503,9 +512,53 @@ impl NativeApp {
         };
         match (state.account.is_some(), state.pending_count()) {
             (false, _) => SyncBadge::Local,
+            (true, _) if self.sync.round_failed() => SyncBadge::Failed,
             (true, 0) => SyncBadge::Synced,
             (true, pending) => SyncBadge::Pending(pending),
         }
+    }
+
+    /// What runs every frame whatever is shown: sync rounds and auto-lock (F-SEC-004).
+    fn background(&mut self, ui: &mut Ui<'_>) {
+        let now = ui.time();
+        if ui.had_input() || self.last_input == 0.0 {
+            self.last_input = now;
+        }
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
+        if let Some(path) = self.vault_path.clone() {
+            let pace = FramePace::new(ui, self.waker.clone());
+            if self.sync.tick(&pace, vault, &path) {
+                // Signing in renumbered hosts and rules: drafts and running rules go.
+                self.hosts.editor = None;
+                self.forwards = screens::ForwardsView::default();
+            }
+            pace.apply(ui);
+        }
+        let minutes = self.settings.auto_lock_minutes;
+        if minutes > 0 {
+            let timeout = f64::from(minutes) * 60.0;
+            let idle = now - self.last_input;
+            if idle >= timeout {
+                self.lock_vault();
+            } else {
+                ui.request_repaint_after(std::time::Duration::from_secs_f64(timeout - idle));
+            }
+        }
+    }
+
+    /// Locks the vault: its keys, decrypted entities, drafts and typed passwords go.
+    pub fn lock_vault(&mut self) {
+        self.vault = None;
+        self.lock = lock::LockView::new(lock::Mode::Unlock);
+        self.hosts = hosts::HostsView::default();
+        self.forwards = screens::ForwardsView::default();
+        self.sync = crate::sync_screen::SyncScreen::default();
+        self.account = account::AccountView::default();
+        self.keychain = screens::KeychainView::default();
+        self.snippets = screens::SnippetsView::default();
+        self.active = 0;
     }
 
     /// Draws one frame. Returns what the window itself must do.
@@ -514,6 +567,7 @@ impl NativeApp {
         let mut area = ui.viewport;
         ui.gfx.fill_rect(area, 0.0, t.chrome);
         let bar = area.take_top(TITLE_H);
+        self.background(ui);
         if ui.key(Key::Char('k'), Modifiers::CTRL_SHIFT) {
             self.palette = match self.palette.take() {
                 Some(_) => None,
@@ -635,9 +689,25 @@ impl NativeApp {
                 .logs
                 .draw(ui, content, vault, self.settings.record_logs),
             Section::Settings => {
-                if screens::settings(ui, content, &mut self.settings, &self.profiles)
-                    && let Some(path) = &self.settings_path
-                {
+                let pace = FramePace::new(ui, self.waker.clone());
+                let (sync, view) = (&mut self.sync, &mut self.account);
+                let path = self.vault_path.clone();
+                let mut draw = |ui: &mut Ui<'_>, rect: Rect| {
+                    path.as_ref()
+                        .map_or(0.0, |path| view.draw(ui, rect, (sync, vault, &pace, path)))
+                };
+                let account: Option<screens::AccountCard<'_>> =
+                    self.vault_path.is_some().then_some(&mut draw);
+                let (changed, height) = screens::settings(
+                    ui,
+                    content,
+                    (&mut self.settings, &self.profiles),
+                    account,
+                    self.account_h,
+                );
+                self.account_h = height;
+                pace.apply(ui);
+                if changed && let Some(path) = &self.settings_path {
                     let _ = self.settings.save(path);
                 }
                 None
@@ -716,6 +786,48 @@ impl NativeApp {
     }
 }
 
+/// The window's clock and waker for background work, collecting the soonest frame it asks
+/// for.
+struct FramePace {
+    now: f64,
+    waker: Option<Waker>,
+    later: std::cell::Cell<Option<std::time::Duration>>,
+}
+
+impl FramePace {
+    fn new(ui: &Ui<'_>, waker: Option<Waker>) -> Self {
+        Self {
+            now: ui.time(),
+            waker,
+            later: std::cell::Cell::new(None),
+        }
+    }
+
+    /// Passes the soonest frame asked for on to the window.
+    fn apply(&self, ui: &mut Ui<'_>) {
+        if let Some(after) = self.later.get() {
+            ui.request_repaint_after(after);
+        }
+    }
+}
+
+impl crate::job::Pace for FramePace {
+    fn now(&self) -> f64 {
+        self.now
+    }
+
+    fn waker(&self) -> crate::job::Wake {
+        self.waker
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(|| {}))
+    }
+
+    fn later(&self, after: std::time::Duration) {
+        let soonest = self.later.get().map_or(after, |earlier| earlier.min(after));
+        self.later.set(Some(soonest));
+    }
+}
+
 /// The rounded content panel beside the navigation; returns its inside.
 fn panel(ui: &mut Ui<'_>, rect: Rect) -> Rect {
     let fill = ui.theme.bg;
@@ -745,6 +857,7 @@ fn vault_status(ui: &mut Ui<'_>, rect: Rect, unlocked: bool, sync: &SyncBadge) {
         (true, SyncBadge::Local) => ("Local vault", "On this device only", t.text3),
         (true, SyncBadge::Synced) => ("Synced", "Up to date", t.ok),
         (true, SyncBadge::Pending(_)) => ("Syncing", "Sending changes", t.warn),
+        (true, SyncBadge::Failed) => ("Sync failed", "Retrying", t.error),
     };
     let glyph = match (unlocked, sync) {
         (false, _) => icons::LOCK,

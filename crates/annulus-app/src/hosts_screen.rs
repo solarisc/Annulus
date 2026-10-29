@@ -233,11 +233,11 @@ impl HostsScreen {
     }
 
     /// Swaps in another vault (after signing in to a sync account) and returns the old one.
-    pub fn replace_vault(&mut self, vault: Vault) -> Vault {
+    /// Drops open editors and the group shown, after the vault was replaced under them.
+    pub fn forget_drafts(&mut self) {
         self.editor = None;
         self.group_editor = None;
         self.group = None;
-        std::mem::replace(&mut self.vault, vault)
     }
 
     /// Draws the screen; returns what the shell should do.

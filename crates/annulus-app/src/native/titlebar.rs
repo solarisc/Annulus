@@ -322,6 +322,7 @@ fn badge_label(ui: &Ui<'_>, sync: &SyncBadge) -> Option<(String, Color)> {
         SyncBadge::Local => None,
         SyncBadge::Synced => Some(("Synced".to_owned(), t.ok)),
         SyncBadge::Pending(count) => Some((format!("Syncing {count}"), t.warn)),
+        SyncBadge::Failed => Some(("Sync failed".to_owned(), t.error)),
     }
 }
 

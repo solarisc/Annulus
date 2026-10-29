@@ -621,7 +621,8 @@ impl Shell {
         let palette = self.palette();
         let vault_path = self.data_dir.join(VAULT_FILE);
         if let Some(hosts) = &mut self.hosts {
-            if self.sync.tick(ui.ctx(), hosts, &vault_path) {
+            if self.sync.tick(ui.ctx(), hosts.vault_mut(), &vault_path) {
+                hosts.forget_drafts();
                 // Signing in renumbered hosts and rules; running rules would no longer match.
                 self.forwards = ForwardsScreen::default();
             }
@@ -1077,7 +1078,7 @@ impl Shell {
         let palette = self.palette();
         let vault_path = self.data_dir.join(VAULT_FILE);
         if let Some(hosts) = &mut self.hosts {
-            self.sync.ui(ui, &palette, hosts, &vault_path);
+            self.sync.ui(ui, &palette, hosts.vault_mut(), &vault_path);
             ui.add_space(space::L);
             self.password.ui(ui, &palette, hosts);
         }

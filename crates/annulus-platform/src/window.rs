@@ -123,7 +123,7 @@ mod portable {
     use winit::application::ApplicationHandler;
     use winit::dpi::LogicalSize;
     use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
     use winit::keyboard::{Key as WinitKey, NamedKey};
     use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
@@ -151,6 +151,7 @@ mod portable {
             modifiers: Modifiers::NONE,
             pointer: None,
             started: Instant::now(),
+            wake_at: None,
         };
         event_loop
             .run_app(&mut host)
@@ -173,6 +174,8 @@ mod portable {
         modifiers: Modifiers,
         pointer: Option<Point>,
         started: Instant,
+        /// When the app asked for its next frame without input.
+        wake_at: Option<Instant>,
     }
 
     /// The band along the window's edges that resizes it, in DIPs.
@@ -274,10 +277,25 @@ mod portable {
             if output.repaint {
                 shown.window.request_redraw();
             }
+            self.wake_at = output.repaint_after.map(|after| Instant::now() + after);
         }
     }
 
     impl ApplicationHandler for Host {
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            match self.wake_at {
+                Some(at) if at <= Instant::now() => {
+                    self.wake_at = None;
+                    if let Some(shown) = &self.window {
+                        shown.window.request_redraw();
+                    }
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
+                Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+                None => event_loop.set_control_flow(ControlFlow::Wait),
+            }
+        }
+
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             if self.window.is_some() {
                 return;
