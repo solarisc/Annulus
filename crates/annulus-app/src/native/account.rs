@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::job::{Job, Pace, Poll};
 use crate::password_screen;
-use crate::sync_screen::{SyncScreen, ago, now_secs, pill};
+use crate::sync_screen::{Attempt, SyncScreen, ago, now_secs, pill};
 
 /// The forms' typed text, wiped when dropped.
 #[derive(Default)]
@@ -152,9 +152,9 @@ impl AccountView {
                     t.text2,
                     Align::Start,
                 );
-                if let Some(certificate) = sync.untrusted.clone() {
+                if let Some((certificate, attempt)) = sync.untrusted.clone() {
                     inner.take_top(space::M);
-                    certificate_box(ui, &mut inner, sync, &certificate);
+                    certificate_box(ui, &mut inner, sync, &certificate, attempt);
                 } else if sync.pin.is_some() {
                     inner.take_top(space::S);
                     ui.gfx.text(
@@ -508,8 +508,15 @@ impl AccountView {
     }
 }
 
-/// The certificate a server showed, by fingerprint, with a choice to trust it (ADR-0018).
-fn certificate_box(ui: &mut Ui<'_>, inner: &mut Rect, sync: &mut SyncScreen, certificate: &[u8]) {
+/// The certificate a server showed, by fingerprint, with a choice to trust it (ADR-0018);
+/// trusting it says how to redo `attempt`, the step it stopped.
+fn certificate_box(
+    ui: &mut Ui<'_>,
+    inner: &mut Rect,
+    sync: &mut SyncScreen,
+    certificate: &[u8],
+    attempt: Attempt,
+) {
     let t = ui.theme;
     let fingerprint = annulus_sync::pin::fingerprint(certificate);
     // 32 bytes as "AB:" pairs: two lines of 16 read and compare more easily than one.
@@ -561,11 +568,7 @@ fn certificate_box(ui: &mut Ui<'_>, inner: &mut Rect, sync: &mut SyncScreen, cer
     ) {
         sync.pin = Some(certificate.to_vec());
         sync.untrusted = None;
-        sync.message = Some((
-            false,
-            "Trusted for this server. Type the master password again and choose Sign in or Create account."
-                .into(),
-        ));
+        sync.message = Some((false, attempt.after_trust().into()));
     }
     if push_button(
         ui,

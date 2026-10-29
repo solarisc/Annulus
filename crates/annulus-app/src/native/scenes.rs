@@ -24,6 +24,7 @@ use annulus_vault::hosts::Host;
 use super::demo::fixture_vault;
 use super::hosts::{HostsAction, Mode};
 use super::{NativeApp, TermView};
+use crate::sync_screen::Attempt;
 use crate::terminal_view::TabStatus;
 
 /// One step of a scene's script, applied between frames.
@@ -133,7 +134,7 @@ fn settings_account_certificate(app: &mut NativeApp) {
     settings_account(app);
     "https://10.1.1.20:8443".clone_into(&mut app.sync.server);
     "ana".clone_into(&mut app.sync.account);
-    app.sync.untrusted = Some((0..=255).collect());
+    app.sync.untrusted = Some(((0..=255).collect(), Attempt::Create));
 }
 
 fn locked(app: &mut NativeApp) {
@@ -1868,6 +1869,11 @@ fn trusting_a_servers_certificate_pins_it_until_the_address_changes() {
     );
     assert_eq!(app.sync.pin, Some((0..=255).collect::<Vec<u8>>()));
     assert!(app.sync.untrusted.is_none());
+    // The certificate stopped a Create account: that, not Sign in, is what to redo.
+    let (_, message) = app.sync.message.clone().unwrap_or_default();
+    assert!(message.contains("not created yet"), "{message}");
+    assert!(message.contains("Create account"), "{message}");
+    assert!(!message.contains("Sign in"), "{message}");
     // Another address: the certificate trusted for the old one goes.
     let output = step(&mut app, &mut state, &[], 2.0);
     let mut events = click_on(&output, "Server, e.g. https://sync.example.com");

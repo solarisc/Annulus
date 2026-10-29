@@ -64,8 +64,30 @@ pub(crate) enum Done {
     /// A step failed before anything changed.
     Failed(String),
     /// The server's certificate is not from a public authority: this one (DER) waits for
-    /// the user to compare its fingerprint and trust it (ADR-0018).
-    Untrusted(Vec<u8>),
+    /// the user to compare its fingerprint and trust it (ADR-0018), and what it stopped.
+    Untrusted(Vec<u8>, Attempt),
+}
+
+/// What the user asked for when the server's certificate stopped it: after trusting, they
+/// must ask again, and asking for the other one fails (no account yet, or one already).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    Create,
+    SignIn,
+}
+
+impl Attempt {
+    /// What to do once the certificate is trusted.
+    pub(crate) fn after_trust(self) -> &'static str {
+        match self {
+            Self::Create => {
+                "Trusted for this server. The account is not created yet: type the master password again and choose Create account."
+            }
+            Self::SignIn => {
+                "Trusted for this server. Type the master password again and choose Sign in."
+            }
+        }
+    }
 }
 
 /// The account part of Settings, kept while the vault is unlocked.
@@ -89,8 +111,8 @@ pub struct SyncScreen {
     /// The certificate the user trusted for `server` (DER), pinned to the account made or
     /// signed in to with it.
     pub(crate) pin: Option<Vec<u8>>,
-    /// A certificate shown by `server` that waits for a yes.
-    pub(crate) untrusted: Option<Vec<u8>>,
+    /// A certificate shown by `server` that waits for a yes, and what it stopped.
+    pub(crate) untrusted: Option<(Vec<u8>, Attempt)>,
 }
 
 /// How sync is doing, for the pill in the tab strip (F-SYNC-004).
@@ -392,9 +414,9 @@ impl SyncScreen {
             },
             Done::Failed(message) => self.message = Some((true, message)),
             // The card shows the certificate and the question.
-            Done::Untrusted(certificate) => {
+            Done::Untrusted(certificate, attempt) => {
                 self.message = None;
-                self.untrusted = Some(certificate);
+                self.untrusted = Some((certificate, attempt));
             }
         }
         false
@@ -575,7 +597,9 @@ impl SyncScreen {
                     token: Secret::new(session.token),
                     pin,
                 }),
-                Err(SyncError::Untrusted(_)) if pin.is_none() => untrusted(&server),
+                Err(SyncError::Untrusted(_)) if pin.is_none() => {
+                    untrusted(&server, Attempt::Create)
+                }
                 Err(error) => Done::Failed(format!("Could not create the account: {error}")),
             }
         });
@@ -610,7 +634,9 @@ impl SyncScreen {
                 )
             }) {
                 Ok(session) => session,
-                Err(SyncError::Untrusted(_)) if pin.is_none() => return untrusted(&server),
+                Err(SyncError::Untrusted(_)) if pin.is_none() => {
+                    return untrusted(&server, Attempt::SignIn);
+                }
                 Err(error) => return Done::Failed(format!("Could not sign in: {error}")),
             };
             let account = SyncAccount {
@@ -699,10 +725,10 @@ fn load_trash(account: &SyncAccount, copy: &SyncCopy) -> Result<Vec<TrashItem>, 
 }
 
 /// The certificate `server` shows, for the user to compare and trust, or why it could not
-/// be read.
-fn untrusted(server: &str) -> Done {
+/// be read; `attempt` is what it stopped.
+fn untrusted(server: &str, attempt: Attempt) -> Done {
     match annulus_sync::pin::certificate_of(server) {
-        Ok(certificate) => Done::Untrusted(certificate),
+        Ok(certificate) => Done::Untrusted(certificate, attempt),
         Err(error) => Done::Failed(format!(
             "The server's certificate is not trusted, and {error}"
         )),
