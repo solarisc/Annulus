@@ -34,7 +34,8 @@ fn round(url: &str, account: &SyncAccount, vault: &mut Vault) {
     assert!(vault.commit_sync(replica.0).unwrap());
 }
 
-/// Host "db" in group "databases", which gives it user postgres and port 5422.
+/// Host "db" in group "databases", which gives it user postgres and port 5422, and a
+/// 1 MiB session log.
 fn add_grouped_host(vault: &mut Vault) {
     let mut group = vault.draft_group(None).unwrap();
     group.name = "databases".into();
@@ -46,6 +47,10 @@ fn add_grouped_host(vault: &mut Vault) {
     host.address = "10.0.0.5".into();
     host.group = Some(group.uid);
     vault.upsert_host(host).unwrap();
+    // A full-size session log (1 MiB, kept): bigger than one push batch once sealed.
+    vault
+        .add_log("db", &"line of output\n".repeat(80_000), 1)
+        .unwrap();
 }
 
 #[test]
@@ -103,6 +108,10 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
         ("postgres", Some(5422))
     );
     assert_eq!(sources.port.as_deref(), Some("databases"));
+    assert!(
+        desktop.logs()[0].text.len() > 1_000_000,
+        "the full-size log arrived"
+    );
 
     // Deleted on B, restored from the trash on A.
     let id = desktop.hosts()[0].id;
