@@ -16,6 +16,10 @@ ignore = [
     # Marvin: a timing attack on RSA *decryption*. SSH uses the rsa crate only to sign and
     # verify (via russh), and no fixed version exists; dropping it would drop RSA keys.
     { id = "RUSTSEC-2023-0071", reason = "rsa used only for signatures in SSH; no fix available" },
+    # crypto-bigint 0.5 comes in through opaque-ke's generic elliptic-curve group, used only by
+    # NIST-curve suites. Our suite is ristretto255 (curve25519-dalek), so no crypto-bigint
+    # arithmetic runs on secrets; the fix exists only in 0.7, which opaque-ke 4.0 cannot use.
+    { id = "RUSTSEC-2026-0387", reason = "opaque-ke uses ristretto255, not crypto-bigint curves" },
 ]
 
 [licenses]

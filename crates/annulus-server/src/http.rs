@@ -1,0 +1,189 @@
+//! HTTP in front of [`Server`]: postcard bodies, the protocol version header, and bearer
+//! device tokens.
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::{RawQuery, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use annulus_proto::{
+    Failure, LoginFinish, LoginStart, PROTOCOL_VERSION, Push, RegisterFinish, RegisterStart,
+    Revoke, VERSION_HEADER, decode, encode, path,
+};
+
+use crate::store::{Caller, Server, ServerError};
+
+/// The HTTP API over `server`.
+pub fn router(server: Arc<Server>) -> Router {
+    Router::new()
+        .route(path::HEALTH, get(|| async { "ok" }))
+        .route(path::REGISTER_START, post(register_start))
+        .route(path::REGISTER_FINISH, post(register_finish))
+        .route(path::LOGIN_START, post(login_start))
+        .route(path::LOGIN_FINISH, post(login_finish))
+        .route(path::RECORDS, get(pull).post(push))
+        .route(path::DEVICES, get(devices))
+        .route(path::REVOKE, post(revoke))
+        .with_state(server)
+}
+
+fn failure(status: StatusCode, message: impl Into<String>) -> Response {
+    let body = encode(&Failure {
+        message: message.into(),
+    });
+    (status, body).into_response()
+}
+
+fn reply<T: Serialize>(result: Result<T, ServerError>) -> Response {
+    match result {
+        Ok(value) => (StatusCode::OK, encode(&value)).into_response(),
+        Err(error) => {
+            let status = match &error {
+                ServerError::BadRequest(_) => StatusCode::BAD_REQUEST,
+                ServerError::Refused(_) => StatusCode::FORBIDDEN,
+                ServerError::Throttled => StatusCode::TOO_MANY_REQUESTS,
+                ServerError::Unauthorized => StatusCode::UNAUTHORIZED,
+                ServerError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            // Storage details stay in the server; clients get a generic message.
+            let message = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "the server could not complete the request".to_owned()
+            } else {
+                error.to_string()
+            };
+            failure(status, message)
+        }
+    }
+}
+
+/// Checks the version header and decodes the body.
+fn read<T: DeserializeOwned>(headers: &HeaderMap, body: &[u8]) -> Result<T, Box<Response>> {
+    check_version(headers)?;
+    decode(body).map_err(|error| Box::new(failure(StatusCode::BAD_REQUEST, error.to_string())))
+}
+
+fn check_version(headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let version = headers
+        .get(VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok());
+    if version == Some(PROTOCOL_VERSION) {
+        Ok(())
+    } else {
+        Err(Box::new(failure(
+            StatusCode::BAD_REQUEST,
+            format!("this server speaks protocol version {PROTOCOL_VERSION}; update the app"),
+        )))
+    }
+}
+
+fn caller(server: &Server, headers: &HeaderMap) -> Result<Caller, Box<Response>> {
+    check_version(headers)?;
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| Box::new(reply::<()>(Err(ServerError::Unauthorized))))?;
+    server
+        .authenticate(token)
+        .map_err(|error| Box::new(reply::<()>(Err(error))))
+}
+
+async fn register_start(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match read::<RegisterStart>(&headers, &body) {
+        Ok(request) => reply(server.register_start(&request)),
+        Err(response) => *response,
+    }
+}
+
+async fn register_finish(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match read::<RegisterFinish>(&headers, &body) {
+        Ok(request) => reply(server.register_finish(&request)),
+        Err(response) => *response,
+    }
+}
+
+async fn login_start(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match read::<LoginStart>(&headers, &body) {
+        Ok(request) => reply(server.login_start(&request)),
+        Err(response) => *response,
+    }
+}
+
+async fn login_finish(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match read::<LoginFinish>(&headers, &body) {
+        Ok(request) => reply(server.login_finish(&request)),
+        Err(response) => *response,
+    }
+}
+
+async fn push(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bytes) -> Response {
+    let caller = match caller(&server, &headers) {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    match decode::<Push>(&body) {
+        Ok(request) => reply(server.push(caller, &request.changes)),
+        Err(error) => failure(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn pull(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let caller = match caller(&server, &headers) {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    let since = query
+        .as_deref()
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("since="))
+        .map_or(Some(0), |value| value.parse::<u64>().ok());
+    match since {
+        Some(since) => reply(server.pull(caller, since)),
+        None => failure(StatusCode::BAD_REQUEST, "since must be a number"),
+    }
+}
+
+async fn devices(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {
+    match caller(&server, &headers) {
+        Ok(caller) => reply(server.devices(caller)),
+        Err(response) => *response,
+    }
+}
+
+async fn revoke(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bytes) -> Response {
+    let caller = match caller(&server, &headers) {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    match decode::<Revoke>(&body) {
+        Ok(request) => reply(server.revoke(caller, request.device)),
+        Err(error) => failure(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
