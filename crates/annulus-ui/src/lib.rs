@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access;
 pub mod gfx;
 pub mod icons;
 pub mod kit;

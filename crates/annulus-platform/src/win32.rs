@@ -4,6 +4,8 @@
 //! are drawn by Direct2D with `ClearType` text, only when input arrives or the app asks
 //! (P-06). This settles it: our own Win32 window, not winit, on Windows.
 //!
+//! Screen readers reach the UI through UI Automation: AccessKit's adapter answers
+//! `WM_GETOBJECT` with the tree of the frame's zones (`annulus_ui::access`).
 //!
 //! [ADR-0017]: ../../../docs/adr/0017-native-ui.md
 
@@ -11,8 +13,12 @@
 // The bindings take raw pointers to locals that outlive each call.
 #![allow(clippy::borrow_as_ptr)]
 
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
+use accesskit_windows::Adapter;
+use annulus_ui::access::accesskit::{ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
+use annulus_ui::access::{self, Request};
 use annulus_ui::gfx::{Point, Rect};
 use annulus_ui::kit::{self, Button, Cursor, Event, Modifiers, Ui, UiState};
 use windows::Win32::Foundation::{
@@ -50,11 +56,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostQuitMessage, RegisterClassExW, SM_CXPADDEDBORDER, SM_CYSIZEFRAME, SW_MAXIMIZE, SW_MINIMIZE,
     SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-    WM_CHAR, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_CHAR, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
+    WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN,
+    WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -69,13 +76,46 @@ use crate::window::{
     WindowApp, WindowError, WindowRequest, is_paste, paste_event, publish_clipboard,
 };
 
+/// Hands a screen reader's requests to the window's thread and wakes it. UI Automation calls
+/// it on threads of its own.
+struct Requests {
+    sender: Sender<ActionRequest>,
+    hwnd: isize,
+}
+
+impl ActionHandler for Requests {
+    fn do_action(&mut self, request: ActionRequest) {
+        if self.sender.send(request).is_ok() {
+            // SAFETY: InvalidateRect may be called from any thread; a stale handle after
+            // the window closed is rejected by Windows, not used.
+            unsafe {
+                let _ =
+                    InvalidateRect(Some(HWND(self.hwnd as *mut core::ffi::c_void)), None, false);
+            }
+        }
+    }
+}
+
+/// The tree a screen reader gets when it first asks (`WM_GETOBJECT`).
+struct Initial(Option<TreeUpdate>);
+
+impl ActivationHandler for Initial {
+    fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+        self.0.take()
+    }
+}
+
 /// Runs `app` in a new window until it closes.
 ///
 /// # Errors
 /// When the window or Direct2D cannot be created.
 pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(), WindowError> {
     let d2d = D2d::new().map_err(|e| WindowError::Platform(e.to_string()))?;
+    let (sender, requests) = channel();
     let mut host = Box::new(Host {
+        title: title.to_owned(),
+        access: None,
+        requests,
         hwnd: HWND::default(),
         app,
         d2d,
@@ -144,6 +184,15 @@ pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(),
             // A stale handle after the window closed is rejected by Windows, not used.
             let _ = InvalidateRect(Some(HWND(handle as *mut core::ffi::c_void)), None, false);
         }));
+        // Before the window shows: UI Automation must be ready before `WM_GETOBJECT`.
+        host.access = Some(Adapter::new(
+            hwnd,
+            false,
+            Requests {
+                sender,
+                hwnd: handle,
+            },
+        ));
         let dark = host.app.theme().dark;
         let value = i32::from(dark);
         // DWMWA_USE_IMMERSIVE_DARK_MODE: dark borders and system menu.
@@ -160,6 +209,11 @@ pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(),
 }
 
 struct Host {
+    title: String,
+    /// The screen-reader bridge; it builds a tree only once one asks.
+    access: Option<Adapter>,
+    /// Screen-reader requests from `Requests`.
+    requests: Receiver<ActionRequest>,
     hwnd: HWND,
     app: Box<dyn WindowApp>,
     d2d: D2d,
@@ -194,6 +248,14 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
         if host.is_null() {
             return DefWindowProcW(hwnd, message, wparam, lparam);
         }
+        if message == WM_GETOBJECT {
+            // Turning the answer into an LRESULT can send a nested WM_GETOBJECT, so it
+            // happens after the host is no longer borrowed.
+            return match (*host).get_object(wparam, lparam) {
+                Some(answer) => answer.into(),
+                None => DefWindowProcW(hwnd, message, wparam, lparam),
+            };
+        }
         (*host).handle(message, wparam, lparam)
     }
 }
@@ -221,6 +283,30 @@ fn high(value: isize) -> i32 {
 }
 
 impl Host {
+    /// The screen reader's `WM_GETOBJECT`: the tree of the frame on screen.
+    fn get_object(&mut self, wparam: WPARAM, lparam: LPARAM) -> Option<impl Into<LRESULT> + use<>> {
+        let tree = access::tree(
+            self.state.zones(),
+            self.state.focus(),
+            self.scale,
+            &self.title,
+        );
+        self.access
+            .as_mut()?
+            .handle_wm_getobject(wparam, lparam, &mut Initial(Some(tree)))
+    }
+
+    /// Tells the screen reader whether the window has keyboard focus.
+    fn window_focus(&mut self, focused: bool) {
+        if let Some(events) = self
+            .access
+            .as_mut()
+            .and_then(|access| access.update_window_focus_state(focused))
+        {
+            events.raise();
+        }
+    }
+
     fn point(&self, lparam: LPARAM) -> Point {
         #[allow(clippy::cast_precision_loss)] // Window coordinates are small.
         Point::new(
@@ -534,6 +620,10 @@ impl Host {
                     self.invalidate();
                     LRESULT(0)
                 }
+                WM_SETFOCUS | WM_KILLFOCUS => {
+                    self.window_focus(message == WM_SETFOCUS);
+                    LRESULT(0)
+                }
                 WM_DESTROY => {
                     PostQuitMessage(0);
                     LRESULT(0)
@@ -603,6 +693,11 @@ impl Host {
         );
         self.size = size;
         let events = std::mem::take(&mut self.events);
+        for request in self.requests.try_iter() {
+            if let Some(request) = Request::from_action(&request) {
+                self.state.request(request);
+            }
+        }
         let time = self.started.elapsed().as_secs_f64();
         let maximized = self.maximized();
         let theme = self.app.theme();
@@ -637,6 +732,13 @@ impl Host {
         }
         self.cursor = output.cursor;
         self.painting = false;
+        let focus = self.state.focus();
+        let (scale, title) = (self.scale, &self.title);
+        if let Some(events) = self.access.as_mut().and_then(|access| {
+            access.update_if_active(|| access::tree(&output.zones, focus, scale, title))
+        }) {
+            events.raise();
+        }
         // SAFETY: window state changes on our own window.
         unsafe {
             match request {

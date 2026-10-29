@@ -42,6 +42,10 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "tim
 directories = "6.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
 egui = "0.37.0"
+# The accessibility tree and its platform adapters (ADR-0017).
+accesskit = "0.25.2"
+accesskit_windows = "0.35.2"
+accesskit_winit = "0.34.2"
 # Without wayland-csd-adwaita: we draw our own title bar (and it pulls in ttf-parser).
 webbrowser = "1.2.4"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }

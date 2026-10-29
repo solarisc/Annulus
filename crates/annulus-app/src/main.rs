@@ -1,9 +1,12 @@
 //! Annulus desktop binary: app state, view models, command registry, window, tab and pane management.
 //!
-//! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4. The UI is egui run by
-//! eframe ([ADR-0015](../../docs/adr/0015-egui-instead-of-hand-built-ui.md)).
+//! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4. The UI is our own toolkit
+//! in our own window ([ADR-0017](../../docs/adr/0017-native-ui.md)); the egui UI
+//! it replaces still runs with `--egui` until it is removed.
 
 #![forbid(unsafe_code)]
+// A release build is a window app: no console window next to it on Windows.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod command_palette;
 mod connect;
@@ -54,20 +57,23 @@ fn data_dir() -> std::path::PathBuf {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|arg| arg == "--native") {
-        let light = args.iter().any(|arg| arg == "--light");
-        return match native::run_native(light, &data_dir()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::FAILURE,
-        };
+    let light = args.iter().any(|arg| arg == "--light");
+    let ran = if args.iter().any(|arg| arg == "--preview") {
+        native::run_preview(light)
+    } else if args.iter().any(|arg| arg == "--egui") {
+        return run_egui();
+    } else {
+        native::run_native(light, &data_dir())
+    };
+    if ran.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
-    if args.iter().any(|arg| arg == "--preview") {
-        let light = args.iter().any(|arg| arg == "--light");
-        return match native::run_preview(light) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::FAILURE,
-        };
-    }
+}
+
+/// The egui UI the new one replaces.
+fn run_egui() -> ExitCode {
     let data_dir = data_dir();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

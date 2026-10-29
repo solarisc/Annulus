@@ -419,6 +419,11 @@ impl Ui<'_> {
                 .text(chip, style.hint, SMALL, t.text3, Align::Center);
         }
         self.state.set_edit(id, state);
+        if buffer.is_secret() {
+            self.set_secret(id);
+        } else {
+            self.set_value(id, buffer.as_str());
+        }
         FieldResponse {
             response,
             changed,
@@ -632,6 +637,11 @@ impl Ui<'_> {
         }
         self.pop_clip();
         self.state.set_edit(id, state);
+        if buffer.is_secret() {
+            self.set_secret(id);
+        } else {
+            self.set_value(id, buffer.as_str());
+        }
         FieldResponse {
             response,
             changed,
@@ -645,6 +655,7 @@ impl Ui<'_> {
         if response.clicked {
             *value = !*value;
         }
+        self.set_toggled(id, *value);
         let t = self.theme;
         let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
         let on = self.ease(id.with("on"), if *value { 1.0 } else { 0.0 });
@@ -679,6 +690,7 @@ impl Ui<'_> {
         if response.clicked {
             *value = !*value;
         }
+        self.set_toggled(id, *value);
         let t = self.theme;
         let on = self.ease(id.with("on"), if *value { 1.0 } else { 0.0 });
         self.gfx
@@ -706,6 +718,7 @@ impl Ui<'_> {
             .and_then(|index| items.get(index))
             .map_or(placeholder, String::as_str);
         let response = self.zone(id, rect, Role::ComboBox, current);
+        self.set_value(id, current);
         let t = self.theme;
         let open = self.state.popup.as_ref().is_some_and(|p| p.owner == id);
         let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });

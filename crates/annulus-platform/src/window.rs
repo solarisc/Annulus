@@ -4,7 +4,8 @@
 //!
 //! The window has no OS title bar: the app draws its own and names the zones that drag the
 //! window and maximize it. Frames are drawn only when input arrives or the app asks for one
-//! (P-06).
+//! (P-06). Screen readers get the tree of each frame's zones (`annulus_ui::access`) through
+//! AccessKit: UI Automation on Windows, AT-SPI on Linux, `NSAccessibility` on macOS.
 //!
 //! [ADR-0017]: ../../../docs/adr/0017-native-ui.md
 
@@ -118,12 +119,13 @@ mod portable {
     use std::time::Instant;
 
     use softbuffer::{Context, Surface};
+    use annulus_ui::access::{self, Request};
     use annulus_ui::gfx::{Point, Rect};
     use annulus_ui::kit::{self, Button, Cursor, Event, Modifiers, Ui, UiState};
     use winit::application::ApplicationHandler;
     use winit::dpi::LogicalSize;
     use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WinitKey, NamedKey};
     use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
@@ -133,14 +135,26 @@ mod portable {
 
     use super::{WindowApp, WindowError, WindowRequest, is_paste, paste_event, publish_clipboard};
 
+    /// A screen reader's news, sent through the event loop by AccessKit's adapter.
+    pub(super) struct Access(accesskit_winit::Event);
+
+    impl From<accesskit_winit::Event> for Access {
+        fn from(event: accesskit_winit::Event) -> Self {
+            Self(event)
+        }
+    }
+
     /// Runs `app` in a `winit` window until it closes.
     pub(super) fn run(
         title: &str,
         size: (f32, f32),
         app: Box<dyn WindowApp>,
     ) -> Result<(), WindowError> {
-        let event_loop = EventLoop::new().map_err(|e| WindowError::Platform(e.to_string()))?;
+        let event_loop = EventLoop::<Access>::with_user_event()
+            .build()
+            .map_err(|e| WindowError::Platform(e.to_string()))?;
         let mut host = Host {
+            proxy: event_loop.create_proxy(),
             title: title.to_owned(),
             size,
             app,
@@ -161,9 +175,12 @@ mod portable {
     struct Shown {
         window: Arc<Window>,
         surface: Surface<Arc<Window>, Arc<Window>>,
+        /// The screen-reader bridge; it builds a tree only once one asks.
+        access: accesskit_winit::Adapter,
     }
 
     struct Host {
+        proxy: EventLoopProxy<Access>,
         title: String,
         size: (f32, f32),
         app: Box<dyn WindowApp>,
@@ -241,6 +258,11 @@ mod portable {
             };
             let output = self.state.end_frame();
             publish_clipboard(&mut self.state);
+            let focus = self.state.focus();
+            let title = &self.title;
+            shown
+                .access
+                .update_if_active(|| access::tree(&output.zones, focus, scale, title));
             if shown.surface.resize(width, height).is_ok()
                 && let Ok(mut buffer) = shown.surface.buffer_mut()
             {
@@ -281,7 +303,22 @@ mod portable {
         }
     }
 
-    impl ApplicationHandler for Host {
+    impl ApplicationHandler<Access> for Host {
+        fn user_event(&mut self, _: &ActiveEventLoop, event: Access) {
+            let Some(shown) = &self.window else { return };
+            match event.0.window_event {
+                accesskit_winit::WindowEvent::ActionRequested(request) => {
+                    if let Some(request) = Request::from_action(&request) {
+                        self.state.request(request);
+                    }
+                }
+                // The next frame sends the whole tree.
+                accesskit_winit::WindowEvent::InitialTreeRequested => {}
+                accesskit_winit::WindowEvent::AccessibilityDeactivated => return,
+            }
+            shown.window.request_redraw();
+        }
+
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
             match self.wake_at {
                 Some(at) if at <= Instant::now() => {
@@ -304,11 +341,19 @@ mod portable {
                 .with_title(self.title.clone())
                 .with_inner_size(LogicalSize::new(self.size.0, self.size.1))
                 .with_min_inner_size(LogicalSize::new(640.0, 400.0))
-                .with_decorations(false);
+                .with_decorations(false)
+                // AccessKit's adapter must exist before the window first shows.
+                .with_visible(false);
             let Ok(window) = event_loop.create_window(attributes) else {
                 event_loop.exit();
                 return;
             };
+            let access = accesskit_winit::Adapter::with_event_loop_proxy(
+                event_loop,
+                &window,
+                self.proxy.clone(),
+            );
+            window.set_visible(true);
             let window = Arc::new(window);
             let Ok(context) = Context::new(window.clone()) else {
                 event_loop.exit();
@@ -321,14 +366,19 @@ mod portable {
             let waker = window.clone();
             self.app.set_waker(Arc::new(move || waker.request_redraw()));
             window.request_redraw();
-            self.window = Some(Shown { window, surface });
+            self.window = Some(Shown {
+                window,
+                surface,
+                access,
+            });
         }
 
         #[allow(clippy::too_many_lines)] // One match over the window's events.
         fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-            let Some(shown) = self.window.as_ref() else {
+            let Some(shown) = self.window.as_mut() else {
                 return;
             };
+            shown.access.process_event(&shown.window, &event);
             let window = shown.window.clone();
             #[allow(clippy::cast_possible_truncation)] // Scale factors are small.
             let scale = window.scale_factor() as f32;

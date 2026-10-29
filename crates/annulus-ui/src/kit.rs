@@ -88,6 +88,28 @@ pub struct Zone {
     pub role: Role,
     /// Its accessible name.
     pub label: String,
+    /// A check box's or switch's state.
+    pub toggled: Option<bool>,
+    /// A field's text or a drop-down's choice, for assistive technology; never a secret's.
+    pub value: Option<String>,
+    /// A secret field: assistive technology is told so and never gets its text.
+    pub secret: bool,
+}
+
+impl Zone {
+    /// A zone with nothing more to tell assistive technology than its role and name.
+    #[must_use]
+    pub fn new(id: Id, rect: Rect, role: Role, label: &str) -> Self {
+        Self {
+            id,
+            rect,
+            role,
+            label: label.to_owned(),
+            toggled: None,
+            value: None,
+            secret: false,
+        }
+    }
 }
 
 /// A mouse button.
@@ -411,6 +433,8 @@ pub struct UiState {
     pub(crate) popup: Option<Popup>,
     pub(crate) clipboard_out: Option<String>,
     faults: Vec<String>,
+    /// What assistive technology asked for since the last frame.
+    requests: Vec<crate::access::Request>,
     /// No animations (UI-SPEC §8, "reduce motion").
     pub reduce_motion: bool,
 }
@@ -425,6 +449,18 @@ impl UiState {
         self.clicks.clear();
         self.double_clicks.clear();
         self.activated = None;
+        for request in std::mem::take(&mut self.requests) {
+            match request {
+                crate::access::Request::Focus(id) => {
+                    self.focus = Some(id);
+                    self.focus_ring = true;
+                }
+                crate::access::Request::Click(id) => {
+                    self.focus = Some(id);
+                    self.activated = Some(id);
+                }
+            }
+        }
         self.typed.clear();
         self.input_seen = events
             .iter()
@@ -511,6 +547,12 @@ impl UiState {
                 Event::Modifiers(modifiers) => self.modifiers = *modifiers,
             }
         }
+    }
+
+    /// Queues what assistive technology asked for (a screen reader's click or focus move);
+    /// the next frame does it, as the same input from the keyboard would.
+    pub fn request(&mut self, request: crate::access::Request) {
+        self.requests.push(request);
     }
 
     /// Ends the frame: the zones drawn become the ones input is resolved against.
@@ -690,12 +732,9 @@ impl<'a> Ui<'a> {
                 ..Response::default()
             };
         }
-        self.state.next_zones.push(Zone {
-            id,
-            rect: visible,
-            role,
-            label: label.to_owned(),
-        });
+        self.state
+            .next_zones
+            .push(Zone::new(id, visible, role, label));
         let state = &*self.state;
         let clicked = state.clicks.contains(&(id, Button::Primary)) || state.activated == Some(id);
         let focused = state.focus == Some(id);
@@ -710,6 +749,37 @@ impl<'a> Ui<'a> {
             middle_clicked: state.clicks.contains(&(id, Button::Middle)),
             focused,
             focus_ring: focused && state.focus_ring,
+        }
+    }
+
+    /// Zone `id` of this frame, to tell assistive technology more about it.
+    fn drawn(&mut self, id: Id) -> Option<&mut Zone> {
+        self.state
+            .next_zones
+            .iter_mut()
+            .rev()
+            .find(|zone| zone.id == id)
+    }
+
+    /// Tells assistive technology that zone `id` (a check box or switch) is on or off.
+    pub fn set_toggled(&mut self, id: Id, on: bool) {
+        if let Some(zone) = self.drawn(id) {
+            zone.toggled = Some(on);
+        }
+    }
+
+    /// Tells assistive technology zone `id`'s text or current choice.
+    pub fn set_value(&mut self, id: Id, value: &str) {
+        if let Some(zone) = self.drawn(id) {
+            value.clone_into(zone.value.get_or_insert_default());
+        }
+    }
+
+    /// Marks zone `id` as a secret field: assistive technology never gets its text.
+    pub fn set_secret(&mut self, id: Id) {
+        if let Some(zone) = self.drawn(id) {
+            zone.secret = true;
+            zone.value = None;
         }
     }
 
@@ -1187,6 +1257,29 @@ mod tests {
         let outside = [Event::PointerMoved(Point::new(300.0, 300.0))];
         frame(&mut state, &outside, 2.0, |ui| within = draw(ui));
         assert_eq!(within, (false, false));
+    }
+
+    #[test]
+    fn a_screen_readers_click_and_focus_work_like_the_keyboards() {
+        let mut state = UiState::default();
+        let mut clicked = (false, false);
+        frame(&mut state, &[], 0.0, |ui| {
+            let _ = two_buttons(ui);
+        });
+        state.request(crate::access::Request::Click(Id::new("b")));
+        frame(&mut state, &[], 1.0, |ui| {
+            let (a, b) = two_buttons(ui);
+            clicked = (a.clicked, b.clicked);
+        });
+        assert_eq!(clicked, (false, true));
+        assert_eq!(state.focus(), Some(Id::new("b")));
+        state.request(crate::access::Request::Focus(Id::new("a")));
+        frame(&mut state, &[], 2.0, |ui| {
+            let (a, b) = two_buttons(ui);
+            clicked = (a.clicked, b.clicked);
+        });
+        assert_eq!(clicked, (false, false), "focus alone clicks nothing");
+        assert_eq!(state.focus(), Some(Id::new("a")));
     }
 
     #[test]

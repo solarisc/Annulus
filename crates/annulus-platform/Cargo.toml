@@ -23,7 +23,11 @@ webbrowser.workspace = true
 winit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+accesskit_windows.workspace = true
 windows-numerics.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+accesskit_winit.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true

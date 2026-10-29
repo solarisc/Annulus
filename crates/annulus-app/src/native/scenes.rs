@@ -633,6 +633,20 @@ fn render(
     let (output, png) = frame(&[], time + 1.0, true);
     faults.extend(output.faults.iter().cloned());
     faults.extend(layout_faults(&output.zones, viewport));
+    // Two zones with one id would take each other's input and screen-reader node.
+    let mut ids = std::collections::HashSet::new();
+    for zone in &output.zones {
+        if !ids.insert(zone.id) {
+            faults.push(format!("{:?} shares its id with another zone", zone.label));
+        }
+    }
+    // What a screen reader gets of the same frame.
+    let tree = annulus_ui::access::tree(&output.zones, state.focus(), scene.scale, "Annulus");
+    faults.extend(
+        annulus_ui::access::faults(&tree)
+            .into_iter()
+            .map(|fault| format!("accessibility: {fault}")),
+    );
     (png.unwrap(), faults)
 }
 
@@ -783,6 +797,35 @@ fn a_hovered_cards_more_menu_stays_open_after_the_hover_fades() {
     assert!(
         output.zones.iter().any(|zone| zone.label == "Duplicate"),
         "the menu closed itself"
+    );
+}
+
+#[test]
+fn the_lock_screens_tree_names_the_password_fields_but_never_their_text() {
+    let mut app = NativeApp::new(None);
+    app.lock = super::lock::LockView::new(super::lock::Mode::Setup);
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let mut events = click_on(&output, "Master password (10+ characters)");
+    events.push(Event::Text("correct horse battery".into()));
+    output = step(&mut app, &mut state, &events, 1.0);
+    let tree = annulus_ui::access::tree(&output.zones, state.focus(), 1.0, "Annulus");
+    assert_eq!(annulus_ui::access::faults(&tree), Vec::<String>::new());
+    let (id, field) = tree
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("Master password (10+ characters)"))
+        .unwrap();
+    assert_eq!(
+        field.role(),
+        annulus_ui::access::accesskit::Role::PasswordInput
+    );
+    assert_eq!(tree.focus, *id, "the field typed into has focus");
+    assert!(
+        tree.nodes
+            .iter()
+            .all(|(_, node)| node.value().is_none_or(|value| !value.contains("horse"))),
+        "the password reached the tree"
     );
 }
 
@@ -1022,11 +1065,8 @@ fn tab_crosses_the_hosts_toolbar_left_to_right() {
 
 #[test]
 fn the_lint_catches_partial_overlaps_but_not_nesting() {
-    let zone = |label: &str, rect: Rect| Zone {
-        id: annulus_ui::kit::Id::new(label),
-        rect,
-        role: Role::Button,
-        label: label.into(),
+    let zone = |label: &str, rect: Rect| {
+        Zone::new(annulus_ui::kit::Id::new(label), rect, Role::Button, label)
     };
     let viewport = Rect::new(0.0, 0.0, 100.0, 100.0);
     let card = zone("card", Rect::new(0.0, 0.0, 50.0, 50.0));

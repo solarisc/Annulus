@@ -13,6 +13,7 @@ workspace = true
 
 
 [dependencies]
+accesskit.workspace = true
 egui.workspace = true
 annulus-config = { path = "../annulus-config" }
 zeroize.workspace = true
