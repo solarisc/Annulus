@@ -73,7 +73,27 @@ pub enum Program {
         target: Target,
         /// Known hosts and keys.
         files: SshFiles,
+        /// A saved password, tried before asking the user.
+        password: Option<Password>,
     },
+}
+
+/// A password handed to a session: wiped on drop, never shown by `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Password(Zeroizing<String>);
+
+impl Password {
+    /// Wraps `value`.
+    #[must_use]
+    pub fn new(value: &str) -> Self {
+        Self(Zeroizing::new(value.to_owned()))
+    }
+}
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Password([redacted])")
+    }
 }
 
 impl Program {
@@ -190,10 +210,12 @@ struct Pending {
     password: Option<tokio::sync::oneshot::Sender<Option<Zeroizing<String>>>>,
 }
 
-/// Asks the UI through session events and waits for its answer.
+/// Asks the UI through session events and waits for its answer. A saved password is
+/// offered once before asking.
 struct UiPrompt {
     listener: Listener,
     pending: Arc<Mutex<Pending>>,
+    saved: Mutex<Option<Zeroizing<String>>>,
 }
 
 impl Prompt for UiPrompt {
@@ -215,6 +237,10 @@ impl Prompt for UiPrompt {
         host: String,
     ) -> tokio::sync::oneshot::Receiver<Option<Zeroizing<String>>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Some(saved) = self.saved.lock().ok().and_then(|mut saved| saved.take()) {
+            let _ = tx.send(Some(saved));
+            return rx;
+        }
         if let Ok(mut pending) = self.pending.lock() {
             pending.password = Some(tx);
         }
@@ -255,9 +281,14 @@ impl Session {
         let term = Arc::new(FairMutex::new(Term::new(config(), &size, listener.clone())));
         let pending = Arc::new(Mutex::new(Pending::default()));
         let backend = match program {
-            Program::Ssh { target, files } => Backend::Ssh(spawn_ssh(
+            Program::Ssh {
+                target,
+                files,
+                password,
+            } => Backend::Ssh(spawn_ssh(
                 target.clone(),
                 files.clone(),
+                password.as_ref().map(|password| password.0.clone()),
                 size,
                 term.clone(),
                 listener.clone(),
@@ -410,6 +441,7 @@ impl Drop for Session {
 fn spawn_ssh(
     target: Target,
     files: SshFiles,
+    saved_password: Option<Zeroizing<String>>,
     size: Size,
     term: Arc<FairMutex<Term<Listener>>>,
     listener: Listener,
@@ -432,6 +464,7 @@ fn spawn_ssh(
                 let prompt = Arc::new(UiPrompt {
                     listener: listener.clone(),
                     pending,
+                    saved: Mutex::new(saved_password),
                 });
                 let connection = match annulus_ssh::connect(
                     &target,
@@ -573,7 +606,11 @@ mod tests {
             user: "nobody".into(),
         };
         let session = Session::spawn(
-            &Program::Ssh { target, files },
+            &Program::Ssh {
+                target,
+                files,
+                password: None,
+            },
             Size::new(80, 24),
             8,
             16,

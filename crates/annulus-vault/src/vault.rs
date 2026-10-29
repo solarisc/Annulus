@@ -183,6 +183,7 @@ impl Vault {
             port: DEFAULT_PORT,
             username: String::new(),
             tags: Vec::new(),
+            password: None,
         }
     }
 

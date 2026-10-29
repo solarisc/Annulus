@@ -4,9 +4,10 @@
 
 use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Palette, space, text};
-use annulus_session::{Program, SshFiles, Target, local_user};
+use annulus_session::{Password, Program, SshFiles, Target, local_user};
+use annulus_ui::secret::{SecretText, secret_field};
 use annulus_ui::{icons, theme};
-use annulus_vault::hosts::{DEFAULT_PORT, Host};
+use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
 
 /// Something the screen asks the shell to do.
@@ -22,6 +23,10 @@ struct Draft {
     tags: String,
     problem: Option<String>,
     is_new: bool,
+    /// A new password to save; empty keeps the saved one.
+    password: SecretText,
+    /// Remove the saved password on save.
+    forget_password: bool,
 }
 
 /// The Hosts screen's state, over an unlocked vault.
@@ -47,13 +52,24 @@ impl HostsScreen {
     /// Annulus's SSH client for `target` text (`user@host:port`), or the system `ssh` if the
     /// text is not a target Annulus understands.
     fn ssh(&self, target: &str) -> Program {
+        self.ssh_with(target, None)
+    }
+
+    /// As [`Self::ssh`], trying `password` before asking.
+    fn ssh_with(&self, target: &str, password: Option<&Secret>) -> Program {
         match Target::parse(target, &local_user()) {
             Some(target) => Program::Ssh {
                 target,
                 files: self.ssh_files.clone(),
+                password: password.map(|secret| Password::new(secret.expose())),
             },
             None => Program::system_ssh(target),
         }
+    }
+
+    /// The program that connects to a saved host, with its saved password.
+    fn connect_host(&self, host: &Host) -> Program {
+        self.ssh_with(&host.target(), host.password.as_ref())
     }
 
     /// Draws the screen; returns what the shell should do.
@@ -92,6 +108,8 @@ impl HostsScreen {
                         tags: String::new(),
                         problem: None,
                         is_new: true,
+                        password: SecretText::new(),
+                        forget_password: false,
                         host,
                     });
                 }
@@ -122,7 +140,7 @@ impl HostsScreen {
             for host in &matches {
                 match host_row(ui, host, palette) {
                     RowAction::Connect => {
-                        request = Some(Request::Open(host.label.clone(), self.ssh(&host.target())))
+                        request = Some(Request::Open(host.label.clone(), self.connect_host(host)))
                     }
                     RowAction::Edit => {
                         self.editor = Some(Draft {
@@ -130,6 +148,8 @@ impl HostsScreen {
                             tags: host.tags.join(", "),
                             problem: None,
                             is_new: false,
+                            password: SecretText::new(),
+                            forget_password: false,
                             host: host.clone(),
                         });
                     }
@@ -149,7 +169,7 @@ impl HostsScreen {
             .iter()
             .find(|host| host.label.eq_ignore_ascii_case(query))
         {
-            return Request::Open(host.label.clone(), self.ssh(&host.target()));
+            return Request::Open(host.label.clone(), self.connect_host(host));
         }
         Request::Open(query.to_owned(), self.ssh(query))
     }
@@ -187,6 +207,25 @@ impl HostsScreen {
                 ui.label("Tags");
                 ui.add(egui::TextEdit::singleline(&mut draft.tags).hint_text("postgres, prod"));
                 ui.end_row();
+                ui.label("Password");
+                let saved = draft.host.password.is_some() && !draft.forget_password;
+                secret_field(
+                    ui,
+                    &mut draft.password,
+                    if saved {
+                        "Saved (type to replace)"
+                    } else {
+                        "Optional"
+                    },
+                );
+                ui.end_row();
+                if saved {
+                    ui.label("");
+                    if ui.small_button("Forget saved password").clicked() {
+                        draft.forget_password = true;
+                    }
+                    ui.end_row();
+                }
             });
         if let Some(problem) = &draft.problem {
             ui.add_space(space::S);
@@ -231,6 +270,12 @@ impl HostsScreen {
         } else {
             port.parse().unwrap_or(0)
         };
+        if draft.forget_password {
+            draft.host.password = None;
+        }
+        if !draft.password.is_empty() {
+            draft.host.password = Some(Secret::new(draft.password.expose()));
+        }
         draft.host.tags = draft
             .tags
             .split(',')
@@ -376,6 +421,26 @@ mod tests {
         assert_eq!(
             opened(&screen.quick_connect("PROD-DB")),
             ("prod-db", "admin@10.0.4.12:2222".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_saved_password_goes_with_the_saved_host_only() {
+        let mut screen = screen_with("db-pw");
+        let mut host = screen.vault.hosts()[0].clone();
+        host.password = Some(Secret::new("hunter2"));
+        screen.vault.upsert_host(host).unwrap();
+        let password_of = |request: Request| match request {
+            Request::Open(_, Program::Ssh { password, .. }) => password,
+            Request::Open(..) => None,
+        };
+        assert_eq!(
+            password_of(screen.quick_connect("db-pw")),
+            Some(Password::new("hunter2"))
+        );
+        assert_eq!(
+            password_of(screen.quick_connect("admin@10.0.4.12:2222")),
+            None
         );
     }
 

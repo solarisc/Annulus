@@ -26,6 +26,34 @@ pub struct Host {
     /// Free-form tags for filtering.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// A saved password, tried before asking (encrypted with the rest of the vault record).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<Secret>,
+}
+
+/// A secret string: wiped from memory when dropped, and never shown by `Debug`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(zeroize::Zeroizing<String>);
+
+impl Secret {
+    /// Wraps `value`.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(zeroize::Zeroizing::new(value.into()))
+    }
+
+    /// The secret itself. Hand it only to the code that needs it, and never log it.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret([redacted])")
+    }
 }
 
 fn default_port() -> u16 {
@@ -134,6 +162,7 @@ mod tests {
             port,
             username: username.into(),
             tags: Vec::new(),
+            password: None,
         }
     }
 
@@ -150,6 +179,17 @@ mod tests {
         assert_eq!(
             host(1, "a", "fe80::1", 2222, "root").target(),
             "root@[fe80::1]:2222"
+        );
+    }
+
+    #[test]
+    fn a_saved_password_never_shows_in_debug_output() {
+        let mut host = host(1, "a", "x", 22, "me");
+        host.password = Some(Secret::new("hunter2"));
+        assert!(!format!("{host:?}").contains("hunter2"));
+        assert!(
+            !host.matches("hunter2"),
+            "search never looks at the password"
         );
     }
 
