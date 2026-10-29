@@ -136,6 +136,68 @@ fn terminal_tab(app: &mut NativeApp) {
     app.active = 1;
 }
 
+/// A recorded session on `host`: one command, its output and the next prompt.
+fn recorded(host: &str, command: &str, output: &[&str]) -> annulus_term::Emulator {
+    let prompt = format!("\x1b[1;32mdeploy@{host}\x1b[0m:\x1b[1;34m~\x1b[0m$ ");
+    let mut text = format!("{prompt}{command}\r\n");
+    for line in output {
+        text.push_str(line);
+        text.push_str("\r\n");
+    }
+    text.push_str(&prompt);
+    let mut emulator = annulus_term::Emulator::new(80, 24);
+    emulator.advance(text.as_bytes());
+    emulator
+}
+
+/// A tab of four recorded panes, two by two: prod-db with the keyboard and cache-eu-1 under
+/// it, web-1 and bastion on the right. Leaf order 1, 3, 2, 4.
+fn split_tab(app: &mut NativeApp) {
+    use super::panes::{Panes, Replay};
+    let pane = |title: &str, emulator: annulus_term::Emulator, status: Option<TabStatus>| Replay {
+        title: title.into(),
+        emulator,
+        status,
+    };
+    let mut panes = Panes::replay(pane("prod-db", super::demo::terminal(), None));
+    panes.split_replay(
+        true,
+        pane(
+            "web-1",
+            recorded(
+                "web-1",
+                "sudo nginx -t",
+                &["nginx: configuration syntax is ok"],
+            ),
+            Some(TabStatus::Unread),
+        ),
+    );
+    panes.focused = 1;
+    panes.split_replay(
+        false,
+        pane(
+            "cache-eu-1",
+            recorded("cache-eu-1", "redis-cli ping", &["PONG"]),
+            Some(TabStatus::Input),
+        ),
+    );
+    panes.focused = 2;
+    panes.split_replay(
+        false,
+        pane(
+            "bastion",
+            recorded(
+                "bastion",
+                "uptime",
+                &[" 09:12:44 up 2 days,  load average: 0.08"],
+            ),
+            Some(TabStatus::Error),
+        ),
+    );
+    panes.focused = 1;
+    app.push_terminal("prod-db", TermView::Live(Box::new(panes)));
+}
+
 const SCENES: &[Scene] = &[
     Scene {
         name: "hosts-empty",
@@ -489,6 +551,32 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: terminal_tab,
         acts: &[],
+    },
+    // Four panes typing together, cache-eu-1 left out; every pane shows its dot.
+    Scene {
+        name: "terminal-broadcast",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: split_tab,
+        acts: &[
+            Act::Click("Broadcast"),
+            Act::Click("Broadcast to cache-eu-1"),
+        ],
+    },
+    // Focus mode: the failed pane large, the list of all four beside it.
+    Scene {
+        name: "terminal-focus-mode",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: split_tab,
+        acts: &[
+            Act::Click("Focus mode"),
+            Act::Click("bastion, Disconnected or failed"),
+        ],
     },
     Scene {
         name: "hosts-hidpi",
@@ -1661,4 +1749,86 @@ fn settings_is_last_so_it_sits_at_the_bottom() {
         settings.y > logs.y && settings.y > 800.0 - 60.0,
         "{settings:?}"
     );
+}
+
+/// The panes of the terminal tab in front.
+fn front_panes(app: &NativeApp) -> &super::panes::Panes {
+    match app
+        .tabs
+        .get(app.active)
+        .and_then(|tab| tab.terminal.as_ref())
+    {
+        Some(TermView::Live(panes)) => panes,
+        _ => panic!("no live terminal tab in front"),
+    }
+}
+
+#[test]
+fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
+    let mut app = NativeApp::new(Some(fixture_vault("split-panes", false)));
+    split_tab(&mut app);
+    let uid = app.tabs[app.active].uid;
+    let terminal = |pane: u64| annulus_ui::kit::Id::new(("terminal", uid, pane));
+    let viewport = Rect::new(0.0, 0.0, 1100.0, 800.0);
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    assert_eq!(layout_faults(&output.zones, viewport), Vec::<String>::new());
+    // Focus mode: one large pane beside the list; a row brings its pane in front, keyboard
+    // and all.
+    output = step(&mut app, &mut state, &click_on(&output, "Focus mode"), 1.0);
+    assert!(front_panes(&app).in_focus_mode());
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "bastion, Disconnected or failed"),
+        2.0,
+    );
+    assert_eq!(front_panes(&app).focused, 4);
+    assert_eq!(state.focus(), Some(terminal(4)));
+    let shown = output
+        .zones
+        .iter()
+        .filter(|zone| zone.role == Role::Terminal)
+        .count();
+    assert_eq!(shown, 1, "only the large pane is drawn");
+    assert_eq!(layout_faults(&output.zones, viewport), Vec::<String>::new());
+    // Ctrl+Shift+M goes back to the split.
+    output = step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Char('m'), Modifiers::CTRL_SHIFT)],
+        3.0,
+    );
+    assert!(!front_panes(&app).in_focus_mode());
+    // Broadcast types into the other three, until one is left out with its own toggle.
+    output = step(&mut app, &mut state, &click_on(&output, "Broadcast"), 4.0);
+    assert!(front_panes(&app).broadcasting());
+    assert_eq!(front_panes(&app).receivers(), [1, 3, 2]);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Broadcast to web-1"),
+        5.0,
+    );
+    assert_eq!(front_panes(&app).receivers(), [1, 3]);
+    let toggle = output
+        .zones
+        .iter()
+        .find(|zone| zone.label == "Broadcast to web-1")
+        .unwrap();
+    assert_eq!(toggle.toggled, Some(false));
+    assert_eq!(
+        state.focus(),
+        Some(terminal(4)),
+        "the keyboard stays with the pane typed in"
+    );
+    assert_eq!(layout_faults(&output.zones, viewport), Vec::<String>::new());
+    // Ctrl+Shift+B stops it.
+    step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Char('b'), Modifiers::CTRL_SHIFT)],
+        6.0,
+    );
+    assert!(!front_panes(&app).broadcasting());
 }
