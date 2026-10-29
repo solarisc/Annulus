@@ -580,6 +580,8 @@ impl NativeApp {
                 self.forwards
                     .host_opened(id, vault, &self.ssh_files, self.waker.as_ref());
                 self.opens.push((title, program, Some(OpenTab::Host(id))));
+                // Connecting: the account's latest comes in now, not at the next minute.
+                self.sync.sync_soon();
             }
             hosts::HostsAction::ConnectAll(uid) => {
                 // The hosts directly in the group, not those of its subgroups.
@@ -615,6 +617,7 @@ impl NativeApp {
                     return;
                 };
                 let title = format!("{} files", host.label);
+                self.sync.sync_soon();
                 let tab = match connect::login(vault, host) {
                     Some((last, via)) => {
                         crate::sftp_view::SftpTab::new(title, last, self.ssh_files.clone(), via)

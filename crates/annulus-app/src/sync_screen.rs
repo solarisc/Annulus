@@ -27,6 +27,18 @@ const PERIOD: f64 = 60.0;
 /// Seconds after a local edit before it is pushed.
 const AFTER_EDIT: f64 = 3.0;
 
+/// Seconds after a failed round before the next try (the server may be back).
+const RETRY: f64 = 15.0;
+
+/// When the next round is due, in the clock of `Pace::now`: a minute after the last, sooner
+/// after a failed one, and a few seconds after a local edit.
+fn next_round(last: f64, dirty_since: Option<f64>, failed: bool) -> f64 {
+    let period = if failed { RETRY } else { PERIOD };
+    dirty_since.map_or(last + period, |since| {
+        (since + AFTER_EDIT).min(last + period)
+    })
+}
+
 /// What a worker thread sends back.
 pub(crate) enum Done {
     /// An account was created; the vault signs in to it.
@@ -129,17 +141,24 @@ impl Watcher {
                 return;
             };
             let mut since = since;
+            let mut offline = false;
             while !thread_stop.load(Ordering::Relaxed) {
                 match http.wait(since) {
-                    Ok(latest) if latest > since => {
-                        since = latest;
+                    // Another device pushed, or the server is back after an outage: what
+                    // it holds now comes in at once.
+                    Ok(latest) if latest > since || offline => {
+                        since = since.max(latest);
+                        offline = false;
                         thread_news.store(true, Ordering::Relaxed);
                         wake();
                     }
                     Ok(_) => {}
                     Err(SyncError::Unauthorized) => return,
                     // Offline or the server is down: try again in a while.
-                    Err(_) => std::thread::sleep(Duration::from_secs(15)),
+                    Err(_) => {
+                        offline = true;
+                        std::thread::sleep(Duration::from_secs(15));
+                    }
                 }
             }
         });
@@ -251,10 +270,7 @@ impl SyncScreen {
         } else if self.dirty_since.is_none() {
             self.dirty_since = Some(now);
         }
-        let due = now - self.last_round >= PERIOD
-            || self
-                .dirty_since
-                .is_some_and(|since| now - since >= AFTER_EDIT);
+        let due = now >= next_round(self.last_round, self.dirty_since, self.round_failed);
         if due && self.work.is_none() {
             self.last_round = now;
             self.dirty_since = None;
@@ -262,11 +278,15 @@ impl SyncScreen {
             self.start(ctx, "Syncing", move || run_round(&signed_in, copy));
         }
         // Wake up for the next round only (idle wakeups, P-06).
-        let next = self.dirty_since.map_or(self.last_round + PERIOD, |since| {
-            (since + AFTER_EDIT).min(self.last_round + PERIOD)
-        });
+        let next = next_round(self.last_round, self.dirty_since, self.round_failed);
         ctx.later(Duration::from_secs_f64((next - now).clamp(0.1, PERIOD)));
         replaced
+    }
+
+    /// Asks for a round as soon as possible: a host is being connected to, so its details
+    /// should be the latest the account has.
+    pub(crate) fn sync_soon(&mut self) {
+        self.last_round = f64::NEG_INFINITY;
     }
 
     /// Applies finished work; true when the vault was replaced.
@@ -681,6 +701,22 @@ fn run_round(account: &SyncAccount, copy: SyncCopy) -> Done {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounds_come_a_minute_apart_sooner_after_an_edit_or_a_failure() {
+        assert_eq!(next_round(100.0, None, false), 160.0);
+        assert_eq!(next_round(100.0, Some(120.0), false), 123.0);
+        assert_eq!(
+            next_round(100.0, None, true),
+            115.0,
+            "a failed round retries soon"
+        );
+        assert_eq!(next_round(100.0, Some(150.0), true), 115.0);
+        assert!(
+            next_round(f64::NEG_INFINITY, None, false) < 0.0,
+            "sync soon"
+        );
+    }
 
     #[test]
     fn the_pill_says_synced_waiting_or_failed() {

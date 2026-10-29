@@ -3016,3 +3016,21 @@ fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
     );
     assert!(!front_panes(&app).broadcasting());
 }
+
+#[test]
+fn connecting_or_unlocking_brings_the_accounts_latest_at_once() {
+    let mut app = NativeApp::new(Some(fixture_vault("sync-on-connect", true)));
+    app.sync.last_round = 5.0;
+    let host = app.vault.as_ref().unwrap().hosts()[0].id;
+    app.act(super::hosts::HostsAction::Connect(host));
+    assert!(
+        app.sync.last_round.is_infinite(),
+        "a round on the next frame"
+    );
+    app.sync.last_round = 5.0;
+    app.lock_vault();
+    assert!(
+        app.sync.last_round.is_infinite(),
+        "and the first frame after an unlock"
+    );
+}
