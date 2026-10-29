@@ -560,31 +560,7 @@ impl HostsScreen {
                 ui.label("Group");
                 groups_view::picker(ui, "host-group", &mut draft.host.group, &group_choices);
                 ui.end_row();
-                ui.label("Port");
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.port)
-                        .hint_text(inherited.port.as_str())
-                        .desired_width(160.0),
-                );
-                ui.end_row();
-                ui.label("Username");
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.host.username)
-                        .hint_text(inherited.username.as_str()),
-                );
-                ui.end_row();
-                ui.label("Tags");
-                ui.add(egui::TextEdit::singleline(&mut draft.tags).hint_text("postgres, prod"));
-                ui.end_row();
-                ui.label("Key");
-                key_picker(ui, &mut draft.host.key_id, &keys, &inherited.key);
-                ui.end_row();
-                ui.label("Jump host");
-                jump_picker(ui, &mut draft.host.jump_id, &others, &inherited.jump);
-                ui.end_row();
-                ui.label("Proxy");
-                secret_line(ui, &mut draft.proxy, &inherited.proxy);
-                ui.end_row();
+                inheritable_rows(ui, draft, &inherited, &keys, &others);
                 groups_view::session_rows(
                     ui,
                     &mut draft.env,
@@ -684,6 +660,80 @@ impl HostsScreen {
     }
 }
 
+/// A "↺" after a field the host sets itself while its group would set it too: a click
+/// clears the host's own value, so the group's applies again (UI-SPEC §2).
+fn reset_button(ui: &mut Ui, own: bool, group: Option<&String>) -> bool {
+    let Some(group) = group.filter(|_| own) else {
+        return false;
+    };
+    ui.small_button("\u{21ba}")
+        .on_hover_text(format!("Use the value from {group}"))
+        .clicked()
+}
+
+/// The editor rows a group can fill in: port, user, tags, key, jump host and proxy, each
+/// with its inherited value as the hint and a "↺" to go back to it.
+fn inheritable_rows(
+    ui: &mut Ui,
+    draft: &mut Draft,
+    inherited: &Hints,
+    keys: &[(u64, String)],
+    others: &[(u64, String)],
+) {
+    let from = &inherited.groups;
+    ui.label("Port");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.port)
+                .hint_text(inherited.port.as_str())
+                .desired_width(160.0),
+        );
+        if reset_button(ui, !draft.port.trim().is_empty(), from.port.as_ref()) {
+            draft.port.clear();
+        }
+    });
+    ui.end_row();
+    ui.label("Username");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.host.username)
+                .hint_text(inherited.username.as_str()),
+        );
+        let own = !draft.host.username.trim().is_empty();
+        if reset_button(ui, own, from.username.as_ref()) {
+            draft.host.username.clear();
+        }
+    });
+    ui.end_row();
+    ui.label("Tags");
+    ui.add(egui::TextEdit::singleline(&mut draft.tags).hint_text("postgres, prod"));
+    ui.end_row();
+    ui.label("Key");
+    ui.horizontal(|ui| {
+        key_picker(ui, &mut draft.host.key_id, keys, &inherited.key);
+        if reset_button(ui, draft.host.key_id.is_some(), from.key_id.as_ref()) {
+            draft.host.key_id = None;
+        }
+    });
+    ui.end_row();
+    ui.label("Jump host");
+    ui.horizontal(|ui| {
+        jump_picker(ui, &mut draft.host.jump_id, others, &inherited.jump);
+        if reset_button(ui, draft.host.jump_id.is_some(), from.jump_id.as_ref()) {
+            draft.host.jump_id = None;
+        }
+    });
+    ui.end_row();
+    ui.label("Proxy");
+    ui.horizontal(|ui| {
+        secret_line(ui, &mut draft.proxy, &inherited.proxy);
+        if reset_button(ui, !draft.proxy.is_empty(), from.proxy.as_ref()) {
+            draft.proxy = SecretText::new();
+        }
+    });
+    ui.end_row();
+}
+
 /// The editor rows for the saved password: a new one, or forgetting the saved one.
 fn password_rows(ui: &mut Ui, draft: &mut Draft) {
     ui.label("Password");
@@ -750,6 +800,8 @@ struct Hints {
     proxy: String,
     env: String,
     startup: String,
+    /// The groups each value would come from, if the host did not set it.
+    groups: annulus_vault::groups::Sources,
 }
 
 fn inherited_hints(
@@ -763,6 +815,7 @@ fn inherited_hints(
     bare.startup.clear();
     bare.username.clear();
     let (resolved, sources) = vault.resolve(&bare);
+    let groups = sources.clone();
     let from = |value: String, source: Option<String>, otherwise: &str| match source {
         Some(group) => format!("{value} (from {group})"),
         None => otherwise.to_owned(),
@@ -803,6 +856,7 @@ fn inherited_hints(
             "LANG=en_US.UTF-8".to_owned()
         },
         startup: from(resolved.startup, sources.startup, "e.g. tmux attach"),
+        groups,
     }
 }
 
@@ -1025,6 +1079,12 @@ mod tests {
         assert_eq!(hints.port, "2200 (from prod)");
         assert_eq!(hints.username, "deploy (from prod)");
         assert_eq!(hints.key, "Default keys");
+        assert_eq!(
+            hints.groups.port.as_deref(),
+            Some("prod"),
+            "the \u{21ba} names it"
+        );
+        assert_eq!(hints.groups.key_id, None);
     }
 
     #[test]
