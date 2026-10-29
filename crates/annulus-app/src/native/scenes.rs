@@ -965,6 +965,36 @@ fn deleting_on_the_host_asks_first() {
 }
 
 #[test]
+fn a_snippet_runs_on_the_hosts_ticked_a_tab_each() {
+    let mut app = NativeApp::new(Some(fixture_vault("snippet-hosts", true)));
+    app.section = super::Section::Snippets;
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Run on hosts"),
+        1.0,
+    );
+    output = step(&mut app, &mut state, &click_on(&output, "api-1"), 2.0);
+    output = step(&mut app, &mut state, &click_on(&output, "bastion"), 3.0);
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Run on 2 hosts")
+    );
+    // One frame: the tabs are added at its end, and start connecting when first drawn.
+    drive(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Run on 2 hosts"),
+        4.0,
+    );
+    assert_eq!(titles(&app), ["Vault", "api-1", "bastion"]);
+}
+
+#[test]
 fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
     let mut app = NativeApp::new(Some(fixture_vault("import-key", true)));
     app.section = super::Section::Keychain;
