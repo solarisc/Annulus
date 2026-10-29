@@ -476,12 +476,15 @@ impl SyncScreen {
         self.password = Zeroizing::new(password.to_owned());
     }
 
-    pub(crate) fn create(&mut self, ctx: &dyn Pace, hosts: &Vault) {
+    /// Creates the account; `invite` is the code a server with closed sign-ups needs
+    /// (empty for none).
+    pub(crate) fn create(&mut self, ctx: &dyn Pace, hosts: &Vault, invite: &str) {
         let password = self.take_password();
-        let (server, name, device) = (
+        let (server, name, device, invite) = (
             self.server.trim().to_owned(),
             self.account.trim().to_owned(),
             self.device.trim().to_owned(),
+            invite.trim().to_owned(),
         );
         let key_file = hosts.key_file_bytes();
         self.message = None;
@@ -491,13 +494,14 @@ impl SyncScreen {
                 return Done::Failed("That is not this vault's master password.".into());
             }
             let result = HttpServer::new(&server, None).and_then(|mut http| {
-                account::register(
+                account::register_with_invite(
                     &mut http,
                     &account::default_ksf(),
                     &name,
                     &password,
                     key_file,
                     &device,
+                    Some(&invite),
                 )
             });
             match result {

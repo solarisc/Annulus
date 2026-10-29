@@ -1,10 +1,11 @@
 # Annulus sync server behind Caddy, which gets and renews a TLS certificate for you.
 # 1. Point a DNS name (sync.example.com below) at this machine; open ports 80 and 443.
 # 2. Replace sync.example.com in Caddyfile.
-# 3. First run with sign-ups open to create your account from the app:
-#      ANNULUS_SIGNUPS=open docker compose up -d
-#    then close them again:
+# 3. Start it and make a single-use invite code for your account (valid 24 hours):
 #      docker compose up -d
+#      docker compose exec annulus annulus-server invite --data /data/annulus-server.db
+#    then enter the code under Invite code when you create the account in the app.
+#    Sign-ups stay closed; ANNULUS_SIGNUPS=open lets anyone who can reach it register.
 services:
   annulus:
     build:
@@ -21,6 +22,14 @@ services:
       - ${ANNULUS_SIGNUPS:-closed}
     volumes:
       - annulus-data:/data
+    # Nothing but the database volume is writable, and the server holds no privileges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
   caddy:
     image: caddy:2

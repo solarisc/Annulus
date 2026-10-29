@@ -10,9 +10,10 @@ use serde::de::DeserializeOwned;
 use ureq::Agent;
 use ureq::tls::{TlsConfig, TlsProvider};
 use annulus_proto::{
-    Change, Changes, Devices, Failure, History, LoginFinish, LoginStart, LoginStartResponse,
-    PROTOCOL_VERSION, Push, PushResult, Record, RegisterFinish, RegisterStart,
-    RegisterStartResponse, Revoke, Session, VERSION_HEADER, decode, encode, path,
+    Change, Changes, Devices, Failure, History, INVITE_HEADER, LoginFinish, LoginStart,
+    LoginStartResponse, PROTOCOL_VERSION, PasswordBegin, PasswordBeginResponse, PasswordChange,
+    Push, PushResult, Record, RegisterFinish, RegisterStart, RegisterStartResponse, Revoke,
+    Session, VERSION_HEADER, decode, encode, path,
 };
 
 use crate::account::Auth;
@@ -30,10 +31,10 @@ impl HttpServer {
     ///
     /// # Errors
     /// `base` is not an `https://` URL (plain `http://` is allowed for loopback only,
-    /// matching the server's own rule).
+    /// matching the server's own rule), or it names a user (`user@host`).
     pub fn new(base: &str, token: Option<String>) -> Result<Self, SyncError> {
         let base = base.trim().trim_end_matches('/').to_owned();
-        if !(base.starts_with("https://") || is_loopback_http(&base)) {
+        if !allowed(&base) {
             return Err(SyncError::Transport(
                 "the server address must start with https://".into(),
             ));
@@ -63,6 +64,16 @@ impl HttpServer {
         route: &str,
         body: Option<Vec<u8>>,
     ) -> Result<T, SyncError> {
+        self.request_invited(route, body, None)
+    }
+
+    /// A request that may carry an invite code (registration only).
+    fn request_invited<T: DeserializeOwned>(
+        &self,
+        route: &str,
+        body: Option<Vec<u8>>,
+        invite: Option<&str>,
+    ) -> Result<T, SyncError> {
         let url = format!("{}{route}", self.base);
         let version = PROTOCOL_VERSION.to_string();
         let authorization = self.token.as_ref().map(|token| format!("Bearer {token}"));
@@ -70,6 +81,9 @@ impl HttpServer {
             let mut request = self.agent.post(&url).header(VERSION_HEADER, &version);
             if let Some(value) = &authorization {
                 request = request.header("Authorization", value);
+            }
+            if let Some(code) = invite.map(str::trim).filter(|code| !code.is_empty()) {
+                request = request.header(INVITE_HEADER, code);
             }
             request.send(&body[..])
         } else {
@@ -116,20 +130,20 @@ impl HttpServer {
     /// Password change step 1 (see [`crate::account::change_password`]).
     ///
     /// # Errors
-    /// Unreachable or signed out.
-    pub fn password_start(
+    /// Unreachable, signed out, or throttled.
+    pub fn password_begin(
         &self,
-        request: &RegisterStart,
-    ) -> Result<RegisterStartResponse, SyncError> {
-        self.post(path::PASSWORD_START, request)
+        request: &PasswordBegin,
+    ) -> Result<PasswordBeginResponse, SyncError> {
+        self.post(path::PASSWORD_BEGIN, request)
     }
 
     /// Password change step 2.
     ///
     /// # Errors
-    /// Unreachable or signed out.
-    pub fn password_finish(&self, request: &RegisterFinish) -> Result<(), SyncError> {
-        self.post(path::PASSWORD_FINISH, request)
+    /// Unreachable, signed out, or the current password was not proven.
+    pub fn password_change(&self, request: &PasswordChange) -> Result<(), SyncError> {
+        self.post(path::PASSWORD_CHANGE, request)
     }
 
     /// Waits (up to about 25 s) until the account has changes newer than `since`; returns
@@ -161,21 +175,35 @@ impl HttpServer {
     }
 }
 
-/// `http://localhost…` or `http://127.x…`/`http://[::1]…`, for a server on this computer.
-fn is_loopback_http(base: &str) -> bool {
-    let Some(rest) = base.strip_prefix("http://") else {
+/// Whether the client may connect to `base`: any `https://` server, and plain `http://`
+/// only to this computer (`localhost`, `127.x`, `[::1]`). The host is the parsed one, so
+/// `http://localhost:80@evil.com` (user `localhost`, host `evil.com`) is not loopback; a
+/// URL that names a user is refused outright.
+fn allowed(base: &str) -> bool {
+    let Ok(uri) = base.parse::<ureq::http::Uri>() else {
         return false;
     };
-    let host = rest.split('/').next().unwrap_or_default();
-    let host = if let Some(bracketed) = host.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or_default()
-    } else {
-        host.rsplit_once(':').map_or(host, |(name, _)| name)
+    let Some(authority) = uri.authority() else {
+        return false;
     };
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    match uri.scheme_str() {
+        Some("https") => true,
+        Some("http") => {
+            let host = authority.host();
+            let host = host
+                .strip_prefix('[')
+                .and_then(|inner| inner.strip_suffix(']'))
+                .unwrap_or(host);
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+        _ => false,
+    }
 }
 
 impl Transport for HttpServer {
@@ -197,12 +225,17 @@ impl Auth for HttpServer {
     fn register_start(
         &mut self,
         request: &RegisterStart,
+        invite: Option<&str>,
     ) -> Result<RegisterStartResponse, SyncError> {
-        self.post(path::REGISTER_START, request)
+        self.request_invited(path::REGISTER_START, Some(encode(request)), invite)
     }
 
-    fn register_finish(&mut self, request: &RegisterFinish) -> Result<Session, SyncError> {
-        self.post(path::REGISTER_FINISH, request)
+    fn register_finish(
+        &mut self,
+        request: &RegisterFinish,
+        invite: Option<&str>,
+    ) -> Result<Session, SyncError> {
+        self.request_invited(path::REGISTER_FINISH, Some(encode(request)), invite)
     }
 
     fn login_start(&mut self, request: &LoginStart) -> Result<LoginStartResponse, SyncError> {
@@ -227,5 +260,12 @@ mod tests {
         assert!(HttpServer::new("http://sync.example.com", None).is_err());
         assert!(HttpServer::new("http://127.0.0.1.evil.com", None).is_err());
         assert!(HttpServer::new("ftp://x", None).is_err());
+        // The host is what follows a user name: these are evil.com, over plain HTTP.
+        assert!(HttpServer::new("http://localhost:80@evil.com", None).is_err());
+        assert!(HttpServer::new("http://127.0.0.1@evil.com:8443", None).is_err());
+        assert!(HttpServer::new("http://[::1]@evil.com", None).is_err());
+        assert!(HttpServer::new("https://user@sync.example.com", None).is_err());
+        assert!(HttpServer::new("http://localhost.evil.com", None).is_err());
+        assert!(HttpServer::new("http://", None).is_err());
     }
 }

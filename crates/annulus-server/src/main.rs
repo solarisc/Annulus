@@ -7,6 +7,7 @@
 //! annulus-server accounts [--data …]               list accounts and storage use
 //! annulus-server delete-account <name> [--data …]  delete an account and its data
 //! annulus-server backup <file> [--data …]          consistent copy while running
+//! annulus-server invite [--expires 24h] [--data …] single-use invite code for one account
 //! ```
 //!
 //! Plain HTTP is allowed on loopback only; elsewhere the server needs a certificate, or
@@ -18,6 +19,7 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use annulus_server::{Server, Signups, service};
 
@@ -36,9 +38,35 @@ enum Command {
     Accounts { data: PathBuf },
     DeleteAccount { data: PathBuf, name: String },
     Backup { data: PathBuf, file: PathBuf },
+    Invite { data: PathBuf, expires: Duration },
 }
 
 const DEFAULT_DATA: &str = "annulus-server.db";
+
+/// How long an invite is valid unless `--expires` says otherwise.
+const DEFAULT_INVITE: Duration = Duration::from_hours(24);
+
+/// The longest an invite may be valid.
+const MAX_INVITE: Duration = Duration::from_hours(30 * 24);
+
+/// `90m`, `24h` or `7d`: at least a minute, at most 30 days.
+fn invite_duration(text: &str) -> Result<Duration, String> {
+    let wrong = || "--expires takes a time like 90m, 24h or 7d (at most 30d)".to_owned();
+    let unit = text.chars().last().ok_or_else(wrong)?;
+    let number: u64 = text[..text.len() - unit.len_utf8()]
+        .parse()
+        .map_err(|_| wrong())?;
+    let minutes = match unit {
+        'm' => number,
+        'h' => number.checked_mul(60).ok_or_else(wrong)?,
+        'd' => number.checked_mul(24 * 60).ok_or_else(wrong)?,
+        _ => return Err(wrong()),
+    };
+    if minutes == 0 || minutes > MAX_INVITE.as_secs() / 60 {
+        return Err(wrong());
+    }
+    Ok(Duration::from_mins(minutes))
+}
 
 fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = args.peekable();
@@ -55,9 +83,11 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
         behind_proxy: false,
     };
     let (mut cert, mut key) = (None, None);
+    let mut expires = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
+            "--expires" => expires = Some(invite_duration(&value()?)?),
             "--listen" => {
                 serve.listen = value()?
                     .parse()
@@ -107,6 +137,10 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             file: PathBuf::from(one("a backup file name")?),
             data: serve.data,
         }),
+        Some("invite") => Ok(Command::Invite {
+            data: serve.data,
+            expires: expires.unwrap_or(DEFAULT_INVITE),
+        }),
         Some(other) => Err(format!("unknown command {other}")),
     }
 }
@@ -124,7 +158,7 @@ fn serve(options: Serve) -> Result<(), String> {
     let server = Arc::new(Server::open(&options.data, options.signups).map_err(|e| e.to_string())?);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async move {
-        let app = service(server);
+        let app = service(server, options.behind_proxy);
         let _ = writeln!(
             std::io::stderr(),
             "annulus-server listening on {} ({})",
@@ -181,6 +215,19 @@ fn run(command: Command) -> Result<(), String> {
         Command::Backup { data, file } => {
             open(&data)?.backup(&file).map_err(|e| e.to_string())?;
             say(&format!("backup written to {}", file.display()));
+            Ok(())
+        }
+        Command::Invite { data, expires } => {
+            let code = open(&data)?
+                .create_invite(expires)
+                .map_err(|e| e.to_string())?;
+            say(&code);
+            let _ = writeln!(
+                std::io::stderr(),
+                "single use, valid for {} hours: enter it under Invite code when creating \
+                 the account in the app",
+                expires.as_secs().div_ceil(3600)
+            );
             Ok(())
         }
     }
@@ -245,5 +292,39 @@ mod tests {
             Ok(Command::Accounts { .. })
         ));
         assert!(parsed(&["frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn an_invite_lasts_a_day_unless_told_otherwise_and_never_beyond_thirty() {
+        let expires = |list: &[&str]| match parsed(list) {
+            Ok(Command::Invite { expires, .. }) => Ok(expires),
+            Ok(_) => Err("not an invite".to_owned()),
+            Err(error) => Err(error),
+        };
+        assert_eq!(expires(&["invite"]), Ok(Duration::from_hours(24)));
+        assert_eq!(
+            expires(&["invite", "--expires", "90m"]),
+            Ok(Duration::from_mins(90))
+        );
+        assert_eq!(
+            expires(&["invite", "--expires", "7d", "--data", "x.db"]),
+            Ok(Duration::from_hours(7 * 24))
+        );
+        assert_eq!(
+            expires(&["invite", "--expires", "30d"]),
+            Ok(Duration::from_hours(30 * 24))
+        );
+        for wrong in [
+            "31d",
+            "0h",
+            "h",
+            "",
+            "12",
+            "5é",
+            "-1h",
+            "300000000000000000d",
+        ] {
+            assert!(expires(&["invite", "--expires", wrong]).is_err(), "{wrong}");
+        }
     }
 }

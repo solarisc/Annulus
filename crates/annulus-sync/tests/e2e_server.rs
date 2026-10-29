@@ -55,6 +55,7 @@ fn add_grouped_host(vault: &mut Vault) {
 
 #[test]
 #[ignore = "needs a deployed annulus-server"]
+#[allow(clippy::too_many_lines)] // One story, two devices, start to finish.
 fn two_devices_sync_restore_and_change_password_through_a_real_server() {
     let url = std::env::var("ANNULUS_E2E_SYNC_URL").expect("ANNULUS_E2E_SYNC_URL");
     let name = format!("e2e-{}", std::process::id());
@@ -141,7 +142,14 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
         .rewrap("first password!", "second password!")
         .unwrap();
     let mut authed = HttpServer::new(&url, Some(laptop_account.token.expose().to_owned())).unwrap();
-    account::change_password(&mut authed, &ksf, "second password!", file.clone()).unwrap();
+    account::change_password(
+        &mut authed,
+        &ksf,
+        "first password!",
+        "second password!",
+        file.clone(),
+    )
+    .unwrap();
     laptop.set_key_file(&file).unwrap();
     let mut b_http =
         HttpServer::new(&url, Some(desktop_account.token.expose().to_owned())).unwrap();

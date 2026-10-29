@@ -15,6 +15,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// The request header that carries [`PROTOCOL_VERSION`].
 pub const VERSION_HEADER: &str = "Annulus-Protocol";
 
+/// The request header of the two registration steps that carries an invite code, which a
+/// server with closed sign-ups needs. A header rather than a field, so registration bodies
+/// stay as they were and older clients still register where sign-ups are open.
+pub const INVITE_HEADER: &str = "Annulus-Invite";
+
 /// The OPAQUE cipher suite (RFC 9807): ristretto255, 3DH with SHA-512, and Argon2id as the
 /// key-stretching function, which only the client runs.
 pub struct Suite;
@@ -44,11 +49,13 @@ pub mod path {
     pub const WAIT: &str = "/v1/records/wait";
     /// Earlier versions of one record, `GET ?id=<record id>` ([`super::History`]).
     pub const HISTORY: &str = "/v1/records/history";
-    /// Starts a password change for the signed-in account ([`super::RegisterStart`]; its
-    /// account name is ignored).
-    pub const PASSWORD_START: &str = "/v1/account/password/start";
-    /// Finishes a password change ([`super::RegisterFinish`]); other devices are signed out.
-    pub const PASSWORD_FINISH: &str = "/v1/account/password/finish";
+    /// Starts a password change for the signed-in account ([`super::PasswordBegin`]): a
+    /// login with the current password and the registration of the new one. It replaces
+    /// `/v1/account/password/start` and `…/finish`, which needed only the device token and
+    /// are gone.
+    pub const PASSWORD_BEGIN: &str = "/v1/account/password/begin";
+    /// Finishes a password change ([`super::PasswordChange`]); other devices are signed out.
+    pub const PASSWORD_CHANGE: &str = "/v1/account/password/change";
     /// The account's devices ([`super::Devices`]).
     pub const DEVICES: &str = "/v1/devices";
     /// Revokes a device ([`super::Revoke`]).
@@ -145,6 +152,41 @@ pub struct LoginFinish {
     pub device: String,
 }
 
+/// First password change step: the current password proves itself with a fresh OPAQUE
+/// login, so a stolen device token cannot take the account over.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordBegin {
+    /// `CredentialRequest` for the current password, serialized by opaque-ke.
+    pub login: Vec<u8>,
+    /// `RegistrationRequest` for the new password, serialized by opaque-ke.
+    pub registration: Vec<u8>,
+}
+
+/// The server's answers to [`PasswordBegin`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordBeginResponse {
+    /// Names this login attempt in [`PasswordChange`].
+    pub login: u64,
+    /// `CredentialResponse`, serialized by opaque-ke.
+    pub credential: Vec<u8>,
+    /// `RegistrationResponse`, serialized by opaque-ke.
+    pub registration: Vec<u8>,
+}
+
+/// Last password change step.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordChange {
+    /// From [`PasswordBeginResponse`].
+    pub login: u64,
+    /// `CredentialFinalization` of the current password's login, serialized by opaque-ke.
+    pub finalization: Vec<u8>,
+    /// `RegistrationUpload` for the new password, serialized by opaque-ke.
+    pub upload: Vec<u8>,
+    /// The vault key file re-wrapped for the new password; the server checks only that it
+    /// has the key file's shape.
+    pub wrapped_keys: Vec<u8>,
+}
+
 /// A signed-in device: its token and the account's wrapped key.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
@@ -173,7 +215,8 @@ pub struct Record {
     pub id: String,
     /// The server sequence number of this version.
     pub seq: u64,
-    /// Encrypted by the client; empty for a deletion.
+    /// Encrypted by the client. For a deletion, the sealed tombstone (empty from clients
+    /// that predate sealed tombstones).
     pub ciphertext: Vec<u8>,
     /// A tombstone: the record was deleted on some device.
     pub deleted: bool,
@@ -186,7 +229,8 @@ pub struct Change {
     pub id: String,
     /// The sequence number of the version this change was made from; 0 for a new record.
     pub base: u64,
-    /// The new ciphertext; empty for a deletion.
+    /// The new ciphertext; for a deletion, the sealed tombstone (or empty, from older
+    /// clients). The server stores and returns it either way.
     pub ciphertext: Vec<u8>,
     /// This change deletes the record.
     pub deleted: bool,
