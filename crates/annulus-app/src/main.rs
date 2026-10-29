@@ -11,6 +11,7 @@ mod lock_screen;
 mod sftp_view;
 mod shell;
 mod ssh_dialogs;
+mod sync_screen;
 mod terminal_view;
 
 use std::process::ExitCode;

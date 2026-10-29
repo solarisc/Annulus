@@ -5625,9 +5625,11 @@ dependencies = [
  "eframe",
  "tokio",
  "annulus-config",
+ "annulus-proto",
  "annulus-session",
  "annulus-sftp",
  "annulus-ssh",
+ "annulus-sync",
  "annulus-term",
  "annulus-ui",
  "annulus-vault",
@@ -5720,6 +5722,7 @@ dependencies = [
  "ureq",
  "annulus-proto",
  "annulus-server",
+ "annulus-vault",
 ]
 
 [[package]]

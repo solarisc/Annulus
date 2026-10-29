@@ -19,6 +19,8 @@ annulus-config = { path = "../annulus-config" }
 annulus-session = { path = "../annulus-session" }
 annulus-sftp = { path = "../annulus-sftp" }
 annulus-ssh = { path = "../annulus-ssh" }
+annulus-proto = { path = "../annulus-proto" }
+annulus-sync = { path = "../annulus-sync" }
 annulus-term = { path = "../annulus-term" }
 annulus-ui = { path = "../annulus-ui" }
 annulus-vault = { path = "../annulus-vault" }

@@ -416,11 +416,60 @@ impl Vault {
         Ok(())
     }
 
+    /// Adds `hosts` and `forwards` from another vault as new entities (fresh local ids,
+    /// rules relinked to their hosts' new ids), so joining an account keeps what was on this
+    /// device (ADR-0008 data-loss rule 4). They are pushed at the next sync.
+    ///
+    /// # Errors
+    /// Writing the file; nothing is added then.
+    pub fn adopt(&mut self, hosts: &[Host], forwards: &[PortForward]) -> Result<(), VaultError> {
+        let mut next_hosts = self.hosts.clone();
+        let mut next_forwards = self.forwards.clone();
+        let mut sync = self.sync.clone();
+        let mut host_id = next_hosts.iter().map(|host| host.id).max().unwrap_or(0);
+        let mut new_ids = std::collections::HashMap::new();
+        for host in hosts {
+            host_id += 1;
+            new_ids.insert(host.id, host_id);
+            sync.touch(kind::HOST, host_id, false)?;
+            next_hosts.push(Host {
+                id: host_id,
+                ..host.clone()
+            });
+        }
+        let mut rule_id = next_forwards.iter().map(|rule| rule.id).max().unwrap_or(0);
+        for rule in forwards {
+            rule_id += 1;
+            sync.touch(kind::FORWARD, rule_id, false)?;
+            next_forwards.push(PortForward {
+                id: rule_id,
+                host_id: new_ids.get(&rule.host_id).copied().unwrap_or(0),
+                ..rule.clone()
+            });
+        }
+        next_hosts.sort_by_key(|host| host.label.to_lowercase());
+        next_forwards.sort_by_key(|rule| rule.label.to_lowercase());
+        self.save(&next_hosts, &next_forwards, &sync)?;
+        self.hosts = next_hosts;
+        self.forwards = next_forwards;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
+    }
+
     /// The key file as uploaded at account registration: the account key wrapped by the
     /// password and by the recovery key, never the key itself.
     #[must_use]
     pub fn key_file_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(&self.key_file).unwrap_or_default()
+    }
+
+    /// Whether `password` opens `key_file` (as from [`Self::key_file_bytes`]). Runs
+    /// Argon2id, so call it off the UI thread.
+    #[must_use]
+    pub fn password_opens(key_file: &[u8], password: &str) -> bool {
+        serde_json::from_slice::<KeyFile>(key_file)
+            .is_ok_and(|file| Keys::unlock(&file, password).is_ok())
     }
 
     /// Creates a vault at `path` from an account's key file (downloaded at sign-in) and
@@ -555,6 +604,28 @@ mod tests {
         let reopened = Vault::unlock(&path, "pw").unwrap();
         assert_eq!(reopened.forwards(), []);
         assert_eq!(reopened.hosts().len(), 2);
+    }
+
+    #[test]
+    fn adopted_entities_get_new_ids_and_rules_follow_their_hosts() {
+        let path = temp("adopt");
+        let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();
+        vault.upsert_host(host(&vault, "already-here")).unwrap();
+        let mut old = host(&vault, "from-old-vault");
+        old.id = 1;
+        let mut rule = PortForward::new(9, 1);
+        rule.label = "db".into();
+        vault.adopt(&[old], &[rule]).unwrap();
+
+        let reopened = Vault::unlock(&path, "pw").unwrap();
+        let adopted = reopened
+            .hosts()
+            .iter()
+            .find(|host| host.label == "from-old-vault")
+            .unwrap();
+        assert_eq!(adopted.id, 2, "a fresh id, not the colliding 1");
+        assert_eq!(reopened.forwards()[0].host_id, adopted.id);
+        assert_eq!(reopened.sync_state().pending_count(), 3);
     }
 
     #[test]

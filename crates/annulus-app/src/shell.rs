@@ -11,6 +11,7 @@ use crate::forwards_screen::ForwardsScreen;
 use crate::hosts_screen::{HostsScreen, Request};
 use crate::lock_screen::LockScreen;
 use crate::sftp_view::SftpTab;
+use crate::sync_screen::SyncScreen;
 use crate::terminal_view::{DEFAULT_FONT_SIZE, FONT_SIZES, TerminalTab};
 
 /// A section of the vault's left navigation (F-APP-003).
@@ -107,6 +108,8 @@ pub struct Shell {
     pub hosts: Option<HostsScreen>,
     /// Port-forwarding rules and the running ones, while the vault is unlocked.
     forwards: ForwardsScreen,
+    /// Account sync, while the vault is unlocked.
+    sync: SyncScreen,
     /// Setup or unlock, while the vault is locked.
     lock: LockScreen,
     data_dir: std::path::PathBuf,
@@ -133,6 +136,7 @@ impl Shell {
             theme_mode: ThemeMode::System,
             hosts: None,
             forwards: ForwardsScreen::default(),
+            sync: SyncScreen::default(),
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
             data_dir: data_dir.to_path_buf(),
             font_size: DEFAULT_FONT_SIZE,
@@ -205,8 +209,9 @@ impl Shell {
         self.auto_lock(ui.ctx());
         egui::Panel::top("tabs").show(ui, |ui| self.tab_strip(ui));
         let palette = self.palette();
-        if let Some(hosts) = &self.hosts {
+        if let Some(hosts) = &mut self.hosts {
             self.forwards.auto_start(ui.ctx(), hosts);
+            self.sync.tick(ui.ctx(), hosts);
         }
         self.forwards.prompts(ui.ctx());
         if matches!(self.tabs.get(self.active_tab), Some(Tab::Vault)) {
@@ -237,6 +242,7 @@ impl Shell {
         };
         self.hosts = Some(HostsScreen::new(vault, files));
         self.forwards = ForwardsScreen::default();
+        self.sync = SyncScreen::default();
     }
 
     /// Locks the vault: its keys and decrypted hosts are dropped (F-SEC-004).
@@ -244,6 +250,7 @@ impl Shell {
         self.hosts = None;
         // Running rules stop with the lock: their connections used the vault's secrets.
         self.forwards = ForwardsScreen::default();
+        self.sync = SyncScreen::default();
         self.lock = LockScreen::new(&self.data_dir.join(VAULT_FILE));
     }
 
@@ -463,6 +470,12 @@ impl Shell {
         ui.add_space(space::M);
         ui.label("Lock the vault after idle minutes (0 = never)");
         ui.add(egui::DragValue::new(&mut self.auto_lock_minutes).range(0..=240));
+        ui.add_space(space::L);
+        let palette = self.palette();
+        let vault_path = self.data_dir.join(VAULT_FILE);
+        if let Some(hosts) = &mut self.hosts {
+            self.sync.ui(ui, &palette, hosts, &vault_path);
+        }
     }
 }
 

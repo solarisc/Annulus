@@ -85,6 +85,12 @@ impl HostsScreen {
         &mut self.vault
     }
 
+    /// Swaps in another vault (after signing in to a sync account) and returns the old one.
+    pub fn replace_vault(&mut self, vault: Vault) -> Vault {
+        self.editor = None;
+        std::mem::replace(&mut self.vault, vault)
+    }
+
     /// Draws the screen; returns what the shell should do.
     pub fn ui(&mut self, ui: &mut Ui, palette: &Palette) -> Option<Request> {
         let mut request = None;
