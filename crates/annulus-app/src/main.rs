@@ -8,6 +8,7 @@
 mod forwards_screen;
 mod hosts_screen;
 mod import_dialog;
+mod keychain_screen;
 mod lock_screen;
 mod sftp_view;
 mod shell;

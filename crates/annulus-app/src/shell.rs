@@ -9,6 +9,7 @@ use annulus_vault::vault::Vault;
 
 use crate::forwards_screen::ForwardsScreen;
 use crate::hosts_screen::{HostsScreen, Request};
+use crate::keychain_screen::KeychainScreen;
 use crate::lock_screen::LockScreen;
 use crate::sftp_view::SftpTab;
 use crate::sync_screen::SyncScreen;
@@ -110,6 +111,8 @@ pub struct Shell {
     forwards: ForwardsScreen,
     /// Account sync, while the vault is unlocked.
     sync: SyncScreen,
+    /// The Keychain screen.
+    keychain: KeychainScreen,
     /// Setup or unlock, while the vault is locked.
     lock: LockScreen,
     data_dir: std::path::PathBuf,
@@ -137,6 +140,7 @@ impl Shell {
             hosts: None,
             forwards: ForwardsScreen::default(),
             sync: SyncScreen::default(),
+            keychain: KeychainScreen::default(),
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
             data_dir: data_dir.to_path_buf(),
             font_size: DEFAULT_FONT_SIZE,
@@ -413,6 +417,14 @@ impl Shell {
                     self.lock.ui(ui, &self.data_dir.join(VAULT_FILE), &palette)
                 {
                     self.unlocked(vault);
+                }
+            }
+            Section::Keychain => {
+                let palette = self.palette();
+                if let Some(hosts) = &mut self.hosts {
+                    self.keychain.ui(ui, &palette, hosts.vault_mut());
+                } else {
+                    self.section = Section::Hosts;
                 }
             }
             Section::PortForwarding => {

@@ -116,6 +116,21 @@ pub fn secret_field(ui: &mut Ui, secret: &mut SecretText, hint: &str) -> Respons
     output.response.response
 }
 
+/// A multi-line field for pasted secrets such as private keys: shown while editing (a key
+/// is checked by eye when pasted), but kept in a zeroizing buffer with no undo history.
+pub fn secret_area(ui: &mut Ui, secret: &mut SecretText, hint: &str, rows: usize) -> Response {
+    let output = TextEdit::multiline(secret)
+        .hint_text(hint)
+        .desired_rows(rows)
+        .font(egui::TextStyle::Monospace)
+        .desired_width(f32::INFINITY)
+        .show(ui);
+    let mut state = output.state;
+    state.clear_undoer();
+    state.store(ui.ctx(), output.response.response.id);
+    output.response.response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

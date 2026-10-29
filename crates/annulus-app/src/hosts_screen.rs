@@ -242,6 +242,12 @@ impl HostsScreen {
     }
 
     fn editor_ui(&mut self, ui: &mut Ui, palette: &Palette) {
+        let keys: Vec<(u64, String)> = self
+            .vault
+            .ssh_keys()
+            .iter()
+            .map(|key| (key.id, key.label.clone()))
+            .collect();
         let Some(draft) = &mut self.editor else {
             return;
         };
@@ -273,6 +279,9 @@ impl HostsScreen {
                 ui.end_row();
                 ui.label("Tags");
                 ui.add(egui::TextEdit::singleline(&mut draft.tags).hint_text("postgres, prod"));
+                ui.end_row();
+                ui.label("Key");
+                key_picker(ui, &mut draft.host.key_id, &keys);
                 ui.end_row();
                 ui.label("Password");
                 let saved = draft.host.password.is_some() && !draft.forget_password;
@@ -366,6 +375,21 @@ impl HostsScreen {
             }
         }
     }
+}
+
+/// The host editor's choice of keychain key.
+fn key_picker(ui: &mut Ui, key_id: &mut Option<u64>, keys: &[(u64, String)]) {
+    let chosen = key_id
+        .and_then(|id| keys.iter().find(|(key, _)| *key == id))
+        .map_or("Default keys", |(_, label)| label.as_str());
+    egui::ComboBox::from_id_salt("host-key")
+        .selected_text(chosen)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(key_id, None, "Default keys");
+            for (id, label) in keys {
+                ui.selectable_value(key_id, Some(*id), label);
+            }
+        });
 }
 
 enum RowAction {
