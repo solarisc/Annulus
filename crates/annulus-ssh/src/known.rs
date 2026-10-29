@@ -84,6 +84,73 @@ pub fn forget(path: &Path, line: usize) -> std::io::Result<()> {
     std::fs::rename(&temporary, path)
 }
 
+/// What [`import`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Imported {
+    /// Entries added.
+    pub added: usize,
+    /// Entries left out because a key is already trusted for one of their host names (a
+    /// different key is never trusted silently), or the same line is already there.
+    pub skipped: usize,
+}
+
+/// Adds the entries of another known-hosts file (`from`, usually OpenSSH's
+/// `~/.ssh/known_hosts`) to the one at `into` (F-KNOWN-005), atomically. Only hosts with no
+/// trusted key yet are added; comments and lines that are not entries are left out.
+///
+/// # Errors
+/// A file cannot be read, or `into` cannot be written; it is left as it was.
+pub fn import(into: &Path, from: &Path) -> std::io::Result<Imported> {
+    let source = std::fs::read_to_string(from)?;
+    let mut text = match std::fs::read_to_string(into) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let mut names: Vec<String> = parse(&text)
+        .into_iter()
+        .flat_map(|entry| entry.hosts)
+        .filter(|name| name != "(hashed)")
+        .collect();
+    let mut lines: Vec<String> = text.lines().map(normalized).collect();
+    let mut result = Imported::default();
+    for line in source.lines() {
+        // Only real entries: a key this app can read.
+        let Some(entry) = parse(line)
+            .into_iter()
+            .next()
+            .filter(|entry| !entry.fingerprint.is_empty())
+        else {
+            continue;
+        };
+        let line = normalized(line);
+        let known = entry.hosts.iter().any(|host| names.contains(host));
+        if known || lines.contains(&line) {
+            result.skipped += 1;
+            continue;
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&line);
+        text.push('\n');
+        names.extend(entry.hosts.into_iter().filter(|name| name != "(hashed)"));
+        lines.push(line);
+        result.added += 1;
+    }
+    if result.added > 0 {
+        let temporary = into.with_extension("tmp");
+        std::fs::write(&temporary, text)?;
+        std::fs::rename(&temporary, into)?;
+    }
+    Ok(result)
+}
+
+/// `line` with its fields separated by single spaces.
+fn normalized(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +170,52 @@ mod tests {
         assert_eq!(entries[1].hosts, ["[jump]:2222"]);
         assert_eq!(entries[2].hosts, ["(hashed)"]);
         assert_eq!(entries[3].hosts, ["*.corp"]);
+    }
+
+    #[test]
+    fn importing_adds_new_hosts_and_never_a_second_key_for_a_trusted_one() {
+        const OTHER: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIGtOO8V0K1MT4rhhh35kzjb6OArnlu8NDuGa6nLdDgQS";
+        let dir = std::env::temp_dir().join(format!("annulus-known-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("known_hosts");
+        let theirs = dir.join("openssh_known_hosts");
+        std::fs::write(&ours, format!("web ssh-ed25519 {ED25519}")).unwrap();
+        std::fs::write(
+            &theirs,
+            format!(
+                "# OpenSSH\nweb ssh-ed25519 {OTHER}\ndb,10.0.0.5  ssh-ed25519 {OTHER}\n\
+                 |1|abc=|def= ssh-ed25519 {OTHER}\nnot an entry\n"
+            ),
+        )
+        .unwrap();
+        let result = import(&ours, &theirs).unwrap();
+        assert_eq!(
+            result,
+            Imported {
+                added: 2,
+                skipped: 1
+            }
+        );
+        let entries = read(&ours);
+        let hosts: Vec<Vec<String>> = entries.iter().map(|e| e.hosts.clone()).collect();
+        assert_eq!(
+            hosts,
+            [vec!["web"], vec!["db", "10.0.0.5"], vec!["(hashed)"]]
+        );
+        assert_eq!(
+            entries[0].fingerprint,
+            parse(&format!("x ssh-ed25519 {ED25519}"))[0].fingerprint,
+            "the key Annulus trusted for web is unchanged"
+        );
+        // Again: nothing new.
+        assert_eq!(
+            import(&ours, &theirs).unwrap(),
+            Imported {
+                added: 0,
+                skipped: 3
+            }
+        );
     }
 
     #[test]

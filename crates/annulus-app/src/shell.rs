@@ -705,7 +705,9 @@ impl Shell {
             Section::KnownHosts => {
                 let palette = self.palette();
                 let path = self.data_dir.join("known_hosts");
-                self.known_hosts.ui(ui, &palette, &path);
+                let openssh = directories::BaseDirs::new()
+                    .map(|dirs| dirs.home_dir().join(".ssh").join("known_hosts"));
+                self.known_hosts.ui(ui, &palette, &path, openssh.as_deref());
             }
             Section::Snippets => {
                 let palette = self.palette();

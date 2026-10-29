@@ -1,5 +1,6 @@
-//! The Known Hosts screen (F-KNOWN-004): the server keys Annulus trusts, with search and
-//! "Forget" (needed after a server is reinstalled, since a changed key is a hard stop).
+//! The Known Hosts screen (F-KNOWN-004, F-KNOWN-005): the server keys Annulus trusts, with
+//! search, "Forget" (needed after a server is reinstalled, since a changed key is a hard
+//! stop) and an import of OpenSSH's own known hosts.
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,8 @@ pub struct KnownHostsScreen {
     search: String,
     confirm: Option<usize>,
     error: Option<String>,
+    /// The result of the last import.
+    notice: Option<String>,
 }
 
 impl KnownHostsScreen {
@@ -24,8 +27,32 @@ impl KnownHostsScreen {
         self.path = Some(path.to_path_buf());
     }
 
-    /// Draws the screen for the known-hosts file at `path`.
-    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, path: &Path) {
+    /// "Import from OpenSSH", when OpenSSH's file exists.
+    fn import_button(&mut self, ui: &mut Ui, path: &Path, openssh: Option<&Path>) {
+        if let Some(openssh) = openssh.filter(|file| file.is_file())
+            && ui
+                .button("Import from OpenSSH")
+                .on_hover_text(format!(
+                    "Add the keys in {} for hosts Annulus has no key for yet",
+                    openssh.display()
+                ))
+                .clicked()
+        {
+            self.error = None;
+            self.notice = Some(match known::import(path, openssh) {
+                Ok(done) => format!(
+                    "Imported {} key(s); left out {} already known.",
+                    done.added, done.skipped
+                ),
+                Err(error) => format!("Could not import: {error}"),
+            });
+            self.reload(path);
+        }
+    }
+
+    /// Draws the screen for the known-hosts file at `path`; `openssh` is OpenSSH's own
+    /// file, offered for import when it exists.
+    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, path: &Path, openssh: Option<&Path>) {
         if self.path.as_deref() != Some(path) {
             self.reload(path);
         }
@@ -39,7 +66,11 @@ impl KnownHostsScreen {
             if ui.button("Refresh").clicked() {
                 self.reload(path);
             }
+            self.import_button(ui, path, openssh);
         });
+        if let Some(notice) = &self.notice {
+            ui.label(RichText::new(notice).color(theme::color(palette.text_secondary)));
+        }
         if let Some(error) = &self.error {
             ui.colored_label(theme::color(palette.status_error), error);
         }
