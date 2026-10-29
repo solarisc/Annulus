@@ -43,6 +43,13 @@ pub fn init(dir: &Path, names: &[String]) -> Result<String, String> {
             .and_then(|mut file| file.write_all(text.as_bytes()))
             .map_err(|error| format!("{}: {error}", path.display()))
     };
+    // Neither may exist yet, so a refused run never leaves a new key beside an old
+    // certificate.
+    for name in ["cert.pem", "key.pem"] {
+        if dir.join(name).exists() {
+            return Err(format!("{} exists already", dir.join(name).display()));
+        }
+    }
     write("key.pem", &key, true)?;
     write("cert.pem", &cert, false)?;
     fingerprint_of_pem(&cert)
@@ -92,6 +99,12 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert!(init(&dir, &names).is_err(), "never over existing files");
+        std::fs::remove_file(dir.join("key.pem")).unwrap();
+        assert!(
+            init(&dir, &names).is_err(),
+            "no new key beside an old certificate"
+        );
+        assert!(!dir.join("key.pem").exists());
         assert!(fingerprint_of_pem("not a certificate").is_err());
     }
 }

@@ -61,7 +61,13 @@ pub fn certificate_of(base: &str) -> Result<Vec<u8>, SyncError> {
         .map_err(|error| failed(&error.to_string()))?;
     let _ = socket.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = socket.set_write_timeout(Some(Duration::from_secs(10)));
+    // The whole handshake has a deadline too, so a server that trickles bytes cannot hold
+    // the question forever.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while tls.is_handshaking() {
+        if std::time::Instant::now() > deadline {
+            return Err(failed("the server took too long"));
+        }
         tls.complete_io(&mut socket)
             .map_err(|error| failed(&error.to_string()))?;
     }

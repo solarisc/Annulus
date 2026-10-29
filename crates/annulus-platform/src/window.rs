@@ -139,11 +139,20 @@ fn expire_clipboard_secret(now: Instant) -> Option<std::time::Duration> {
     if now < secret.until {
         return Some(secret.until - now);
     }
-    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-        let current = clipboard.get_text().ok().map(Zeroizing::new);
-        if secret.clears(current.as_ref().map(|text| text.as_str()), now) {
-            let _ = clipboard.clear();
+    let current = arboard::Clipboard::new().and_then(|mut clipboard| {
+        let text = clipboard.get_text().map(Zeroizing::new);
+        if let Ok(text) = &text
+            && secret.clears(Some(text.as_str()), now)
+        {
+            clipboard.clear()?;
         }
+        text.map(|_| ())
+    });
+    // Another program holds the clipboard: try again shortly, for at most a minute.
+    if matches!(current, Err(arboard::Error::ClipboardOccupied))
+        && now < secret.until + std::time::Duration::from_secs(60)
+    {
+        return Some(std::time::Duration::from_secs(1));
     }
     *held = None;
     None
