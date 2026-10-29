@@ -368,3 +368,132 @@ fn a_full_round_over_http_then_a_revoked_device_is_refused() {
         Err(SyncError::Unauthorized)
     ));
 }
+
+mod vaults {
+    //! Two real vaults, on two "devices", syncing hosts and forwarding rules.
+
+    use annulus_vault::crypto::KdfParams;
+    use annulus_vault::hosts::Secret;
+    use annulus_vault::sync::SyncAccount;
+    use annulus_vault::vault::Vault;
+
+    use super::*;
+    use crate::replica::VaultReplica;
+
+    const CHEAP_KDF: KdfParams = KdfParams {
+        memory_kib: 64,
+        iterations: 1,
+        parallelism: 1,
+    };
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("annulus-sync-vault-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("vault.anv")
+    }
+
+    fn round(server: &Server, caller: Caller, vault: &mut Vault) {
+        let mut direct = Direct {
+            server,
+            caller: Some(caller),
+        };
+        let mut replica = VaultReplica(vault.sync_copy());
+        sync(&mut direct, &mut replica).unwrap();
+        assert!(vault.commit_sync(replica.0).unwrap());
+    }
+
+    fn account(device: u64) -> SyncAccount {
+        SyncAccount {
+            server: "http://127.0.0.1".into(),
+            name: "ana".into(),
+            device,
+            token: Secret::new("t"),
+        }
+    }
+
+    #[test]
+    fn hosts_and_rules_reach_a_device_that_joins_and_edits_come_back() {
+        let server = server();
+        let (mut laptop, _) = Vault::create(temp("laptop"), "pw", CHEAP_KDF).unwrap();
+        let mut host = laptop.draft_host();
+        host.label = "bastion".into();
+        host.address = "10.0.0.1".into();
+        laptop.upsert_host(host).unwrap();
+        let host_id = laptop.hosts()[0].id;
+        let mut rule = laptop.draft_forward(host_id);
+        rule.label = "db".into();
+        rule.bind_port = 15432;
+        rule.destination_host = "db".into();
+        rule.destination_port = 5432;
+        laptop.upsert_forward(rule).unwrap();
+
+        let mut direct = Direct {
+            server: &server,
+            caller: None,
+        };
+        let first = account::register(
+            &mut direct,
+            &cheap(),
+            "ana",
+            "pw",
+            laptop.key_file_bytes(),
+            "laptop",
+        )
+        .unwrap();
+        laptop
+            .set_sync_account(Some(account(first.device)))
+            .unwrap();
+        let laptop_caller = server.authenticate(&first.token).unwrap();
+        round(&server, laptop_caller, &mut laptop);
+        assert_eq!(laptop.sync_state().pending_count(), 0);
+
+        // The second device signs in and builds its vault from the account's key file.
+        let desktop_path = temp("desktop");
+        let second = account::login(&mut direct, &cheap(), "ana", "pw", "desktop").unwrap();
+        let mut desktop = Vault::join(
+            desktop_path.clone(),
+            &second.wrapped_keys,
+            "pw",
+            account(second.device),
+        )
+        .unwrap();
+        let desktop_caller = server.authenticate(&second.token).unwrap();
+        round(&server, desktop_caller, &mut desktop);
+        assert_eq!(desktop.hosts()[0].label, "bastion");
+        let synced_rule = &desktop.forwards()[0];
+        assert_eq!(
+            synced_rule.host_id,
+            desktop.hosts()[0].id,
+            "the rule finds its host"
+        );
+
+        // An edit on the desktop reaches the laptop; a deletion on the laptop reaches back.
+        let mut edited = desktop.hosts()[0].clone();
+        edited.address = "10.0.0.2".into();
+        desktop.upsert_host(edited).unwrap();
+        round(&server, desktop_caller, &mut desktop);
+        round(&server, laptop_caller, &mut laptop);
+        assert_eq!(laptop.hosts()[0].address, "10.0.0.2");
+        let rule_id = laptop.forwards()[0].id;
+        laptop.remove_forward(rule_id).unwrap();
+        round(&server, laptop_caller, &mut laptop);
+        round(&server, desktop_caller, &mut desktop);
+        assert_eq!(desktop.forwards(), []);
+        // Both survive a lock and unlock with their sync state.
+        let reopened = Vault::unlock(&desktop_path, "pw").unwrap();
+        assert_eq!(reopened.sync_state().cursor, desktop.sync_state().cursor);
+    }
+
+    #[test]
+    fn a_snapshot_older_than_a_local_edit_is_not_applied() {
+        let (mut vault, _) = Vault::create(temp("stale"), "pw", CHEAP_KDF).unwrap();
+        let copy = vault.sync_copy();
+        let mut host = vault.draft_host();
+        host.label = "new".into();
+        host.address = "h".into();
+        vault.upsert_host(host).unwrap();
+        assert!(!vault.commit_sync(copy).unwrap());
+        assert_eq!(vault.hosts().len(), 1, "the local edit stays");
+    }
+}

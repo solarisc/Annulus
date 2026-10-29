@@ -13,11 +13,14 @@ use zeroize::Zeroizing;
 use crate::crypto::{CryptoError, KdfParams, KeyFile, Keys, Sealed};
 use crate::forwards::PortForward;
 use crate::hosts::{DEFAULT_PORT, Host};
+use crate::sync::{SyncAccount, SyncCopy, SyncState, kind};
 
 /// Record kind of a saved host.
 const KIND_HOST: u8 = 1;
 /// Record kind of a port-forwarding rule.
 const KIND_FORWARD: u8 = 2;
+/// Record kind of the sync bookkeeping (one record).
+const KIND_SYNC_STATE: u8 = 3;
 
 /// Why the vault could not be used.
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +72,9 @@ pub struct Vault {
     keys: Keys,
     hosts: Vec<Host>,
     forwards: Vec<PortForward>,
+    sync: SyncState,
+    /// Counts saved changes, so a sync result made from an older snapshot is not applied.
+    generation: u64,
 }
 
 impl Vault {
@@ -95,8 +101,10 @@ impl Vault {
             keys,
             hosts: Vec::new(),
             forwards: Vec::new(),
+            sync: SyncState::new()?,
+            generation: 0,
         };
-        vault.save(&vault.hosts, &vault.forwards)?;
+        vault.save(&vault.hosts, &vault.forwards, &vault.sync)?;
         Ok((vault, recovery))
     }
 
@@ -125,6 +133,7 @@ impl Vault {
     fn open_records(path: PathBuf, file: VaultFile, keys: Keys) -> Result<Self, VaultError> {
         let mut hosts = Vec::new();
         let mut forwards = Vec::new();
+        let mut sync = None;
         for record in &file.records {
             let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
             match record.kind {
@@ -137,6 +146,10 @@ impl Vault {
                     forwards
                         .push(serde_json::from_slice::<PortForward>(&plaintext).map_err(damaged)?);
                 }
+                KIND_SYNC_STATE => {
+                    let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
+                    sync = Some(serde_json::from_slice::<SyncState>(&plaintext).map_err(damaged)?);
+                }
                 // A newer version wrote kinds this one doesn't know; saving would drop them, so
                 // refuse to open rather than lose data silently.
                 other => {
@@ -146,12 +159,29 @@ impl Vault {
         }
         hosts.sort_by_key(|host| host.label.to_lowercase());
         forwards.sort_by_key(|rule| rule.label.to_lowercase());
+        let mut sync = match sync {
+            Some(sync) => sync,
+            None => SyncState::new()?,
+        };
+        // Entities from before sync existed get sync ids now, as unpushed changes.
+        for host in &hosts {
+            if sync.id_of(kind::HOST, host.id).is_none() {
+                sync.touch(kind::HOST, host.id, false)?;
+            }
+        }
+        for rule in &forwards {
+            if sync.id_of(kind::FORWARD, rule.id).is_none() {
+                sync.touch(kind::FORWARD, rule.id, false)?;
+            }
+        }
         Ok(Self {
             path,
             key_file: file.keys,
             keys,
             hosts,
             forwards,
+            sync,
+            generation: 0,
         })
     }
 
@@ -162,7 +192,7 @@ impl Vault {
     pub fn change_password(&mut self, password: &str) -> Result<(), VaultError> {
         let key_file = self.keys.change_password(&self.key_file, password)?;
         let previous = std::mem::replace(&mut self.key_file, key_file);
-        if let Err(error) = self.save(&self.hosts, &self.forwards) {
+        if let Err(error) = self.save(&self.hosts, &self.forwards, &self.sync) {
             self.key_file = previous;
             return Err(error);
         }
@@ -205,14 +235,19 @@ impl Vault {
     /// # Errors
     /// Writing the file.
     pub fn upsert_host(&mut self, host: Host) -> Result<(), VaultError> {
+        let id = host.id;
         let mut next = self.hosts.clone();
         match next.iter_mut().find(|existing| existing.id == host.id) {
             Some(existing) => *existing = host,
             None => next.push(host),
         }
         next.sort_by_key(|host| host.label.to_lowercase());
-        self.save(&next, &self.forwards)?;
+        let mut sync = self.sync.clone();
+        sync.touch(kind::HOST, id, false)?;
+        self.save(&next, &self.forwards, &sync)?;
         self.hosts = next;
+        self.sync = sync;
+        self.generation += 1;
         Ok(())
     }
 
@@ -227,8 +262,12 @@ impl Vault {
             .filter(|host| host.id != id)
             .cloned()
             .collect();
-        self.save(&next, &self.forwards)?;
+        let mut sync = self.sync.clone();
+        sync.touch(kind::HOST, id, true)?;
+        self.save(&next, &self.forwards, &sync)?;
         self.hosts = next;
+        self.sync = sync;
+        self.generation += 1;
         Ok(())
     }
 
@@ -244,15 +283,19 @@ impl Vault {
             return Ok(0);
         }
         let mut next = self.hosts.clone();
+        let mut sync = self.sync.clone();
         let mut id = next.iter().map(|host| host.id).max().unwrap_or(0);
         for mut host in imported.iter().cloned() {
             id += 1;
             host.id = id;
+            sync.touch(kind::HOST, id, false)?;
             next.push(host);
         }
         next.sort_by_key(|host| host.label.to_lowercase());
-        self.save(&next, &self.forwards)?;
+        self.save(&next, &self.forwards, &sync)?;
         self.hosts = next;
+        self.sync = sync;
+        self.generation += 1;
         std::fs::remove_file(plain)?;
         Ok(imported.len())
     }
@@ -275,14 +318,19 @@ impl Vault {
     /// # Errors
     /// Writing the file.
     pub fn upsert_forward(&mut self, rule: PortForward) -> Result<(), VaultError> {
+        let id = rule.id;
         let mut next = self.forwards.clone();
         match next.iter_mut().find(|existing| existing.id == rule.id) {
             Some(existing) => *existing = rule,
             None => next.push(rule),
         }
         next.sort_by_key(|rule| rule.label.to_lowercase());
-        self.save(&self.hosts, &next)?;
+        let mut sync = self.sync.clone();
+        sync.touch(kind::FORWARD, id, false)?;
+        self.save(&self.hosts, &next, &sync)?;
         self.forwards = next;
+        self.sync = sync;
+        self.generation += 1;
         Ok(())
     }
 
@@ -297,13 +345,121 @@ impl Vault {
             .filter(|rule| rule.id != id)
             .cloned()
             .collect();
-        self.save(&self.hosts, &next)?;
+        let mut sync = self.sync.clone();
+        sync.touch(kind::FORWARD, id, true)?;
+        self.save(&self.hosts, &next, &sync)?;
         self.forwards = next;
+        self.sync = sync;
+        self.generation += 1;
         Ok(())
     }
 
-    fn save(&self, hosts: &[Host], forwards: &[PortForward]) -> Result<(), VaultError> {
-        let mut records = Vec::with_capacity(hosts.len() + forwards.len());
+    /// The sync bookkeeping.
+    #[must_use]
+    pub fn sync_state(&self) -> &SyncState {
+        &self.sync
+    }
+
+    /// A snapshot for a sync round on another thread.
+    #[must_use]
+    pub fn sync_copy(&self) -> SyncCopy {
+        SyncCopy {
+            keys: self.keys.clone(),
+            hosts: self.hosts.clone(),
+            forwards: self.forwards.clone(),
+            state: self.sync.clone(),
+            generation: self.generation,
+        }
+    }
+
+    /// Takes the result of a sync round and saves it. Returns false, changing nothing, if
+    /// the vault was edited since the snapshot; the next round redoes the work (the server
+    /// keeps everything, and the edit is pushed then).
+    ///
+    /// # Errors
+    /// Writing the file; the vault stays as it was.
+    pub fn commit_sync(&mut self, copy: SyncCopy) -> Result<bool, VaultError> {
+        if copy.generation != self.generation {
+            return Ok(false);
+        }
+        self.save(&copy.hosts, &copy.forwards, &copy.state)?;
+        self.hosts = copy.hosts;
+        self.forwards = copy.forwards;
+        self.sync = copy.state;
+        self.generation += 1;
+        Ok(true)
+    }
+
+    /// Signs the vault in to (or, with `None`, out of) a sync account. Signing out keeps
+    /// every local record (ADR-0008 data-loss rule 2); signing in to another account later
+    /// pushes them there as new records.
+    ///
+    /// # Errors
+    /// Writing the file.
+    pub fn set_sync_account(&mut self, account: Option<SyncAccount>) -> Result<(), VaultError> {
+        let mut sync = self.sync.clone();
+        let switching = sync.account.as_ref().map(|a| (&a.server, &a.name))
+            != account.as_ref().map(|a| (&a.server, &a.name));
+        if switching {
+            // Another account: everything local is new there.
+            sync.cursor = 0;
+            sync.entries.retain(|_, entry| !entry.deleted);
+            for entry in sync.entries.values_mut() {
+                entry.base = 0;
+                entry.dirty = true;
+            }
+        }
+        sync.account = account;
+        self.save(&self.hosts, &self.forwards, &sync)?;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// The key file as uploaded at account registration: the account key wrapped by the
+    /// password and by the recovery key, never the key itself.
+    #[must_use]
+    pub fn key_file_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(&self.key_file).unwrap_or_default()
+    }
+
+    /// Creates a vault at `path` from an account's key file (downloaded at sign-in) and
+    /// the password, empty until the first sync fills it. The caller moves any existing
+    /// vault aside first (ADR-0008 data-loss rule 4).
+    ///
+    /// # Errors
+    /// [`VaultError::WrongPassword`], a damaged key file, or writing the file.
+    pub fn join(
+        path: impl Into<PathBuf>,
+        key_file: &[u8],
+        password: &str,
+        account: SyncAccount,
+    ) -> Result<Self, VaultError> {
+        let key_file: KeyFile = serde_json::from_slice(key_file)
+            .map_err(|error| VaultError::Damaged(error.to_string()))?;
+        let keys = Keys::unlock(&key_file, password)?;
+        let mut sync = SyncState::new()?;
+        sync.account = Some(account);
+        let vault = Self {
+            path: path.into(),
+            key_file,
+            keys,
+            hosts: Vec::new(),
+            forwards: Vec::new(),
+            sync,
+            generation: 0,
+        };
+        vault.save(&vault.hosts, &vault.forwards, &vault.sync)?;
+        Ok(vault)
+    }
+
+    fn save(
+        &self,
+        hosts: &[Host],
+        forwards: &[PortForward],
+        sync: &SyncState,
+    ) -> Result<(), VaultError> {
+        let mut records = Vec::with_capacity(hosts.len() + forwards.len() + 1);
         let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
         for host in hosts {
             let id = format!("host-{}", host.id);
@@ -325,6 +481,12 @@ impl Vault {
                 sealed,
             });
         }
+        let plaintext = Zeroizing::new(serde_json::to_vec(sync).map_err(damaged)?);
+        records.push(Record {
+            id: "sync".into(),
+            kind: KIND_SYNC_STATE,
+            sealed: self.keys.seal_record("sync", KIND_SYNC_STATE, &plaintext)?,
+        });
         let file = VaultFile {
             version: 1,
             keys: self.key_file.clone(),

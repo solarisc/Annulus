@@ -179,6 +179,7 @@ pub struct KeyFile {
 }
 
 /// An unlocked vault's keys.
+#[derive(Clone)]
 pub struct Keys {
     account: Key,
     record: Key,

@@ -19,6 +19,7 @@ serde.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 annulus-proto = { path = "../annulus-proto" }
+annulus-vault = { path = "../annulus-vault" }
 
 [dev-dependencies]
 axum.workspace = true

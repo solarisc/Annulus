@@ -1,0 +1,391 @@
+//! What the vault keeps for account sync (ADR-0008): a random sync id per entity, the server
+//! version each copy is based on, which entities changed since the last sync, and the
+//! hybrid-logical-clock time of each change. Stored encrypted like every other record.
+//!
+//! A [`SyncCopy`] is a snapshot the sync thread works on without holding the vault; the vault
+//! takes its result back with [`crate::vault::Vault::commit_sync`].
+
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::crypto::{CryptoError, Keys, Sealed};
+use crate::forwards::PortForward;
+use crate::hosts::{Host, Secret};
+
+/// Entity kinds inside synced records.
+pub mod kind {
+    /// A saved host.
+    pub const HOST: u8 = 1;
+    /// A port-forwarding rule.
+    pub const FORWARD: u8 = 2;
+}
+
+/// The record kind (bound into the encryption) of envelopes sent to the server.
+const KIND_SYNCED: u8 = 4;
+
+/// The signed-in account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncAccount {
+    /// Base URL of the server.
+    pub server: String,
+    /// The account name.
+    pub name: String,
+    /// This device's id on the server.
+    pub device: u64,
+    /// This device's token.
+    pub token: Secret,
+}
+
+/// Sync bookkeeping for one entity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    /// [`kind::HOST`] or [`kind::FORWARD`].
+    pub kind: u8,
+    /// The entity's local id.
+    pub local: u64,
+    /// The server version this copy is based on; 0 before the first push.
+    pub base: u64,
+    /// Changed locally since `base`.
+    pub dirty: bool,
+    /// Deleted (a tombstone until the deletion is pushed, and after).
+    pub deleted: bool,
+    /// When it last changed.
+    pub hlc: u64,
+}
+
+/// Everything the vault stores for sync.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncState {
+    /// The account, while signed in.
+    pub account: Option<SyncAccount>,
+    /// The newest server sequence number seen.
+    pub cursor: u64,
+    /// This device's number in clock times.
+    pub node: u16,
+    /// The newest clock time seen.
+    pub clock: u64,
+    /// Entries by sync id.
+    pub entries: BTreeMap<String, Entry>,
+    /// When the last sync round finished, seconds since the Unix epoch.
+    #[serde(default)]
+    pub last_synced: u64,
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// A random 128-bit id as hex.
+pub(crate) fn random_id() -> Result<String, CryptoError> {
+    use std::fmt::Write as _;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| CryptoError::Randomness)?;
+    Ok(bytes
+        .iter()
+        .fold(String::with_capacity(32), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        }))
+}
+
+impl SyncState {
+    /// A fresh state for a new device.
+    ///
+    /// # Errors
+    /// No randomness.
+    pub(crate) fn new() -> Result<Self, CryptoError> {
+        let mut node = [0u8; 2];
+        getrandom::fill(&mut node).map_err(|_| CryptoError::Randomness)?;
+        Ok(Self {
+            node: u16::from_le_bytes(node),
+            ..Self::default()
+        })
+    }
+
+    /// A new clock time, after every time seen so far.
+    fn tick(&mut self) -> u64 {
+        let wall = (now_millis() << 16) | u64::from(self.node);
+        self.clock = if wall > self.clock {
+            wall
+        } else {
+            (((self.clock >> 16) + 1) << 16) | u64::from(self.node)
+        };
+        self.clock
+    }
+
+    /// The sync id of local entity (`kind`, `local`).
+    #[must_use]
+    pub fn id_of(&self, kind: u8, local: u64) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(_, entry)| entry.kind == kind && entry.local == local && !entry.deleted)
+            .map(|(id, _)| id.as_str())
+    }
+
+    /// Records a local change of (`kind`, `local`): a new entity gets a sync id.
+    pub(crate) fn touch(&mut self, kind: u8, local: u64, deleted: bool) -> Result<(), CryptoError> {
+        let hlc = self.tick();
+        let id = match self.id_of(kind, local) {
+            Some(id) => id.to_owned(),
+            None if deleted => return Ok(()),
+            None => random_id()?,
+        };
+        let entry = self.entries.entry(id).or_insert(Entry {
+            kind,
+            local,
+            base: 0,
+            dirty: true,
+            deleted: false,
+            hlc,
+        });
+        entry.dirty = true;
+        entry.deleted = deleted;
+        entry.hlc = hlc;
+        Ok(())
+    }
+
+    /// Changes not pushed yet.
+    #[must_use]
+    pub fn pending_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.dirty && !(entry.deleted && entry.base == 0))
+            .count()
+    }
+}
+
+/// A forward rule as synced: it names its host by sync id, since local ids differ per
+/// device.
+#[derive(Serialize, Deserialize)]
+struct SyncedForward {
+    rule: PortForward,
+    host: Option<String>,
+}
+
+/// A local change for the sync engine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    /// Sync id.
+    pub id: String,
+    /// Server version it was made from.
+    pub base: u64,
+    /// When it was made.
+    pub hlc: u64,
+    /// `(kind, body)`, or `None` for a deletion.
+    pub content: Option<(u8, Vec<u8>)>,
+}
+
+/// A snapshot of the vault for one sync round.
+pub struct SyncCopy {
+    pub(crate) keys: Keys,
+    pub(crate) hosts: Vec<Host>,
+    pub(crate) forwards: Vec<PortForward>,
+    pub(crate) state: SyncState,
+    pub(crate) generation: u64,
+}
+
+impl SyncCopy {
+    /// The sync bookkeeping.
+    #[must_use]
+    pub fn state(&self) -> &SyncState {
+        &self.state
+    }
+
+    /// The newest server sequence number seen.
+    #[must_use]
+    pub fn cursor(&self) -> u64 {
+        self.state.cursor
+    }
+
+    /// Remembers the newest server sequence number.
+    pub fn set_cursor(&mut self, cursor: u64) {
+        self.state.cursor = cursor;
+    }
+
+    /// Notes when this round finished.
+    pub fn mark_synced(&mut self) {
+        self.state.last_synced = now_millis() / 1000;
+    }
+
+    /// The server version of `id` held here.
+    #[must_use]
+    pub fn version(&self, id: &str) -> u64 {
+        self.state.entries.get(id).map_or(0, |entry| entry.base)
+    }
+
+    /// Local changes to push. A record created and deleted before its first push is not
+    /// sent at all.
+    #[must_use]
+    pub fn pending(&self) -> Vec<Pending> {
+        self.state
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.dirty && !(entry.deleted && entry.base == 0))
+            .filter_map(|(id, entry)| {
+                let content = if entry.deleted {
+                    None
+                } else {
+                    Some((entry.kind, self.body(entry)?))
+                };
+                Some(Pending {
+                    id: id.clone(),
+                    base: entry.base,
+                    hlc: entry.hlc,
+                    content,
+                })
+            })
+            .collect()
+    }
+
+    fn body(&self, entry: &Entry) -> Option<Vec<u8>> {
+        match entry.kind {
+            kind::HOST => {
+                let host = self.hosts.iter().find(|host| host.id == entry.local)?;
+                serde_json::to_vec(host).ok()
+            }
+            kind::FORWARD => {
+                let rule = self.forwards.iter().find(|rule| rule.id == entry.local)?;
+                let synced = SyncedForward {
+                    rule: rule.clone(),
+                    host: self
+                        .state
+                        .id_of(kind::HOST, rule.host_id)
+                        .map(str::to_owned),
+                };
+                serde_json::to_vec(&synced).ok()
+            }
+            _ => None,
+        }
+    }
+
+    /// Encrypts `(kind, hlc, body)` for record `id` with the account key.
+    ///
+    /// # Errors
+    /// No randomness.
+    pub fn seal(&self, id: &str, kind: u8, hlc: u64, body: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let mut envelope = Zeroizing::new(Vec::with_capacity(body.len() + 9));
+        envelope.push(kind);
+        envelope.extend_from_slice(&hlc.to_le_bytes());
+        envelope.extend_from_slice(body);
+        let sealed = self.keys.seal_record(id, KIND_SYNCED, &envelope)?;
+        serde_json::to_vec(&sealed).map_err(|_| CryptoError::Corrupt)
+    }
+
+    /// Decrypts record `id` into `(kind, hlc, body)`.
+    ///
+    /// # Errors
+    /// Not made with this account's key, or altered.
+    pub fn open(&self, id: &str, ciphertext: &[u8]) -> Result<(u8, u64, Vec<u8>), CryptoError> {
+        let sealed: Sealed =
+            serde_json::from_slice(ciphertext).map_err(|_| CryptoError::Corrupt)?;
+        let envelope = self.keys.open_record(id, KIND_SYNCED, &sealed)?;
+        let (kind, rest) = envelope.split_first().ok_or(CryptoError::Corrupt)?;
+        if rest.len() < 8 {
+            return Err(CryptoError::Corrupt);
+        }
+        let (hlc, body) = rest.split_at(8);
+        let hlc = u64::from_le_bytes(hlc.try_into().map_err(|_| CryptoError::Corrupt)?);
+        Ok((*kind, hlc, body.to_vec()))
+    }
+
+    /// The pending change of `id` was accepted as version `seq` (or the copy now holds
+    /// version `seq`).
+    pub fn pushed(&mut self, id: &str, seq: u64) {
+        if let Some(entry) = self.state.entries.get_mut(id) {
+            entry.base = seq;
+            entry.dirty = false;
+        }
+    }
+
+    /// Keeps the pending change of `id`, rebased on server version `seq`.
+    pub fn rebase(&mut self, id: &str, seq: u64) {
+        if let Some(entry) = self.state.entries.get_mut(id) {
+            entry.base = seq;
+        }
+    }
+
+    /// Takes the server's version `seq` of `id`: `content` is `(kind, hlc, body)`, or
+    /// `None` when it was deleted. A body this version cannot read is skipped (kept on the
+    /// server) rather than guessed at.
+    pub fn apply(&mut self, id: &str, seq: u64, content: Option<(u8, u64, Vec<u8>)>) {
+        let Some((kind, hlc, body)) = content else {
+            if let Some(entry) = self.state.entries.get_mut(id) {
+                match entry.kind {
+                    kind::HOST => self.hosts.retain(|host| host.id != entry.local),
+                    kind::FORWARD => self.forwards.retain(|rule| rule.id != entry.local),
+                    _ => {}
+                }
+                entry.deleted = true;
+                entry.dirty = false;
+                entry.base = seq;
+            }
+            return;
+        };
+        self.state.clock = self.state.clock.max(hlc);
+        let existing = self.state.entries.get(id).map(|entry| entry.local);
+        let local = match kind {
+            kind::HOST => {
+                let Ok(mut host) = serde_json::from_slice::<Host>(&body) else {
+                    return;
+                };
+                host.id = existing.unwrap_or_else(|| next_id(self.hosts.iter().map(|h| h.id)));
+                let local = host.id;
+                upsert(&mut self.hosts, host, |h| h.id, |h| h.label.to_lowercase());
+                local
+            }
+            kind::FORWARD => {
+                let Ok(synced) = serde_json::from_slice::<SyncedForward>(&body) else {
+                    return;
+                };
+                let mut rule = synced.rule;
+                rule.id = existing.unwrap_or_else(|| next_id(self.forwards.iter().map(|r| r.id)));
+                // The host's local id here; 0 shows as "(host deleted)" until it arrives.
+                rule.host_id = synced
+                    .host
+                    .and_then(|host| self.state.entries.get(&host))
+                    .filter(|entry| entry.kind == kind::HOST && !entry.deleted)
+                    .map_or(0, |entry| entry.local);
+                let local = rule.id;
+                upsert(
+                    &mut self.forwards,
+                    rule,
+                    |r| r.id,
+                    |r| r.label.to_lowercase(),
+                );
+                local
+            }
+            _ => return,
+        };
+        self.state.entries.insert(
+            id.to_owned(),
+            Entry {
+                kind,
+                local,
+                base: seq,
+                dirty: false,
+                deleted: false,
+                hlc,
+            },
+        );
+    }
+}
+
+fn next_id(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().unwrap_or(0) + 1
+}
+
+fn upsert<T, K: Ord>(list: &mut Vec<T>, item: T, id: impl Fn(&T) -> u64, sort: impl Fn(&T) -> K) {
+    let key = id(&item);
+    match list.iter_mut().find(|existing| id(existing) == key) {
+        Some(existing) => *existing = item,
+        None => list.push(item),
+    }
+    list.sort_by_key(sort);
+}
