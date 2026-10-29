@@ -141,7 +141,7 @@ pub struct FieldStyle<'a> {
 /// A popup menu open below a widget.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Popup {
-    owner: Id,
+    pub(crate) owner: Id,
     anchor: Rect,
     items: Vec<String>,
     selected: Option<usize>,
@@ -1000,6 +1000,43 @@ mod tests {
         assert_eq!(word_right(text, 0), 3);
         assert_eq!(word_right(text, 3), 9);
         assert_eq!(word_at(text, 7), (5, 9));
+    }
+
+    #[test]
+    fn escape_closes_an_open_menu_before_anything_else_sees_it() {
+        let mut state = UiState::default();
+        let id = Id::new("group");
+        let items = vec!["Top level".to_owned(), "Production".to_owned()];
+        let rect = Rect::new(10.0, 10.0, 200.0, 32.0);
+        let click = [
+            Event::PointerMoved(Point::new(20.0, 20.0)),
+            Event::PointerDown(crate::kit::Button::Primary),
+            Event::PointerUp(crate::kit::Button::Primary),
+        ];
+        frame(&mut state, &[], |ui| {
+            ui.select(id, rect, &items, Some(0), "");
+        });
+        frame(&mut state, &click, |ui| {
+            ui.select(id, rect, &items, Some(0), "");
+        });
+        assert!(state.popup.is_some());
+        let mut escape_seen = true;
+        frame(&mut state, &[key(Key::Escape, Modifiers::NONE)], |ui| {
+            ui.select(id, rect, &items, Some(0), "");
+            escape_seen = ui.key(Key::Escape, Modifiers::NONE);
+        });
+        assert!(state.popup.is_none());
+        assert!(
+            !escape_seen,
+            "the panel under the menu must not see the Escape"
+        );
+        // A menu whose owner stops drawing closes too.
+        frame(&mut state, &click, |ui| {
+            ui.select(id, rect, &items, Some(0), "");
+        });
+        assert!(state.popup.is_some());
+        frame(&mut state, &[], |_| {});
+        assert!(state.popup.is_none());
     }
 
     #[test]

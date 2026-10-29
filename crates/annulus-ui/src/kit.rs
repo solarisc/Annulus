@@ -456,6 +456,13 @@ impl UiState {
                     self.wheel.0 += x;
                     self.wheel.1 += y;
                 }
+                // An open menu takes Escape before anything under it (a panel that would
+                // close with its draft).
+                Event::Key(Key::Escape, modifiers)
+                    if *modifiers == Modifiers::NONE && self.popup.is_some() =>
+                {
+                    self.popup = None;
+                }
                 Event::Key(Key::Tab, modifiers) if !modifiers.ctrl && !modifiers.alt => {
                     self.move_focus(!modifiers.shift);
                 }
@@ -487,6 +494,12 @@ impl UiState {
             && self.zone(id).is_none()
         {
             self.focus = None;
+        }
+        // A menu whose owner is gone (its panel closed) goes with it.
+        if let Some(owner) = self.popup.as_ref().map(|popup| popup.owner)
+            && self.zone(owner).is_none()
+        {
+            self.popup = None;
         }
         FrameOutput {
             cursor: self.cursor,

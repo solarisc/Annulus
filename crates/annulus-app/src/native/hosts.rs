@@ -198,18 +198,30 @@ impl HostsView {
         &mut self,
         ui: &mut Ui<'_>,
         rect: Rect,
-        mut vault: Option<&mut Vault>,
+        vault: Option<&mut Vault>,
     ) -> Option<HostsAction> {
         let mut area = rect;
         let mut action = None;
-        if self.editor.is_some() {
-            let width = EDITOR_W.min(area.w * 0.6);
-            let panel = area.take_right(width);
-            if let Some(vault) = vault.as_deref_mut() {
-                self.editor_panel(ui, panel, vault);
-            }
-        }
+        let panel = self
+            .editor
+            .is_some()
+            .then(|| area.take_right(EDITOR_W.min(area.w * 0.6)));
         let vault = vault?;
+        action = self.listing_area(ui, area, vault).or(action);
+        if let Some(panel) = panel {
+            self.editor_panel(ui, panel, vault);
+        }
+        action
+    }
+
+    /// Everything left of the editor: header, toolbar, and the list or an empty state.
+    fn listing_area(
+        &mut self,
+        ui: &mut Ui<'_>,
+        area: Rect,
+        vault: &mut Vault,
+    ) -> Option<HostsAction> {
+        let mut action = None;
         let (cards, groups) = self.gather(vault);
         let mut main = area.inset(PAD, 0.0);
         main.take_top(space::XL);
@@ -359,56 +371,13 @@ impl HostsView {
         let term_w = if compact { CONTROL } else { term_w };
         let new_w = if compact { CONTROL } else { new_w };
 
+        // Laid out from the right, drawn from the left: Tab follows the drawing order.
         let terminal = row.take_right(term_w);
-        if ui
-            .button(
-                Id::new("hosts.terminal"),
-                terminal,
-                term_label,
-                Some(icons::TERMINAL),
-                Kind::Secondary,
-            )
-            .clicked
-        {
-            action = Some(HostsAction::LocalTerminal);
-        }
         row.take_right(space::S);
         let more = row.take_right(CONTROL);
-        let items = vec!["New group".to_owned(), "Import from ssh_config".to_owned()];
-        match ui.menu_button(
-            Id::new("hosts.new.more"),
-            more,
-            "",
-            Some(icons::CHEVRON_DOWN),
-            Kind::Primary,
-            &items,
-        ) {
-            Some(0) => {
-                if let Ok(mut group) = vault.draft_group(self.group.clone()) {
-                    group.name = "New group".into();
-                    let _ = vault.upsert_group(group);
-                }
-            }
-            Some(_) => action = Some(HostsAction::ImportSshConfig),
-            None => {}
-        }
         row.take_right(2.0);
         let new = row.take_right(new_w);
-        if ui
-            .button(
-                Id::new("hosts.new"),
-                new,
-                new_label,
-                Some(icons::PLUS),
-                Kind::Primary,
-            )
-            .clicked
-            || ui.key(Key::Char('n'), Modifiers::CTRL_SHIFT)
-        {
-            self.new_host(vault);
-        }
         row.take_right(space::M);
-
         let search = row;
         let field = ui.text_field(
             Id::new("hosts.search"),
@@ -427,6 +396,49 @@ impl HostsView {
             } else if !query.is_empty() {
                 action = Some(HostsAction::QuickConnect(query.to_owned()));
             }
+        }
+        if ui
+            .button(
+                Id::new("hosts.new"),
+                new,
+                new_label,
+                Some(icons::PLUS),
+                Kind::Primary,
+            )
+            .clicked
+            || ui.key(Key::Char('n'), Modifiers::CTRL_SHIFT)
+        {
+            self.new_host(vault);
+        }
+        let items = vec!["New group".to_owned(), "Import from ssh_config".to_owned()];
+        match ui.menu_button(
+            Id::new("hosts.new.more"),
+            more,
+            "",
+            Some(icons::CHEVRON_DOWN),
+            Kind::Primary,
+            &items,
+        ) {
+            Some(0) => {
+                if let Ok(mut group) = vault.draft_group(self.group.clone()) {
+                    group.name = "New group".into();
+                    let _ = vault.upsert_group(group);
+                }
+            }
+            Some(_) => action = Some(HostsAction::ImportSshConfig),
+            None => {}
+        }
+        if ui
+            .button(
+                Id::new("hosts.terminal"),
+                terminal,
+                term_label,
+                Some(icons::TERMINAL),
+                Kind::Secondary,
+            )
+            .clicked
+        {
+            action = Some(HostsAction::LocalTerminal);
         }
         action
     }
@@ -808,34 +820,6 @@ impl HostsView {
         let cancel_w = button_width(ui.gfx, "Cancel", None);
         let cancel = buttons.take_right(cancel_w);
         let mut saved = false;
-        if ui
-            .button(Id::new("editor.save"), save, "Save", None, Kind::Primary)
-            .clicked
-            || ui.key(Key::Char('s'), Modifiers::CTRL)
-        {
-            match editor.build() {
-                Ok(host) => match vault.upsert_host(host.clone()) {
-                    Ok(()) => {
-                        self.selected = Some(host.id);
-                        saved = true;
-                    }
-                    Err(error) => editor.problem = Some(error.to_string()),
-                },
-                Err(problem) => editor.problem = Some(problem),
-            }
-        }
-        if ui
-            .button(
-                Id::new("editor.cancel"),
-                cancel,
-                "Cancel",
-                None,
-                Kind::Secondary,
-            )
-            .clicked
-        {
-            close_editor = true;
-        }
         if !editor.is_new {
             let delete_w = button_width(ui.gfx, "Delete", Some(icons::TRASH));
             let delete = Rect::new(footer.x + space::XL, cancel.y, delete_w, CONTROL);
@@ -851,6 +835,34 @@ impl HostsView {
                 && vault.remove_host(editor.host.id).is_ok()
             {
                 saved = true;
+            }
+        }
+        if ui
+            .button(
+                Id::new("editor.cancel"),
+                cancel,
+                "Cancel",
+                None,
+                Kind::Secondary,
+            )
+            .clicked
+        {
+            close_editor = true;
+        }
+        if ui
+            .button(Id::new("editor.save"), save, "Save", None, Kind::Primary)
+            .clicked
+            || ui.key(Key::Char('s'), Modifiers::CTRL)
+        {
+            match editor.build() {
+                Ok(host) => match vault.upsert_host(host.clone()) {
+                    Ok(()) => {
+                        self.selected = Some(host.id);
+                        saved = true;
+                    }
+                    Err(error) => editor.problem = Some(error.to_string()),
+                },
+                Err(problem) => editor.problem = Some(problem),
             }
         }
         if saved || close_editor {
@@ -1097,16 +1109,16 @@ fn host_card(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEv
         slots.take_right(4.0);
         let edit = slots.take_right(30.0).centered(30.0, 30.0);
         if ui
-            .icon_button(id.with("connect"), connect, icons::PLAY, "Connect", false)
-            .clicked
-        {
-            event = CardEvent::Connect;
-        }
-        if ui
             .icon_button(id.with("edit"), edit, icons::EDIT, "Edit", false)
             .clicked
         {
             event = CardEvent::Edit;
+        }
+        if ui
+            .icon_button(id.with("connect"), connect, icons::PLAY, "Connect", false)
+            .clicked
+        {
+            event = CardEvent::Connect;
         }
     } else if !card.tags.is_empty() {
         let width = tags_width(ui, &card.tags, inner.w * 0.4);

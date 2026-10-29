@@ -479,6 +479,52 @@ fn every_scene_renders_without_layout_faults() {
 }
 
 #[test]
+fn tab_crosses_the_hosts_toolbar_left_to_right() {
+    let mut app = NativeApp::new(Some(fixture_vault("tab-order", true)));
+    let mut state = UiState::default();
+    let mut renderer = Cpu(None);
+    let viewport = Rect::new(0.0, 0.0, 1100.0, 720.0);
+    let mut focused = Vec::new();
+    for step in 0..40 {
+        let events = if step == 0 {
+            Vec::new()
+        } else {
+            vec![Event::Key(Key::Tab, Modifiers::NONE)]
+        };
+        let mut output = FrameOutput::default();
+        renderer.frame((1100, 720, 1.0), false, &mut |canvas| {
+            #[allow(clippy::cast_precision_loss)] // Step counts are small.
+            state.begin_frame(&events, f64::from(step));
+            let mut ui = Ui::new(canvas, Theme::new(Appearance::Dark), &mut state, viewport);
+            app.frame(&mut ui);
+            output = state.end_frame();
+        });
+        if let Some(id) = state.focus()
+            && let Some(zone) = output.zones.iter().find(|zone| zone.id == id)
+        {
+            focused.push(zone.label.clone());
+        }
+    }
+    let at = |label: &str| {
+        focused
+            .iter()
+            .position(|seen| seen == label)
+            .unwrap_or_else(|| panic!("{label:?} never focused: {focused:?}"))
+    };
+    let order = [
+        at("Vault"),
+        at("Hosts"),
+        at("Settings"),
+        at("Search hosts, or type user@host:port to connect"),
+        at("New host"),
+        at("chevron-down"),
+        at("Terminal"),
+        at("Homelab"),
+    ];
+    assert!(order.is_sorted(), "{order:?}: {focused:?}");
+}
+
+#[test]
 fn the_lint_catches_partial_overlaps_but_not_nesting() {
     let zone = |label: &str, rect: Rect| Zone {
         id: annulus_ui::kit::Id::new(label),
