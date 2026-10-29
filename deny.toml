@@ -13,6 +13,9 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "merged into zbus; via accesskit_unix" },
     { id = "RUSTSEC-2026-0371", reason = "merged into zbus; via accesskit_unix" },
     { id = "RUSTSEC-2026-0372", reason = "merged into zbus; via accesskit_unix" },
+    # Marvin: a timing attack on RSA *decryption*. SSH uses the rsa crate only to sign and
+    # verify (via russh), and no fixed version exists; dropping it would drop RSA keys.
+    { id = "RUSTSEC-2023-0071", reason = "rsa used only for signatures in SSH; no fix available" },
 ]
 
 [licenses]

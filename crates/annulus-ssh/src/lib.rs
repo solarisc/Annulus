@@ -63,7 +63,7 @@ impl Target {
 /// What the host key check found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostKeyQuestion {
-    /// `host` or `[host]:port`, as known_hosts names it.
+    /// `host` or `[host]:port`, as `known_hosts` names it.
     pub host: String,
     /// The key type, e.g. `ssh-ed25519`.
     pub algorithm: String,
@@ -323,7 +323,7 @@ impl Shell {
     pub async fn next(&mut self) -> Output {
         loop {
             match self.channel.wait().await {
-                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
                     return Output::Data(data.to_vec());
                 }
                 Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Output::Closed,
