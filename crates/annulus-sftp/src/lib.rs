@@ -227,9 +227,13 @@ impl Sftp {
     /// remote file's name. `progress(done, total)` is called after each chunk and stops
     /// the transfer by returning `false`.
     ///
+    /// The bytes go to a hidden part file first, which takes the target's name only once
+    /// complete: an existing file is replaced (with [`Conflict::Overwrite`]) only by a
+    /// whole copy, never lost to a cancelled or failed one.
+    ///
     /// # Errors
     /// The remote name is unsafe as a local name, reading or writing failed, or the
-    /// transfer was cancelled. A partial local file is removed.
+    /// transfer was cancelled. The part file is removed.
     pub async fn download(
         &self,
         remote: &str,
@@ -241,59 +245,69 @@ impl Sftp {
         if !is_safe_local_name(name) {
             return Err(SftpError::UnsafeName(name.to_owned()));
         }
-        let mut target = local_dir.join(name);
-        if target.exists() {
-            match conflict {
-                Conflict::Skip => return Ok(Outcome::Skipped),
-                Conflict::Overwrite => {}
-                Conflict::KeepBoth => {
-                    target = (1..KEEP_BOTH_TRIES)
-                        .map(|n| local_dir.join(keep_both_name(name, n)))
-                        .find(|candidate| !candidate.exists())
-                        .unwrap_or(target);
-                }
-            }
-        }
+        let free = |path: &Path| !path.exists();
+        let Some(target) = place(conflict, local_dir.join(name), &free, |n| {
+            local_dir.join(keep_both_name(name, n))
+        }) else {
+            return Ok(Outcome::Skipped);
+        };
         let local_error = |path: &Path| {
             let path = path.to_path_buf();
             move |source| SftpError::Local { path, source }
         };
         let mut source = self.session.open(remote).await?;
         let total = source.metadata().await.map_or(0, |attrs| attrs.len());
-        let mut sink = if conflict == Conflict::Overwrite {
-            tokio::fs::File::create(&target).await
-        } else {
-            tokio::fs::File::create_new(&target).await
+        let mut part = None;
+        for n in 0..KEEP_BOTH_TRIES {
+            let path = local_dir.join(part_name(name, n));
+            match tokio::fs::File::create_new(&path).await {
+                Ok(file) => {
+                    part = Some((path, file));
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(local_error(&path)(error)),
+            }
         }
-        .map_err(local_error(&target))?;
+        let (part, mut sink) = part.ok_or_else(|| SftpError::UnsafeName(name.to_owned()))?;
 
         let copied = copy(&mut source, &mut sink, total, progress).await;
         let flushed = sink.flush().await;
         drop(sink);
         let _ = source.close().await;
-        match (copied, flushed) {
-            (Ok(bytes), Ok(())) => Ok(Outcome::Done {
-                to: target.display().to_string(),
-                bytes,
-            }),
-            (copied, flushed) => {
-                let _ = tokio::fs::remove_file(&target).await;
-                Err(match (copied, flushed) {
-                    (Err(Copy::Cancelled), _) => SftpError::Cancelled,
-                    (Err(Copy::Read(error)), _) => SftpError::Remote(error.to_string()),
-                    (Err(Copy::Write(error)), _) | (_, Err(error)) => local_error(&target)(error),
-                    (Ok(_), Ok(())) => unreachable!("handled above"),
-                })
+        let failure = match (copied, flushed) {
+            (Ok(bytes), Ok(())) => {
+                // Another file may have taken the name during the copy.
+                let Some(target) = place(conflict, target, &free, |n| {
+                    local_dir.join(keep_both_name(name, n))
+                }) else {
+                    let _ = tokio::fs::remove_file(&part).await;
+                    return Ok(Outcome::Skipped);
+                };
+                match tokio::fs::rename(&part, &target).await {
+                    Ok(()) => {
+                        return Ok(Outcome::Done {
+                            to: target.display().to_string(),
+                            bytes,
+                        });
+                    }
+                    Err(error) => local_error(&target)(error),
+                }
             }
-        }
+            (Err(Copy::Cancelled), _) => SftpError::Cancelled,
+            (Err(Copy::Read(error)), _) => SftpError::Remote(error.to_string()),
+            (Err(Copy::Write(error)), _) | (_, Err(error)) => local_error(&part)(error),
+        };
+        let _ = tokio::fs::remove_file(&part).await;
+        Err(failure)
     }
 
     /// Uploads the local file `local` into the remote folder `remote_dir`, under its
-    /// local name. `progress` works as in [`Sftp::download`].
+    /// local name. `progress` works as in [`Sftp::download`], and so does the part file:
+    /// an existing remote file is removed only once the new copy is complete.
     ///
     /// # Errors
-    /// Reading or writing failed, or the transfer was cancelled. A partial remote file
-    /// is removed.
+    /// Reading or writing failed, or the transfer was cancelled. The part file is removed.
     pub async fn upload(
         &self,
         local: &Path,
@@ -309,46 +323,109 @@ impl Sftp {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| SftpError::UnsafeName(local.display().to_string()))?;
-        let mut target = join(remote_dir, name);
-        if self.session.try_exists(target.as_str()).await? {
-            match conflict {
-                Conflict::Skip => return Ok(Outcome::Skipped),
-                Conflict::Overwrite => {}
-                Conflict::KeepBoth => {
-                    for n in 1..KEEP_BOTH_TRIES {
-                        let candidate = join(remote_dir, &keep_both_name(name, n));
-                        if !self.session.try_exists(candidate.as_str()).await? {
-                            target = candidate;
-                            break;
-                        }
-                    }
-                }
-            }
+        // Skip before copying anything; the target is chosen again once the copy is done.
+        if self
+            .place_remote(conflict, remote_dir, name)
+            .await?
+            .is_none()
+        {
+            return Ok(Outcome::Skipped);
         }
         let mut source = tokio::fs::File::open(local).await.map_err(local_error)?;
         let total = source.metadata().await.map_err(local_error)?.len();
-        let mut flags = OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE;
-        if conflict != Conflict::Overwrite {
-            // Never replace a file that appeared since the check above.
-            flags |= OpenFlags::EXCLUDE;
-        }
-        let mut sink = self.session.open_with_flags(target.as_str(), flags).await?;
-        let copied = copy(&mut source, &mut sink, total, progress).await;
-        let closed = sink.shutdown().await;
-        match (copied, closed) {
-            (Ok(bytes), Ok(())) => Ok(Outcome::Done { to: target, bytes }),
-            (copied, closed) => {
-                let _ = self.session.remove_file(target.as_str()).await;
-                Err(match (copied, closed) {
-                    (Err(Copy::Cancelled), _) => SftpError::Cancelled,
-                    (Err(Copy::Read(error)), _) => local_error(error),
-                    (Err(Copy::Write(error)), _) | (_, Err(error)) => {
-                        SftpError::Remote(error.to_string())
-                    }
-                    (Ok(_), Ok(())) => unreachable!("handled above"),
-                })
+        let mut part = None;
+        for n in 0..KEEP_BOTH_TRIES {
+            let path = join(remote_dir, &part_name(name, n));
+            if !self.session.try_exists(path.as_str()).await? {
+                part = Some(path);
+                break;
             }
         }
+        let part = part.ok_or_else(|| SftpError::UnsafeName(name.to_owned()))?;
+        let flags = OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE;
+        let mut sink = self.session.open_with_flags(part.as_str(), flags).await?;
+        let copied = copy(&mut source, &mut sink, total, progress).await;
+        let closed = sink.shutdown().await;
+        let failure = match (copied, closed) {
+            (Ok(bytes), Ok(())) => {
+                // Another file may have taken the name during the copy.
+                let Some(target) = self.place_remote(conflict, remote_dir, name).await? else {
+                    let _ = self.session.remove_file(part.as_str()).await;
+                    return Ok(Outcome::Skipped);
+                };
+                // SFTP rename refuses an existing target on many servers, so the old file
+                // goes first; the new one is complete by now.
+                if conflict == Conflict::Overwrite
+                    && self.session.try_exists(target.as_str()).await?
+                {
+                    self.session.remove_file(target.as_str()).await?;
+                }
+                match self.session.rename(part.as_str(), target.as_str()).await {
+                    Ok(()) => return Ok(Outcome::Done { to: target, bytes }),
+                    Err(error) => SftpError::from(error),
+                }
+            }
+            (Err(Copy::Cancelled), _) => SftpError::Cancelled,
+            (Err(Copy::Read(error)), _) => local_error(error),
+            (Err(Copy::Write(error)), _) | (_, Err(error)) => SftpError::Remote(error.to_string()),
+        };
+        let _ = self.session.remove_file(part.as_str()).await;
+        Err(failure)
+    }
+
+    /// Where an upload of `name` into `dir` lands under `conflict`; `None` to skip.
+    async fn place_remote(
+        &self,
+        conflict: Conflict,
+        dir: &str,
+        name: &str,
+    ) -> Result<Option<String>, SftpError> {
+        let target = join(dir, name);
+        if !self.session.try_exists(target.as_str()).await? {
+            return Ok(Some(target));
+        }
+        Ok(match conflict {
+            Conflict::Skip => None,
+            Conflict::Overwrite => Some(target),
+            Conflict::KeepBoth => {
+                let mut free = None;
+                for n in 1..KEEP_BOTH_TRIES {
+                    let candidate = join(dir, &keep_both_name(name, n));
+                    if !self.session.try_exists(candidate.as_str()).await? {
+                        free = Some(candidate);
+                        break;
+                    }
+                }
+                free
+            }
+        })
+    }
+}
+
+/// Where a download lands under `conflict`, given whether a path is `free` and the
+/// keep-both candidates; `None` to skip.
+fn place(
+    conflict: Conflict,
+    target: PathBuf,
+    free: &dyn Fn(&Path) -> bool,
+    candidate: impl Fn(u32) -> PathBuf,
+) -> Option<PathBuf> {
+    if free(&target) {
+        return Some(target);
+    }
+    match conflict {
+        Conflict::Skip => None,
+        Conflict::Overwrite => Some(target),
+        Conflict::KeepBoth => (1..KEEP_BOTH_TRIES).map(candidate).find(|path| free(path)),
+    }
+}
+
+/// The hidden name a transfer of `name` writes to until it is complete.
+fn part_name(name: &str, n: u32) -> String {
+    if n == 0 {
+        format!(".{name}.annulus-part")
+    } else {
+        format!(".{name}.{n}.annulus-part")
     }
 }
 

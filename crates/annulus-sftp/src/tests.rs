@@ -328,6 +328,46 @@ async fn a_cancelled_download_leaves_no_partial_file() {
     assert!(!local.join("big.bin").exists());
 }
 
+/// The file names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn a_cancelled_overwrite_keeps_the_original_on_both_sides() {
+    let remote = temp_dir("keep-remote");
+    let local = temp_dir("keep-local");
+    fs::write(remote.join("notes.txt"), vec![1u8; CHUNK * 2]).unwrap();
+    fs::write(local.join("notes.txt"), b"local").unwrap();
+    let sftp = client(remote.clone()).await;
+
+    let down = sftp
+        .download("/notes.txt", &local, Conflict::Overwrite, &mut |_, _| false)
+        .await;
+    assert!(matches!(down, Err(SftpError::Cancelled)));
+    assert_eq!(fs::read(local.join("notes.txt")).unwrap(), b"local");
+    assert_eq!(names(&local), ["notes.txt"]);
+
+    fs::write(local.join("big.txt"), vec![2u8; CHUNK * 2]).unwrap();
+    fs::write(remote.join("big.txt"), b"remote").unwrap();
+    let up = sftp
+        .upload(
+            &local.join("big.txt"),
+            "/",
+            Conflict::Overwrite,
+            &mut |_, _| false,
+        )
+        .await;
+    assert!(matches!(up, Err(SftpError::Cancelled)));
+    assert_eq!(fs::read(remote.join("big.txt")).unwrap(), b"remote");
+    assert_eq!(names(&remote), ["big.txt", "notes.txt"]);
+}
+
 #[tokio::test]
 async fn an_upload_lands_under_its_local_name_and_respects_conflicts() {
     let remote = temp_dir("up-remote");

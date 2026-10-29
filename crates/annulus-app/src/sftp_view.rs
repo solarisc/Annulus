@@ -18,7 +18,8 @@ use crate::ssh_dialogs::SshDialogs;
 
 /// What the tab asks the connection thread to do.
 enum Command {
-    List(String),
+    /// List a folder; replies carry the request number so stale ones can be dropped.
+    List(String, u64),
     Download {
         id: u64,
         remote: String,
@@ -47,10 +48,12 @@ enum Reply {
     },
     Listed {
         dir: String,
+        request: u64,
         entries: Vec<Entry>,
     },
     ListFailed {
         dir: String,
+        request: u64,
         message: String,
     },
     Progress {
@@ -147,10 +150,15 @@ async fn run(sftp: Arc<Sftp>, command: Command, send: Send) {
         error: result.err().map(|error| error.to_string()),
     };
     match command {
-        Command::List(dir) => send(match sftp.list(&dir).await {
-            Ok(entries) => Reply::Listed { dir, entries },
+        Command::List(dir, request) => send(match sftp.list(&dir).await {
+            Ok(entries) => Reply::Listed {
+                dir,
+                request,
+                entries,
+            },
             Err(error) => Reply::ListFailed {
                 dir,
+                request,
                 message: error.to_string(),
             },
         }),
@@ -203,6 +211,7 @@ fn progress(
 struct Transfer {
     id: u64,
     label: String,
+    upload: bool,
     done: u64,
     total: u64,
     state: TransferState,
@@ -235,6 +244,8 @@ pub struct SftpTab {
     cwd: Option<String>,
     /// The login folder.
     home: String,
+    /// The newest listing asked for; older replies are dropped.
+    list_request: u64,
     path_field: String,
     entries: Vec<Entry>,
     selected: Option<String>,
@@ -266,6 +277,7 @@ impl SftpTab {
             failed: None,
             cwd: None,
             home: "/".to_owned(),
+            list_request: 0,
             path_field: String::new(),
             entries: Vec::new(),
             selected: None,
@@ -309,7 +321,8 @@ impl SftpTab {
     }
 
     fn navigate(&mut self, dir: String) {
-        self.send(Command::List(dir));
+        self.list_request += 1;
+        self.send(Command::List(dir, self.list_request));
     }
 
     fn reload(&mut self) {
@@ -332,10 +345,15 @@ impl SftpTab {
                     self.dialogs.take(event);
                 }
                 Reply::Ready { home } => {
+                    // Shown even if listing it fails, so the error has somewhere to appear.
+                    self.cwd = Some(home.clone());
+                    self.path_field.clone_from(&home);
                     self.home.clone_from(&home);
                     self.navigate(home);
                 }
-                Reply::Listed { dir, entries } => {
+                Reply::Listed { request, .. } | Reply::ListFailed { request, .. }
+                    if request != self.list_request => {}
+                Reply::Listed { dir, entries, .. } => {
                     if self.cwd.as_deref() != Some(dir.as_str()) {
                         self.selected = None;
                     }
@@ -344,7 +362,7 @@ impl SftpTab {
                     self.entries = entries;
                     self.list_error = None;
                 }
-                Reply::ListFailed { dir, message } => {
+                Reply::ListFailed { dir, message, .. } => {
                     self.list_error = Some(format!("Could not open {dir}: {message}"));
                     if let Some(cwd) = &self.cwd {
                         self.path_field.clone_from(cwd);
@@ -357,7 +375,7 @@ impl SftpTab {
                     }
                 }
                 Reply::Finished { id, result } => {
-                    let uploaded = matches!(result, Ok(Outcome::Done { .. }));
+                    let done = matches!(result, Ok(Outcome::Done { .. }));
                     if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) {
                         transfer.state = match result {
                             Ok(Outcome::Done { to, .. }) => TransferState::Done(to),
@@ -365,7 +383,7 @@ impl SftpTab {
                             Err(message) => TransferState::Failed(message),
                         };
                         // A finished upload shows up in the listing.
-                        if uploaded && transfer.label.starts_with('\u{2191}') {
+                        if done && transfer.upload {
                             self.reload();
                         }
                     }
@@ -381,6 +399,7 @@ impl SftpTab {
     fn start_transfer(
         &mut self,
         label: String,
+        upload: bool,
         command: impl FnOnce(u64, Arc<AtomicBool>) -> Command,
     ) {
         self.next_id += 1;
@@ -388,6 +407,7 @@ impl SftpTab {
         self.transfers.push(Transfer {
             id: self.next_id,
             label,
+            upload,
             done: 0,
             total: 0,
             state: TransferState::Running,
@@ -400,7 +420,7 @@ impl SftpTab {
         let Some(cwd) = self.cwd.clone() else { return };
         let remote = join(&cwd, &entry.name);
         let (to, conflict) = (self.downloads.clone(), self.conflict);
-        self.start_transfer(format!("\u{2193} {}", entry.name), |id, cancel| {
+        self.start_transfer(format!("\u{2193} {}", entry.name), false, |id, cancel| {
             Command::Download {
                 id,
                 remote,
@@ -424,12 +444,14 @@ impl SftpTab {
             return;
         }
         let conflict = self.conflict;
-        self.start_transfer(format!("\u{2191} {name}"), |id, cancel| Command::Upload {
-            id,
-            local,
-            dir,
-            conflict,
-            cancel,
+        self.start_transfer(format!("\u{2191} {name}"), true, |id, cancel| {
+            Command::Upload {
+                id,
+                local,
+                dir,
+                conflict,
+                cancel,
+            }
         });
     }
 
