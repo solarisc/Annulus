@@ -61,8 +61,11 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     }
 
     row.take_right(space::S);
-    let badge = sync_badge(ui, &row, &app.sync_badge());
-    row.take_right(badge + space::S);
+    // Reserved now, drawn after the tabs: Tab follows the drawing order.
+    let sync = app.sync_badge();
+    let badge_w = badge_width(ui, &sync);
+    let badge = Rect::new(row.r() - badge_w, row.center().y - 12.0, badge_w, 24.0);
+    row.take_right(badge_w + space::S);
 
     row.take_left(space::M + 2.0);
     let mark = row.take_left(20.0).centered(20.0, 20.0);
@@ -94,6 +97,7 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         "New terminal tab",
         false,
     );
+    sync_badge(ui, badge, &sync);
     if let Some(index) = close_tab
         && index > 0
     {
@@ -304,16 +308,29 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
     event
 }
 
-/// The sync badge at the right of `row`; returns the width it took.
-fn sync_badge(ui: &mut Ui<'_>, row: &Rect, sync: &SyncBadge) -> f32 {
+/// The sync badge's words and color; `None` for a local vault, which shows none.
+fn badge_label(ui: &Ui<'_>, sync: &SyncBadge) -> Option<(String, Color)> {
     let t = ui.theme;
-    let (label, color) = match sync {
-        SyncBadge::Local => return 0.0,
-        SyncBadge::Synced => ("Synced".to_owned(), t.ok),
-        SyncBadge::Pending(count) => (format!("Syncing {count}"), t.warn),
+    match sync {
+        SyncBadge::Local => None,
+        SyncBadge::Synced => Some(("Synced".to_owned(), t.ok)),
+        SyncBadge::Pending(count) => Some((format!("Syncing {count}"), t.warn)),
+    }
+}
+
+/// The width the sync badge takes.
+fn badge_width(ui: &mut Ui<'_>, sync: &SyncBadge) -> f32 {
+    badge_label(ui, sync).map_or(0.0, |(label, _)| {
+        ui.gfx.measure(&label, SMALL).width + 8.0 + 6.0 + 2.0 * space::S + 4.0
+    })
+}
+
+/// Draws the sync badge into `rect`.
+fn sync_badge(ui: &mut Ui<'_>, rect: Rect, sync: &SyncBadge) {
+    let t = ui.theme;
+    let Some((label, color)) = badge_label(ui, sync) else {
+        return;
     };
-    let width = ui.gfx.measure(&label, SMALL).width + 8.0 + 6.0 + 2.0 * space::S + 4.0;
-    let rect = Rect::new(row.r() - width, row.center().y - 12.0, width, 24.0);
     let id = Id::new("titlebar.sync");
     let response = ui.zone(id, rect, Role::Button, &label);
     ui.gfx.fill_rect(
@@ -326,5 +343,4 @@ fn sync_badge(ui: &mut Ui<'_>, row: &Rect, sync: &SyncBadge) -> f32 {
     ui.gfx.fill_circle(dot.center(), 3.5, color);
     inner.take_left(6.0);
     ui.gfx.text(inner, &label, SMALL, t.text, Align::Start);
-    width
 }
