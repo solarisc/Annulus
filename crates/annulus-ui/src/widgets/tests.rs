@@ -397,14 +397,15 @@ fn tab_stays_inside_an_open_modal() {
 #[test]
 fn clicks_outside_a_modal_never_reach_the_app_underneath() {
     let DialogFixture {
-        mut tree, behind, ..
+        mut tree,
+        behind,
+        modal,
+        ..
     } = dialog_fixture();
     let under = inside(&tree, behind);
-    assert_eq!(
-        tree.hit_test(under),
-        Some(behind),
-        "the button lies under the scrim"
-    );
+    // The point is on the button, but the scrim above it is what the pointer hits.
+    assert!(tree.bounds(behind).unwrap().contains(under));
+    assert_eq!(tree.hit_test(under), Some(modal));
     click(&mut tree, under);
     assert_eq!(actions(&mut tree), []);
     assert_ne!(tree.focused(), Some(behind));
