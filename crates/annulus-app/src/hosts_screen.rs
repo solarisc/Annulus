@@ -239,17 +239,7 @@ impl HostsScreen {
                     .map(|error| format!("Could not duplicate: {error}"));
             }
             RowAction::Edit => {
-                self.editor = Some(Draft {
-                    port: host.port.map(|port| port.to_string()).unwrap_or_default(),
-                    tags: host.tags.join(", "),
-                    problem: None,
-                    is_new: false,
-                    password: SecretText::new(),
-                    forget_password: false,
-                    proxy: SecretText::from(host.proxy.as_ref().map_or("", |url| url.expose())),
-                    env: groups_view::format_env(&host.env),
-                    host: host.clone(),
-                });
+                self.open_editor(host.clone(), false);
             }
             RowAction::MoveTo(index) => {
                 let mut moved = host.clone();
@@ -320,6 +310,15 @@ impl HostsScreen {
                 request = Some(self.quick_connect(&query));
                 self.search.clear();
             }
+            if let Some(host) = self.unsaved_target(&query)
+                && ui
+                    .button("Save as host")
+                    .on_hover_text("Open the host editor with this address filled in")
+                    .clicked()
+            {
+                self.open_editor(host, true);
+                self.search.clear();
+            }
             if ui.button("Local terminal").clicked() {
                 request = Some(Request::Open("Local".into(), Program::DefaultShell));
             }
@@ -388,19 +387,40 @@ impl HostsScreen {
         if ui.button("New host").clicked() {
             let mut host = self.vault.draft_host();
             host.group.clone_from(&self.group);
-            self.group_editor = None;
-            self.editor = Some(Draft {
-                port: host.port.map(|port| port.to_string()).unwrap_or_default(),
-                tags: String::new(),
-                problem: None,
-                is_new: true,
-                password: SecretText::new(),
-                forget_password: false,
-                proxy: SecretText::new(),
-                env: String::new(),
-                host,
-            });
+            self.open_editor(host, true);
         }
+    }
+
+    /// What the search field holds as a new host, when it is an SSH target (`user@host:port`)
+    /// that no saved host has the label of (F-APP-006).
+    fn unsaved_target(&self, query: &str) -> Option<Host> {
+        if !query.contains(['@', ':', '.']) || self.vault.hosts().iter().any(|h| h.label == query) {
+            return None;
+        }
+        let target = Target::parse(query, "")?;
+        let mut host = self.vault.draft_host();
+        host.label.clone_from(&target.host);
+        host.address = target.host;
+        host.port = (target.port != DEFAULT_PORT).then_some(target.port);
+        host.username = target.user;
+        host.group.clone_from(&self.group);
+        Some(host)
+    }
+
+    /// Opens the host editor on `host`.
+    fn open_editor(&mut self, host: Host, is_new: bool) {
+        self.group_editor = None;
+        self.editor = Some(Draft {
+            port: host.port.map(|port| port.to_string()).unwrap_or_default(),
+            tags: host.tags.join(", "),
+            problem: None,
+            is_new,
+            password: SecretText::new(),
+            forget_password: false,
+            proxy: SecretText::from(host.proxy.as_ref().map_or("", |url| url.expose())),
+            env: groups_view::format_env(&host.env),
+            host,
+        });
     }
 
     /// The groups and hosts inside the group being browsed (a host whose group is gone shows
@@ -1288,6 +1308,32 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn a_typed_target_can_be_saved_as_a_host() {
+        let screen = screen_with("known");
+        let host = screen.unsaved_target("deploy@10.0.9.9:2200").unwrap();
+        assert_eq!(
+            (
+                host.label.as_str(),
+                host.address.as_str(),
+                host.username.as_str(),
+                host.port
+            ),
+            ("10.0.9.9", "10.0.9.9", "deploy", Some(2200))
+        );
+        let plain = screen.unsaved_target("db.example.com").unwrap();
+        assert_eq!((plain.port, plain.username.as_str()), (None, ""));
+        assert!(
+            screen.unsaved_target("known").is_none(),
+            "a saved host's label"
+        );
+        assert!(screen.unsaved_target("just words").is_none());
+        assert!(
+            screen.unsaved_target("web").is_none(),
+            "a bare word is a search"
+        );
     }
 
     #[test]
