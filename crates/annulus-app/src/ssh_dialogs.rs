@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, Key, Vec2};
 use annulus_session::{Answers, HostKeyQuestion, SessionEvent};
+use annulus_ssh::Trust;
 use annulus_ui::secret::{SecretText, secret_field};
 use zeroize::Zeroizing;
 
@@ -44,8 +45,8 @@ impl SshDialogs {
         match &self.question {
             None => false,
             Some(Question::HostKey(question)) => {
-                if let Some(trust) = host_key(ctx, question) {
-                    answers.host_key(trust);
+                if let Some(answer) = host_key(ctx, question) {
+                    answers.host_key_answer(answer);
                     self.question = None;
                 }
                 true
@@ -71,7 +72,7 @@ fn dialog(title: &str) -> egui::Window<'_> {
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
 }
 
-fn host_key(ctx: &egui::Context, question: &HostKeyQuestion) -> Option<bool> {
+fn host_key(ctx: &egui::Context, question: &HostKeyQuestion) -> Option<Trust> {
     let mut answer = None;
     dialog("Unknown host").show(ctx, |ui| {
         ui.label(format!(
@@ -84,10 +85,17 @@ fn host_key(ctx: &egui::Context, question: &HostKeyQuestion) -> Option<bool> {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             if ui.button("Trust and connect").clicked() {
-                answer = Some(true);
+                answer = Some(Trust::Save);
+            }
+            if ui
+                .button("Connect once")
+                .on_hover_text("Trust it for this connection only; the next one asks again")
+                .clicked()
+            {
+                answer = Some(Trust::Once);
             }
             if ui.button("Cancel").clicked() || ui.input(|input| input.key_pressed(Key::Escape)) {
-                answer = Some(false);
+                answer = Some(Trust::Reject);
             }
         });
     });

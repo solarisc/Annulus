@@ -58,10 +58,13 @@ struct Answers {
 }
 
 impl Prompt for Answers {
-    fn trust_new_host_key(&self, question: HostKeyQuestion) -> oneshot::Receiver<bool> {
+    fn trust_new_host_key(
+        &self,
+        question: HostKeyQuestion,
+    ) -> oneshot::Receiver<annulus_ssh::Trust> {
         *self.asked_key.lock().unwrap() = Some(question);
         let (tx, rx) = oneshot::channel();
-        let _ = tx.send(self.trust);
+        let _ = tx.send(self.trust.into());
         rx
     }
 

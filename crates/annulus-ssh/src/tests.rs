@@ -291,6 +291,8 @@ async fn serve_recording(key: PrivateKey) -> (u16, Arc<Mutex<Vec<String>>>) {
 /// Scripted answers: whether to trust a new key, and passwords to hand out in order.
 struct Script {
     trust: bool,
+    /// Overrides `trust` with a specific answer, such as connecting once.
+    answer: Option<Trust>,
     passwords: Mutex<Vec<&'static str>>,
     asked_key: Mutex<Option<HostKeyQuestion>>,
 }
@@ -299,6 +301,7 @@ impl Script {
     fn new(trust: bool, passwords: &[&'static str]) -> Arc<Self> {
         Arc::new(Self {
             trust,
+            answer: None,
             passwords: Mutex::new(passwords.iter().rev().copied().collect()),
             asked_key: Mutex::new(None),
         })
@@ -306,10 +309,10 @@ impl Script {
 }
 
 impl Prompt for Script {
-    fn trust_new_host_key(&self, question: HostKeyQuestion) -> oneshot::Receiver<bool> {
+    fn trust_new_host_key(&self, question: HostKeyQuestion) -> oneshot::Receiver<Trust> {
         *self.asked_key.lock().unwrap() = Some(question);
         let (tx, rx) = oneshot::channel();
-        let _ = tx.send(self.trust);
+        let _ = tx.send(self.answer.unwrap_or(self.trust.into()));
         rx
     }
 
@@ -715,6 +718,27 @@ async fn a_server_is_reached_through_a_socks_proxy() {
     .unwrap();
     let mut shell = connection.shell(80, 24).await.unwrap();
     assert_eq!(shell.next().await, Output::Data(b"welcome\r\n".to_vec()));
+}
+
+#[tokio::test]
+async fn a_key_trusted_once_is_not_remembered() {
+    let port = serve(new_key()).await;
+    let path = known_hosts("once");
+    let script = Arc::new(Script {
+        answer: Some(Trust::Once),
+        ..Arc::try_unwrap(Script::new(false, &["secret"]))
+            .ok()
+            .unwrap()
+    });
+    connect(&target(port, "alice"), &path, None, &[], script)
+        .await
+        .expect("connects this once");
+    assert!(
+        !std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("ssh-ed25519"),
+        "nothing was saved"
+    );
 }
 
 #[tokio::test]

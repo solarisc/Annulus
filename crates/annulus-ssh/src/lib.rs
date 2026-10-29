@@ -77,11 +77,31 @@ pub struct HostKeyQuestion {
     pub fingerprint: String,
 }
 
+/// What to do with a server key seen for the first time (F-KNOWN-002).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trust {
+    /// Trust it and remember it in the known-hosts file.
+    Save,
+    /// Trust it for this connection only; the next one asks again.
+    Once,
+    /// Do not connect.
+    Reject,
+}
+
+impl From<bool> for Trust {
+    /// `true` trusts and remembers; `false` rejects.
+    fn from(trust: bool) -> Self {
+        if trust { Trust::Save } else { Trust::Reject }
+    }
+}
+
 /// Answers to questions only the user can answer.
 pub trait Prompt: Send + Sync {
-    /// The server's key is not known yet: trust it (and remember it)?
-    fn trust_new_host_key(&self, question: HostKeyQuestion)
-    -> tokio::sync::oneshot::Receiver<bool>;
+    /// The server's key is not known yet: trust it, and remember it?
+    fn trust_new_host_key(
+        &self,
+        question: HostKeyQuestion,
+    ) -> tokio::sync::oneshot::Receiver<Trust>;
 
     /// The password for `user@host`, or `None` to give up.
     fn password(
@@ -186,12 +206,12 @@ impl client::Handler for Checker {
                     algorithm: key.algorithm().as_str().to_owned(),
                     fingerprint,
                 };
-                let trusted = self
+                let answer = self
                     .prompt
                     .trust_new_host_key(question)
                     .await
-                    .unwrap_or(false);
-                if trusted {
+                    .unwrap_or(Trust::Reject);
+                if answer == Trust::Save {
                     if let Some(parent) = self.known_hosts.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
@@ -202,7 +222,7 @@ impl client::Handler for Checker {
                         &self.known_hosts,
                     );
                 }
-                Ok(trusted)
+                Ok(answer != Trust::Reject)
             }
             Err(_) => {
                 if let Ok(mut changed) = self.changed.lock() {

@@ -328,7 +328,7 @@ enum Backend {
 /// Questions waiting for the user.
 #[derive(Default)]
 struct Pending {
-    host_key: Option<tokio::sync::oneshot::Sender<bool>>,
+    host_key: Option<tokio::sync::oneshot::Sender<annulus_ssh::Trust>>,
     password: Option<tokio::sync::oneshot::Sender<Option<Zeroizing<String>>>>,
 }
 
@@ -337,15 +337,20 @@ struct Pending {
 pub struct Answers(Arc<Mutex<Pending>>);
 
 impl Answers {
-    /// Answers [`SessionEvent::HostKey`]: trust the new key, or stop.
+    /// Answers [`SessionEvent::HostKey`]: trust and remember the new key, or stop.
     pub fn host_key(&self, trust: bool) {
+        self.host_key_answer(trust.into());
+    }
+
+    /// Answers [`SessionEvent::HostKey`] with `answer`, e.g. trusting it this once.
+    pub fn host_key_answer(&self, answer: annulus_ssh::Trust) {
         if let Some(reply) = self
             .0
             .lock()
             .ok()
             .and_then(|mut pending| pending.host_key.take())
         {
-            let _ = reply.send(trust);
+            let _ = reply.send(answer);
         }
     }
 
@@ -390,7 +395,7 @@ impl Prompt for AskUi {
     fn trust_new_host_key(
         &self,
         question: HostKeyQuestion,
-    ) -> tokio::sync::oneshot::Receiver<bool> {
+    ) -> tokio::sync::oneshot::Receiver<annulus_ssh::Trust> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if let Ok(mut pending) = self.answers.0.lock() {
             pending.host_key = Some(tx);
