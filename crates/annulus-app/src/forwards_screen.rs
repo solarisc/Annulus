@@ -381,9 +381,22 @@ impl ForwardsScreen {
             .find(|host| host.id == rule.host_id)
             .map_or_else(|| "(host deleted)".to_owned(), |host| host.label.clone());
         let status = self.running.get(&rule.id).map(Running::status);
+        let running = matches!(
+            status,
+            Some(Status::Starting | Status::Active(_) | Status::Reconnecting(_))
+        );
+        let mut toggle = false;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(&rule.label).size(text::BODY + 1.0).strong());
+                let name = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(&rule.label).size(text::BODY + 1.0).strong(),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Double-click to start or stop");
+                toggle = name.double_clicked();
                 ui.label(
                     RichText::new(format!("{}  \u{b7}  via {host_label}", rule.summary()))
                         .size(text::SECONDARY)
@@ -446,20 +459,16 @@ impl ForwardsScreen {
                 if ui.button("Edit").clicked() {
                     self.editor = Some(Draft::new(rule.clone(), false));
                 }
-                let running = matches!(
-                    status,
-                    Some(Status::Starting | Status::Active(_) | Status::Reconnecting(_))
-                );
-                if running {
-                    if ui.button("Stop").clicked() {
-                        self.running.remove(&rule.id);
-                    }
-                } else if ui.button("Start").clicked() {
-                    self.error = None;
-                    self.start_rule(ui.ctx(), rule, hosts);
-                }
+                let label = if running { "Stop" } else { "Start" };
+                toggle |= ui.button(label).clicked();
             });
         });
+        if toggle && running {
+            self.running.remove(&rule.id);
+        } else if toggle {
+            self.error = None;
+            self.start_rule(ui.ctx(), rule, hosts);
+        }
     }
 
     fn editor_ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut HostsScreen) {
