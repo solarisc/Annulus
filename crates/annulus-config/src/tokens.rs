@@ -1,0 +1,284 @@
+//! Design tokens: our own visual identity (UI-SPEC §8, ADR-0010). Colors, radii, spacing,
+//! type sizes and control metrics, for the light and dark themes.
+
+/// An opaque sRGB color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Rgb {
+    /// Red.
+    pub r: u8,
+    /// Green.
+    pub g: u8,
+    /// Blue.
+    pub b: u8,
+}
+
+impl Rgb {
+    /// The color `0xRRGGBB`.
+    #[must_use]
+    pub const fn hex(value: u32) -> Self {
+        let [_, r, g, b] = value.to_be_bytes();
+        Self { r, g, b }
+    }
+
+    /// WCAG 2.x relative luminance, 0.0 (black) to 1.0 (white).
+    #[must_use]
+    pub fn luminance(self) -> f64 {
+        let channel = |value: u8| {
+            let c = f64::from(value) / 255.0;
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(self.r) + 0.7152 * channel(self.g) + 0.0722 * channel(self.b)
+    }
+
+    /// WCAG 2.x contrast ratio with `other`, from 1.0 to 21.0.
+    #[must_use]
+    pub fn contrast(self, other: Rgb) -> f64 {
+        let (a, b) = (self.luminance(), other.luminance());
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+}
+
+/// Which theme the user picked in Settings (F-SET-002).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeMode {
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
+    /// Follow the operating system, switching live when it does.
+    #[default]
+    System,
+}
+
+/// A resolved theme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Appearance {
+    /// Light theme.
+    Light,
+    /// Dark theme.
+    Dark,
+}
+
+impl ThemeMode {
+    /// The theme to draw, given what the OS currently uses.
+    #[must_use]
+    pub fn resolve(self, system: Appearance) -> Appearance {
+        match self {
+            ThemeMode::Light => Appearance::Light,
+            ThemeMode::Dark => Appearance::Dark,
+            ThemeMode::System => system,
+        }
+    }
+}
+
+/// The color tokens of one theme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// Window background.
+    pub bg_app: Rgb,
+    /// Panels and cards.
+    pub bg_surface: Rgb,
+    /// Popovers, menus and dialogs.
+    pub bg_raised: Rgb,
+    /// Hovered rows and controls.
+    pub bg_hover: Rgb,
+    /// Selected rows.
+    pub bg_selected: Rgb,
+    /// Dividers and control outlines.
+    pub border_subtle: Rgb,
+    /// Main text.
+    pub text_primary: Rgb,
+    /// Secondary text: hints, metadata.
+    pub text_secondary: Rgb,
+    /// Accent: primary buttons, links, the focus ring.
+    pub accent: Rgb,
+    /// Warnings.
+    pub status_warn: Rgb,
+    /// Errors, also used as text.
+    pub status_error: Rgb,
+    /// Success and "connected".
+    pub status_ok: Rgb,
+}
+
+impl Palette {
+    /// The palette for `appearance`.
+    #[must_use]
+    pub const fn for_appearance(appearance: Appearance) -> Self {
+        match appearance {
+            Appearance::Light => LIGHT,
+            Appearance::Dark => DARK,
+        }
+    }
+
+    /// Every background a token can sit on.
+    #[must_use]
+    pub const fn backgrounds(&self) -> [Rgb; 5] {
+        [
+            self.bg_app,
+            self.bg_surface,
+            self.bg_raised,
+            self.bg_hover,
+            self.bg_selected,
+        ]
+    }
+}
+
+/// The dark theme.
+pub const DARK: Palette = Palette {
+    bg_app: Rgb::hex(0x12_14_16),
+    bg_surface: Rgb::hex(0x1A_1D_20),
+    bg_raised: Rgb::hex(0x23_27_2B),
+    bg_hover: Rgb::hex(0x2B_30_35),
+    bg_selected: Rgb::hex(0x13_3A_37),
+    border_subtle: Rgb::hex(0x2C_31_36),
+    text_primary: Rgb::hex(0xE8_EA_ED),
+    text_secondary: Rgb::hex(0xA9_B0_B7),
+    accent: Rgb::hex(0x2B_B3_A3),
+    status_warn: Rgb::hex(0xE0_A4_3A),
+    status_error: Rgb::hex(0xE8_64_5D),
+    status_ok: Rgb::hex(0x4C_C2_7A),
+};
+
+/// The light theme. Raised surfaces are white and set apart by a shadow.
+pub const LIGHT: Palette = Palette {
+    bg_app: Rgb::hex(0xF6_F7_F8),
+    bg_surface: Rgb::hex(0xFF_FF_FF),
+    bg_raised: Rgb::hex(0xFF_FF_FF),
+    bg_hover: Rgb::hex(0xEE_F0_F2),
+    bg_selected: Rgb::hex(0xD9_F2_EE),
+    border_subtle: Rgb::hex(0xE2_E5_E8),
+    text_primary: Rgb::hex(0x15_18_1B),
+    text_secondary: Rgb::hex(0x4D_56_5E),
+    accent: Rgb::hex(0x11_7C_70),
+    status_warn: Rgb::hex(0xB9_7B_10),
+    status_error: Rgb::hex(0xC9_3A_33),
+    status_ok: Rgb::hex(0x24_93_4F),
+};
+
+/// Corner radii in DIPs.
+pub mod radius {
+    /// Inputs and chips.
+    pub const SMALL: f32 = 4.0;
+    /// Cards and buttons.
+    pub const MEDIUM: f32 = 8.0;
+    /// Dialogs.
+    pub const LARGE: f32 = 12.0;
+}
+
+/// The 4-DIP spacing scale.
+pub mod space {
+    /// 4 DIPs.
+    pub const XS: f32 = 4.0;
+    /// 8 DIPs.
+    pub const S: f32 = 8.0;
+    /// 12 DIPs.
+    pub const M: f32 = 12.0;
+    /// 16 DIPs.
+    pub const L: f32 = 16.0;
+    /// 24 DIPs.
+    pub const XL: f32 = 24.0;
+    /// 32 DIPs.
+    pub const XXL: f32 = 32.0;
+}
+
+/// Type sizes in DIPs, for the system UI font.
+pub mod text {
+    /// Body text.
+    pub const BODY: f32 = 13.0;
+    /// Secondary text.
+    pub const SECONDARY: f32 = 12.0;
+    /// Section headings.
+    pub const HEADING: f32 = 15.0;
+    /// Page headings.
+    pub const TITLE: f32 = 18.0;
+}
+
+/// Control and list metrics in DIPs.
+pub mod metrics {
+    /// Height of buttons, fields and selects.
+    pub const CONTROL_HEIGHT: f32 = 32.0;
+    /// Height of a host card in grid view.
+    pub const HOST_CARD_HEIGHT: f32 = 72.0;
+    /// Height of a row in list view.
+    pub const LIST_ROW_HEIGHT: f32 = 36.0;
+    /// Width of the focus ring, drawn outside the control with this offset.
+    pub const FOCUS_RING_WIDTH: f32 = 2.0;
+}
+
+/// Duration of panel and popover animations, in milliseconds. Zero under reduced motion.
+pub const MOTION_MS: u32 = 120;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG AA for normal text.
+    const TEXT_AA: f64 = 4.5;
+    /// WCAG AA for UI components and graphics (focus ring, status dots), 1.4.11.
+    const NON_TEXT_AA: f64 = 3.0;
+
+    fn failures(palette: &Palette) -> Vec<String> {
+        let mut failures = Vec::new();
+        let mut require = |name: &str, color: Rgb, backgrounds: &[Rgb], minimum: f64| {
+            for background in backgrounds {
+                let ratio = color.contrast(*background);
+                if ratio < minimum {
+                    failures.push(format!("{name} on {background:?}: {ratio:.2} < {minimum}"));
+                }
+            }
+        };
+        let all = palette.backgrounds();
+        let panels = [palette.bg_app, palette.bg_surface, palette.bg_raised];
+        require("text_primary", palette.text_primary, &all, TEXT_AA);
+        require("text_secondary", palette.text_secondary, &all, TEXT_AA);
+        // Links and error messages are text on panels; the ring and dots are graphics.
+        require("accent", palette.accent, &panels, TEXT_AA);
+        require("status_error", palette.status_error, &panels, TEXT_AA);
+        for (name, color) in [
+            ("accent", palette.accent),
+            ("status_warn", palette.status_warn),
+            ("status_error", palette.status_error),
+            ("status_ok", palette.status_ok),
+        ] {
+            require(name, color, &all, NON_TEXT_AA);
+        }
+        failures
+    }
+
+    #[test]
+    fn both_themes_meet_wcag_aa() {
+        assert_eq!(failures(&DARK), Vec::<String>::new(), "dark");
+        assert_eq!(failures(&LIGHT), Vec::<String>::new(), "light");
+    }
+
+    #[test]
+    fn contrast_matches_wcag_reference_values() {
+        let black = Rgb::hex(0x00_00_00);
+        let white = Rgb::hex(0xFF_FF_FF);
+        assert!((black.contrast(white) - 21.0).abs() < 1e-9);
+        assert!((white.contrast(white) - 1.0).abs() < 1e-9);
+        // #767676 on white is the classic smallest gray that passes AA (4.54:1).
+        assert!((Rgb::hex(0x76_76_76).contrast(white) - 4.54).abs() < 0.01);
+    }
+
+    #[test]
+    fn system_mode_follows_the_os_and_fixed_modes_ignore_it() {
+        assert_eq!(
+            ThemeMode::System.resolve(Appearance::Dark),
+            Appearance::Dark
+        );
+        assert_eq!(
+            ThemeMode::System.resolve(Appearance::Light),
+            Appearance::Light
+        );
+        assert_eq!(
+            ThemeMode::Light.resolve(Appearance::Dark),
+            Appearance::Light
+        );
+        assert_eq!(ThemeMode::Dark.resolve(Appearance::Light), Appearance::Dark);
+    }
+}
