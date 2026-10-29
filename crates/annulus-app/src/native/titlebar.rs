@@ -111,6 +111,8 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         ui.gfx.fill_rect(line, 0.0, ui.theme.line_strong);
     }
     let dragged = drag_tab(app, ui, &slots);
+    // A context menu's "close the others": the tab kept, and whether only those to its right go.
+    let mut close_others = None;
     for (index, slot) in slots.iter().enumerate() {
         if dragged.is_some_and(|(at, _)| at == index) {
             continue;
@@ -119,9 +121,14 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         let at = ui.spring(place, slot.x);
         match tab(ui, *slot, at, app, index) {
             TabEvent::Select => app.active = index,
-            TabEvent::Close => close_tab = Some(index),
+            TabEvent::Close | TabEvent::Menu(0) => close_tab = Some(index),
+            TabEvent::Menu(1) => close_others = Some((app.tabs[index].uid, true)),
+            TabEvent::Menu(_) => close_others = Some((app.tabs[index].uid, false)),
             TabEvent::None => {}
         }
+    }
+    if let Some((keep, right_only)) = close_others {
+        app.close_others(keep, right_only);
     }
     // The dragged tab last, over its neighbours.
     if let Some((index, at)) = dragged
@@ -345,7 +352,12 @@ enum TabEvent {
     None,
     Select,
     Close,
+    /// An item of the tab's context menu, [`TAB_MENU`].
+    Menu(usize),
 }
+
+/// A session tab's context menu (right click, or Shift+F10).
+const TAB_MENU: [&str; 3] = ["Close tab", "Close tabs to the right", "Close other tabs"];
 
 /// What a tab's icon is: the host's OS mark for a session with a saved host whose OS is known,
 /// else one for what it holds.
@@ -366,6 +378,7 @@ fn tab_icon(app: &NativeApp, tab: &super::Tab) -> Result<&'static super::os::Os,
 }
 
 /// Draws tab `index`, taking clicks in `slot` and drawn at `x` (it glides there).
+#[allow(clippy::too_many_lines)] // One tab left to right: pill, icon, dot, label, close, menu.
 fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> TabEvent {
     let tab = &app.tabs[index];
     let id = Id::new(("tab", tab.uid));
@@ -461,6 +474,10 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
         }
         if response.middle_clicked {
             event = TabEvent::Close;
+        }
+        let menu: Vec<String> = TAB_MENU.iter().map(|item| (*item).to_owned()).collect();
+        if let Some(choice) = ui.context_menu(id, &response, &menu) {
+            event = TabEvent::Menu(choice);
         }
         inner.take_right(6.0);
     }

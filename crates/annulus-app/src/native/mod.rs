@@ -316,6 +316,23 @@ impl NativeApp {
         }
     }
 
+    /// Closes every session tab but tab `uid`, or (`right_only`) only those to its right; `uid`
+    /// is then in front.
+    pub fn close_others(&mut self, uid: u64, right_only: bool) {
+        let Some(at) = self.tabs.iter().position(|tab| tab.uid == uid) else {
+            return;
+        };
+        let from = if right_only { at + 1 } else { FIXED_TABS };
+        for index in (from..self.tabs.len()).rev() {
+            if self.tabs[index].uid != uid {
+                self.close_tab(index);
+            }
+        }
+        if let Some(at) = self.tabs.iter().position(|tab| tab.uid == uid) {
+            self.active = at;
+        }
+    }
+
     /// Moves tab `from` to place `to`, the tab in front staying in front; fixed tabs never move
     /// and nothing moves among them.
     pub fn move_tab(&mut self, from: usize, to: usize) {

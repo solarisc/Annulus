@@ -3372,6 +3372,35 @@ fn closing_a_background_tab_keeps_the_front_tab() {
 }
 
 #[test]
+fn a_tabs_menu_closes_the_tabs_to_its_right_or_all_the_others() {
+    let mut app = NativeApp::new(Some(fixture_vault("tab-menu", false)));
+    for title in ["a", "b", "c", "d"] {
+        replay(&mut app, title);
+    }
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let output = step(&mut app, &mut state, &right_click_on(&output, "b"), 1.0);
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Close tabs to the right"),
+        2.0,
+    );
+    assert_eq!(titles(&app), ["Vault", "SFTP", "a", "b"]);
+    assert_eq!(app.tabs[app.active].title, "b");
+    replay(&mut app, "e");
+    let output = step(&mut app, &mut state, &[], 3.0);
+    let output = step(&mut app, &mut state, &right_click_on(&output, "b"), 4.0);
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Close other tabs"),
+        5.0,
+    );
+    assert_eq!(titles(&app), ["Vault", "SFTP", "b"]);
+}
+
+#[test]
 fn a_tab_moves_among_the_sessions_and_the_one_in_front_stays_in_front() {
     let mut app = NativeApp::new(None);
     for title in ["a", "b", "c"] {
