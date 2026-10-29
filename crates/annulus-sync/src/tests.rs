@@ -597,6 +597,37 @@ mod vaults {
     }
 
     #[test]
+    fn signing_in_again_on_the_same_vault_relinks_without_duplicates() {
+        let server = server();
+        let (a_token, _) = tokens(&server);
+        let a_id = server.authenticate(&a_token).unwrap();
+        let (mut laptop, _) = Vault::create(temp("relink"), "pw", CHEAP_KDF).unwrap();
+        let mut host = laptop.draft_host();
+        host.label = "db".into();
+        host.address = "db.internal".into();
+        laptop.upsert_host(host).unwrap();
+        laptop.set_sync_account(Some(account(1))).unwrap();
+        round(&server, a_id, &mut laptop);
+
+        laptop.set_sync_account(None).unwrap();
+        // The account's key file is this vault's own (it registered with it).
+        let key_file = laptop.key_file_bytes();
+        assert!(laptop.sync_copy().same_account(&key_file, "pw"));
+        laptop.relink(&key_file, account(1)).unwrap();
+        round(&server, a_id, &mut laptop);
+        assert_eq!(
+            server.pull(a_id, 0).unwrap().records.len(),
+            1,
+            "no duplicate on the server"
+        );
+        assert_eq!(laptop.hosts().len(), 1);
+
+        // Another vault is not the same account, whatever its password.
+        let (other, _) = Vault::create(temp("relink-other"), "pw", CHEAP_KDF).unwrap();
+        assert!(!other.sync_copy().same_account(&key_file, "pw"));
+    }
+
+    #[test]
     fn a_snapshot_older_than_a_local_edit_is_not_applied() {
         let (mut vault, _) = Vault::create(temp("stale"), "pw", CHEAP_KDF).unwrap();
         let copy = vault.sync_copy();

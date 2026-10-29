@@ -383,6 +383,17 @@ impl SyncCopy {
         }
     }
 
+    /// Whether `key_file` (an account's, from sign-in) opens with `password` to this vault's
+    /// own account key: then signing in only re-links, with nothing to merge. Runs
+    /// Argon2id; call it off the UI thread.
+    #[must_use]
+    pub fn same_account(&self, key_file: &[u8], password: &str) -> bool {
+        serde_json::from_slice::<crate::crypto::KeyFile>(key_file)
+            .ok()
+            .and_then(|file| Keys::unlock(&file, password).ok())
+            .is_some_and(|keys| keys.same_account(&self.keys))
+    }
+
     /// Records deleted after reaching the server: their sync ids and kinds, for the trash.
     #[must_use]
     pub fn deleted(&self) -> Vec<(String, u8)> {

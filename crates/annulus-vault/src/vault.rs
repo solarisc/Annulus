@@ -553,6 +553,27 @@ impl Vault {
         Ok(())
     }
 
+    /// Signs in again to the account this vault already belongs to: takes the account's
+    /// key file (it may be wrapped by a newer password) and the new device token, keeping
+    /// every record and its sync state. Check with `SyncCopy::same_account` first.
+    ///
+    /// # Errors
+    /// The key file is damaged, or writing the file.
+    pub fn relink(&mut self, key_file: &[u8], account: SyncAccount) -> Result<(), VaultError> {
+        let file: KeyFile = serde_json::from_slice(key_file)
+            .map_err(|error| VaultError::Damaged(error.to_string()))?;
+        let previous = std::mem::replace(&mut self.key_file, file);
+        let mut sync = self.sync.clone();
+        sync.account = Some(account);
+        if let Err(error) = self.save(&self.hosts, &self.forwards, &sync) {
+            self.key_file = previous;
+            return Err(error);
+        }
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
+    }
+
     /// The key file as uploaded at account registration: the account key wrapped by the
     /// password and by the recovery key, never the key itself.
     #[must_use]

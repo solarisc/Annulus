@@ -186,6 +186,14 @@ pub struct Keys {
 }
 
 impl Keys {
+    /// Whether both unlock the same account key (the same vault, perhaps wrapped by a
+    /// different password).
+    #[must_use]
+    pub fn same_account(&self, other: &Keys) -> bool {
+        // Not secret-dependent timing worth guarding: both sides are already unlocked.
+        self.account.0 == other.account.0
+    }
+
     /// Creates a new account key protected by `password` and by a new recovery key, which is
     /// returned for the user to write down (shown once).
     ///

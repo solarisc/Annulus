@@ -37,6 +37,9 @@ enum Done {
     /// The joined vault (written next to the live one), the backup, and the generation of
     /// the local vault it merged.
     Joined(Box<Vault>, PathBuf, u64),
+    /// Signed in again to the account this vault already belongs to: its key file and the
+    /// new device.
+    Relinked(Vec<u8>, SyncAccount),
     /// A sync round finished.
     Synced(Box<SyncCopy>, Result<Report, SyncError>),
     /// The device list.
@@ -172,35 +175,15 @@ impl SyncScreen {
                 });
                 self.last_round = f64::NEG_INFINITY;
             }
-            Done::Joined(vault, backup, generation) => {
-                let mut vault = *vault;
-                if hosts.vault().generation() != generation {
-                    // Edited while signing in: the merge would miss that edit.
-                    let _ = std::fs::remove_file(vault.path());
-                    self.message = Some((
-                        true,
-                        "Hosts changed while signing in, so nothing was replaced. Sign in again."
-                            .into(),
-                    ));
-                    return false;
-                }
-                if let Err(error) = vault.move_to(vault_path) {
-                    self.message = Some((
-                        true,
-                        format!("Could not put the account's vault in place: {error}"),
-                    ));
-                    return false;
-                }
-                hosts.replace_vault(vault);
-                self.message = Some((
-                    false,
-                    format!(
-                        "Signed in, and this device's hosts are merged into the account. From now on the vault opens with the account's master password and recovery key. The old vault file is kept at {}.",
-                        backup.display()
-                    ),
-                ));
+            Done::Relinked(key_file, account) => {
+                self.message = Some(match hosts.vault_mut().relink(&key_file, account) {
+                    Ok(()) => (false, "Signed in again. Nothing was merged: this vault already belongs to the account.".into()),
+                    Err(error) => (true, format!("Could not sign in: {error}")),
+                });
                 self.last_round = f64::NEG_INFINITY;
-                return true;
+            }
+            Done::Joined(vault, backup, generation) => {
+                return self.finish_join(*vault, &backup, generation, hosts, vault_path);
             }
             Done::Synced(copy, result) => match result {
                 Ok(report) => {
@@ -265,6 +248,43 @@ impl SyncScreen {
             Done::Failed(message) => self.message = Some((true, message)),
         }
         false
+    }
+
+    /// Puts a joined vault in place; true when it replaced the local one.
+    fn finish_join(
+        &mut self,
+        mut vault: Vault,
+        backup: &Path,
+        generation: u64,
+        hosts: &mut HostsScreen,
+        vault_path: &Path,
+    ) -> bool {
+        if hosts.vault().generation() != generation {
+            // Edited while signing in: the merge would miss that edit.
+            let _ = std::fs::remove_file(vault.path());
+            self.message = Some((
+                true,
+                "Hosts changed while signing in, so nothing was replaced. Sign in again.".into(),
+            ));
+            return false;
+        }
+        if let Err(error) = vault.move_to(vault_path) {
+            self.message = Some((
+                true,
+                format!("Could not put the account's vault in place: {error}"),
+            ));
+            return false;
+        }
+        hosts.replace_vault(vault);
+        self.message = Some((
+            false,
+            format!(
+                "Signed in, and this device's hosts are merged into the account. From now on the vault opens with the account's master password and recovery key. The old vault file is kept at {}.",
+                backup.display()
+            ),
+        ));
+        self.last_round = f64::NEG_INFINITY;
+        true
     }
 
     /// Draws the section.
@@ -428,6 +448,7 @@ impl SyncScreen {
         let local_keys = hosts.vault().ssh_keys().to_vec();
         let local_snippets = hosts.vault().snippets().to_vec();
         let generation = hosts.vault().generation();
+        let copy = hosts.vault().sync_copy();
         let path = vault_path.to_path_buf();
         self.message = None;
         self.start(ctx, "Signing in", move || {
@@ -443,6 +464,17 @@ impl SyncScreen {
                 Ok(session) => session,
                 Err(error) => return Done::Failed(format!("Could not sign in: {error}")),
             };
+            let account = SyncAccount {
+                server: server.clone(),
+                name: name.clone(),
+                device: session.device,
+                token: Secret::new(session.token.clone()),
+            };
+            // This vault already belongs to the account (signed out earlier, or signed out
+            // by another device): just link it again, nothing to merge.
+            if copy.same_account(&session.wrapped_keys, &password) {
+                return Done::Relinked(session.wrapped_keys, account);
+            }
             // Keep the current vault file before anything replaces it.
             let backup = path.with_extension(format!("before-sync-{}.anv", now_secs()));
             if let Err(error) = std::fs::copy(&path, &backup) {
