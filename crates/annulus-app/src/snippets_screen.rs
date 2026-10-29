@@ -1,5 +1,5 @@
 //! Snippets (F-SNIP-001…003): the Snippets screen to write and organize saved commands,
-//! and the panel beside a terminal (Ctrl+Shift+S) to run or paste one.
+//! and the panel beside a terminal (Ctrl+Shift+.) to run or paste one.
 
 use eframe::egui::{self, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
@@ -42,7 +42,7 @@ impl SnippetsScreen {
         ui.add_space(space::S);
         if vault.snippets().is_empty() {
             ui.label(
-                RichText::new("No snippets yet. Save commands you type often; run them from the panel beside any terminal with Ctrl+Shift+S.")
+                RichText::new("No snippets yet. Save commands you type often; run them from the panel beside any terminal with Ctrl+Shift+.")
                     .color(theme::color(palette.text_secondary)),
             );
             return;

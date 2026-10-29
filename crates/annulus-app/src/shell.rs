@@ -11,11 +11,12 @@ use crate::forwards_screen::ForwardsScreen;
 use crate::hosts_screen::{HostsScreen, Request};
 use crate::keychain_screen::KeychainScreen;
 use crate::lock_screen::LockScreen;
+use crate::panes::{Layout as PaneLayout, Panes};
 use crate::password_screen::PasswordScreen;
 use crate::sftp_view::SftpTab;
 use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::SyncScreen;
-use crate::terminal_view::{FONT_SIZES, TerminalTab};
+use crate::terminal_view::FONT_SIZES;
 use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
 use annulus_session::profiles::{self, Profile};
 use annulus_term::themes;
@@ -82,8 +83,8 @@ impl Section {
 pub enum Tab {
     /// The vault: hosts, keychain and the rest. Always first, never closed.
     Vault,
-    /// A terminal: a local shell or an SSH session.
-    Terminal(Box<TerminalTab>),
+    /// Terminals: one, or several split panes.
+    Terminal(Box<Panes>),
     /// A file browser on a host.
     Sftp(Box<SftpTab>),
 }
@@ -94,7 +95,7 @@ impl Tab {
     pub fn title(&self) -> &str {
         match self {
             Tab::Vault => "Vault",
-            Tab::Terminal(terminal) => &terminal.title,
+            Tab::Terminal(panes) => panes.title(),
             Tab::Sftp(sftp) => &sftp.title,
         }
     }
@@ -122,7 +123,7 @@ pub struct Shell {
     snippets: SnippetsScreen,
     /// Changing the master password, in Settings.
     password: PasswordScreen,
-    /// The snippet panel beside terminals is open (Ctrl+Shift+S), and its search text.
+    /// The snippet panel beside terminals is open (Ctrl+Shift+.), and its search text.
     snippet_panel: Option<String>,
     /// Setup or unlock, while the vault is locked.
     lock: LockScreen,
@@ -190,6 +191,41 @@ impl Shell {
             .or_else(|| self.profiles.first())
     }
 
+    /// Split right (Ctrl+Shift+D) and down (Ctrl+Shift+E) with the focused pane's program,
+    /// and Alt+Arrows to move between panes (UI-SPEC §7).
+    fn pane_shortcuts(&mut self, ui: &Ui) {
+        let Some(Tab::Terminal(panes)) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let command = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+        let several = panes.len() > 1;
+        let (right, down, back, forward) = ui.input_mut(|input| {
+            let mut arrow = |key| several && input.consume_key(egui::Modifiers::ALT, key);
+            let back = arrow(egui::Key::ArrowLeft) | arrow(egui::Key::ArrowUp);
+            let forward = arrow(egui::Key::ArrowRight) | arrow(egui::Key::ArrowDown);
+            (
+                input.consume_key(command, egui::Key::D),
+                input.consume_key(command, egui::Key::E),
+                back,
+                forward,
+            )
+        });
+        if let Some((title, program)) = panes.focused_program() {
+            if right {
+                panes.split(PaneLayout::Row, title.clone(), program.clone());
+            }
+            if down {
+                panes.split(PaneLayout::Column, title, program);
+            }
+        }
+        if back {
+            panes.move_focus(-1);
+        }
+        if forward {
+            panes.move_focus(1);
+        }
+    }
+
     /// Opens a local terminal with `profile`, or the default one.
     pub fn open_local(&mut self, profile: Option<usize>) {
         let chosen = profile
@@ -226,7 +262,7 @@ impl Shell {
     /// Opens a terminal tab titled `title` running `program`, in front.
     pub fn open_terminal(&mut self, title: impl Into<String>, program: Program) {
         self.tabs
-            .push(Tab::Terminal(Box::new(TerminalTab::new(title, program))));
+            .push(Tab::Terminal(Box::new(Panes::single(title, program))));
         self.active_tab = self.tabs.len() - 1;
     }
 
@@ -311,11 +347,13 @@ impl Shell {
                 .exact_size(200.0)
                 .show(ui, |ui| self.navigation(ui));
             egui::CentralPanel::default().show(ui, |ui| self.section_screen(ui));
-        } else if let Some(Tab::Terminal(terminal)) = self.tabs.get_mut(self.active_tab) {
+        } else if let Some(Tab::Terminal(panes)) = self.tabs.get_mut(self.active_tab) {
             let font_size = self.font_size;
             let theme = themes::theme(&self.terminal_theme)
                 .unwrap_or_else(annulus_term::Palette::annulus_dark);
-            terminal.set_palette(&theme);
+            for pane in panes.all_mut() {
+                pane.set_palette(&theme);
+            }
             if let Some(search) = &mut self.snippet_panel {
                 let snippets = self
                     .hosts
@@ -327,14 +365,16 @@ impl Shell {
                     .default_size(260.0)
                     .show(ui, |ui| snippets_screen::side_panel(ui, search, &snippets))
                     .inner;
-                if let Some((snippet, run)) = chosen {
-                    terminal.send_snippet(&snippet, run);
+                if let Some((snippet, run)) = chosen
+                    && let Some(pane) = panes.focused_mut()
+                {
+                    pane.send_snippet(&snippet, run);
                 }
             }
             let frame = egui::Frame::NONE.inner_margin(egui::Margin::same(4));
             egui::CentralPanel::default()
                 .frame(frame)
-                .show(ui, |ui| terminal.ui(ui, font_size));
+                .show(ui, |ui| panes.ui(ui, font_size));
         } else if let Some(Tab::Sftp(sftp)) = self.tabs.get_mut(self.active_tab) {
             egui::CentralPanel::default().show(ui, |ui| sftp.ui(ui, &palette));
         }
@@ -376,9 +416,10 @@ impl Shell {
                 input.consume_key(command, egui::Key::W),
                 input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab),
                 input.consume_key(command, egui::Key::L),
-                input.consume_key(command, egui::Key::S),
+                input.consume_key(command, egui::Key::Period),
             )
         });
+        self.pane_shortcuts(ui);
         if snippets {
             self.snippet_panel = match self.snippet_panel.take() {
                 Some(_) => None,
@@ -392,7 +433,14 @@ impl Shell {
             self.open_local(None);
         }
         if close_tab {
-            self.close_tab(self.active_tab);
+            // A split tab closes its focused pane first.
+            let closed_pane = match self.tabs.get_mut(self.active_tab) {
+                Some(Tab::Terminal(panes)) => panes.close_focused(),
+                _ => false,
+            };
+            if !closed_pane {
+                self.close_tab(self.active_tab);
+            }
         }
         if next_tab {
             self.active_tab = (self.active_tab + 1) % self.tabs.len().max(1);

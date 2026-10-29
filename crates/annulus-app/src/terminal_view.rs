@@ -197,6 +197,17 @@ impl TerminalTab {
         }
     }
 
+    /// Gives this pane the keyboard on its next frame.
+    pub fn take_focus(&mut self) {
+        self.focused_once = false;
+    }
+
+    /// What this pane runs.
+    #[must_use]
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
     /// Starts the program again in this tab: a reconnect for SSH, a new shell otherwise.
     fn restart(&mut self) {
         self.session = None;
