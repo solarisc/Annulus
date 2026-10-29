@@ -225,8 +225,14 @@ impl LiveTerminal {
         let Some(pointer) = ui.pointer() else { return };
         let (row, column) = cell_at(pointer);
         let ctrl = ui.modifiers().ctrl;
-        if ctrl && response.hovered && session.link_at(row, column).is_some() {
+        let link = (ctrl && response.hovered)
+            .then(|| session.link_at(row, column))
+            .flatten();
+        if let Some(link) = link {
             ui.set_cursor(annulus_ui::kit::Cursor::Pointer);
+            // Where it really goes, which a link's text can hide.
+            let near = annulus_ui::gfx::Rect::new(pointer.x - 8.0, pointer.y - 8.0, 16.0, 16.0);
+            ui.tooltip(id, near, &link_hint(&link.url));
         } else if response.hovered {
             ui.set_cursor(annulus_ui::kit::Cursor::Text);
         }
@@ -848,6 +854,24 @@ fn encode(typed: &Typed, mode: TermMode) -> Option<Vec<u8>> {
     }
 }
 
+/// What a link's tooltip says: its real target, and whether a click opens it.
+fn link_hint(url: &str) -> String {
+    const LONGEST: usize = 80;
+    let shown: String = if url.chars().count() > LONGEST {
+        url.chars()
+            .take(LONGEST - 1)
+            .chain(std::iter::once('\u{2026}'))
+            .collect()
+    } else {
+        url.to_owned()
+    };
+    if annulus_term::links::allowed(url) {
+        format!("Ctrl+click opens {shown}")
+    } else {
+        format!("Not opened: {shown}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use annulus_config::tokens::Appearance;
@@ -856,6 +880,25 @@ mod tests {
     use annulus_ui::kit::{Event, Theme, UiState};
 
     use super::*;
+
+    #[test]
+    fn a_link_names_its_real_target_and_whether_a_click_opens_it() {
+        assert_eq!(
+            link_hint("https://example.org/x"),
+            "Ctrl+click opens https://example.org/x"
+        );
+        assert_eq!(
+            link_hint("file:///etc/passwd"),
+            "Not opened: file:///etc/passwd"
+        );
+        let long = format!("https://example.org/{}", "a".repeat(200));
+        let hint = link_hint(&long);
+        assert!(hint.starts_with("Ctrl+click opens https://example.org/aaa"));
+        assert!(
+            hint.ends_with('\u{2026}') && hint.chars().count() < 100,
+            "{hint}"
+        );
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]
