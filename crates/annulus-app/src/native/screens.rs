@@ -31,8 +31,8 @@ use crate::{connect, keychain_screen, logs_screen, snippets_screen};
 pub enum ScreenAction {
     /// Open a terminal tab running a program.
     Terminal(String, Box<Program>),
-    /// Open a terminal tab for each (a snippet run on several hosts).
-    Terminals(snippets_screen::Panes),
+    /// Open one tab of split panes, one per program (a snippet run on several hosts).
+    Terminals(String, snippets_screen::Panes),
     /// Open a log, read-only, in a tab.
     Log(String, String),
 }
@@ -820,7 +820,11 @@ impl SnippetsView {
             })
             .collect();
         self.targets = None;
-        Some(ScreenAction::Terminals(tabs))
+        let title = match tabs.len() {
+            1 => snippet.label.clone(),
+            n => format!("{} on {n} hosts", snippet.label),
+        };
+        Some(ScreenAction::Terminals(title, tabs))
     }
 
     /// Draws the screen; running a snippet opens a terminal, or one per host.

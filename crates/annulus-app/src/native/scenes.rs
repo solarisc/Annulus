@@ -1734,7 +1734,7 @@ fn deleting_on_the_host_asks_first() {
 }
 
 #[test]
-fn a_snippet_runs_on_the_hosts_ticked_a_tab_each() {
+fn a_snippet_runs_on_the_hosts_ticked_in_one_tab_of_panes() {
     let mut app = NativeApp::new(Some(fixture_vault("snippet-hosts", true)));
     app.section = super::Section::Snippets;
     let mut state = UiState::default();
@@ -1753,14 +1753,17 @@ fn a_snippet_runs_on_the_hosts_ticked_a_tab_each() {
             .iter()
             .any(|zone| zone.label == "Run on 2 hosts")
     );
-    // One frame: the tabs are added at its end, and start connecting when first drawn.
+    // One frame: the tab is added at its end, and its panes start connecting when drawn.
     drive(
         &mut app,
         &mut state,
         &click_on(&output, "Run on 2 hosts"),
         4.0,
     );
-    assert_eq!(titles(&app), ["Vault", "api-1", "bastion"]);
+    assert_eq!(titles(&app), ["Vault", "Tail the app log on 2 hosts"]);
+    let panes = front_panes(&app);
+    assert_eq!(panes.len(), 2, "a pane per host, side by side");
+    assert_eq!(app.active, 1);
 }
 
 #[test]

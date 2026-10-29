@@ -185,6 +185,8 @@ pub struct NativeApp {
     pub waker: Option<Waker>,
     /// Terminal tabs to open after this frame: title, program and where it came from.
     opens: Vec<(String, Program, Option<OpenTab>)>,
+    /// One tab of panes to open after this frame (a snippet run on several hosts).
+    open_split: Option<(String, Vec<(String, Program)>)>,
     /// Another Annulus window has this data folder open: the vault stays closed here, since
     /// two windows saving one vault would lose each other's changes.
     pub blocked: Option<String>,
@@ -244,6 +246,7 @@ impl NativeApp {
             },
             waker: None,
             opens: Vec::new(),
+            open_split: None,
             blocked: None,
             instance: None,
             pending_hosts: Vec::new(),
@@ -550,10 +553,8 @@ impl NativeApp {
     fn screen_action(&mut self, action: screens::ScreenAction) {
         match action {
             screens::ScreenAction::Terminal(title, program) => self.open(title, *program),
-            screens::ScreenAction::Terminals(tabs) => {
-                for (title, program) in tabs {
-                    self.open(title, program);
-                }
+            screens::ScreenAction::Terminals(title, programs) => {
+                self.open_split = Some((title, programs));
             }
             screens::ScreenAction::Log(title, text) => {
                 let mut emulator = Emulator::new(120, 40);
@@ -933,6 +934,12 @@ impl NativeApp {
             if let Some(tab) = self.tabs.last_mut() {
                 tab.origin = origin;
             }
+            ui.request_repaint();
+        }
+        if let Some((title, programs)) = self.open_split.take()
+            && let Some(panes) = panes::Panes::several(programs)
+        {
+            self.push_terminal(title, TermView::Live(Box::new(panes)));
             ui.request_repaint();
         }
         self.remember_tabs();

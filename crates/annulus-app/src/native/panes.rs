@@ -39,6 +39,25 @@ enum Split {
 }
 
 impl Split {
+    /// `ids` split in halves, side by side first and then stacked, alternating, so every
+    /// pane gets about the same room.
+    fn balanced(ids: &[u64], across: bool) -> Split {
+        match ids {
+            [] => Split::Leaf(0),
+            [id] => Split::Leaf(*id),
+            _ => {
+                let (first, second) = ids.split_at(ids.len().div_ceil(2));
+                let share = |n: usize| f32::from(u16::try_from(n).unwrap_or(u16::MAX));
+                Split::Node {
+                    across,
+                    ratio: share(first.len()) / share(ids.len()),
+                    first: Box::new(Self::balanced(first, !across)),
+                    second: Box::new(Self::balanced(second, !across)),
+                }
+            }
+        }
+    }
+
     fn leaves(&self, out: &mut Vec<u64>) {
         match self {
             Split::Leaf(id) => out.push(*id),
@@ -291,6 +310,30 @@ impl Panes {
             refocus: false,
             rects: Vec::new(),
         }
+    }
+
+    /// A tab of one pane per program, titled, in a balanced split (a snippet run on several
+    /// hosts, F-SNIP-004); at most [`MAX_PANES`]. `None` for no program.
+    #[must_use]
+    pub fn several(programs: Vec<(String, Program)>) -> Option<Self> {
+        let mut all = Vec::new();
+        for (id, (title, program)) in (1..).zip(programs.into_iter().take(MAX_PANES)) {
+            let mut terminal = LiveTerminal::new(program);
+            terminal.title = Some(title);
+            all.push(Pane::new(id, terminal));
+        }
+        let ids: Vec<u64> = all.iter().map(|pane| pane.id).collect();
+        let next = ids.last().copied()? + 1;
+        Some(Self {
+            tree: Split::balanced(&ids, true),
+            all,
+            focused: 1,
+            next,
+            broadcast: false,
+            focus_mode: false,
+            refocus: false,
+            rects: Vec::new(),
+        })
     }
 
     /// A tab with one pane showing `replay`.
@@ -979,6 +1022,39 @@ mod tests {
     /// A tab of one pane that never starts: nothing is drawn.
     fn panes() -> Panes {
         Panes::new(LiveTerminal::new(Program::DefaultShell))
+    }
+
+    #[test]
+    fn several_hosts_share_one_tab_with_about_the_same_room_each() {
+        for count in [1_u64, 2, 3, 5, 9, 16] {
+            let programs = (1..=count)
+                .map(|n| (format!("host-{n}"), Program::DefaultShell))
+                .collect();
+            let tab = Panes::several(programs).unwrap();
+            assert_eq!(tab.len(), usize::try_from(count).unwrap());
+            assert_eq!(leaves(&tab.tree), (1..=count).collect::<Vec<_>>());
+            let area = Rect::new(0.0, 0.0, 1600.0, 900.0);
+            let placed = layout(&tab.tree, area).panes;
+            let fair = 1600.0 * 900.0 / f32::from(u16::try_from(count).unwrap());
+            for (id, rect) in &placed {
+                assert!(
+                    rect.w * rect.h > fair * 0.6,
+                    "{count} panes: pane {id} gets {}x{}",
+                    rect.w,
+                    rect.h
+                );
+            }
+            assert_eq!(
+                tab.all[0].terminal.title.as_deref(),
+                Some("host-1"),
+                "each pane is named for its host"
+            );
+        }
+        assert!(Panes::several(Vec::new()).is_none());
+        let many = (0..20)
+            .map(|n| (format!("host-{n}"), Program::DefaultShell))
+            .collect();
+        assert_eq!(Panes::several(many).unwrap().len(), MAX_PANES);
     }
 
     #[test]
