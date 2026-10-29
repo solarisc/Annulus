@@ -2587,6 +2587,20 @@ fn closing_a_tab_saves_its_log_only_when_logging_is_on() {
 }
 
 #[test]
+fn a_log_of_a_tab_closed_while_locked_is_saved_once_the_vault_opens() {
+    let mut app = NativeApp::new(Some(fixture_vault("logs-locked", false)));
+    app.settings.record_logs = true;
+    replay(&mut app, "build");
+    let vault = app.vault.take();
+    app.save_logs(vec![("build".into(), "make: done".into())]);
+    assert!(app.vault.is_none());
+    app.vault = vault;
+    app.unlocked();
+    let logs = app.vault.as_ref().unwrap().logs();
+    assert!(logs.iter().any(|log| log.text == "make: done"), "{logs:?}");
+}
+
+#[test]
 fn tabs_are_listed_for_the_next_launch_and_host_tabs_wait_for_the_vault() {
     let mut app = NativeApp::new(Some(fixture_vault("restore", true)));
     app.settings.restore_tabs = true;
@@ -2611,6 +2625,15 @@ fn tabs_are_listed_for_the_next_launch_and_host_tabs_wait_for_the_vault() {
     assert_eq!(next.pending_hosts, Vec::<u64>::new());
     assert_eq!(next.tabs.len(), 2, "the host's tab is open again");
     assert_eq!(next.active, 1);
+    // Quitting at the lock screen keeps a host tab that is still waiting for the vault.
+    let mut locked = NativeApp::new(None);
+    locked.settings = next.settings.clone();
+    locked.restore();
+    drive(&mut locked, &mut state, &[], 3.0);
+    assert_eq!(
+        locked.settings.open_tabs,
+        [annulus_config::settings::OpenTab::Host(host)]
+    );
     // With the setting off, nothing comes back.
     let mut off = NativeApp::new(None);
     off.settings = next.settings.clone();

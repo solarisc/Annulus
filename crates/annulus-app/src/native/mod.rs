@@ -192,6 +192,8 @@ pub struct NativeApp {
     instance: Option<std::fs::File>,
     /// Host tabs to reopen once the vault is unlocked.
     pending_hosts: Vec<u64>,
+    /// Logs of sessions that ended while the vault was locked, saved once it opens.
+    waiting_logs: Vec<(String, String)>,
     /// The snippet panel beside terminals (Ctrl+Shift+.), and its search.
     snippet_panel: Option<String>,
     /// The device settings, and where they are saved (`None` in the preview).
@@ -245,6 +247,7 @@ impl NativeApp {
             blocked: None,
             instance: None,
             pending_hosts: Vec::new(),
+            waiting_logs: Vec::new(),
             snippet_panel: None,
             settings: Settings::default(),
             settings_path: None,
@@ -318,6 +321,8 @@ impl NativeApp {
             return;
         }
         let Some(vault) = self.vault.as_mut() else {
+            // Locked: kept until the vault opens (UI review #5).
+            self.waiting_logs.extend(logs);
             return;
         };
         let now = crate::sync_screen::now_secs();
@@ -352,10 +357,13 @@ impl NativeApp {
         if !self.settings.restore_tabs {
             return;
         }
+        // Host tabs still waiting for the vault count too, or quitting at the lock screen
+        // would forget them (UI review #8).
         let open: Vec<OpenTab> = self
             .tabs
             .iter()
             .filter_map(|tab| tab.origin.clone())
+            .chain(self.pending_hosts.iter().map(|id| OpenTab::Host(*id)))
             .collect();
         if open != self.settings.open_tabs {
             self.settings.open_tabs = open;
@@ -654,6 +662,8 @@ impl NativeApp {
                 panes.set_program(&connect::host(vault, &self.ssh_files, host));
             }
         }
+        let waiting = std::mem::take(&mut self.waiting_logs);
+        self.save_logs(waiting);
     }
 
     /// Takes the vault the lock screen's work opened, once it is done.
@@ -739,8 +749,15 @@ impl NativeApp {
         if let Some(path) = self.vault_path.clone() {
             let pace = FramePace::new(ui, self.waker.clone());
             if self.sync.tick(&pace, vault, &path) {
-                // Signing in renumbered hosts and rules: drafts and running rules go.
+                // Signing in renumbered hosts and rules: drafts and running rules go, and open
+                // host tabs are no longer remembered by their old numbers.
                 self.hosts.editor = None;
+                self.pending_hosts.clear();
+                for tab in &mut self.tabs {
+                    if matches!(tab.origin, Some(OpenTab::Host(_))) {
+                        tab.origin = None;
+                    }
+                }
                 self.forwards = screens::ForwardsView::default();
             }
             pace.apply(ui);
@@ -1135,6 +1152,23 @@ fn vault_status(ui: &mut Ui<'_>, rect: Rect, unlocked: bool, sync: &SyncBadge) {
         3.5,
         dot,
     );
+}
+
+impl Drop for NativeApp {
+    /// The window closed: sessions still open keep their logs too, as when their tab closes
+    /// (UI review #5).
+    fn drop(&mut self) {
+        let logs: Vec<(String, String)> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match &tab.terminal {
+                Some(TermView::Live(panes)) => Some(panes.transcripts()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        self.save_logs(logs);
+    }
 }
 
 /// The new UI in a window over a throwaway demo vault: `annulus-app --preview` (add `--light`
