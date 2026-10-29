@@ -459,7 +459,8 @@ impl SftpView {
         let t = ui.theme;
         let mut row = rect;
         let line = row.take_top(22.0);
-        let mut cells = line.inset(space::S, 0.0);
+        // As wide as the rows, which leave room for the scroll bar, so the columns line up.
+        let mut cells = Rect::new(line.x, line.y, line.w - 10.0, line.h).inset(space::S, 0.0);
         // Where the rows' buttons are.
         cells.take_right(2.0 * 26.0 + 2.0 * space::S);
         let (size_w, modified_w) = Self::column_widths(cells.w);

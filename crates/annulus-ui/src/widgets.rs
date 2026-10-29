@@ -278,6 +278,9 @@ impl Ui<'_> {
         } else {
             fill
         };
+        // Held down, it gives a little, like a key.
+        let press = self.ease(id.with("press"), if response.pressed { 1.0 } else { 0.0 });
+        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.035 * press));
         self.gfx.fill_rect(rect, radius::SMALL + 2.0, fill);
         if border.a > 0 {
             self.gfx.stroke_rect(rect, radius::SMALL + 2.0, 1.0, border);
@@ -295,6 +298,7 @@ impl Ui<'_> {
         if !label.is_empty() {
             self.strict_text(inner, label, BODY_MEDIUM, ink, Align::Start);
         }
+        self.pop_layer();
         if response.hovered {
             self.set_cursor(Cursor::Pointer);
         }
@@ -318,6 +322,8 @@ impl Ui<'_> {
         } else {
             t.hover.alpha(hover)
         };
+        let press = self.ease(id.with("press"), if response.pressed { 1.0 } else { 0.0 });
+        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.06 * press));
         self.gfx.fill_rect(rect, radius::SMALL + 2.0, fill);
         if response.focus_ring {
             self.focus_ring(rect, radius::SMALL + 2.0);
@@ -328,6 +334,7 @@ impl Ui<'_> {
             t.text2.mix(t.text, hover)
         };
         self.gfx.icon(icon, rect.centered(16.0, 16.0), ink);
+        self.pop_layer();
         self.tooltip(id, rect, name);
         response
     }
@@ -779,8 +786,9 @@ impl Ui<'_> {
         self.set_toggled(id, *value);
         let t = self.theme;
         let on = self.ease(id.with("on"), if *value { 1.0 } else { 0.0 });
-        self.gfx
-            .fill_rect(track, 10.0, t.line_strong.mix(t.accent, on));
+        // Off, the track is dark enough to read as a control on a white card too.
+        let off = t.line_strong.mix(t.text3, 0.55);
+        self.gfx.fill_rect(track, 10.0, off.mix(t.accent, on));
         let knob = Point::new(track.x + 10.0 + 14.0 * on, track.center().y);
         self.gfx
             .fill_circle(knob, 7.0, t.on_accent.mix(Color::WHITE, 0.4));
@@ -844,7 +852,8 @@ impl Ui<'_> {
         let response = self.button(id, rect, label, icon, kind);
         let width = items
             .iter()
-            .map(|item| self.gfx.measure(item, BODY).width + 2.0 * space::L)
+            // The item's text, its row's insets and the check mark's column.
+            .map(|item| self.gfx.measure(item, BODY).width + 2.0 * space::L + 24.0)
             .fold(rect.w.max(180.0), f32::max);
         self.popup_toggle(id, &response, rect, items, None, width)
     }
@@ -971,7 +980,10 @@ impl Ui<'_> {
             .max(8.0);
         let menu = Rect::new(x, y, popup.width, height);
         // It grows out of the widget that opened it, from the edge nearest to it.
-        let open = self.entrance(popup.owner.with("menu.open"), Motion::FAST);
+        let open = self.entrance(
+            popup.owner.with("menu.open"),
+            Motion::new(180, crate::motion::Curve::Out),
+        );
         let below = y >= popup.anchor.y;
         let origin = Point::new(
             popup.anchor.center().x.clamp(menu.x, menu.r()),
@@ -980,8 +992,8 @@ impl Ui<'_> {
         self.push_layer(Layer::appear(
             open,
             origin,
-            0.94,
-            if below { -4.0 } else { 4.0 },
+            0.9,
+            if below { -6.0 } else { 6.0 },
         ));
         self.draw_menu(&popup, menu, content, height);
         self.pop_layer();

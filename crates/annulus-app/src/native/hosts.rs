@@ -2223,8 +2223,11 @@ fn host_card(
     let mut detail = Rect::new(inner.x, shape.y + 37.0, inner.w, 20.0);
     ui.gfx
         .text(name_line, &card.label, BODY_STRONG, t.text, Align::Start);
-    // The tags share the second line with the address, which keeps at least half of it.
-    let (count, width) = tags_fit(ui, &card.tags, detail.w * 0.5);
+    // The tags share the second line with the address: the address takes what it needs (up
+    // to 70 % of the line), the tags the rest, with a "+n" for those that do not fit.
+    let address = ui.gfx.measure(&card.detail, SMALL).width + space::S;
+    let room = (detail.w - address).max(detail.w * 0.3);
+    let (count, width) = tags_fit(ui, &card.tags, room);
     if width > 0.0 {
         let tags = detail.take_right(width);
         draw_tags(ui, tags, &card.tags, count);
