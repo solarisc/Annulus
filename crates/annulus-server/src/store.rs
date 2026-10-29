@@ -530,15 +530,13 @@ impl Server {
                  ON CONFLICT (account, id) DO UPDATE SET
                      seq = excluded.seq, ciphertext = excluded.ciphertext,
                      deleted = excluded.deleted",
+                // A deletion keeps its ciphertext too: a sealed tombstone, which lets devices
+                // tell a real deletion from one the server made up. Older clients send none.
                 params![
                     caller.account,
                     change.id,
                     last,
-                    if change.deleted {
-                        Vec::new()
-                    } else {
-                        change.ciphertext.clone()
-                    },
+                    change.ciphertext,
                     change.deleted
                 ],
             )?;

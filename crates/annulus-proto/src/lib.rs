@@ -173,7 +173,8 @@ pub struct Record {
     pub id: String,
     /// The server sequence number of this version.
     pub seq: u64,
-    /// Encrypted by the client; empty for a deletion.
+    /// Encrypted by the client. For a deletion, the sealed tombstone (empty from clients
+    /// that predate sealed tombstones).
     pub ciphertext: Vec<u8>,
     /// A tombstone: the record was deleted on some device.
     pub deleted: bool,
@@ -186,7 +187,8 @@ pub struct Change {
     pub id: String,
     /// The sequence number of the version this change was made from; 0 for a new record.
     pub base: u64,
-    /// The new ciphertext; empty for a deletion.
+    /// The new ciphertext; for a deletion, the sealed tombstone (or empty, from older
+    /// clients). The server stores and returns it either way.
     pub ciphertext: Vec<u8>,
     /// This change deletes the record.
     pub deleted: bool,

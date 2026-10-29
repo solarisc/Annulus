@@ -206,15 +206,31 @@ fn a_deletion_is_a_tombstone_with_history() {
     let session = register(&server, "ana", "pw").unwrap();
     let me = caller(&server, &session.token);
     server.push(me, &[change("r1", 0, b"v1")]).unwrap();
+    // A sealed tombstone: the deletion's ciphertext is kept and handed out like any other.
     let tombstone = Change {
         deleted: true,
-        ..change("r1", 1, b"ignored")
+        ..change("r1", 1, b"sealed tombstone")
     };
     server.push(me, &[tombstone]).unwrap();
     let pulled = server.pull(me, 1).unwrap();
     assert!(pulled.records[0].deleted);
-    assert_eq!(pulled.records[0].ciphertext, b"");
+    assert_eq!(pulled.records[0].ciphertext, b"sealed tombstone");
     assert_eq!(server.history(me, "r1").unwrap()[0].ciphertext, b"v1");
+    // A conflict on a deleted record returns the tombstone with its ciphertext.
+    let stale = server.push(me, &[change("r1", 1, b"edit")]).unwrap();
+    assert_eq!(stale.conflicts[0].ciphertext, b"sealed tombstone");
+    assert!(stale.conflicts[0].deleted);
+
+    // An older client's tombstone has no ciphertext, and is still accepted.
+    server.push(me, &[change("r2", 0, b"v1")]).unwrap();
+    let empty = Change {
+        deleted: true,
+        ..change("r2", 3, b"")
+    };
+    assert_eq!(server.push(me, &[empty]).unwrap().accepted.len(), 1);
+    let pulled = server.pull(me, 3).unwrap();
+    assert!(pulled.records[0].deleted);
+    assert_eq!(pulled.records[0].ciphertext, b"");
 }
 
 #[test]

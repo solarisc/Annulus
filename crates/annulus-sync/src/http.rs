@@ -30,10 +30,10 @@ impl HttpServer {
     ///
     /// # Errors
     /// `base` is not an `https://` URL (plain `http://` is allowed for loopback only,
-    /// matching the server's own rule).
+    /// matching the server's own rule), or it names a user (`user@host`).
     pub fn new(base: &str, token: Option<String>) -> Result<Self, SyncError> {
         let base = base.trim().trim_end_matches('/').to_owned();
-        if !(base.starts_with("https://") || is_loopback_http(&base)) {
+        if !allowed(&base) {
             return Err(SyncError::Transport(
                 "the server address must start with https://".into(),
             ));
@@ -161,21 +161,35 @@ impl HttpServer {
     }
 }
 
-/// `http://localhost…` or `http://127.x…`/`http://[::1]…`, for a server on this computer.
-fn is_loopback_http(base: &str) -> bool {
-    let Some(rest) = base.strip_prefix("http://") else {
+/// Whether the client may connect to `base`: any `https://` server, and plain `http://`
+/// only to this computer (`localhost`, `127.x`, `[::1]`). The host is the parsed one, so
+/// `http://localhost:80@evil.com` (user `localhost`, host `evil.com`) is not loopback; a
+/// URL that names a user is refused outright.
+fn allowed(base: &str) -> bool {
+    let Ok(uri) = base.parse::<ureq::http::Uri>() else {
         return false;
     };
-    let host = rest.split('/').next().unwrap_or_default();
-    let host = if let Some(bracketed) = host.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or_default()
-    } else {
-        host.rsplit_once(':').map_or(host, |(name, _)| name)
+    let Some(authority) = uri.authority() else {
+        return false;
     };
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    match uri.scheme_str() {
+        Some("https") => true,
+        Some("http") => {
+            let host = authority.host();
+            let host = host
+                .strip_prefix('[')
+                .and_then(|inner| inner.strip_suffix(']'))
+                .unwrap_or(host);
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+        _ => false,
+    }
 }
 
 impl Transport for HttpServer {
@@ -227,5 +241,12 @@ mod tests {
         assert!(HttpServer::new("http://sync.example.com", None).is_err());
         assert!(HttpServer::new("http://127.0.0.1.evil.com", None).is_err());
         assert!(HttpServer::new("ftp://x", None).is_err());
+        // The host is what follows a user name: these are evil.com, over plain HTTP.
+        assert!(HttpServer::new("http://localhost:80@evil.com", None).is_err());
+        assert!(HttpServer::new("http://127.0.0.1@evil.com:8443", None).is_err());
+        assert!(HttpServer::new("http://[::1]@evil.com", None).is_err());
+        assert!(HttpServer::new("https://user@sync.example.com", None).is_err());
+        assert!(HttpServer::new("http://localhost.evil.com", None).is_err());
+        assert!(HttpServer::new("http://", None).is_err());
     }
 }
