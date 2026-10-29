@@ -43,9 +43,15 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
 
     // Device A creates the account from its vault.
     let (mut laptop, _) = Vault::create(temp("a"), "first password!", CHEAP).unwrap();
+    let mut group = laptop.draft_group(None).unwrap();
+    group.name = "databases".into();
+    group.defaults.username = "postgres".into();
+    group.defaults.port = Some(5422);
+    laptop.upsert_group(group.clone()).unwrap();
     let mut host = laptop.draft_host();
     host.label = "db".into();
     host.address = "10.0.0.5".into();
+    host.group = Some(group.uid.clone());
     laptop.upsert_host(host).unwrap();
     let mut http = HttpServer::new(&url, None).unwrap();
     let session = account::register(
@@ -86,6 +92,12 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
     .unwrap();
     round(&url, &desktop_account, &mut desktop);
     assert_eq!(desktop.hosts()[0].address, "10.0.0.5");
+    let (resolved, sources) = desktop.resolve(&desktop.hosts()[0]);
+    assert_eq!(
+        (resolved.username.as_str(), resolved.port),
+        ("postgres", Some(5422))
+    );
+    assert_eq!(sources.port.as_deref(), Some("databases"));
 
     // Deleted on B, restored from the trash on A.
     let id = desktop.hosts()[0].id;
