@@ -14,6 +14,7 @@ use crate::crypto::{CryptoError, KdfParams, KeyFile, Keys, Sealed};
 use crate::forwards::PortForward;
 use crate::hosts::{DEFAULT_PORT, Host};
 use crate::keychain::SshKey;
+use crate::snippets::Snippet;
 use crate::sync::{SyncAccount, SyncCopy, SyncState, kind};
 
 /// Record kind of a saved host.
@@ -24,6 +25,8 @@ const KIND_FORWARD: u8 = 2;
 const KIND_SYNC_STATE: u8 = 3;
 /// Record kind of a keychain key.
 const KIND_KEY: u8 = 5;
+/// Record kind of a snippet.
+const KIND_SNIPPET: u8 = 6;
 
 /// Why the vault could not be used.
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +79,7 @@ pub struct Vault {
     hosts: Vec<Host>,
     forwards: Vec<PortForward>,
     ssh_keys: Vec<SshKey>,
+    snippets: Vec<Snippet>,
     sync: SyncState,
     /// Counts saved changes, so a sync result made from an older snapshot is not applied.
     generation: u64,
@@ -106,6 +110,7 @@ impl Vault {
             hosts: Vec::new(),
             forwards: Vec::new(),
             ssh_keys: Vec::new(),
+            snippets: Vec::new(),
             sync: SyncState::new()?,
             generation: 0,
         };
@@ -139,6 +144,7 @@ impl Vault {
         let mut hosts = Vec::new();
         let mut forwards = Vec::new();
         let mut ssh_keys = Vec::new();
+        let mut snippets = Vec::new();
         let mut sync = None;
         for record in &file.records {
             let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
@@ -155,6 +161,10 @@ impl Vault {
                 KIND_KEY => {
                     let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
                     ssh_keys.push(serde_json::from_slice::<SshKey>(&plaintext).map_err(damaged)?);
+                }
+                KIND_SNIPPET => {
+                    let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
+                    snippets.push(serde_json::from_slice::<Snippet>(&plaintext).map_err(damaged)?);
                 }
                 KIND_SYNC_STATE => {
                     let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
@@ -185,6 +195,7 @@ impl Vault {
             }
         }
         ssh_keys.sort_by_key(|key: &SshKey| key.label.to_lowercase());
+        snippets.sort_by_key(|snippet: &Snippet| snippet.label.to_lowercase());
         Ok(Self {
             path,
             key_file: file.keys,
@@ -192,6 +203,7 @@ impl Vault {
             hosts,
             forwards,
             ssh_keys,
+            snippets,
             sync,
             generation: 0,
         })
@@ -403,6 +415,7 @@ impl Vault {
             hosts: self.hosts.clone(),
             forwards: self.forwards.clone(),
             ssh_keys: self.ssh_keys.clone(),
+            snippets: self.snippets.clone(),
             state: self.sync.clone(),
             generation: self.generation,
         }
@@ -418,10 +431,17 @@ impl Vault {
         if copy.generation != self.generation {
             return Ok(false);
         }
-        self.save_all(&copy.hosts, &copy.forwards, &copy.ssh_keys, &copy.state)?;
+        self.save_all(
+            &copy.hosts,
+            &copy.forwards,
+            &copy.ssh_keys,
+            &copy.snippets,
+            &copy.state,
+        )?;
         self.hosts = copy.hosts;
         self.forwards = copy.forwards;
         self.ssh_keys = copy.ssh_keys;
+        self.snippets = copy.snippets;
         self.sync = copy.state;
         self.generation += 1;
         Ok(true)
@@ -459,11 +479,22 @@ impl Vault {
         hosts: &[Host],
         forwards: &[PortForward],
         ssh_keys: &[SshKey],
+        snippets: &[Snippet],
     ) -> Result<(), VaultError> {
+        let mut next_snippets = self.snippets.clone();
+        let mut snippet_id = next_snippets.iter().map(|s| s.id).max().unwrap_or(0);
+        let mut sync = self.sync.clone();
+        for snippet in snippets {
+            snippet_id += 1;
+            sync.touch(kind::SNIPPET, snippet_id, false)?;
+            next_snippets.push(Snippet {
+                id: snippet_id,
+                ..snippet.clone()
+            });
+        }
         let mut next_hosts = self.hosts.clone();
         let mut next_forwards = self.forwards.clone();
         let mut next_keys = self.ssh_keys.clone();
-        let mut sync = self.sync.clone();
         let mut key_id = next_keys.iter().map(|key| key.id).max().unwrap_or(0);
         let mut new_key_ids = std::collections::HashMap::new();
         for key in ssh_keys {
@@ -500,10 +531,18 @@ impl Vault {
         next_hosts.sort_by_key(|host| host.label.to_lowercase());
         next_forwards.sort_by_key(|rule| rule.label.to_lowercase());
         next_keys.sort_by_key(|key| key.label.to_lowercase());
-        self.save_all(&next_hosts, &next_forwards, &next_keys, &sync)?;
+        next_snippets.sort_by_key(|snippet| snippet.label.to_lowercase());
+        self.save_all(
+            &next_hosts,
+            &next_forwards,
+            &next_keys,
+            &next_snippets,
+            &sync,
+        )?;
         self.hosts = next_hosts;
         self.forwards = next_forwards;
         self.ssh_keys = next_keys;
+        self.snippets = next_snippets;
         self.sync = sync;
         self.generation += 1;
         Ok(())
@@ -548,6 +587,7 @@ impl Vault {
             hosts: Vec::new(),
             forwards: Vec::new(),
             ssh_keys: Vec::new(),
+            snippets: Vec::new(),
             sync,
             generation: 0,
         };
@@ -587,7 +627,7 @@ impl Vault {
         next.sort_by_key(|key| key.label.to_lowercase());
         let mut sync = self.sync.clone();
         sync.touch(kind::KEY, id, false)?;
-        self.save_all(&self.hosts, &self.forwards, &next, &sync)?;
+        self.save_all(&self.hosts, &self.forwards, &next, &self.snippets, &sync)?;
         self.ssh_keys = next;
         self.sync = sync;
         self.generation += 1;
@@ -612,7 +652,7 @@ impl Vault {
             sync.touch(kind::HOST, host.id, false)?;
         }
         sync.touch(kind::KEY, id, true)?;
-        self.save_all(&hosts, &self.forwards, &keys, &sync)?;
+        self.save_all(&hosts, &self.forwards, &keys, &self.snippets, &sync)?;
         self.hosts = hosts;
         self.ssh_keys = keys;
         self.sync = sync;
@@ -626,7 +666,65 @@ impl Vault {
         forwards: &[PortForward],
         sync: &SyncState,
     ) -> Result<(), VaultError> {
-        self.save_all(hosts, forwards, &self.ssh_keys, sync)
+        self.save_all(hosts, forwards, &self.ssh_keys, &self.snippets, sync)
+    }
+
+    /// The snippets, sorted by label.
+    #[must_use]
+    pub fn snippets(&self) -> &[Snippet] {
+        &self.snippets
+    }
+
+    /// A new, unsaved snippet with a fresh id.
+    #[must_use]
+    pub fn draft_snippet(&self) -> Snippet {
+        Snippet {
+            id: self.snippets.iter().map(|s| s.id).max().unwrap_or(0) + 1,
+            label: String::new(),
+            script: String::new(),
+            package: String::new(),
+        }
+    }
+
+    /// Adds or replaces a snippet, then saves. On failure nothing changes.
+    ///
+    /// # Errors
+    /// Writing the file.
+    pub fn upsert_snippet(&mut self, snippet: Snippet) -> Result<(), VaultError> {
+        let id = snippet.id;
+        let mut next = self.snippets.clone();
+        match next.iter_mut().find(|existing| existing.id == id) {
+            Some(existing) => *existing = snippet,
+            None => next.push(snippet),
+        }
+        next.sort_by_key(|snippet| snippet.label.to_lowercase());
+        let mut sync = self.sync.clone();
+        sync.touch(kind::SNIPPET, id, false)?;
+        self.save_all(&self.hosts, &self.forwards, &self.ssh_keys, &next, &sync)?;
+        self.snippets = next;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Deletes a snippet, then saves. On failure nothing changes.
+    ///
+    /// # Errors
+    /// Writing the file.
+    pub fn remove_snippet(&mut self, id: u64) -> Result<(), VaultError> {
+        let next: Vec<Snippet> = self
+            .snippets
+            .iter()
+            .filter(|s| s.id != id)
+            .cloned()
+            .collect();
+        let mut sync = self.sync.clone();
+        sync.touch(kind::SNIPPET, id, true)?;
+        self.save_all(&self.hosts, &self.forwards, &self.ssh_keys, &next, &sync)?;
+        self.snippets = next;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
     }
 
     fn save_all(
@@ -634,9 +732,11 @@ impl Vault {
         hosts: &[Host],
         forwards: &[PortForward],
         ssh_keys: &[SshKey],
+        snippets: &[Snippet],
         sync: &SyncState,
     ) -> Result<(), VaultError> {
-        let mut records = Vec::with_capacity(hosts.len() + forwards.len() + ssh_keys.len() + 1);
+        let mut records =
+            Vec::with_capacity(hosts.len() + forwards.len() + ssh_keys.len() + snippets.len() + 1);
         let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
         for host in hosts {
             let id = format!("host-{}", host.id);
@@ -665,6 +765,16 @@ impl Vault {
             records.push(Record {
                 id,
                 kind: KIND_KEY,
+                sealed,
+            });
+        }
+        for snippet in snippets {
+            let id = format!("snippet-{}", snippet.id);
+            let plaintext = Zeroizing::new(serde_json::to_vec(snippet).map_err(damaged)?);
+            let sealed = self.keys.seal_record(&id, KIND_SNIPPET, &plaintext)?;
+            records.push(Record {
+                id,
+                kind: KIND_SNIPPET,
                 sealed,
             });
         }
@@ -753,7 +863,7 @@ mod tests {
         old.id = 1;
         let mut rule = PortForward::new(9, 1);
         rule.label = "db".into();
-        vault.adopt(&[old], &[rule], &[]).unwrap();
+        vault.adopt(&[old], &[rule], &[], &[]).unwrap();
 
         let reopened = Vault::unlock(&path, "pw").unwrap();
         let adopted = reopened

@@ -462,6 +462,10 @@ mod vaults {
         rule.destination_host = "db".into();
         rule.destination_port = 5432;
         laptop.upsert_forward(rule).unwrap();
+        let mut snippet = laptop.draft_snippet();
+        snippet.label = "disk".into();
+        snippet.script = "df -h".into();
+        laptop.upsert_snippet(snippet).unwrap();
 
         let mut direct = Direct {
             server: &server,
@@ -503,6 +507,7 @@ mod vaults {
             "the rule finds its host"
         );
         assert_eq!(desktop.ssh_keys()[0].label, "work key");
+        assert_eq!(desktop.snippets()[0].script, "df -h");
         assert_eq!(
             desktop.hosts()[0].key_id,
             Some(desktop.ssh_keys()[0].id),

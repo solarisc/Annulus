@@ -12,6 +12,7 @@ mod keychain_screen;
 mod lock_screen;
 mod sftp_view;
 mod shell;
+mod snippets_screen;
 mod ssh_dialogs;
 mod sync_screen;
 mod terminal_view;

@@ -12,6 +12,7 @@ use crate::hosts_screen::{HostsScreen, Request};
 use crate::keychain_screen::KeychainScreen;
 use crate::lock_screen::LockScreen;
 use crate::sftp_view::SftpTab;
+use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::SyncScreen;
 use crate::terminal_view::{DEFAULT_FONT_SIZE, FONT_SIZES, TerminalTab};
 
@@ -113,6 +114,10 @@ pub struct Shell {
     sync: SyncScreen,
     /// The Keychain screen.
     keychain: KeychainScreen,
+    /// The Snippets screen.
+    snippets: SnippetsScreen,
+    /// The snippet panel beside terminals is open (Ctrl+Shift+S), and its search text.
+    snippet_panel: Option<String>,
     /// Setup or unlock, while the vault is locked.
     lock: LockScreen,
     data_dir: std::path::PathBuf,
@@ -141,6 +146,8 @@ impl Shell {
             forwards: ForwardsScreen::default(),
             sync: SyncScreen::default(),
             keychain: KeychainScreen::default(),
+            snippets: SnippetsScreen::default(),
+            snippet_panel: None,
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
             data_dir: data_dir.to_path_buf(),
             font_size: DEFAULT_FONT_SIZE,
@@ -231,6 +238,21 @@ impl Shell {
             egui::CentralPanel::default().show(ui, |ui| self.section_screen(ui));
         } else if let Some(Tab::Terminal(terminal)) = self.tabs.get_mut(self.active_tab) {
             let font_size = self.font_size;
+            if let Some(search) = &mut self.snippet_panel {
+                let snippets = self
+                    .hosts
+                    .as_ref()
+                    .map(|hosts| hosts.vault().snippets().to_vec())
+                    .unwrap_or_default();
+                let chosen = egui::Panel::right("terminal-snippets")
+                    .resizable(true)
+                    .default_size(260.0)
+                    .show(ui, |ui| snippets_screen::side_panel(ui, search, &snippets))
+                    .inner;
+                if let Some((snippet, run)) = chosen {
+                    terminal.send_snippet(&snippet, run);
+                }
+            }
             let frame = egui::Frame::NONE.inner_margin(egui::Margin::same(4));
             egui::CentralPanel::default()
                 .frame(frame)
@@ -266,14 +288,21 @@ impl Shell {
     /// App shortcuts use Ctrl+Shift so plain Ctrl+letter stays with the shell (UI-SPEC §7).
     fn shortcuts(&mut self, ui: &Ui) {
         let command = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
-        let (new_tab, close_tab, next_tab, lock) = ui.input_mut(|input| {
+        let (new_tab, close_tab, next_tab, lock, snippets) = ui.input_mut(|input| {
             (
                 input.consume_key(command, egui::Key::T),
                 input.consume_key(command, egui::Key::W),
                 input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab),
                 input.consume_key(command, egui::Key::L),
+                input.consume_key(command, egui::Key::S),
             )
         });
+        if snippets {
+            self.snippet_panel = match self.snippet_panel.take() {
+                Some(_) => None,
+                None => Some(String::new()),
+            };
+        }
         if lock {
             self.lock_vault();
         }
@@ -417,6 +446,14 @@ impl Shell {
                     self.lock.ui(ui, &self.data_dir.join(VAULT_FILE), &palette)
                 {
                     self.unlocked(vault);
+                }
+            }
+            Section::Snippets => {
+                let palette = self.palette();
+                if let Some(hosts) = &mut self.hosts {
+                    self.snippets.ui(ui, &palette, hosts.vault_mut());
+                } else {
+                    self.section = Section::Hosts;
                 }
             }
             Section::Keychain => {

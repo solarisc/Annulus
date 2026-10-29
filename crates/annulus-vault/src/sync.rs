@@ -15,6 +15,7 @@ use crate::crypto::{CryptoError, Keys, Sealed};
 use crate::forwards::PortForward;
 use crate::hosts::{Host, Secret};
 use crate::keychain::SshKey;
+use crate::snippets::Snippet;
 
 /// Entity kinds inside synced records.
 pub mod kind {
@@ -24,6 +25,8 @@ pub mod kind {
     pub const FORWARD: u8 = 2;
     /// A keychain key.
     pub const KEY: u8 = 3;
+    /// A snippet.
+    pub const SNIPPET: u8 = 4;
 }
 
 /// The record kind (bound into the encryption) of envelopes sent to the server.
@@ -217,6 +220,7 @@ pub struct SyncCopy {
     pub(crate) hosts: Vec<Host>,
     pub(crate) forwards: Vec<PortForward>,
     pub(crate) ssh_keys: Vec<SshKey>,
+    pub(crate) snippets: Vec<Snippet>,
     pub(crate) state: SyncState,
     pub(crate) generation: u64,
 }
@@ -305,6 +309,10 @@ impl SyncCopy {
                 let key = self.ssh_keys.iter().find(|key| key.id == entry.local)?;
                 serde_json::to_vec(key).ok()
             }
+            kind::SNIPPET => {
+                let snippet = self.snippets.iter().find(|s| s.id == entry.local)?;
+                serde_json::to_vec(snippet).ok()
+            }
             kind::FORWARD => {
                 let rule = self.forwards.iter().find(|rule| rule.id == entry.local)?;
                 let synced = SyncedForward {
@@ -387,17 +395,7 @@ impl SyncCopy {
     /// server) rather than guessed at.
     pub fn apply(&mut self, id: &str, seq: u64, content: Option<(u8, u64, Vec<u8>)>) {
         let Some((kind, hlc, body)) = content else {
-            if let Some(entry) = self.state.entries.get_mut(id) {
-                match entry.kind {
-                    kind::HOST => self.hosts.retain(|host| host.id != entry.local),
-                    kind::FORWARD => self.forwards.retain(|rule| rule.id != entry.local),
-                    kind::KEY => self.ssh_keys.retain(|key| key.id != entry.local),
-                    _ => {}
-                }
-                entry.deleted = true;
-                entry.dirty = false;
-                entry.base = seq;
-            }
+            self.apply_deletion(id, seq);
             return;
         };
         self.state.clock = self.state.clock.max(hlc);
@@ -449,20 +447,10 @@ impl SyncCopy {
                 );
                 local
             }
-            kind::KEY => {
-                let Ok(mut key) = serde_json::from_slice::<SshKey>(&body) else {
-                    return;
-                };
-                key.id = existing.unwrap_or_else(|| next_id(self.ssh_keys.iter().map(|k| k.id)));
-                let local = key.id;
-                upsert(
-                    &mut self.ssh_keys,
-                    key,
-                    |k| k.id,
-                    |k| k.label.to_lowercase(),
-                );
-                local
-            }
+            kind::KEY | kind::SNIPPET => match self.take_plain(kind, existing, &body) {
+                Some(local) => local,
+                None => return,
+            },
             _ => return,
         };
         self.state.entries.insert(
@@ -479,6 +467,55 @@ impl SyncCopy {
         );
         if kind == kind::HOST || kind == kind::KEY {
             self.link_waiting(id, local);
+        }
+    }
+
+    /// Removes the local copy of `id`, deleted on the server as version `seq`.
+    fn apply_deletion(&mut self, id: &str, seq: u64) {
+        if let Some(entry) = self.state.entries.get_mut(id) {
+            match entry.kind {
+                kind::HOST => self.hosts.retain(|host| host.id != entry.local),
+                kind::FORWARD => self.forwards.retain(|rule| rule.id != entry.local),
+                kind::KEY => self.ssh_keys.retain(|key| key.id != entry.local),
+                kind::SNIPPET => self.snippets.retain(|s| s.id != entry.local),
+                _ => {}
+            }
+            entry.deleted = true;
+            entry.dirty = false;
+            entry.base = seq;
+        }
+    }
+
+    /// Stores a key or snippet (entities that point at nothing) from `body`, under its local
+    /// id `existing` or a new one; returns the local id, or `None` if `body` is unreadable.
+    fn take_plain(&mut self, kind: u8, existing: Option<u64>, body: &[u8]) -> Option<u64> {
+        match kind {
+            kind::KEY => {
+                let mut key = serde_json::from_slice::<SshKey>(body).ok()?;
+                key.id = existing.unwrap_or_else(|| next_id(self.ssh_keys.iter().map(|k| k.id)));
+                let local = key.id;
+                upsert(
+                    &mut self.ssh_keys,
+                    key,
+                    |k| k.id,
+                    |k| k.label.to_lowercase(),
+                );
+                Some(local)
+            }
+            kind::SNIPPET => {
+                let mut snippet = serde_json::from_slice::<Snippet>(body).ok()?;
+                snippet.id =
+                    existing.unwrap_or_else(|| next_id(self.snippets.iter().map(|s| s.id)));
+                let local = snippet.id;
+                upsert(
+                    &mut self.snippets,
+                    snippet,
+                    |s| s.id,
+                    |s| s.label.to_lowercase(),
+                );
+                Some(local)
+            }
+            _ => None,
         }
     }
 
@@ -533,6 +570,7 @@ mod tests {
             hosts: Vec::new(),
             forwards: Vec::new(),
             ssh_keys: Vec::new(),
+            snippets: Vec::new(),
             state: SyncState::new().unwrap(),
             generation: 0,
         }

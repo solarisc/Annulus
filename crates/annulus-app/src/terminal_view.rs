@@ -200,6 +200,20 @@ impl TerminalTab {
         }
     }
 
+    /// Sends a snippet to the program: typed and run, or pasted at the prompt.
+    pub fn send_snippet(&mut self, snippet: &annulus_vault::snippets::Snippet, run: bool) {
+        let Some(session) = &self.session else { return };
+        session.scroll_to_bottom();
+        if run {
+            session.write(snippet.input(true));
+        } else {
+            let text = String::from_utf8_lossy(&snippet.input(false)).into_owned();
+            session.write(paste_bytes(&text, session.mode()));
+        }
+        // The keyboard goes back to the terminal.
+        self.focused_once = false;
+    }
+
     /// Shows a pending SSH question; true while one is open.
     fn prompts(&mut self, ctx: &egui::Context) -> bool {
         match &self.session {
