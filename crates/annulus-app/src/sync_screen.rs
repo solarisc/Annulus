@@ -30,12 +30,15 @@ const AFTER_EDIT: f64 = 3.0;
 /// Seconds after a failed round before the next try (the server may be back).
 const RETRY: f64 = 15.0;
 
-/// When the next round is due, in the clock of `Pace::now`: a minute after the last, sooner
-/// after a failed one, and a few seconds after a local edit.
+/// When the next round is due, in the clock of `Pace::now`: a minute after the last, a few
+/// seconds after a local edit, and after a failure (`last` is then when it failed) 15 s
+/// whatever is waiting, so an unreachable server is not tried back to back.
 fn next_round(last: f64, dirty_since: Option<f64>, failed: bool) -> f64 {
-    let period = if failed { RETRY } else { PERIOD };
-    dirty_since.map_or(last + period, |since| {
-        (since + AFTER_EDIT).min(last + period)
+    if failed {
+        return last + RETRY;
+    }
+    dirty_since.map_or(last + PERIOD, |since| {
+        (since + AFTER_EDIT).min(last + PERIOD)
     })
 }
 
@@ -233,11 +236,24 @@ impl SyncScreen {
     /// forwards, whose ids changed, are stopped.
     pub fn tick(&mut self, ctx: &dyn Pace, hosts: &mut Vault, vault_path: &Path) -> bool {
         let mut replaced = false;
-        if let Some((_, rx)) = &self.work
-            && let Ok(done) = rx.try_recv()
-        {
-            self.work = None;
-            replaced = self.finish(done, hosts, vault_path);
+        if let Some((_, rx)) = &self.work {
+            match rx.try_recv() {
+                Ok(done) => {
+                    self.work = None;
+                    replaced = self.finish(done, hosts, vault_path);
+                    // A retry counts from the failure, not from when the round began.
+                    if self.round_failed {
+                        self.last_round = ctx.now();
+                    }
+                }
+                // The work thread ended without an answer (it panicked): sync goes on.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.work = None;
+                    self.round_failed = true;
+                    self.last_round = ctx.now();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
         }
         let state = hosts.sync_state();
         let Some(signed_in) = state.account.clone() else {
@@ -277,9 +293,12 @@ impl SyncScreen {
             let copy = hosts.sync_copy();
             self.start(ctx, "Syncing", move || run_round(&signed_in, copy));
         }
-        // Wake up for the next round only (idle wakeups, P-06).
-        let next = next_round(self.last_round, self.dirty_since, self.round_failed);
-        ctx.later(Duration::from_secs_f64((next - now).clamp(0.1, PERIOD)));
+        // Wake up for the next round only (idle wakeups, P-06); a round in flight wakes the
+        // window itself when it ends.
+        if self.work.is_none() {
+            let next = next_round(self.last_round, self.dirty_since, self.round_failed);
+            ctx.later(Duration::from_secs_f64((next - now).clamp(0.1, PERIOD)));
+        }
         replaced
     }
 
@@ -711,7 +730,11 @@ mod tests {
             115.0,
             "a failed round retries soon"
         );
-        assert_eq!(next_round(100.0, Some(150.0), true), 115.0);
+        assert_eq!(
+            next_round(100.0, Some(101.0), true),
+            115.0,
+            "an edit waiting does not make an unreachable server be tried back to back"
+        );
         assert!(
             next_round(f64::NEG_INFINITY, None, false) < 0.0,
             "sync soon"

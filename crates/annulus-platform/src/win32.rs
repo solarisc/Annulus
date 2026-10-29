@@ -43,10 +43,11 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_BACK,
-    VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT, VK_LEFT,
-    VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR,
-    VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
+    TrackMouseEvent, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE,
+    VK_F1, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_COMMA,
+    VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT,
+    VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
@@ -494,12 +495,18 @@ impl Host {
                 }
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                     let point = self.point(lparam);
+                    // The release reaches this window even outside it, so a press never stays
+                    // down (a drag let go elsewhere does not drop later by surprise).
+                    SetCapture(hwnd);
                     self.events.push(Event::Modifiers(Self::modifiers()));
                     self.events.push(Event::PointerMoved(point));
                     self.push(Event::PointerDown(Button::Primary));
                     LRESULT(0)
                 }
                 WM_LBUTTONUP => {
+                    let _ = ReleaseCapture();
+                    let point = self.point(lparam);
+                    self.events.push(Event::PointerMoved(point));
                     self.push(Event::PointerUp(Button::Primary));
                     LRESULT(0)
                 }
