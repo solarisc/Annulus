@@ -50,7 +50,13 @@ fn router(server: Arc<Server>) -> Router {
         .route(path::REGISTER_FINISH, post(register_finish))
         .route(path::LOGIN_START, post(login_start))
         .route(path::LOGIN_FINISH, post(login_finish))
-        .route(path::RECORDS, get(pull).post(push))
+        // Only a signed-in device's push may be large; everything else stays small.
+        .route(
+            path::RECORDS,
+            get(pull)
+                .post(push)
+                .layer(axum::extract::DefaultBodyLimit::max(annulus_proto::MAX_BODY)),
+        )
         .route(path::HISTORY, get(history))
         .route(path::WAIT, get(wait))
         .route(path::PASSWORD_START, post(password_start))
@@ -58,7 +64,7 @@ fn router(server: Arc<Server>) -> Router {
         .route(path::DEVICES, get(devices))
         .route(path::REVOKE, post(revoke))
         .layer(axum::extract::DefaultBodyLimit::max(
-            annulus_proto::MAX_BODY,
+            annulus_proto::MAX_SMALL_BODY,
         ))
         .with_state(server)
 }

@@ -60,9 +60,14 @@ pub mod path {
 #[error("malformed message: {0}")]
 pub struct DecodeError(String);
 
-/// The largest request body a server accepts. A client keeps pushes far below it (see
-/// the sync engine's batches); one record, such as a 1 MiB session log once sealed, fits.
+/// The largest push a server accepts (signed-in devices only). A client keeps pushes far
+/// below it (see the sync engine's batches); one record, such as a 1 MiB session log once
+/// sealed, fits.
 pub const MAX_BODY: usize = 8 * 1024 * 1024;
+
+/// The largest body of every other request, sign-up and login included: their messages
+/// are a few KiB, and a stranger must not make the server buffer more.
+pub const MAX_SMALL_BODY: usize = 64 * 1024;
 
 /// Encodes a message body.
 #[must_use]

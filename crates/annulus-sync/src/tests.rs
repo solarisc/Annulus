@@ -363,6 +363,40 @@ fn http_server() -> String {
 }
 
 #[test]
+fn only_a_push_may_be_large_and_strangers_get_413() {
+    let base = http_server();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let status = |route: &str, bytes: usize| {
+        agent
+            .post(&format!("{base}{route}"))
+            .header(
+                annulus_proto::VERSION_HEADER,
+                &annulus_proto::PROTOCOL_VERSION.to_string(),
+            )
+            .send(&vec![0u8; bytes][..])
+            .map_or(0, |response| response.status().as_u16())
+    };
+    let big = annulus_proto::MAX_SMALL_BODY + 1;
+    for route in [
+        annulus_proto::path::REGISTER_START,
+        annulus_proto::path::LOGIN_START,
+        annulus_proto::path::LOGIN_FINISH,
+    ] {
+        assert_eq!(status(route, big), 413, "{route}");
+        assert_ne!(status(route, 100), 413, "{route}: a normal size is read");
+    }
+    // A push of the same size is read (and refused only for want of a token).
+    assert_eq!(status(annulus_proto::path::RECORDS, big), 401);
+    assert_eq!(
+        status(annulus_proto::path::RECORDS, annulus_proto::MAX_BODY + 1),
+        413
+    );
+}
+
+#[test]
 fn a_first_sync_with_several_large_records_goes_through_over_http() {
     let base = http_server();
     let mut laptop = crate::http::HttpServer::new(&base, None).unwrap();
