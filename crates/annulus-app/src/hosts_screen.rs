@@ -1,6 +1,7 @@
-//! The Hosts screen (F-HOST-001, F-HOST-005, F-APP-006): saved hosts from the unlocked
-//! vault, filtered by the search field, quick connect from the same field, and the host
-//! editor in a right side panel.
+//! The Hosts screen (F-HOST-001, F-HOST-003, F-HOST-005, F-APP-006): saved hosts from the
+//! unlocked vault, browsed group by group or filtered by the search field, quick connect from
+//! the same field, and the host and group editors in a right side panel. Connections use the
+//! resolved host: what it sets itself, filled in from its groups.
 
 use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Palette, space, text};
@@ -10,6 +11,7 @@ use annulus_ui::{icons, theme};
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
 
+use crate::groups_view::{self, Crumb, GroupAction, GroupDraft};
 use crate::import_dialog::ImportPreview;
 
 /// Longest jump chain followed; longer ones are cut, so a mistake cannot hang a connect.
@@ -50,6 +52,9 @@ pub struct HostsScreen {
     import: Option<ImportPreview>,
     /// The result of the last import or export, shown under the toolbar.
     notice: Option<String>,
+    /// The group being browsed (its uid); `None` is the top level.
+    group: Option<String>,
+    group_editor: Option<GroupDraft>,
 }
 
 impl HostsScreen {
@@ -63,6 +68,8 @@ impl HostsScreen {
             ssh_files,
             import: None,
             notice: None,
+            group: None,
+            group_editor: None,
         }
     }
 
@@ -83,8 +90,10 @@ impl HostsScreen {
         }
     }
 
-    /// How to log in to a saved host: its target, saved password and keychain key.
+    /// How to log in to a saved host: its target, saved password and keychain key, with
+    /// what it inherits from its groups.
     fn hop(&self, host: &Host) -> Option<Hop> {
+        let (host, _) = self.vault.resolve(host);
         Some(Hop {
             target: Target::parse(&host.target(), &local_user())?,
             password: host
@@ -139,7 +148,7 @@ impl HostsScreen {
                 proxy: hop.proxy,
                 reconnect: !host.no_reconnect,
             },
-            None => Program::system_ssh(&host.target()),
+            None => Program::system_ssh(&self.vault.resolve(host).0.target()),
         }
     }
 
@@ -150,8 +159,14 @@ impl HostsScreen {
             .on_hover_text("Hosts as an OpenSSH config, without passwords")
             .clicked()
         {
+            let resolved: Vec<Host> = self
+                .vault
+                .hosts()
+                .iter()
+                .map(|host| self.vault.resolve(host).0)
+                .collect();
             ui.ctx()
-                .copy_text(annulus_import::ssh_config::export(self.vault.hosts()));
+                .copy_text(annulus_import::ssh_config::export(&resolved));
             self.notice = Some("Copied the hosts as an OpenSSH config (no passwords).".into());
         }
         if ui.button("Import ssh_config").clicked() {
@@ -187,8 +202,10 @@ impl HostsScreen {
             RowAction::CopyCommand => {
                 let jump = host
                     .jump_id
-                    .and_then(|id| self.vault.hosts().iter().find(|h| h.id == id));
-                ui.ctx().copy_text(ssh_command(host, jump));
+                    .and_then(|id| self.vault.hosts().iter().find(|h| h.id == id))
+                    .map(|jump| self.vault.resolve(jump).0);
+                let resolved = self.vault.resolve(host).0;
+                ui.ctx().copy_text(ssh_command(&resolved, jump.as_ref()));
                 self.notice = Some(format!("Copied the ssh command for {}.", host.label));
             }
             RowAction::Duplicate => {
@@ -236,6 +253,8 @@ impl HostsScreen {
     /// Swaps in another vault (after signing in to a sync account) and returns the old one.
     pub fn replace_vault(&mut self, vault: Vault) -> Vault {
         self.editor = None;
+        self.group_editor = None;
+        self.group = None;
         std::mem::replace(&mut self.vault, vault)
     }
 
@@ -247,6 +266,15 @@ impl HostsScreen {
                 .resizable(false)
                 .exact_size(340.0)
                 .show(ui, |ui| self.editor_ui(ui, palette));
+        } else if let Some(draft) = &mut self.group_editor {
+            let closed = egui::Panel::right("group-editor")
+                .resizable(false)
+                .exact_size(340.0)
+                .show(ui, |ui| draft.ui(ui, palette, &mut self.vault))
+                .inner;
+            if closed {
+                self.group_editor = None;
+            }
         }
         ui.add_space(space::S);
         ui.horizontal(|ui| {
@@ -269,24 +297,23 @@ impl HostsScreen {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.import_export_buttons(ui);
-                if ui.button("New host").clicked() {
-                    let host = self.vault.draft_host();
-                    self.editor = Some(Draft {
-                        port: host.port.map(|port| port.to_string()).unwrap_or_default(),
-                        tags: String::new(),
-                        problem: None,
-                        is_new: true,
-                        password: SecretText::new(),
-                        forget_password: false,
-                        proxy: SecretText::new(),
-                        host,
-                    });
-                }
+                self.new_buttons(ui);
             });
         });
         self.import_preview(ui, palette);
         ui.add_space(space::M);
 
+        if self.search.trim().is_empty() {
+            match groups_view::breadcrumb(ui, self.vault.groups(), self.group.as_deref()) {
+                Some(Crumb::Top) => self.group = None,
+                Some(Crumb::Group(uid)) => self.group = Some(uid),
+                None => {}
+            }
+            if let Some(chosen) = self.browse(ui, palette) {
+                request = Some(chosen);
+            }
+            return request;
+        }
         let matches: Vec<Host> = self.vault.search(&self.search).cloned().collect();
         if self.vault.hosts().is_empty() {
             empty(
@@ -308,7 +335,112 @@ impl HostsScreen {
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
             for host in &matches {
-                let action = host_row(ui, host, palette);
+                let shown = self.vault.resolve(host).0;
+                let action = host_row(ui, &shown, palette);
+                if let Some(chosen) = self.row_action(ui, host, action) {
+                    request = Some(chosen);
+                }
+            }
+        });
+        request
+    }
+
+    /// "New group" and "New host": both start inside the group being browsed.
+    fn new_buttons(&mut self, ui: &mut Ui) {
+        if ui.button("New group").clicked() {
+            match self.vault.draft_group(self.group.clone()) {
+                Ok(group) => {
+                    self.editor = None;
+                    self.group_editor = Some(GroupDraft::new(group, true));
+                }
+                Err(error) => self.notice = Some(error.to_string()),
+            }
+        }
+        if ui.button("New host").clicked() {
+            let mut host = self.vault.draft_host();
+            host.group.clone_from(&self.group);
+            self.group_editor = None;
+            self.editor = Some(Draft {
+                port: host.port.map(|port| port.to_string()).unwrap_or_default(),
+                tags: String::new(),
+                problem: None,
+                is_new: true,
+                password: SecretText::new(),
+                forget_password: false,
+                proxy: SecretText::new(),
+                host,
+            });
+        }
+    }
+
+    /// The groups and hosts inside the group being browsed (a host whose group is gone shows
+    /// at the top level). Returns a connect request.
+    fn browse(&mut self, ui: &mut Ui, palette: &Palette) -> Option<Request> {
+        let groups = self.vault.groups().to_vec();
+        // A group deleted (here or by sync) while open: go back to the top.
+        if self
+            .group
+            .as_deref()
+            .is_some_and(|uid| !groups.iter().any(|group| group.uid == uid))
+        {
+            self.group = None;
+        }
+        let current = self.group.clone();
+        let in_here = |uid: Option<&str>| {
+            let known = uid.filter(|uid| groups.iter().any(|group| group.uid == *uid));
+            known == current.as_deref()
+        };
+        let subgroups: Vec<_> = groups
+            .iter()
+            .filter(|group| in_here(group.parent.as_deref()))
+            .cloned()
+            .collect();
+        let hosts: Vec<Host> = self
+            .vault
+            .hosts()
+            .iter()
+            .filter(|host| in_here(host.group.as_deref()))
+            .cloned()
+            .collect();
+        if subgroups.is_empty() && hosts.is_empty() {
+            let (title, detail) = if current.is_none() {
+                (
+                    "No hosts yet",
+                    "Add one with New host, or type user@host:port above to connect now.",
+                )
+            } else {
+                (
+                    "This group is empty",
+                    "Add a host or a group to it with the buttons above.",
+                )
+            };
+            empty(ui, palette, title, detail);
+            return None;
+        }
+        let mut request = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for group in &subgroups {
+                let count = |uid: Option<&str>| uid == Some(group.uid.as_str());
+                let holds = groups_view::holds(
+                    self.vault
+                        .hosts()
+                        .iter()
+                        .filter(|h| count(h.group.as_deref()))
+                        .count(),
+                    groups.iter().filter(|g| count(g.parent.as_deref())).count(),
+                );
+                match groups_view::row(ui, group, &holds, palette) {
+                    GroupAction::Open => self.group = Some(group.uid.clone()),
+                    GroupAction::Edit => {
+                        self.editor = None;
+                        self.group_editor = Some(GroupDraft::new(group.clone(), false));
+                    }
+                    GroupAction::None => {}
+                }
+            }
+            for host in &hosts {
+                let shown = self.vault.resolve(host).0;
+                let action = host_row(ui, &shown, palette);
                 if let Some(chosen) = self.row_action(ui, host, action) {
                     request = Some(chosen);
                 }
@@ -352,6 +484,12 @@ impl HostsScreen {
 
     fn editor_ui(&mut self, ui: &mut Ui, palette: &Palette) {
         let (others, keys) = self.pick_lists();
+        let group_choices = groups_view::choices(self.vault.groups(), None);
+        let inherited = self
+            .editor
+            .as_ref()
+            .map(|draft| inherited_hints(&self.vault, &draft.host, &keys))
+            .unwrap_or_default();
         let Some(draft) = &mut self.editor else {
             return;
         };
@@ -375,48 +513,36 @@ impl HostsScreen {
                         .hint_text("10.0.4.12 or db.example.com"),
                 );
                 ui.end_row();
+                ui.label("Group");
+                groups_view::picker(ui, "host-group", &mut draft.host.group, &group_choices);
+                ui.end_row();
                 ui.label("Port");
-                ui.add(egui::TextEdit::singleline(&mut draft.port).desired_width(80.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.port)
+                        .hint_text(inherited.port.as_str())
+                        .desired_width(160.0),
+                );
                 ui.end_row();
                 ui.label("Username");
-                ui.add(egui::TextEdit::singleline(&mut draft.host.username).hint_text("admin"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.host.username)
+                        .hint_text(inherited.username.as_str()),
+                );
                 ui.end_row();
                 ui.label("Tags");
                 ui.add(egui::TextEdit::singleline(&mut draft.tags).hint_text("postgres, prod"));
                 ui.end_row();
                 ui.label("Key");
-                key_picker(ui, &mut draft.host.key_id, &keys);
+                key_picker(ui, &mut draft.host.key_id, &keys, &inherited.key);
                 ui.end_row();
                 ui.label("Jump host");
                 jump_picker(ui, &mut draft.host.jump_id, &others);
                 ui.end_row();
                 ui.label("Proxy");
-                secret_line(
-                    ui,
-                    &mut draft.proxy,
-                    "socks5://host:1080 or http://host:8080",
-                );
+                secret_line(ui, &mut draft.proxy, &inherited.proxy);
                 ui.end_row();
                 reconnect_row(ui, &mut draft.host);
-                ui.label("Password");
-                let saved = draft.host.password.is_some() && !draft.forget_password;
-                secret_field(
-                    ui,
-                    &mut draft.password,
-                    if saved {
-                        "Saved (type to replace)"
-                    } else {
-                        "Optional"
-                    },
-                );
-                ui.end_row();
-                if saved {
-                    ui.label("");
-                    if ui.small_button("Forget saved password").clicked() {
-                        draft.forget_password = true;
-                    }
-                    ui.end_row();
-                }
+                password_rows(ui, draft);
             });
         if let Some(problem) = &draft.problem {
             ui.add_space(space::S);
@@ -500,6 +626,29 @@ impl HostsScreen {
     }
 }
 
+/// The editor rows for the saved password: a new one, or forgetting the saved one.
+fn password_rows(ui: &mut Ui, draft: &mut Draft) {
+    ui.label("Password");
+    let saved = draft.host.password.is_some() && !draft.forget_password;
+    secret_field(
+        ui,
+        &mut draft.password,
+        if saved {
+            "Saved (type to replace)"
+        } else {
+            "Optional"
+        },
+    );
+    ui.end_row();
+    if saved {
+        ui.label("");
+        if ui.small_button("Forget saved password").clicked() {
+            draft.forget_password = true;
+        }
+        ui.end_row();
+    }
+}
+
 /// The host editor's choice of a saved host to connect through.
 fn jump_picker(ui: &mut Ui, jump_id: &mut Option<u64>, hosts: &[(u64, String)]) {
     let chosen = jump_id
@@ -515,19 +664,58 @@ fn jump_picker(ui: &mut Ui, jump_id: &mut Option<u64>, hosts: &[(u64, String)]) 
         });
 }
 
-/// The host editor's choice of keychain key.
-fn key_picker(ui: &mut Ui, key_id: &mut Option<u64>, keys: &[(u64, String)]) {
+/// The host editor's choice of keychain key; `unset` names what "no key of its own" means
+/// (the group's key, or the default keys).
+fn key_picker(ui: &mut Ui, key_id: &mut Option<u64>, keys: &[(u64, String)], unset: &str) {
     let chosen = key_id
         .and_then(|id| keys.iter().find(|(key, _)| *key == id))
-        .map_or("Default keys", |(_, label)| label.as_str());
+        .map_or(unset, |(_, label)| label.as_str());
     egui::ComboBox::from_id_salt("host-key")
         .selected_text(chosen)
         .show_ui(ui, |ui| {
-            ui.selectable_value(key_id, None, "Default keys");
+            ui.selectable_value(key_id, None, unset);
             for (id, label) in keys {
                 ui.selectable_value(key_id, Some(*id), label);
             }
         });
+}
+
+/// What the host editor shows in a field the host leaves unset: the inherited value and the
+/// group it comes from, or the plain default.
+#[derive(Default)]
+struct Hints {
+    port: String,
+    username: String,
+    key: String,
+    proxy: String,
+}
+
+fn inherited_hints(vault: &Vault, host: &Host, keys: &[(u64, String)]) -> Hints {
+    let mut bare = host.clone();
+    (bare.port, bare.key_id, bare.proxy) = (None, None, None);
+    bare.username.clear();
+    let (resolved, sources) = vault.resolve(&bare);
+    let from = |value: String, source: Option<String>, otherwise: &str| match source {
+        Some(group) => format!("{value} (from {group})"),
+        None => otherwise.to_owned(),
+    };
+    Hints {
+        port: from(resolved.port().to_string(), sources.port, "22"),
+        username: from(resolved.username, sources.username, "admin"),
+        key: from(
+            resolved
+                .key_id
+                .and_then(|id| keys.iter().find(|(key, _)| *key == id))
+                .map_or_else(String::new, |(_, label)| label.clone()),
+            sources.key_id,
+            "Default keys",
+        ),
+        proxy: from(
+            "group proxy".to_owned(),
+            sources.proxy,
+            "socks5://host:1080 or http://host:8080",
+        ),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -692,6 +880,27 @@ mod tests {
                 key_dir: None,
             },
         )
+    }
+
+    #[test]
+    fn a_host_in_a_group_connects_with_what_it_inherits() {
+        let mut screen = screen_with("grp");
+        let mut group = screen.vault.draft_group(None).unwrap();
+        group.name = "prod".into();
+        group.defaults.username = "deploy".into();
+        group.defaults.port = Some(2200);
+        screen.vault.upsert_group(group.clone()).unwrap();
+        let mut host = screen.vault.hosts()[0].clone();
+        (host.username, host.port, host.group) = (String::new(), None, Some(group.uid));
+        screen.vault.upsert_host(host.clone()).unwrap();
+        let Program::Ssh { target, .. } = screen.connect_host(&host) else {
+            panic!("an ssh program");
+        };
+        assert_eq!((target.user.as_str(), target.port), ("deploy", 2200));
+        let hints = inherited_hints(&screen.vault, &host, &[]);
+        assert_eq!(hints.port, "2200 (from prod)");
+        assert_eq!(hints.username, "deploy (from prod)");
+        assert_eq!(hints.key, "Default keys");
     }
 
     #[test]

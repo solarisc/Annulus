@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod forwards_screen;
+mod groups_view;
 mod hosts_screen;
 mod import_dialog;
 mod keychain_screen;
