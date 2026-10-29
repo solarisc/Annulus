@@ -598,3 +598,72 @@ async fn permissions_are_set_on_the_server() {
     let listed = sftp.list(&home).await.unwrap();
     assert!(!listed.iter().any(|entry| entry.name == "annulus-chmod.txt"));
 }
+
+#[tokio::test]
+#[ignore = "needs the test servers"]
+async fn an_upload_cut_off_by_the_server_continues_where_it_stopped() {
+    let env = env();
+    let local = empty_dir("upcut-local");
+    let data: Vec<u8> = (0..60_000_000u32)
+        .map(|i| u8::try_from(i.wrapping_mul(2_654_435_761) >> 24).unwrap_or(0))
+        .collect();
+    std::fs::write(local.join("annulus-upcut.bin"), &data).unwrap();
+    let target = format!("{}@{}", env.user, env.vm1);
+
+    let connection = with_key(&env, &env.vm1, "upcut").await;
+    let sftp = Sftp::open(&connection).await.unwrap();
+    let home = sftp.home().await.unwrap();
+    let mut killed = false;
+    let mut cutter = |done: u64, _: u64| {
+        if !killed && done > 8_000_000 {
+            killed = true;
+            let status = std::process::Command::new("ssh")
+                .args(["-o", "BatchMode=yes", &target, "pkill -9 -x sftp-server"])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        true
+    };
+    let failed = sftp
+        .upload(
+            &local.join("annulus-upcut.bin"),
+            &home,
+            Conflict::KeepBoth,
+            &mut cutter,
+        )
+        .await;
+    assert!(failed.is_err(), "{failed:?}");
+    drop(sftp);
+
+    let again = with_key(&env, &env.vm1, "upcut").await;
+    let sftp = Sftp::open(&again).await.unwrap();
+    let mut first = None;
+    let mut watch = |done: u64, _: u64| {
+        first.get_or_insert(done);
+        true
+    };
+    sftp.upload(
+        &local.join("annulus-upcut.bin"),
+        &home,
+        Conflict::KeepBoth,
+        &mut watch,
+    )
+    .await
+    .unwrap();
+    assert!(first.unwrap() > 8_000_000, "resumed, not restarted");
+
+    // Fetched back, it is byte for byte the file that was sent: no hole, nothing twice.
+    let back = empty_dir("upcut-back");
+    sftp.download(
+        &format!("{home}/annulus-upcut.bin"),
+        &back,
+        Conflict::KeepBoth,
+        &mut |_, _| true,
+    )
+    .await
+    .unwrap();
+    let same = std::fs::read(back.join("annulus-upcut.bin")).unwrap() == data;
+    run(&again, "rm -f ~/annulus-upcut.bin ~/.annulus-upcut.bin.*").await;
+    assert!(same, "the resumed upload differs from what was sent");
+}
