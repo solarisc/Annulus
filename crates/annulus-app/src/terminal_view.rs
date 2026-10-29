@@ -121,8 +121,8 @@ impl TerminalTab {
                 Err(error) => self.failed = Some(format!("Could not start the session: {error}")),
             }
         }
-        if let Some(message) = &self.failed {
-            ui.colored_label(Color32::from_rgb(0xE8, 0x64, 0x5D), message);
+        if self.failed.is_some() {
+            self.failed_ui(ui);
             return;
         }
         let Some(session) = &self.session else { return };
@@ -132,8 +132,8 @@ impl TerminalTab {
             self.size = Some((size, cell_w, cell_h));
         }
         self.drain_events(ui.ctx());
-        if let Some(message) = &self.failed {
-            ui.colored_label(Color32::from_rgb(0xE8, 0x64, 0x5D), message);
+        if self.failed.is_some() {
+            self.failed_ui(ui);
             return;
         }
         let prompting = self.prompts(ui.ctx());
@@ -146,6 +146,14 @@ impl TerminalTab {
         if response.clicked() || !self.focused_once {
             response.request_focus();
             self.focused_once = true;
+        }
+        // A finished session starts again on Enter (an SSH tab reconnects).
+        if self.exited
+            && response.has_focus()
+            && ui.input(|input| input.key_pressed(EguiKey::Enter))
+        {
+            self.restart();
+            return;
         }
         if response.has_focus() {
             // Tab, arrows and Escape belong to the program, not to egui's focus navigation.
@@ -185,15 +193,26 @@ impl TerminalTab {
             paint_matches(ui, area.min, cell, &session.find_visible(search));
         }
         if self.exited {
-            #[allow(clippy::cast_precision_loss)] // Row counts are small.
-            let at = area.min + Vec2::new(4.0, cell.y * (size.rows.saturating_sub(1)) as f32);
-            ui.painter().text(
-                at,
-                egui::Align2::LEFT_TOP,
-                "[session ended]",
-                font,
-                Color32::GRAY,
-            );
+            paint_ended(ui, area.min, cell, size.rows, font);
+        }
+    }
+
+    /// Starts the program again in this tab: a reconnect for SSH, a new shell otherwise.
+    fn restart(&mut self) {
+        self.session = None;
+        self.failed = None;
+        self.exited = false;
+        self.size = None;
+        self.focused_once = false;
+    }
+
+    /// The reason a session could not start, and a way to try again.
+    fn failed_ui(&mut self, ui: &mut Ui) {
+        if let Some(message) = &self.failed {
+            ui.colored_label(Color32::from_rgb(0xE8, 0x64, 0x5D), message);
+        }
+        if ui.button("Try again").clicked() {
+            self.restart();
         }
     }
 
@@ -324,6 +343,19 @@ fn paint_matches(ui: &Ui, origin: Pos2, cell: Vec2, highlights: &[Highlight]) {
             Color32::from_rgba_unmultiplied(0xF2, 0xC1, 0x4E, alpha),
         );
     }
+}
+
+/// The line that says the session ended, on the last row.
+#[allow(clippy::cast_precision_loss)] // Row counts are small.
+fn paint_ended(ui: &Ui, origin: Pos2, cell: Vec2, rows: usize, font: FontId) {
+    let at = origin + Vec2::new(4.0, cell.y * (rows.saturating_sub(1)) as f32);
+    ui.painter().text(
+        at,
+        egui::Align2::LEFT_TOP,
+        "[session ended \u{2014} press Enter to start it again]",
+        font,
+        Color32::GRAY,
+    );
 }
 
 fn color(rgb: Rgb) -> Color32 {
