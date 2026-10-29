@@ -83,6 +83,8 @@ pub enum Program {
         identity: Option<Password>,
         /// Jump hosts to go through, in order (empty: connect directly).
         via: Vec<Hop>,
+        /// A proxy to reach the first hop through (F-SSH-015).
+        proxy: Option<Password>,
     },
 }
 
@@ -95,6 +97,8 @@ pub struct Hop {
     pub password: Option<Password>,
     /// A keychain private key.
     pub identity: Option<Password>,
+    /// A proxy for the first hop: `socks5://…` or `http://…` (F-SSH-015).
+    pub proxy: Option<Password>,
 }
 
 /// Connects through `via`, in order, to `last` (F-SSH-014). Each hop checks its own host
@@ -125,11 +129,17 @@ pub async fn connect_chain(
             .into_iter()
             .collect();
         let (known_hosts, key_dir) = (&files.known_hosts, files.key_dir.as_deref());
-        let result = match jump.take() {
-            None => {
-                annulus_ssh::connect(&hop.target, known_hosts, key_dir, &identities, prompt).await
-            }
-            Some(through) => {
+        let proxy = match hop.proxy.as_ref().filter(|_| index == 0) {
+            Some(url) => Some(annulus_ssh::proxy::Proxy::parse(&url.0).ok_or_else(|| {
+                format!(
+                    "the proxy for {} is not a socks5:// or http:// address",
+                    hop.target.host
+                )
+            })?),
+            None => None,
+        };
+        let result = match (jump.take(), proxy) {
+            (Some(through), _) => {
                 annulus_ssh::connect_via(
                     through,
                     &hop.target,
@@ -139,6 +149,20 @@ pub async fn connect_chain(
                     prompt,
                 )
                 .await
+            }
+            (None, Some(proxy)) => {
+                annulus_ssh::connect_proxied(
+                    &proxy,
+                    &hop.target,
+                    known_hosts,
+                    key_dir,
+                    &identities,
+                    prompt,
+                )
+                .await
+            }
+            (None, None) => {
+                annulus_ssh::connect(&hop.target, known_hosts, key_dir, &identities, prompt).await
             }
         };
         let connection = result.map_err(|error| {
@@ -422,12 +446,14 @@ impl Session {
                 password,
                 identity,
                 via,
+                proxy,
             } => Backend::Ssh(spawn_ssh(
                 SshLogin {
                     last: Hop {
                         target: target.clone(),
                         password: password.clone(),
                         identity: identity.clone(),
+                        proxy: proxy.clone(),
                     },
                     files: files.clone(),
                     via: via.clone(),
@@ -766,6 +792,7 @@ mod tests {
                 password: None,
                 identity: None,
                 via: Vec::new(),
+                proxy: None,
             },
             Size::new(80, 24),
             8,

@@ -54,6 +54,12 @@ impl SecretText {
     }
 }
 
+impl From<&str> for SecretText {
+    fn from(text: &str) -> Self {
+        Self(Zeroizing::new(text.to_owned()))
+    }
+}
+
 impl fmt::Debug for SecretText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SecretText([redacted])")
@@ -125,6 +131,16 @@ pub fn secret_area(ui: &mut Ui, secret: &mut SecretText, hint: &str, rows: usize
         .font(egui::TextStyle::Monospace)
         .desired_width(f32::INFINITY)
         .show(ui);
+    let mut state = output.state;
+    state.clear_undoer();
+    state.store(ui.ctx(), output.response.response.id);
+    output.response.response
+}
+
+/// A visible single-line field for secrets that are edited as text, such as a proxy URL
+/// that may contain a login: kept in a zeroizing buffer with no undo history.
+pub fn secret_line(ui: &mut Ui, secret: &mut SecretText, hint: &str) -> Response {
+    let output = TextEdit::singleline(secret).hint_text(hint).show(ui);
     let mut state = output.state;
     state.clear_undoer();
     state.store(ui.ctx(), output.response.response.id);

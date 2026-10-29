@@ -694,6 +694,7 @@ mod tests {
             password: None,
             key_id: None,
             jump_id: None,
+            proxy: None,
         };
         copy.apply(
             "host-sync-id",
@@ -742,6 +743,7 @@ mod tests {
             password: None,
             key_id: None,
             jump_id: None,
+            proxy: None,
         });
         // Many entries, so random ids would put some rule before some host by chance.
         for _ in 0..20 {

@@ -564,6 +564,48 @@ async fn a_host_behind_a_jump_host_is_reached_through_it() {
 }
 
 #[tokio::test]
+async fn a_server_is_reached_through_a_socks_proxy() {
+    let inner = serve(new_key()).await;
+    // A plain local SOCKS proxy that dials directly, standing in for a corporate proxy.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut client, _) = listener.accept().await.unwrap();
+        let mut greeting = [0u8; 3];
+        client.read_exact(&mut greeting).await.unwrap();
+        client.write_all(&[5, 0]).await.unwrap();
+        let mut head = [0u8; 5];
+        client.read_exact(&mut head).await.unwrap();
+        let mut name = vec![0u8; usize::from(head[4])];
+        client.read_exact(&mut name).await.unwrap();
+        let port = client.read_u16().await.unwrap();
+        let mut upstream =
+            tokio::net::TcpStream::connect((String::from_utf8(name).unwrap().as_str(), port))
+                .await
+                .unwrap();
+        client
+            .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    });
+    let proxy = proxy::Proxy::parse(&format!("socks5://127.0.0.1:{proxy_port}")).unwrap();
+    let connection = connect_proxied(
+        &proxy,
+        &target(inner, "alice"),
+        &known_hosts("socks"),
+        None,
+        &[],
+        Script::new(true, &["secret"]),
+    )
+    .await
+    .unwrap();
+    let mut shell = connection.shell(80, 24).await.unwrap();
+    assert_eq!(shell.next().await, Output::Data(b"welcome\r\n".to_vec()));
+}
+
+#[tokio::test]
 async fn a_rejected_new_key_stops_before_any_password_is_sent() {
     let port = serve(new_key()).await;
     let script = Script::new(false, &["secret"]);

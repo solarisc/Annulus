@@ -35,6 +35,10 @@ pub struct Host {
     /// The saved host to connect through (`ProxyJump`); it may have its own jump host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump_id: Option<u64>,
+    /// A proxy to reach the host through: `socks5://…` or `http://…` (may hold a login,
+    /// which is why it lives in the encrypted record).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<Secret>,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -171,6 +175,7 @@ mod tests {
             password: None,
             key_id: None,
             jump_id: None,
+            proxy: None,
         }
     }
 

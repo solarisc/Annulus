@@ -301,6 +301,7 @@ impl SftpTab {
                 },
                 password: None,
                 identity: None,
+                proxy: None,
             },
             SshFiles {
                 known_hosts: PathBuf::new(),

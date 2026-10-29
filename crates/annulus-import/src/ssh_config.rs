@@ -322,6 +322,7 @@ impl Found {
             password: None,
             key_id: None,
             jump_id: None,
+            proxy: None,
         }
     }
 
@@ -486,6 +487,7 @@ mod tests {
             password: None,
             key_id: None,
             jump_id: None,
+            proxy: None,
         }
     }
 }

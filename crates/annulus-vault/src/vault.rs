@@ -310,6 +310,7 @@ impl Vault {
             password: None,
             key_id: None,
             jump_id: None,
+            proxy: None,
         }
     }
 

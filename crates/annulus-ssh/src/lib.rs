@@ -9,6 +9,7 @@
 pub mod forward;
 pub mod keys;
 pub mod known;
+pub mod proxy;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -262,8 +263,32 @@ pub async fn connect(
     identities: &[Zeroizing<String>],
     prompt: Arc<dyn Prompt>,
 ) -> Result<Connection, SshError> {
-    let (handle, remote) = handshake(target, known_hosts, prompt.clone(), None).await?;
+    let (handle, remote) = handshake(target, known_hosts, prompt.clone(), Route::Direct).await?;
     log_in(handle, remote, None, target, key_dir, identities, prompt).await
+}
+
+/// As [`connect`], but the TCP connection goes through `proxy` (SOCKS5 or HTTP CONNECT).
+///
+/// # Errors
+/// As [`connect`]; [`SshError::Unreachable`] names the proxy when it refuses.
+pub async fn connect_proxied(
+    proxy: &proxy::Proxy,
+    target: &Target,
+    known_hosts: &Path,
+    key_dir: Option<&Path>,
+    identities: &[Zeroizing<String>],
+    prompt: Arc<dyn Prompt>,
+) -> Result<Connection, SshError> {
+    let (handle, remote) =
+        handshake(target, known_hosts, prompt.clone(), Route::Proxy(proxy)).await?;
+    log_in(handle, remote, None, target, key_dir, identities, prompt).await
+}
+
+/// How the SSH transport reaches its server.
+enum Route<'a> {
+    Direct,
+    Jump(&'a Arc<Connection>),
+    Proxy(&'a proxy::Proxy),
 }
 
 /// As [`connect`], but through `jump`: the connection to `target` runs inside a
@@ -280,7 +305,8 @@ pub async fn connect_via(
     identities: &[Zeroizing<String>],
     prompt: Arc<dyn Prompt>,
 ) -> Result<Connection, SshError> {
-    let (handle, remote) = handshake(target, known_hosts, prompt.clone(), Some(&jump)).await?;
+    let (handle, remote) =
+        handshake(target, known_hosts, prompt.clone(), Route::Jump(&jump)).await?;
     log_in(
         handle,
         remote,
@@ -298,7 +324,7 @@ async fn handshake(
     target: &Target,
     known_hosts: &Path,
     prompt: Arc<dyn Prompt>,
-    via: Option<&Arc<Connection>>,
+    route: Route<'_>,
 ) -> Result<(Handle<Checker>, forward::RemoteMap), SshError> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
@@ -315,9 +341,11 @@ async fn handshake(
         remote: remote.clone(),
     };
     let name = known_hosts_name(&target.host, target.port);
-    let connected = match via {
-        None => client::connect(config, (target.host.as_str(), target.port), checker).await,
-        Some(jump) => {
+    let connected = match route {
+        Route::Direct => {
+            client::connect(config, (target.host.as_str(), target.port), checker).await
+        }
+        Route::Jump(jump) => {
             let channel = jump
                 .handle
                 .channel_open_direct_tcpip(
@@ -334,6 +362,18 @@ async fn handshake(
                     )
                 })?;
             client::connect_stream(config, channel.into_stream(), checker).await
+        }
+        Route::Proxy(proxy) => {
+            let stream = proxy
+                .connect(&target.host, target.port)
+                .await
+                .map_err(|error| {
+                    SshError::Unreachable(
+                        name.clone(),
+                        format!("through the proxy {}:{}: {error}", proxy.host, proxy.port),
+                    )
+                })?;
+            client::connect_stream(config, stream, checker).await
         }
     };
     match connected {

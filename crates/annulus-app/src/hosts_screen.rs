@@ -5,7 +5,7 @@
 use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Palette, space, text};
 use annulus_session::{Hop, Password, Program, SshFiles, Target, local_user};
-use annulus_ui::secret::{SecretText, secret_field};
+use annulus_ui::secret::{SecretText, secret_field, secret_line};
 use annulus_ui::{icons, theme};
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
@@ -37,6 +37,8 @@ struct Draft {
     password: SecretText,
     /// Remove the saved password on save.
     forget_password: bool,
+    /// The proxy URL, edited as text (it may hold a login).
+    proxy: SecretText,
 }
 
 /// The Hosts screen's state, over an unlocked vault.
@@ -74,6 +76,7 @@ impl HostsScreen {
                 password: None,
                 identity: None,
                 via: Vec::new(),
+                proxy: None,
             },
             None => Program::system_ssh(target),
         }
@@ -91,6 +94,7 @@ impl HostsScreen {
                 .key_id
                 .and_then(|id| self.vault.ssh_key(id))
                 .map(|key| Password::new(key.private.expose())),
+            proxy: host.proxy.as_ref().map(|url| Password::new(url.expose())),
         })
     }
 
@@ -131,6 +135,7 @@ impl HostsScreen {
                 password: hop.password,
                 identity: hop.identity,
                 via: self.jump_chain(host),
+                proxy: hop.proxy,
             },
             None => Program::system_ssh(&host.target()),
         }
@@ -224,6 +229,7 @@ impl HostsScreen {
                         is_new: true,
                         password: SecretText::new(),
                         forget_password: false,
+                        proxy: SecretText::new(),
                         host,
                     });
                 }
@@ -268,6 +274,9 @@ impl HostsScreen {
                             is_new: false,
                             password: SecretText::new(),
                             forget_password: false,
+                            proxy: SecretText::from(
+                                host.proxy.as_ref().map_or("", |url| url.expose()),
+                            ),
                             host: host.clone(),
                         });
                     }
@@ -351,6 +360,13 @@ impl HostsScreen {
                 ui.label("Jump host");
                 jump_picker(ui, &mut draft.host.jump_id, &others);
                 ui.end_row();
+                ui.label("Proxy");
+                secret_line(
+                    ui,
+                    &mut draft.proxy,
+                    "socks5://host:1080 or http://host:8080",
+                );
+                ui.end_row();
                 ui.label("Password");
                 let saved = draft.host.password.is_some() && !draft.forget_password;
                 secret_field(
@@ -420,6 +436,13 @@ impl HostsScreen {
         if !draft.password.is_empty() {
             draft.host.password = Some(Secret::new(draft.password.expose()));
         }
+        let proxy = draft.proxy.expose().trim();
+        if !proxy.is_empty() && annulus_ssh::proxy::Proxy::parse(proxy).is_none() {
+            draft.problem =
+                Some("The proxy must look like socks5://host:port or http://host:port.".into());
+            return;
+        }
+        draft.host.proxy = (!proxy.is_empty()).then(|| Secret::new(proxy));
         draft.host.tags = draft
             .tags
             .split(',')
