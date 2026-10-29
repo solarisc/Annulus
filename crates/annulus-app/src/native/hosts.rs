@@ -19,6 +19,8 @@ use crate::{connect, groups_view};
 
 /// Width of the editor panel.
 const EDITOR_W: f32 = 392.0;
+/// The narrowest the host list gets beside the editor; below it the editor covers the list.
+const LIST_MIN_W: f32 = 420.0;
 /// Height of a chip of the tag filter.
 const CHIP_H: f32 = 28.0;
 /// The narrowest a host card gets before the grid drops a column.
@@ -238,10 +240,21 @@ impl HostsView {
     ) -> Option<HostsAction> {
         let mut area = rect;
         let mut action = None;
-        let panel = (self.editor.is_some() || self.group_editor.is_some())
-            .then(|| area.take_right(EDITOR_W.min(area.w * 0.6)));
+        let open = self.editor.is_some() || self.group_editor.is_some();
+        // Beside the list while the list keeps room for its header and cards; over it in a
+        // narrow window, where both side by side would be too cramped to read.
+        let beside = area.w - EDITOR_W >= LIST_MIN_W;
+        let panel = open.then(|| {
+            if beside {
+                area.take_right(EDITOR_W.min(area.w * 0.6))
+            } else {
+                area
+            }
+        });
         let vault = vault?;
-        action = self.listing_area(ui, area, vault).or(action);
+        if !open || beside {
+            action = self.listing_area(ui, area, vault).or(action);
+        }
         if action == Some(HostsAction::ImportSshConfig) {
             action = None;
             match crate::import_dialog::ImportPreview::load(vault) {

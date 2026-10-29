@@ -49,8 +49,13 @@ impl PaletteView {
                 action: Action::QuickConnect(target.to_owned()),
             });
         }
+        // As many rows as fit under the field in this window, up to eight.
+        let top = if window.h < 560.0 { space::XL } else { 72.0 };
+        let room = window.h - top - space::L - CONTROL - 2.0 * space::M - space::S;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // A few rows.
+        let fits = (room / ROW).floor().max(1.0) as usize;
         results.extend(rank(&self.query, items).into_iter().take(SHOWN).cloned());
-        results.truncate(SHOWN);
+        results.truncate(SHOWN.min(fits));
         self.selected = self.selected.min(results.len().saturating_sub(1));
 
         #[allow(clippy::cast_precision_loss)] // At most eight rows.
@@ -58,7 +63,7 @@ impl PaletteView {
         let width = window.w.clamp(320.0, 600.0) - 2.0 * space::L;
         let card = Rect::new(
             window.center().x - width / 2.0,
-            window.y + 72.0,
+            window.y + top,
             width,
             CONTROL + 2.0 * space::M + list_h + space::S,
         );

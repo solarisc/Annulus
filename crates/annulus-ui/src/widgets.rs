@@ -163,6 +163,8 @@ pub(crate) struct Popup {
     items: Vec<String>,
     selected: Option<usize>,
     width: f32,
+    /// The menu was drawn once (it scrolls to the current choice when it first opens).
+    shown: bool,
 }
 
 impl Ui<'_> {
@@ -803,6 +805,7 @@ impl Ui<'_> {
                 items: items.to_vec(),
                 selected,
                 width,
+                shown: false,
             });
         }
         None
@@ -829,13 +832,21 @@ impl Ui<'_> {
             self.state.popup = None;
             return;
         }
-        #[allow(clippy::cast_precision_loss)] // Menus are short.
-        let height = popup.items.len() as f32 * MENU_ITEM + 8.0;
+        #[allow(clippy::cast_precision_loss)] // Menus hold dozens of items at most.
+        let content = popup.items.len() as f32 * MENU_ITEM + 8.0;
+        // Below the widget when it fits, else above; when neither side holds it all, the side
+        // with more room, and the menu scrolls.
         let below = popup.anchor.b() + 4.0;
-        let y = if below + height > self.viewport.b() - 8.0 {
-            (popup.anchor.y - 4.0 - height).max(8.0)
+        let room_below = self.viewport.b() - 8.0 - below;
+        let room_above = popup.anchor.y - 4.0 - (self.viewport.y + 8.0);
+        let (y, height) = if content <= room_below {
+            (below, content)
+        } else if content <= room_above {
+            (popup.anchor.y - 4.0 - content, content)
+        } else if room_below >= room_above {
+            (below, room_below.max(MENU_ITEM + 8.0))
         } else {
-            below
+            (popup.anchor.y - 4.0 - room_above, room_above)
         };
         let x = popup
             .anchor
@@ -846,9 +857,38 @@ impl Ui<'_> {
         self.gfx.shadow(menu, radius::MEDIUM, 16.0, 6.0, t.shadow);
         self.gfx.fill_rect(menu, radius::MEDIUM, t.raised);
         self.gfx.stroke_rect(menu, radius::MEDIUM, 1.0, t.line);
-        let mut rows = menu.inset(4.0, 4.0);
+        let list = menu.inset(4.0, 4.0);
+        let scroll_id = popup.owner.with("menu.scroll");
+        let offset = if content > height {
+            // In view: the item the keyboard is on, or the current choice as the menu opens.
+            let focused = (0..popup.items.len())
+                .find(|index| self.state.focus() == Some(popup.owner.with(("item", *index))));
+            let keep = focused.or(popup.selected.filter(|_| !popup.shown));
+            if let Some(index) = keep {
+                #[allow(clippy::cast_precision_loss)] // As above.
+                let top = index as f32 * MENU_ITEM;
+                let now = self.scroll_offset(scroll_id);
+                self.set_scroll_offset(scroll_id, now.clamp(top + MENU_ITEM - list.h, top));
+            }
+            self.scroll_view(scroll_id, list, content - 8.0)
+        } else {
+            0.0
+        };
+        if let Some(open) = self.state.popup.as_mut() {
+            open.shown = true;
+        }
+        self.push_clip(list);
         for (index, item) in popup.items.iter().enumerate() {
-            let row = rows.take_top(MENU_ITEM);
+            #[allow(clippy::cast_precision_loss)] // As above.
+            let row = Rect::new(
+                list.x,
+                list.y - offset + index as f32 * MENU_ITEM,
+                list.w,
+                MENU_ITEM,
+            );
+            if row.b() < list.y || row.y > list.b() {
+                continue;
+            }
             let id = popup.owner.with(("item", index));
             let response = self.zone(id, row, Role::MenuItem, item);
             if response.hovered || response.focus_ring {
@@ -865,6 +905,7 @@ impl Ui<'_> {
                 self.set_cursor(Cursor::Pointer);
             }
         }
+        self.pop_clip();
     }
 
     /// A small uppercase label above a group of rows.
@@ -1142,7 +1183,7 @@ fn from_shown(content: &str, secret: bool, offset: usize) -> usize {
 mod tests {
     use super::*;
     use crate::gfx::tests::Recorder;
-    use crate::kit::{Event, Theme, UiState};
+    use crate::kit::{Event, Theme, UiState, Zone};
     use annulus_config::tokens::Appearance;
 
     fn frame(state: &mut UiState, events: &[Event], draw: impl FnOnce(&mut Ui<'_>)) {
@@ -1380,6 +1421,47 @@ mod tests {
             ui.text_area(id, FIELD, &mut area, FieldStyle::default());
         });
         assert!(area.contains('y'));
+    }
+
+    #[test]
+    fn a_menu_too_long_for_the_window_scrolls_inside_it_from_the_current_choice() {
+        let mut state = UiState::default();
+        let id = Id::new("host");
+        let items: Vec<String> = (1..=30).map(|n| format!("host-{n}")).collect();
+        let field = Rect::new(10.0, 120.0, 200.0, 32.0);
+        let open = [
+            Event::PointerMoved(field.center()),
+            Event::PointerDown(crate::kit::Button::Primary),
+            Event::PointerUp(crate::kit::Button::Primary),
+        ];
+        frame(&mut state, &[], |ui| {
+            ui.select(id, field, &items, Some(24), "Host");
+        });
+        frame(&mut state, &open, |ui| {
+            ui.select(id, field, &items, Some(24), "Host");
+        });
+        frame(&mut state, &[], |ui| {
+            ui.select(id, field, &items, Some(24), "Host");
+        });
+        let zones = state.zones();
+        let window = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let menu: Vec<&Zone> = zones
+            .iter()
+            .filter(|zone| zone.role == Role::MenuItem)
+            .collect();
+        assert!(
+            !menu.is_empty() && menu.len() < items.len(),
+            "only what fits is drawn"
+        );
+        assert!(
+            menu.iter()
+                .all(|zone| zone.rect.b() <= window.b() && zone.rect.y >= window.y),
+            "every item inside the window"
+        );
+        assert!(
+            menu.iter().any(|zone| zone.label == "host-25"),
+            "opened at the choice"
+        );
     }
 
     #[test]

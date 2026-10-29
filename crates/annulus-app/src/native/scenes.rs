@@ -431,6 +431,15 @@ const SCENES: &[Scene] = &[
         acts: &[Act::Click("New rule")],
     },
     Scene {
+        name: "forwards-new-small",
+        width: 640,
+        height: 420,
+        scale: 1.0,
+        populated: true,
+        setup: forwards,
+        acts: &[Act::Click("New rule")],
+    },
+    Scene {
         name: "known-hosts",
         width: 1100,
         height: 720,
@@ -621,6 +630,15 @@ const SCENES: &[Scene] = &[
         scale: 1.5,
         populated: true,
         setup: with_tabs,
+        acts: &[],
+    },
+    Scene {
+        name: "host-editor-small",
+        width: 640,
+        height: 420,
+        scale: 1.0,
+        populated: true,
+        setup: edit_prod_db,
         acts: &[],
     },
     Scene {
@@ -889,8 +907,13 @@ fn every_scene_renders_without_layout_faults() {
         annulus_platform::d2d::D2d::new().unwrap(),
     )));
     let mut failures = Vec::new();
+    // `ANNULUS_SCENES=forwards` renders only the scenes whose names contain it.
+    let only = std::env::var("ANNULUS_SCENES").ok();
     for renderer in &mut renderers {
-        for scene in SCENES {
+        for scene in SCENES
+            .iter()
+            .filter(|scene| only.as_deref().is_none_or(|part| scene.name.contains(part)))
+        {
             for appearance in [Appearance::Dark, Appearance::Light] {
                 let (png, faults) = render(scene, appearance, renderer.as_mut());
                 let theme = match appearance {
@@ -934,6 +957,291 @@ fn drive(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) 
 fn step(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) -> FrameOutput {
     drive(app, state, events, time);
     drive(app, state, &[], time)
+}
+
+/// Lays out with the real fonts but draws no pixels: the random-input test runs thousands of
+/// frames, and only what the toolkit decides matters there.
+struct Measure(TextEngine);
+
+impl Canvas for Measure {
+    fn scale(&self) -> f32 {
+        1.0
+    }
+    fn fill_rect(&mut self, _: Rect, _: f32, _: annulus_ui::gfx::Color) {}
+    fn stroke_rect(&mut self, _: Rect, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn shadow(&mut self, _: Rect, _: f32, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn fill_circle(&mut self, _: Point, _: f32, _: annulus_ui::gfx::Color) {}
+    fn polyline(&mut self, _: &[Point], _: bool, _: f32, _: annulus_ui::gfx::Color) {}
+    fn stroke_circle(&mut self, _: Point, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn measure(&mut self, text: &str, font: annulus_ui::gfx::Font) -> annulus_ui::gfx::TextSize {
+        self.0.measure(text, font)
+    }
+    fn draw_text(
+        &mut self,
+        _: Point,
+        _: &str,
+        _: annulus_ui::gfx::Font,
+        _: annulus_ui::gfx::Color,
+    ) {
+    }
+    fn push_clip(&mut self, _: Rect) {}
+    fn pop_clip(&mut self) {}
+}
+
+/// A seeded generator (xorshift64*), so a failing run replays from its seed.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        #[allow(clippy::cast_possible_truncation)] // A list index.
+        let at = (self.next() % n.max(1) as u64) as usize;
+        at
+    }
+}
+
+/// What the random user types: plain words, addresses, accents, other scripts, emoji, a
+/// combining mark, spaces, a very long name and several lines.
+const TYPED: &[&str] = &[
+    "a",
+    "web-1",
+    "root@10.0.4.12:2222",
+    "\u{c4}rger.txt",
+    "\u{65e5}\u{672c}\u{8a9e}",
+    "\u{1f642}",
+    "e\u{301}",
+    " ",
+    "--",
+    "a-very-long-host-name-that-goes-on-and-on-and-on.internal.example.com",
+    "644",
+    "line one\nline two",
+];
+
+/// Controls the random user leaves alone: they reach the network or other machines, write
+/// outside the test's folders, or lock the vault for the rest of the run.
+const HANDS_OFF: &[&str] = &[
+    "Create account",
+    "Sign in",
+    "Sync now",
+    "Export to Downloads",
+    "Lock",
+    "Install",
+    "Run this rule",
+    "Download to this computer",
+    "Upload to the host",
+];
+
+/// One random action against the last frame's zones; also says what it was, for the report.
+fn random_action(rng: &mut Rng, zones: &[Zone]) -> (Vec<Event>, String) {
+    let targets: Vec<&Zone> = zones
+        .iter()
+        .filter(|zone| zone.role != Role::WindowButton && zone.rect.w > 1.0)
+        .filter(|zone| !HANDS_OFF.iter().any(|name| zone.label.starts_with(name)))
+        .collect();
+    let click = |zone: &Zone, twice: bool| {
+        let at = zone.rect.center();
+        let mut events = vec![Event::PointerMoved(at)];
+        for _ in 0..if twice { 2 } else { 1 } {
+            events.push(Event::PointerDown(Button::Primary));
+            events.push(Event::PointerUp(Button::Primary));
+        }
+        events
+    };
+    let ctrl_shift = |c| Event::Key(Key::Char(c), Modifiers::CTRL_SHIFT);
+    match rng.below(24) {
+        0..=9 if !targets.is_empty() => {
+            let zone = targets[rng.below(targets.len())];
+            (click(zone, false), format!("click {:?}", zone.label))
+        }
+        10 if !targets.is_empty() => {
+            let zone = targets[rng.below(targets.len())];
+            (click(zone, true), format!("double-click {:?}", zone.label))
+        }
+        11..=13 => {
+            let text = TYPED[rng.below(TYPED.len())];
+            (vec![Event::Text(text.to_owned())], format!("type {text:?}"))
+        }
+        14 => {
+            let text = TYPED[rng.below(TYPED.len())];
+            (
+                vec![Event::Paste(text.to_owned())],
+                format!("paste {text:?}"),
+            )
+        }
+        15 => (vec![Event::Key(Key::Tab, Modifiers::NONE)], "Tab".into()),
+        16 => (
+            vec![Event::Key(Key::Tab, Modifiers::SHIFT)],
+            "Shift+Tab".into(),
+        ),
+        17 => (
+            vec![Event::Key(Key::Escape, Modifiers::NONE)],
+            "Escape".into(),
+        ),
+        18 => (
+            vec![Event::Key(Key::Enter, Modifiers::NONE)],
+            "Enter".into(),
+        ),
+        19 => {
+            let key = [Key::Backspace, Key::Delete, Key::F(2)][rng.below(3)];
+            (vec![Event::Key(key, Modifiers::NONE)], format!("{key:?}"))
+        }
+        20 => {
+            let key = [
+                Key::Left,
+                Key::Right,
+                Key::Up,
+                Key::Down,
+                Key::Home,
+                Key::End,
+            ][rng.below(6)];
+            let modifiers = [Modifiers::NONE, Modifiers::SHIFT, Modifiers::CTRL][rng.below(3)];
+            (
+                vec![Event::Key(key, modifiers)],
+                format!("{key:?} {modifiers:?}"),
+            )
+        }
+        21 if !targets.is_empty() => {
+            let zone = targets[rng.below(targets.len())];
+            (
+                vec![
+                    Event::PointerMoved(zone.rect.center()),
+                    Event::Wheel { x: 0.0, y: -120.0 },
+                ],
+                format!("scroll over {:?}", zone.label),
+            )
+        }
+        _ => {
+            let c = ['k', 't', 'w', 'f', 'm', 'b', 'd', 'e', '.'][rng.below(9)];
+            (vec![ctrl_shift(c)], format!("Ctrl+Shift+{c}"))
+        }
+    }
+}
+
+/// One frame of `app` on `canvas` in a window of `viewport`.
+fn measured_frame(
+    canvas: &mut Measure,
+    state: &mut UiState,
+    app: &mut NativeApp,
+    (events, time): (&[Event], f64),
+    viewport: Rect,
+) -> FrameOutput {
+    state.begin_frame(events, time);
+    let mut ui = Ui::new(canvas, Theme::new(Appearance::Dark), state, viewport);
+    app.frame(&mut ui);
+    state.end_frame()
+}
+
+/// Drives the whole app with `steps` random actions from `seed`: every frame must be
+/// free of panics, layout faults, accessibility-tree faults and shared zone ids. New terminal
+/// and SFTP tabs are closed before they first draw, so nothing connects anywhere.
+fn random_user(seed: u64, steps: usize, (width, height): (f32, f32)) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let mut vault = fixture_vault(&format!("monkey-{seed}"), true);
+    // Rules that start by themselves would connect to the made-up hosts.
+    for rule in vault.forwards().to_vec() {
+        let rule = annulus_vault::forwards::PortForward {
+            auto_start: false,
+            ..rule
+        };
+        vault.upsert_forward(rule).unwrap();
+    }
+    let mut app = NativeApp::new(Some(vault));
+    app.ssh_files.known_hosts = super::demo::known_hosts(&format!("monkey-{seed}"));
+    app.ssh_files.key_dir = None;
+    app.settings.auto_lock_minutes = 0;
+    app.push_sftp(super::demo::sftp_tab(&format!("monkey-{seed}")));
+    app.push_terminal(
+        "replay",
+        TermView::Replay(Box::new(super::demo::terminal())),
+    );
+    app.active = 0;
+    let keep: Vec<u64> = app.tabs.iter().map(|tab| tab.uid).collect();
+    let viewport = Rect::new(0.0, 0.0, width, height);
+    let mut canvas = Measure(TextEngine::new());
+    let mut state = UiState::default();
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut zones: Vec<Zone> = Vec::new();
+    let mut history: Vec<String> = Vec::new();
+    // What the run reached, printed at the end so a narrow run shows.
+    let mut reached: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut sections = std::collections::BTreeSet::new();
+    for step in 0..steps {
+        let (events, what) = random_action(&mut rng, &zones);
+        history.push(what);
+        if history.len() > 16 {
+            history.remove(0);
+        }
+        #[allow(clippy::cast_precision_loss)] // Step counts are small.
+        let time = step as f64 * 0.25;
+        let frames = catch_unwind(AssertUnwindSafe(|| {
+            let first =
+                measured_frame(&mut canvas, &mut state, &mut app, (&events, time), viewport);
+            // Nothing new connects: terminal and SFTP tabs opened by the step go before they draw.
+            app.tabs
+                .retain(|tab| keep.contains(&tab.uid) || tab.kind == super::TabKind::Vault);
+            app.active = app.active.min(app.tabs.len().saturating_sub(1));
+            let second = measured_frame(
+                &mut canvas,
+                &mut state,
+                &mut app,
+                (&[], time + 0.1),
+                viewport,
+            );
+            (first, second)
+        }));
+        let Ok((first, second)) = frames else {
+            panic!("seed {seed}, step {step}: a panic after {history:#?}");
+        };
+        let mut faults = first.faults;
+        faults.extend(second.faults);
+        faults.extend(layout_faults(&second.zones, viewport));
+        let tree = annulus_ui::access::tree(&second.zones, state.focus(), 1.0, "Annulus");
+        faults.extend(annulus_ui::access::faults(&tree));
+        let mut ids = std::collections::HashSet::new();
+        for zone in &second.zones {
+            if !ids.insert(zone.id) {
+                faults.push(format!("{:?} shares its id", zone.label));
+            }
+        }
+        assert!(
+            faults.is_empty(),
+            "seed {seed}, step {step}: {faults:#?}\nafter: {history:#?}"
+        );
+        reached.extend(second.zones.iter().map(|zone| zone.label.clone()));
+        sections.insert(format!("{:?}", app.section));
+        zones = second.zones;
+    }
+    eprintln!(
+        "seed {seed}: {steps} steps, {} distinct controls, sections {sections:?}",
+        reached.len()
+    );
+}
+
+/// A few thousand random steps on every push; `ANNULUS_MONKEY_STEPS` and `ANNULUS_MONKEY_SEED`
+/// make the nightly run longer and replay a failure.
+#[test]
+fn random_input_finds_no_panic_or_fault() {
+    let steps = std::env::var("ANNULUS_MONKEY_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1500);
+    let seeds: Vec<u64> = match std::env::var("ANNULUS_MONKEY_SEED") {
+        Ok(seed) => vec![seed.parse().expect("ANNULUS_MONKEY_SEED is a number")],
+        Err(_) => vec![1, 2, 3],
+    };
+    for seed in seeds {
+        random_user(seed, steps, (1100.0, 760.0));
+        // The smallest window the app allows, where layouts break first.
+        random_user(seed + 1000, steps / 2, (640.0, 420.0));
+    }
 }
 
 /// A click on the zone named `name` that lies inside the zone named `within` (a button of
