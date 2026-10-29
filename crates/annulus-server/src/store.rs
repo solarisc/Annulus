@@ -42,6 +42,14 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// The longest account name, in bytes (an e-mail address fits).
 const MAX_ACCOUNT_NAME: usize = 254;
 
+/// The most characters of a device's name that are kept.
+const MAX_DEVICE_NAME: usize = 64;
+
+/// A device name as stored: trimmed, at most [`MAX_DEVICE_NAME`] characters.
+fn device_name(text: &str) -> String {
+    text.trim().chars().take(MAX_DEVICE_NAME).collect()
+}
+
 /// A device token unused for this long (90 days, in seconds) stops working; the device
 /// signs in again.
 const TOKEN_IDLE: i64 = 90 * 24 * 60 * 60;
@@ -498,7 +506,7 @@ impl Server {
         let token = new_token()?;
         db.execute(
             "INSERT INTO devices (account, name, token_hash, last_seen) VALUES (?1, ?2, ?3, ?4)",
-            params![account, name.trim(), token_hash(&token), now()],
+            params![account, device_name(name), token_hash(&token), now()],
         )?;
         Ok(Session {
             token,
@@ -1093,6 +1101,13 @@ mod tests {
     use super::*;
 
     const FILE: &str = r#"{"salt":[1,2],"kdf":{"memory_kib":8,"iterations":1,"parallelism":1},"by_password":{"nonce":"AA","ciphertext":"AA"},"by_recovery":{"nonce":[1],"ciphertext":[2]}}"#;
+
+    #[test]
+    fn a_device_name_is_kept_short() {
+        assert_eq!(device_name("  laptop  "), "laptop");
+        let long = "é".repeat(10_000);
+        assert_eq!(device_name(&long).chars().count(), MAX_DEVICE_NAME);
+    }
 
     #[test]
     fn a_key_file_needs_every_part_and_at_most_four_kib() {
