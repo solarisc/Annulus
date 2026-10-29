@@ -205,13 +205,16 @@ struct SyncedHost {
     jump: Option<String>,
 }
 
-/// A group as synced: its default key named by sync id (local ids differ per device).
+/// A group as synced: its default key and jump host named by sync id (local ids differ
+/// per device).
 #[derive(Serialize, Deserialize)]
 struct SyncedGroup {
     #[serde(flatten)]
     group: Group,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jump: Option<String>,
 }
 
 /// A forward rule as synced: it names its host by sync id, since local ids differ per
@@ -348,12 +351,17 @@ impl SyncCopy {
             kind::GROUP => {
                 let group = self.groups.iter().find(|group| group.id == entry.local)?;
                 let mut plain = group.clone();
-                plain.defaults.key_id = None;
+                (plain.defaults.key_id, plain.defaults.jump_id) = (None, None);
                 let synced = SyncedGroup {
                     key: group
                         .defaults
                         .key_id
                         .and_then(|key| self.state.id_of(kind::KEY, key))
+                        .map(str::to_owned),
+                    jump: group
+                        .defaults
+                        .jump_id
+                        .and_then(|jump| self.state.id_of(kind::HOST, jump))
                         .map(str::to_owned),
                     group: plain,
                 };
@@ -554,23 +562,13 @@ impl SyncCopy {
                 );
                 local
             }
-            kind::GROUP => {
-                let Ok(synced) = serde_json::from_slice::<SyncedGroup>(&body) else {
-                    return;
-                };
-                let mut group = synced.group;
-                group.id = existing.unwrap_or_else(|| next_id(self.groups.iter().map(|g| g.id)));
-                group.defaults.key_id = synced
-                    .key
-                    .as_ref()
-                    .and_then(|key| self.state.entries.get(key))
-                    .filter(|entry| entry.kind == kind::KEY && !entry.deleted)
-                    .map(|entry| entry.local);
-                awaits = synced.key.filter(|_| group.defaults.key_id.is_none());
-                let local = group.id;
-                upsert(&mut self.groups, group, |g| g.id, |g| g.name.to_lowercase());
-                local
-            }
+            kind::GROUP => match self.take_group(existing, &body) {
+                Some((local, key, jump)) => {
+                    (awaits, awaits_jump) = (key, jump);
+                    local
+                }
+                None => return,
+            },
             kind::KEY | kind::SNIPPET | kind::LOG => match self.take_plain(kind, existing, &body) {
                 Some(local) => local,
                 None => return,
@@ -593,6 +591,32 @@ impl SyncCopy {
         if kind == kind::HOST || kind == kind::KEY {
             self.link_waiting(id, local);
         }
+    }
+
+    /// Stores a group from `body` under its local id `existing` or a new one. Returns the
+    /// local id and the sync ids of a default key and jump host that have not arrived yet,
+    /// or `None` if `body` is unreadable.
+    fn take_group(
+        &mut self,
+        existing: Option<u64>,
+        body: &[u8],
+    ) -> Option<(u64, Option<String>, Option<String>)> {
+        let synced = serde_json::from_slice::<SyncedGroup>(body).ok()?;
+        let mut group = synced.group;
+        group.id = existing.unwrap_or_else(|| next_id(self.groups.iter().map(|g| g.id)));
+        let local_of = |id: &Option<String>, want: u8| {
+            id.as_ref()
+                .and_then(|id| self.state.entries.get(id))
+                .filter(|entry| entry.kind == want && !entry.deleted)
+                .map(|entry| entry.local)
+        };
+        group.defaults.key_id = local_of(&synced.key, kind::KEY);
+        group.defaults.jump_id = local_of(&synced.jump, kind::HOST);
+        let awaits = synced.key.filter(|_| group.defaults.key_id.is_none());
+        let awaits_jump = synced.jump.filter(|_| group.defaults.jump_id.is_none());
+        let local = group.id;
+        upsert(&mut self.groups, group, |g| g.id, |g| g.name.to_lowercase());
+        Some((local, awaits, awaits_jump))
     }
 
     /// Removes the local copy of `id`, deleted on the server as version `seq`.
@@ -664,7 +688,14 @@ impl SyncCopy {
         for entry in self.state.entries.values_mut() {
             if entry.awaits_jump.as_deref() == Some(target) {
                 entry.awaits_jump = None;
-                if let Some(host) = self.hosts.iter_mut().find(|host| host.id == entry.local) {
+                if entry.kind == kind::GROUP {
+                    if let Some(group) =
+                        self.groups.iter_mut().find(|group| group.id == entry.local)
+                    {
+                        group.defaults.jump_id = Some(local);
+                    }
+                } else if let Some(host) = self.hosts.iter_mut().find(|host| host.id == entry.local)
+                {
                     host.jump_id = Some(local);
                 }
             }

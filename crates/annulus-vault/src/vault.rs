@@ -373,20 +373,42 @@ impl Vault {
     /// # Errors
     /// Writing the file.
     pub fn remove_host(&mut self, id: u64) -> Result<(), VaultError> {
-        let next: Vec<Host> = self
+        let mut next: Vec<Host> = self
             .hosts
             .iter()
             .filter(|host| host.id != id)
             .cloned()
             .collect();
         let mut sync = self.sync.clone();
+        // Nothing may keep pointing at the id: a new host could get it and be used instead.
+        for host in next.iter_mut().filter(|host| host.jump_id == Some(id)) {
+            host.jump_id = None;
+            sync.touch(kind::HOST, host.id, false)?;
+        }
+        let mut groups = self.groups.clone();
+        for group in groups
+            .iter_mut()
+            .filter(|group| group.defaults.jump_id == Some(id))
+        {
+            group.defaults.jump_id = None;
+            sync.touch(kind::GROUP, group.id, false)?;
+        }
+        let mut forwards = self.forwards.clone();
+        for rule in forwards.iter_mut().filter(|rule| rule.host_id == id) {
+            rule.host_id = 0;
+            sync.touch(kind::FORWARD, rule.id, false)?;
+        }
         sync.touch(kind::HOST, id, true)?;
         self.save_all(&Parts {
             hosts: &next,
+            forwards: &forwards,
+            groups: &groups,
             sync: &sync,
             ..self.parts()
         })?;
         self.hosts = next;
+        self.forwards = forwards;
+        self.groups = groups;
         self.sync = sync;
         self.generation += 1;
         Ok(())
@@ -654,6 +676,15 @@ impl Vault {
         // Jump hosts point at hosts adopted in the same batch.
         for host in next_hosts.iter_mut().rev().take(hosts.len()) {
             host.jump_id = host.jump_id.and_then(|jump| new_ids.get(&jump).copied());
+        }
+        for group in next_groups
+            .iter_mut()
+            .filter(|g| groups.iter().any(|a| a.uid == g.uid))
+        {
+            group.defaults.jump_id = group
+                .defaults
+                .jump_id
+                .and_then(|jump| new_ids.get(&jump).copied());
         }
         let mut rule_id = next_forwards.iter().map(|rule| rule.id).max().unwrap_or(0);
         for rule in forwards {
@@ -1216,6 +1247,34 @@ mod tests {
         host.label = label.into();
         host.address = format!("{label}.example.com");
         host
+    }
+
+    #[test]
+    fn deleting_a_host_leaves_nothing_pointing_at_its_id() {
+        let (mut vault, _) = Vault::create(temp("dangling"), "pw", KdfParams::TEST).unwrap();
+        let mut bastion = vault.draft_host();
+        (bastion.label, bastion.address) = ("bastion".into(), "b".into());
+        vault.upsert_host(bastion.clone()).unwrap();
+        let mut web = vault.draft_host();
+        (web.label, web.address, web.jump_id) = ("web".into(), "w".into(), Some(bastion.id));
+        vault.upsert_host(web).unwrap();
+        let mut group = vault.draft_group(None).unwrap();
+        group.name = "g".into();
+        group.defaults.jump_id = Some(bastion.id);
+        vault.upsert_group(group).unwrap();
+        let mut rule = vault.draft_forward(bastion.id);
+        rule.label = "r".into();
+        vault.upsert_forward(rule).unwrap();
+
+        vault.remove_host(bastion.id).unwrap();
+        assert_eq!(vault.hosts()[0].jump_id, None);
+        assert_eq!(vault.groups()[0].defaults.jump_id, None);
+        assert_eq!(vault.forwards()[0].host_id, 0, "shows as (host deleted)");
+        // A new host may get the old id; nothing routes through it by accident.
+        let mut fresh = vault.draft_host();
+        (fresh.label, fresh.address) = ("new".into(), "n".into());
+        vault.upsert_host(fresh).unwrap();
+        assert!(vault.hosts().iter().all(|host| host.jump_id.is_none()));
     }
 
     #[test]

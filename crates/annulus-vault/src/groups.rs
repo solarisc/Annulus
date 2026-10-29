@@ -1,6 +1,7 @@
 //! Host groups (F-HOST-003): a tree of folders. A group sets defaults (user, port, key,
-//! proxy) that its hosts and subgroups inherit field by field; a host's own value always
-//! wins, and an unset field (empty user, no port, no key, no proxy) is what inherits.
+//! jump host, proxy) that its hosts and subgroups inherit field by field; a host's own
+//! value always wins, and an unset field (empty user, no port, key, jump host or proxy) is
+//! what inherits.
 //!
 //! Hosts and subgroups name their group by its `uid`, which is the same on every device,
 //! so sync needs no translation for these links.
@@ -40,6 +41,9 @@ pub struct Defaults {
     /// A keychain key (local id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<u64>,
+    /// A saved host to connect through (local id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_id: Option<u64>,
     /// A proxy URL (may hold a login).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<Secret>,
@@ -55,6 +59,8 @@ pub struct Sources {
     pub port: Option<String>,
     /// Key.
     pub key_id: Option<String>,
+    /// Jump host.
+    pub jump_id: Option<String>,
     /// Proxy.
     pub proxy: Option<String>,
 }
@@ -105,6 +111,14 @@ pub fn resolve(host: &Host, groups: &[Group]) -> (Host, Sources) {
         if resolved.key_id.is_none() && defaults.key_id.is_some() {
             resolved.key_id = defaults.key_id;
             sources.key_id = Some(group.name.clone());
+        }
+        // A jump host inherits too, except onto itself (it would jump through itself).
+        if resolved.jump_id.is_none()
+            && defaults.jump_id.is_some()
+            && defaults.jump_id != Some(host.id)
+        {
+            resolved.jump_id = defaults.jump_id;
+            sources.jump_id = Some(group.name.clone());
         }
         if resolved.proxy.is_none() && defaults.proxy.is_some() {
             resolved.proxy.clone_from(&defaults.proxy);
@@ -163,6 +177,7 @@ mod tests {
                     username: "admin".into(),
                     port: Some(2222),
                     key_id: Some(7),
+                    jump_id: Some(1),
                     proxy: None,
                 },
             ),
@@ -185,6 +200,10 @@ mod tests {
         assert_eq!(resolved.port, Some(2222));
         assert_eq!(sources.port.as_deref(), Some("PROD"));
         assert_eq!(resolved.key_id, Some(7));
+        assert_eq!(resolved.jump_id, None, "host 1 is the jump host itself");
+        let mut other = host_in("db");
+        other.id = 2;
+        assert_eq!(resolve(&other, &tree()).0.jump_id, Some(1));
         assert_eq!(resolved.proxy, None);
         assert_eq!(sources.proxy, None);
     }

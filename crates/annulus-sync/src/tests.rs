@@ -605,8 +605,12 @@ mod vaults {
             fingerprint: "SHA256:k".into(),
         };
         laptop.upsert_key(key.clone()).unwrap();
+        let mut bastion = laptop.draft_host();
+        (bastion.label, bastion.address) = ("bastion".into(), "10.0.0.1".into());
+        laptop.upsert_host(bastion.clone()).unwrap();
         let mut prod = laptop.draft_group(None).unwrap();
         prod.name = "prod".into();
+        prod.defaults.jump_id = Some(bastion.id);
         prod.defaults.username = "admin".into();
         prod.defaults.port = Some(2222);
         prod.defaults.key_id = Some(key.id);
@@ -625,7 +629,18 @@ mod vaults {
         let mut desktop =
             Vault::join(temp("groups-b"), &laptop.key_file_bytes(), "pw", account(2)).unwrap();
         round(&server, b_id, &mut desktop);
-        let (resolved, sources) = desktop.resolve(&desktop.hosts()[0]);
+        let pg1 = desktop.hosts().iter().find(|h| h.label == "pg1").unwrap();
+        let bastion_here = desktop
+            .hosts()
+            .iter()
+            .find(|h| h.label == "bastion")
+            .unwrap();
+        let (resolved, sources) = desktop.resolve(pg1);
+        assert_eq!(
+            resolved.jump_id,
+            Some(bastion_here.id),
+            "jump host by this device's id"
+        );
         assert_eq!(resolved.username, "postgres");
         assert_eq!(resolved.port, Some(2222));
         assert_eq!(
@@ -648,7 +663,8 @@ mod vaults {
         round(&server, a_id, &mut laptop);
         assert_eq!(laptop.groups().len(), 1);
         assert_eq!(laptop.groups()[0].parent, None);
-        let (resolved, _) = laptop.resolve(&laptop.hosts()[0]);
+        let pg1 = laptop.hosts().iter().find(|h| h.label == "pg1").unwrap();
+        let (resolved, _) = laptop.resolve(pg1);
         assert_eq!(
             (resolved.username.as_str(), resolved.port),
             ("postgres", None)

@@ -108,12 +108,12 @@ impl HostsScreen {
         })
     }
 
-    /// The jump hosts in front of `host`, outermost first. A loop or a missing host ends the
-    /// chain where it is.
+    /// The jump hosts in front of `host`, outermost first, each as its groups resolve it. A
+    /// loop or a missing host ends the chain where it is.
     fn jump_chain(&self, host: &Host) -> Vec<Hop> {
         let mut chain = Vec::new();
         let mut seen = vec![host.id];
-        let mut next = host.jump_id;
+        let mut next = self.vault.resolve(host).0.jump_id;
         while let Some(id) = next {
             if seen.contains(&id) || chain.len() >= MAX_JUMPS {
                 break;
@@ -129,7 +129,7 @@ impl HostsScreen {
             };
             let Some(hop) = self.hop(jump) else { break };
             chain.push(hop);
-            next = jump.jump_id;
+            next = self.vault.resolve(jump).0.jump_id;
         }
         chain.reverse();
         chain
@@ -508,7 +508,7 @@ impl HostsScreen {
         let inherited = self
             .editor
             .as_ref()
-            .map(|draft| inherited_hints(&self.vault, &draft.host, &keys))
+            .map(|draft| inherited_hints(&self.vault, &draft.host, &keys, &others))
             .unwrap_or_default();
         let Some(draft) = &mut self.editor else {
             return;
@@ -556,7 +556,7 @@ impl HostsScreen {
                 key_picker(ui, &mut draft.host.key_id, &keys, &inherited.key);
                 ui.end_row();
                 ui.label("Jump host");
-                jump_picker(ui, &mut draft.host.jump_id, &others);
+                jump_picker(ui, &mut draft.host.jump_id, &others, &inherited.jump);
                 ui.end_row();
                 ui.label("Proxy");
                 secret_line(ui, &mut draft.proxy, &inherited.proxy);
@@ -669,15 +669,16 @@ fn password_rows(ui: &mut Ui, draft: &mut Draft) {
     }
 }
 
-/// The host editor's choice of a saved host to connect through.
-fn jump_picker(ui: &mut Ui, jump_id: &mut Option<u64>, hosts: &[(u64, String)]) {
+/// The host editor's choice of a saved host to connect through; `unset` names what "no jump
+/// host of its own" means (the group's, or direct).
+fn jump_picker(ui: &mut Ui, jump_id: &mut Option<u64>, hosts: &[(u64, String)], unset: &str) {
     let chosen = jump_id
         .and_then(|id| hosts.iter().find(|(host, _)| *host == id))
-        .map_or("None (direct)", |(_, label)| label.as_str());
+        .map_or(unset, |(_, label)| label.as_str());
     egui::ComboBox::from_id_salt("host-jump")
         .selected_text(chosen)
         .show_ui(ui, |ui| {
-            ui.selectable_value(jump_id, None, "None (direct)");
+            ui.selectable_value(jump_id, None, unset);
             for (id, label) in hosts {
                 ui.selectable_value(jump_id, Some(*id), label);
             }
@@ -707,12 +708,18 @@ struct Hints {
     port: String,
     username: String,
     key: String,
+    jump: String,
     proxy: String,
 }
 
-fn inherited_hints(vault: &Vault, host: &Host, keys: &[(u64, String)]) -> Hints {
+fn inherited_hints(
+    vault: &Vault,
+    host: &Host,
+    keys: &[(u64, String)],
+    hosts: &[(u64, String)],
+) -> Hints {
     let mut bare = host.clone();
-    (bare.port, bare.key_id, bare.proxy) = (None, None, None);
+    (bare.port, bare.key_id, bare.jump_id, bare.proxy) = (None, None, None, None);
     bare.username.clear();
     let (resolved, sources) = vault.resolve(&bare);
     let from = |value: String, source: Option<String>, otherwise: &str| match source {
@@ -729,6 +736,14 @@ fn inherited_hints(vault: &Vault, host: &Host, keys: &[(u64, String)]) -> Hints 
                 .map_or_else(String::new, |(_, label)| label.clone()),
             sources.key_id,
             "Default keys",
+        ),
+        jump: from(
+            resolved
+                .jump_id
+                .and_then(|id| hosts.iter().find(|(host, _)| *host == id))
+                .map_or_else(String::new, |(_, label)| label.clone()),
+            sources.jump_id,
+            "None (direct)",
         ),
         proxy: from(
             "group proxy".to_owned(),
@@ -920,19 +935,31 @@ mod tests {
     #[test]
     fn a_host_in_a_group_connects_with_what_it_inherits() {
         let mut screen = screen_with("grp");
+        let mut bastion = screen.vault.draft_host();
+        (bastion.label, bastion.address) = ("bastion".into(), "jump.example.com".into());
+        screen.vault.upsert_host(bastion.clone()).unwrap();
         let mut group = screen.vault.draft_group(None).unwrap();
         group.name = "prod".into();
         group.defaults.username = "deploy".into();
         group.defaults.port = Some(2200);
+        group.defaults.jump_id = Some(bastion.id);
         screen.vault.upsert_group(group.clone()).unwrap();
-        let mut host = screen.vault.hosts()[0].clone();
+        let mut host = screen
+            .vault
+            .hosts()
+            .iter()
+            .find(|host| host.label == "grp")
+            .unwrap()
+            .clone();
         (host.username, host.port, host.group) = (String::new(), None, Some(group.uid));
         screen.vault.upsert_host(host.clone()).unwrap();
-        let Program::Ssh { target, .. } = screen.connect_host(&host) else {
+        let Program::Ssh { target, via, .. } = screen.connect_host(&host) else {
             panic!("an ssh program");
         };
         assert_eq!((target.user.as_str(), target.port), ("deploy", 2200));
-        let hints = inherited_hints(&screen.vault, &host, &[]);
+        let hops: Vec<&str> = via.iter().map(|hop| hop.target.host.as_str()).collect();
+        assert_eq!(hops, ["jump.example.com"], "through the group's jump host");
+        let hints = inherited_hints(&screen.vault, &host, &[], &[]);
         assert_eq!(hints.port, "2200 (from prod)");
         assert_eq!(hints.username, "deploy (from prod)");
         assert_eq!(hints.key, "Default keys");
@@ -949,7 +976,10 @@ mod tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let host = screen.vault.hosts()[0].clone();
             screen.row_action(ui, &host, RowAction::MoveTo(Some(0)), &targets);
-            assert_eq!(screen.vault.hosts()[0].group.as_deref(), Some(group.uid.as_str()));
+            assert_eq!(
+                screen.vault.hosts()[0].group.as_deref(),
+                Some(group.uid.as_str())
+            );
             let host = screen.vault.hosts()[0].clone();
             screen.row_action(ui, &host, RowAction::MoveTo(None), &targets);
             assert_eq!(screen.vault.hosts()[0].group, None);

@@ -167,6 +167,21 @@ pub fn holds(hosts: usize, subgroups: usize) -> String {
     }
 }
 
+/// A picker of a key or host by id, or "Not set".
+fn id_picker(ui: &mut Ui, id: &str, chosen: &mut Option<u64>, choices: &[(u64, String)]) {
+    let shown = chosen
+        .and_then(|id| choices.iter().find(|(choice, _)| *choice == id))
+        .map_or("Not set", |(_, label)| label.as_str());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(chosen, None, "Not set");
+            for (value, label) in choices {
+                ui.selectable_value(chosen, Some(*value), label);
+            }
+        });
+}
+
 /// The group editor's working copy.
 pub struct GroupDraft {
     group: Group,
@@ -200,6 +215,11 @@ impl GroupDraft {
             .ssh_keys()
             .iter()
             .map(|key| (key.id, key.label.clone()))
+            .collect();
+        let hosts: Vec<(u64, String)> = vault
+            .hosts()
+            .iter()
+            .map(|host| (host.id, host.label.clone()))
             .collect();
         ui.add_space(space::M);
         ui.heading(if self.is_new {
@@ -236,18 +256,10 @@ impl GroupDraft {
                 );
                 ui.end_row();
                 ui.label("Key");
-                let key = &mut self.group.defaults.key_id;
-                let shown = key
-                    .and_then(|id| keys.iter().find(|(choice, _)| *choice == id))
-                    .map_or("Not set", |(_, label)| label.as_str());
-                egui::ComboBox::from_id_salt("group-key")
-                    .selected_text(shown)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(key, None, "Not set");
-                        for (id, label) in &keys {
-                            ui.selectable_value(key, Some(*id), label);
-                        }
-                    });
+                id_picker(ui, "group-key", &mut self.group.defaults.key_id, &keys);
+                ui.end_row();
+                ui.label("Jump host");
+                id_picker(ui, "group-jump", &mut self.group.defaults.jump_id, &hosts);
                 ui.end_row();
                 ui.label("Proxy");
                 secret_line(ui, &mut self.proxy, "Not set");
