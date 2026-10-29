@@ -898,9 +898,11 @@ mod tests {
                     .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
                     .collect::<Vec<_>>()
                     .join("\n");
+                // The answer, not the echoed command; typed before the shell drew its prompt,
+                // it lands after the prompt on that line ("# got:typed").
                 if seen
                     .lines()
-                    .any(|line| line.trim_start().starts_with("got:typed"))
+                    .any(|line| line.trim_end().ends_with("got:typed") && !line.contains("echo"))
                 {
                     assert_eq!(live.failed, None);
                     return;
