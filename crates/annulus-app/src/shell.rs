@@ -72,7 +72,7 @@ pub enum Tab {
     /// The vault: hosts, keychain and the rest. Always first, never closed.
     Vault,
     /// A terminal: a local shell or an SSH session.
-    Terminal(TerminalTab),
+    Terminal(Box<TerminalTab>),
 }
 
 impl Tab {
@@ -123,7 +123,7 @@ impl Shell {
     /// Opens a terminal tab titled `title` running `program`, in front.
     pub fn open_terminal(&mut self, title: impl Into<String>, program: Program) {
         self.tabs
-            .push(Tab::Terminal(TerminalTab::new(title, program)));
+            .push(Tab::Terminal(Box::new(TerminalTab::new(title, program))));
         self.active_tab = self.tabs.len() - 1;
     }
 

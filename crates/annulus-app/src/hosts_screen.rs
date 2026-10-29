@@ -125,7 +125,7 @@ impl HostsScreen {
                         request = Some(Request::Open(
                             host.label.clone(),
                             Program::ssh(&host.target()),
-                        ))
+                        ));
                     }
                     RowAction::Edit => {
                         self.editor = Some(Draft {

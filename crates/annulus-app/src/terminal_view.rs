@@ -63,7 +63,7 @@ impl TerminalTab {
         if self.session.is_none() && self.failed.is_none() {
             let ctx = ui.ctx().clone();
             match Session::spawn(&self.program, size, cell_w, cell_h, move || {
-                ctx.request_repaint()
+                ctx.request_repaint();
             }) {
                 Ok(session) => {
                     self.session = Some(session);
@@ -138,6 +138,7 @@ impl TerminalTab {
             response.has_focus(),
         );
         if self.exited {
+            #[allow(clippy::cast_precision_loss)] // Row counts are small.
             let at = area.min + Vec2::new(4.0, cell.y * (size.rows.saturating_sub(1)) as f32);
             ui.painter().text(
                 at,
@@ -247,7 +248,7 @@ fn handle_mouse(response: &egui::Response, session: &Session, origin: Pos2, cell
 
 /// Sends this frame's keyboard and paste input to the program.
 fn handle_input(ui: &Ui, session: &Session) {
-    let mode = session.mode();
+    let term_mode = session.mode();
     let events = ui.input(|input| input.events.clone());
     for event in events {
         match event {
@@ -257,7 +258,7 @@ fn handle_input(ui: &Ui, session: &Session) {
             }
             egui::Event::Paste(text) => {
                 session.scroll_to_bottom();
-                session.write(paste_bytes(&text, mode));
+                session.write(paste_bytes(&text, term_mode));
             }
             egui::Event::Key {
                 key,
@@ -288,7 +289,7 @@ fn handle_input(ui: &Ui, session: &Session) {
                     ctrl: modifiers.ctrl,
                 };
                 if let Some(key) = map_key(key, modifiers.ctrl)
-                    && let Some(bytes) = keys::encode(key, mods, mode)
+                    && let Some(bytes) = keys::encode(key, mods, term_mode)
                 {
                     session.scroll_to_bottom();
                     session.write(bytes);
