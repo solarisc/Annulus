@@ -6,6 +6,7 @@
 
 pub mod keys;
 pub mod palette;
+pub mod select;
 pub mod snapshot;
 
 pub use alacritty_terminal;
@@ -98,11 +99,45 @@ impl Emulator {
     pub fn screen(&self) -> Screen {
         snapshot(&self.term, &self.palette)
     }
+
+    /// The terminal itself, for selection and search.
+    pub fn term_mut(&mut self) -> &mut Term<VoidListener> {
+        &mut self.term
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_selects_text_and_highlights_it() {
+        let mut term = Emulator::new(20, 3);
+        term.advance(b"hello world\r\nsecond line");
+        select::start(term.term_mut(), 0, 6, select::SelectionKind::Characters);
+        select::extend(term.term_mut(), 1, 5);
+        assert_eq!(
+            select::text(term.term_mut()).as_deref(),
+            Some("world\nsecond")
+        );
+        let screen = term.screen();
+        assert!(screen.rows[0][6].selected && !screen.rows[0][5].selected);
+        assert_eq!(screen.rows[0][6].bg, Palette::annulus_dark().selection);
+        select::clear(term.term_mut());
+        assert_eq!(select::text(term.term_mut()), None);
+    }
+
+    #[test]
+    fn double_click_selects_the_word_under_the_pointer() {
+        let mut term = Emulator::new(30, 2);
+        term.advance(b"ssh admin@prod-db -p 22");
+        select::start(term.term_mut(), 0, 6, select::SelectionKind::Words);
+        select::extend(term.term_mut(), 0, 6);
+        assert_eq!(
+            select::text(term.term_mut()).as_deref(),
+            Some("admin@prod-db")
+        );
+    }
 
     #[test]
     fn resizing_reflows_and_hostile_input_never_breaks_the_grid() {

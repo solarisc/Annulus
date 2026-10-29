@@ -8,6 +8,7 @@ use annulus_session::{Program, Session, SessionEvent};
 use annulus_term::alacritty_terminal::term::TermMode;
 use annulus_term::alacritty_terminal::vte::ansi::Rgb;
 use annulus_term::keys::{self, Key, Mods};
+use annulus_term::select::SelectionKind;
 use annulus_term::{Screen, Size};
 
 /// Font size of terminal text, in points.
@@ -87,7 +88,8 @@ impl TerminalTab {
         }
 
         let id = ui.scope_id().with("terminal");
-        let response = ui.interact(area, id, Sense::click());
+        let response = ui.interact(area, id, Sense::click_and_drag());
+        handle_mouse(&response, session, area.min, cell);
         // A new tab takes the keyboard, so typing works without a click first.
         if response.clicked() || !self.focused_once {
             response.request_focus();
@@ -203,6 +205,35 @@ fn paint(ui: &Ui, origin: Pos2, cell: Vec2, screen: &Screen, font: &FontId, focu
     }
 }
 
+/// Drag selects characters, a double-click words and a triple-click lines; a plain click
+/// clears the selection.
+fn handle_mouse(response: &egui::Response, session: &Session, origin: Pos2, cell: Vec2) {
+    let Some(pointer) = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos())
+    else {
+        return;
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Clamped to the grid below.
+    let (row, column) = (
+        ((pointer.y - origin.y) / cell.y).max(0.0) as usize,
+        ((pointer.x - origin.x) / cell.x).max(0.0) as usize,
+    );
+    if response.triple_clicked() {
+        session.select_start(row, column, SelectionKind::Lines);
+        session.select_to(row, column);
+    } else if response.double_clicked() {
+        session.select_start(row, column, SelectionKind::Words);
+        session.select_to(row, column);
+    } else if response.drag_started() {
+        session.select_start(row, column, SelectionKind::Characters);
+    } else if response.dragged() {
+        session.select_to(row, column);
+    } else if response.clicked() {
+        session.clear_selection();
+    }
+}
+
 /// Sends this frame's keyboard and paste input to the program.
 fn handle_input(ui: &Ui, session: &Session) {
     let mode = session.mode();
@@ -225,6 +256,18 @@ fn handle_input(ui: &Ui, session: &Session) {
             } => {
                 // Ctrl+Shift+V pastes and Ctrl+Shift+C copies (UI-SPEC §7): egui reports
                 // those as Paste/Copy events, so the raw keys are not sent.
+                // Ctrl+Shift+C copies; Ctrl+C copies when there is a selection and otherwise
+                // interrupts the program. Ctrl+Shift+V arrives as a Paste event.
+                if modifiers.ctrl && key == EguiKey::C {
+                    if let Some(selected) = session.selection_text() {
+                        ui.ctx().copy_text(selected);
+                        session.clear_selection();
+                        continue;
+                    }
+                    if modifiers.shift {
+                        continue;
+                    }
+                }
                 if modifiers.ctrl && modifiers.shift {
                     continue;
                 }

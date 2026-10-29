@@ -16,6 +16,8 @@ pub struct Palette {
     pub background: Rgb,
     /// The cursor block.
     pub cursor: Rgb,
+    /// Behind selected text.
+    pub selection: Rgb,
 }
 
 const fn rgb(value: u32) -> Rgb {
@@ -49,6 +51,7 @@ impl Palette {
             foreground: rgb(0xE8_EA_ED),
             background: rgb(0x12_14_16),
             cursor: rgb(0x2B_B3_A3),
+            selection: rgb(0x1F_5C_56),
         }
     }
 

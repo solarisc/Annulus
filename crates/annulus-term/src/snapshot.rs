@@ -29,6 +29,8 @@ pub struct Cell {
     pub strikeout: bool,
     /// The right half of a wide character: draw nothing but the background.
     pub spacer: bool,
+    /// Part of the mouse selection.
+    pub selected: bool,
 }
 
 /// The visible screen.
@@ -63,6 +65,7 @@ pub fn snapshot<T: EventListener>(term: &Term<T>, palette: &Palette) -> Screen {
         underline: false,
         strikeout: false,
         spacer: false,
+        selected: false,
     };
     let mut rows = vec![vec![blank; columns]; lines];
     let offset = i32::try_from(content.display_offset).unwrap_or(i32::MAX);
@@ -91,6 +94,12 @@ pub fn snapshot<T: EventListener>(term: &Term<T>, palette: &Palette) -> Screen {
         if flags.contains(Flags::HIDDEN) {
             fg = bg;
         }
+        let selected = content
+            .selection
+            .is_some_and(|range| range.contains(indexed.point));
+        if selected {
+            bg = palette.selection;
+        }
         *slot = Cell {
             ch: if cell.c == '\0' { ' ' } else { cell.c },
             fg,
@@ -100,6 +109,7 @@ pub fn snapshot<T: EventListener>(term: &Term<T>, palette: &Palette) -> Screen {
             underline: flags.intersects(Flags::ALL_UNDERLINES),
             strikeout: flags.contains(Flags::STRIKEOUT),
             spacer: flags.contains(Flags::WIDE_CHAR_SPACER),
+            selected,
         };
     }
     let cursor_point = content.cursor.point;

@@ -14,6 +14,7 @@ use annulus_term::alacritty_terminal::grid::Scroll;
 use annulus_term::alacritty_terminal::sync::FairMutex;
 use annulus_term::alacritty_terminal::term::{Term, TermMode};
 use annulus_term::alacritty_terminal::tty;
+use annulus_term::select::{self, SelectionKind};
 use annulus_term::{Palette, Screen, Size, config, snapshot};
 
 /// What a session tells the UI.
@@ -200,6 +201,27 @@ impl Session {
     #[must_use]
     pub fn screen(&self) -> Screen {
         snapshot(&self.term.lock(), &self.palette)
+    }
+
+    /// Starts a mouse selection at screen cell (`row`, `column`).
+    pub fn select_start(&self, row: usize, column: usize, kind: SelectionKind) {
+        select::start(&mut self.term.lock(), row, column, kind);
+    }
+
+    /// Extends the selection to screen cell (`row`, `column`).
+    pub fn select_to(&self, row: usize, column: usize) {
+        select::extend(&mut self.term.lock(), row, column);
+    }
+
+    /// The selected text, if any.
+    #[must_use]
+    pub fn selection_text(&self) -> Option<String> {
+        select::text(&self.term.lock())
+    }
+
+    /// Removes the selection.
+    pub fn clear_selection(&self) {
+        select::clear(&mut self.term.lock());
     }
 
     /// The terminal's input modes (application cursor keys, bracketed paste).
