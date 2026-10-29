@@ -3,7 +3,6 @@
 //! so creating and unlocking run on a background thread while the screen shows a spinner.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use eframe::egui::{self, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
@@ -13,43 +12,10 @@ use annulus_vault::crypto::KdfParams;
 use annulus_vault::vault::{Vault, VaultError};
 use zeroize::Zeroizing;
 
+use crate::job::{Job, Poll};
+
 /// Shortest master password accepted.
 const MIN_PASSWORD: usize = 10;
-
-/// Work running on another thread; its result is taken once.
-pub struct Job<T>(Receiver<T>);
-
-impl<T: Send + 'static> Job<T> {
-    /// Runs `work` on a new thread and wakes `ctx` when it is done.
-    pub fn start(ctx: &egui::Context, work: impl FnOnce() -> T + Send + 'static) -> Self {
-        let (done, result) = channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = done.send(work());
-            ctx.request_repaint();
-        });
-        Job(result)
-    }
-
-    /// The result once there is one; [`Poll::Lost`] if the thread died without one.
-    pub fn poll(&self) -> Poll<T> {
-        match self.0.try_recv() {
-            Ok(value) => Poll::Done(value),
-            Err(TryRecvError::Empty) => Poll::Running,
-            Err(TryRecvError::Disconnected) => Poll::Lost,
-        }
-    }
-}
-
-/// What [`Job::poll`] found.
-pub enum Poll<T> {
-    /// Still working.
-    Running,
-    /// Finished with this.
-    Done(T),
-    /// The thread ended without a result.
-    Lost,
-}
 
 /// A new vault and its recovery key, or why not.
 type Created = Result<(Vault, Zeroizing<String>), VaultError>;

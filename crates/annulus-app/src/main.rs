@@ -9,6 +9,7 @@ mod forwards_screen;
 mod groups_view;
 mod hosts_screen;
 mod import_dialog;
+mod job;
 mod keychain_screen;
 mod known_hosts_screen;
 mod local_pane;

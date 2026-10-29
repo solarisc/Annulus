@@ -13,6 +13,7 @@ use annulus_vault::keychain::SshKey;
 use annulus_vault::vault::Vault;
 
 use crate::hosts_screen::HostsScreen;
+use crate::job::{Job, Poll};
 use crate::ssh_task::{Outcome, SshTask};
 
 /// What the form at the top is doing.
@@ -23,6 +24,8 @@ enum Form {
     Generate {
         label: String,
         kind: keys::KeyKind,
+        /// Making the key (RSA takes seconds).
+        working: Option<Job<Result<KeyPair, keys::KeyError>>>,
     },
     Import {
         label: String,
@@ -119,6 +122,7 @@ impl KeychainScreen {
                 self.form = Form::Generate {
                     label: String::new(),
                     kind: keys::KeyKind::Ed25519,
+                    working: None,
                 };
                 self.message = None;
             }
@@ -229,8 +233,28 @@ impl KeychainScreen {
         let mut cancel = false;
         match &mut self.form {
             Form::Closed => return,
-            Form::Generate { label, kind } => {
+            Form::Generate {
+                label,
+                kind,
+                working,
+            } => {
                 ui.add_space(space::S);
+                if let Some(job) = working {
+                    match job.poll() {
+                        Poll::Running => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("Making a {} key\u{2026}", kind.name()));
+                            });
+                            return;
+                        }
+                        Poll::Done(result) => {
+                            done = Some(result.map(|pair| stored(vault, label, &pair)));
+                        }
+                        Poll::Lost => done = Some(Err(keys::KeyError::Generate)),
+                    }
+                    *working = None;
+                }
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(label).hint_text("work laptop"));
@@ -246,10 +270,9 @@ impl KeychainScreen {
                         .add_enabled(ready, egui::Button::new("Generate"))
                         .clicked()
                     {
-                        done = Some(
-                            keys::generate(*kind, &comment())
-                                .map(|pair| stored(vault, label, &pair)),
-                        );
+                        let (kind, comment) = (*kind, comment());
+                        *working =
+                            Some(Job::start(ui.ctx(), move || keys::generate(kind, &comment)));
                     }
                     cancel |= ui.button("Cancel").clicked();
                 });
