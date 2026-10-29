@@ -38,9 +38,9 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_BACK,
-    VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_LEFT, VK_LWIN,
-    VK_MENU, VK_NEXT, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RETURN,
-    VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT, VK_LEFT,
+    VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR,
+    VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -62,7 +62,9 @@ use crate::d2d::{D2d, D2dCanvas};
 
 /// `WM_MOUSELEAVE`, which the bindings file under `UI::Controls`.
 const WM_MOUSELEAVE: u32 = 0x02A3;
-use crate::window::{WindowApp, WindowError, WindowRequest};
+use crate::window::{
+    WindowApp, WindowError, WindowRequest, is_paste, paste_event, publish_clipboard,
+};
 
 /// Runs `app` in a new window until it closes.
 ///
@@ -133,6 +135,12 @@ pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(),
             h,
             SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED,
         );
+        // The waker may run on any thread: InvalidateRect is safe to call from one.
+        let handle = hwnd.0 as isize;
+        host.app.set_waker(std::sync::Arc::new(move || {
+            // A stale handle after the window closed is rejected by Windows, not used.
+            let _ = InvalidateRect(Some(HWND(handle as *mut core::ffi::c_void)), None, false);
+        }));
         let dark = host.app.theme().dark;
         let value = i32::from(dark);
         // DWMWA_USE_IMMERSIVE_DARK_MODE: dark borders and system menu.
@@ -423,9 +431,18 @@ impl Host {
                 }
                 WM_KEYDOWN | WM_SYSKEYDOWN => {
                     #[allow(clippy::cast_possible_truncation)] // Virtual-key codes are 16-bit.
-                    let key = map_key(VIRTUAL_KEY(wparam.0 as u16));
+                    let code = VIRTUAL_KEY(wparam.0 as u16);
+                    let key = map_key(code);
+                    let modifiers = Self::modifiers();
+                    let paste_key = key.unwrap_or(kit::Key::Space);
+                    if is_paste(&self.state, paste_key, modifiers, code == VK_INSERT) {
+                        if let Some(paste) = paste_event() {
+                            self.push(paste);
+                        }
+                        return LRESULT(0);
+                    }
                     if let Some(key) = key {
-                        self.push(Event::Key(key, Self::modifiers()));
+                        self.push(Event::Key(key, modifiers));
                     }
                     if message == WM_SYSKEYDOWN {
                         return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -599,7 +616,9 @@ impl Host {
                 request = request.or(self.app.frame(&mut ui, maximized));
             }
             canvas.finish();
-            self.state.end_frame()
+            let output = self.state.end_frame();
+            publish_clipboard(&mut self.state);
+            output
         };
         // SAFETY: as above.
         if let Err(error) = unsafe { target.EndDraw(None, None) }

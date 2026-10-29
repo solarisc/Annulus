@@ -90,13 +90,18 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     }
     row.take_left(space::XS);
     let plus = row.take_left(30.0).centered(30.0, 30.0);
-    ui.icon_button(
-        Id::new("tab.new"),
-        plus,
-        icons::PLUS,
-        "New terminal tab",
-        false,
-    );
+    if ui
+        .icon_button(
+            Id::new("tab.new"),
+            plus,
+            icons::PLUS,
+            "New terminal tab",
+            false,
+        )
+        .clicked
+    {
+        app.open("Local", annulus_session::Program::DefaultShell);
+    }
     sync_badge(ui, badge, &sync);
     if let Some(index) = close_tab
         && index > 0
@@ -231,7 +236,7 @@ enum TabEvent {
 
 fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
     let tab = &app.tabs[index];
-    let id = Id::new(("tab", index, tab.title.as_str()));
+    let id = Id::new(("tab", tab.uid));
     let active = app.active == index;
     let response = ui.zone(id, rect, Role::Tab, &tab.title);
     let t = ui.theme;

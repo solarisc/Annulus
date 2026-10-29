@@ -1,8 +1,11 @@
 # Photographs the real window of a build: starts `annulus-app --preview` (a throwaway demo
 # vault, never anyone's data), captures the window with PrintWindow and closes it.
 #   scripts\ci\capture-window.ps1 -Bin target\release\annulus-app.exe -Out shots
-# Needs a logged-in desktop session. Writes window-dark.png and window-light.png.
-param([string]$Bin = "target\release\annulus-app.exe", [string]$Out = "shots")
+# -Keys sends keystrokes first (SendKeys syntax): "^+techo hi{ENTER}" opens a live terminal
+# tab; -Type is typed 2 seconds later, once the program is up. -Name prefixes the files.
+# Needs a logged-in desktop session. Writes <name>-dark.png and <name>-light.png.
+param([string]$Bin = "target\release\annulus-app.exe", [string]$Out = "shots",
+      [string]$Keys = "", [string]$Type = "", [string]$Name = "window")
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
@@ -29,6 +32,14 @@ foreach ($theme in @("dark", "light")) {
   }
   if ($h -eq [IntPtr]::Zero) { Stop-Process $p -Force; throw "no window" }
   Start-Sleep -Milliseconds 800
+  if ($Keys) {
+    $shell = New-Object -ComObject WScript.Shell
+    $shell.AppActivate($p.Id) | Out-Null
+    Start-Sleep -Milliseconds 300
+    $shell.SendKeys($Keys)
+    Start-Sleep -Milliseconds 2000
+    if ($Type) { $shell.SendKeys($Type); Start-Sleep -Milliseconds 1500 }
+  }
   $r = New-Object Win+RECT
   [Win]::GetWindowRect($h, [ref]$r) | Out-Null
   $w = $r.Right - $r.Left; $hgt = $r.Bottom - $r.Top
@@ -38,7 +49,7 @@ foreach ($theme in @("dark", "light")) {
   # PW_RENDERFULLCONTENT (2): content drawn by Direct2D/DirectComposition too.
   [Win]::PrintWindow($h, $dc, 2) | Out-Null
   $g.ReleaseHdc($dc); $g.Dispose()
-  $bmp.Save((Join-Path $Out "window-$theme.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+  $bmp.Save((Join-Path $Out "$Name-$theme.png"), [System.Drawing.Imaging.ImageFormat]::Png)
   $bmp.Dispose()
   Stop-Process $p -Force
 }

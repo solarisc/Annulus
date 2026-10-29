@@ -61,6 +61,9 @@ pub enum Role {
     Splitter,
     /// Takes the pointer but is not interactive (the title bar's drag area, a backdrop).
     Backdrop,
+    /// A terminal: focusable, and while focused every key goes to the program, Tab and
+    /// Enter included.
+    Terminal,
 }
 
 impl Role {
@@ -198,6 +201,8 @@ pub enum Event {
     Key(Key, Modifiers),
     /// Text typed, after the keyboard layout and IME.
     Text(String),
+    /// Text pasted from the clipboard.
+    Paste(String),
 }
 
 /// A key press or typed text, in arrival order.
@@ -207,6 +212,8 @@ pub enum Typed {
     Key(Key, Modifiers),
     /// Text after the keyboard layout and IME.
     Text(String),
+    /// Text pasted from the clipboard.
+    Paste(String),
 }
 
 /// The mouse cursor a frame asks for.
@@ -463,7 +470,11 @@ impl UiState {
                 {
                     self.popup = None;
                 }
-                Event::Key(Key::Tab, modifiers) if !modifiers.ctrl && !modifiers.alt => {
+                Event::Key(Key::Tab, modifiers)
+                    if !modifiers.ctrl
+                        && !modifiers.alt
+                        && self.focused_role() != Some(Role::Terminal) =>
+                {
                     self.move_focus(!modifiers.shift);
                 }
                 Event::Key(key @ (Key::Enter | Key::Space), modifiers)
@@ -477,6 +488,7 @@ impl UiState {
                 }
                 Event::Key(key, modifiers) => self.typed.push(Typed::Key(*key, *modifiers)),
                 Event::Text(text) => self.typed.push(Typed::Text(text.clone())),
+                Event::Paste(text) => self.typed.push(Typed::Paste(text.clone())),
             }
         }
     }
@@ -519,6 +531,15 @@ impl UiState {
     #[must_use]
     pub fn focus(&self) -> Option<Id> {
         self.focus
+    }
+
+    /// The role of the focused zone, so a window can route keys (Ctrl+V pastes into a text
+    /// field but belongs to the program in a terminal).
+    #[must_use]
+    pub fn focused_role(&self) -> Option<Role> {
+        self.focus
+            .and_then(|id| self.zone(id))
+            .map(|zone| zone.role)
     }
 
     /// Gives `id` keyboard focus, with the focus ring when `ring`.
@@ -602,7 +623,8 @@ fn activates(role: Role, key: Key) -> bool {
         | Role::ScrollView
         | Role::Splitter
         | Role::Backdrop
-        | Role::WindowButton => false,
+        | Role::WindowButton
+        | Role::Terminal => false,
     }
 }
 
@@ -922,6 +944,40 @@ mod tests {
             |ui| seen = two_buttons(ui),
         );
         assert!(seen.0.clicked && !seen.1.clicked);
+    }
+
+    #[test]
+    fn a_focused_terminal_keeps_tab_and_enter() {
+        let mut state = UiState::default();
+        let rect = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let draw = |ui: &mut Ui<'_>| ui.zone(Id::new("term"), rect, Role::Terminal, "Terminal");
+        frame(&mut state, &[], 0.0, |ui| {
+            draw(ui);
+        });
+        state.set_focus(Some(Id::new("term")), false);
+        let mut typed = Vec::new();
+        frame(
+            &mut state,
+            &[
+                Event::Key(Key::Tab, Modifiers::NONE),
+                Event::Key(Key::Enter, Modifiers::NONE),
+                Event::Paste("ls".into()),
+            ],
+            0.1,
+            |ui| {
+                draw(ui);
+                typed = ui.take_typed();
+            },
+        );
+        assert_eq!(state.focus(), Some(Id::new("term")));
+        assert_eq!(
+            typed,
+            [
+                Typed::Key(Key::Tab, Modifiers::NONE),
+                Typed::Key(Key::Enter, Modifiers::NONE),
+                Typed::Paste("ls".into())
+            ]
+        );
     }
 
     #[test]

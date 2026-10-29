@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+arboard.workspace = true
 parley.workspace = true
 softbuffer.workspace = true
 swash.workspace = true

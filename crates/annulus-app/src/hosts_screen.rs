@@ -5,17 +5,15 @@
 
 use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Palette, space, text};
-use annulus_session::{Hop, Password, Program, SshFiles, Target, local_user};
+use annulus_session::{Program, SshFiles, Target};
 use annulus_ui::secret::{SecretText, secret_field, secret_line};
 use annulus_ui::{icons, theme};
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
 
+use crate::connect;
 use crate::groups_view::{self, Crumb, GroupAction, GroupDraft};
 use crate::import_dialog::ImportPreview;
-
-/// Longest jump chain followed; longer ones are cut, so a mistake cannot hang a connect.
-const MAX_JUMPS: usize = 8;
 
 /// Ids and labels for a picker.
 type Choices = Vec<(u64, String)>;
@@ -100,87 +98,13 @@ impl HostsScreen {
     /// Annulus's SSH client for `target` text (`user@host:port`), or the system `ssh` if the
     /// text is not a target Annulus understands.
     fn ssh(&self, target: &str) -> Program {
-        match Target::parse(target, &local_user()) {
-            Some(target) => Program::Ssh {
-                target,
-                files: self.ssh_files.clone(),
-                password: None,
-                identity: None,
-                via: Vec::new(),
-                proxy: None,
-                reconnect: true,
-                env: Vec::new(),
-                startup: None,
-                term: String::new(),
-            },
-            None => Program::system_ssh(target),
-        }
-    }
-
-    /// How to log in to a saved host: its target, saved password and keychain key, with
-    /// what it inherits from its groups.
-    fn hop(&self, host: &Host) -> Option<Hop> {
-        let (host, _) = self.vault.resolve(host);
-        Some(Hop {
-            target: Target::parse(&host.target(), &local_user())?,
-            password: host
-                .password
-                .as_ref()
-                .map(|secret| Password::new(secret.expose())),
-            identity: host
-                .key_id
-                .and_then(|id| self.vault.ssh_key(id))
-                .map(|key| Password::new(key.private.expose())),
-            proxy: host.proxy.as_ref().map(|url| Password::new(url.expose())),
-        })
-    }
-
-    /// The jump hosts in front of `host`, outermost first, each as its groups resolve it. A
-    /// loop or a missing host ends the chain where it is.
-    fn jump_chain(&self, host: &Host) -> Vec<Hop> {
-        let mut chain = Vec::new();
-        let mut seen = vec![host.id];
-        let mut next = self.vault.resolve(host).0.jump_id;
-        while let Some(id) = next {
-            if seen.contains(&id) || chain.len() >= MAX_JUMPS {
-                break;
-            }
-            seen.push(id);
-            let Some(jump) = self
-                .vault
-                .hosts()
-                .iter()
-                .find(|candidate| candidate.id == id)
-            else {
-                break;
-            };
-            let Some(hop) = self.hop(jump) else { break };
-            chain.push(hop);
-            next = self.vault.resolve(jump).0.jump_id;
-        }
-        chain.reverse();
-        chain
+        connect::quick(target, &self.ssh_files)
     }
 
     /// The program that connects to a saved host: through its jump hosts, with its key and
     /// saved password.
     pub fn connect_host(&self, host: &Host) -> Program {
-        let (resolved, _) = self.vault.resolve(host);
-        match self.hop(host) {
-            Some(hop) => Program::Ssh {
-                target: hop.target,
-                files: self.ssh_files.clone(),
-                password: hop.password,
-                identity: hop.identity,
-                via: self.jump_chain(host),
-                proxy: hop.proxy,
-                reconnect: !host.no_reconnect,
-                env: resolved.env,
-                startup: Some(resolved.startup).filter(|command| !command.trim().is_empty()),
-                term: resolved.term,
-            },
-            None => Program::system_ssh(&self.vault.resolve(host).0.target()),
-        }
+        connect::host(&self.vault, &self.ssh_files, host)
     }
 
     /// The import and export buttons for `ssh_config` (F-IMP-001, F-IMP-003).
@@ -1138,6 +1062,7 @@ fn empty(ui: &mut Ui, palette: &Palette, title: &str, detail: &str) {
 
 #[cfg(test)]
 mod tests {
+    use annulus_session::{Hop, Password};
     use annulus_vault::crypto::KdfParams;
 
     use super::*;
@@ -1532,8 +1457,7 @@ mod tests {
             .find(|h| h.id == inner)
             .unwrap()
             .clone();
-        let hops: Vec<String> = screen
-            .jump_chain(&host)
+        let hops: Vec<String> = connect::jump_chain(&screen.vault, &host)
             .into_iter()
             .map(|hop| hop.target.host)
             .collect();
@@ -1548,7 +1472,7 @@ mod tests {
             .find(|h| h.id == inner)
             .unwrap()
             .clone();
-        assert_eq!(screen.jump_chain(&host).len(), 2);
+        assert_eq!(connect::jump_chain(&screen.vault, &host).len(), 2);
     }
 
     fn opened(request: &Request) -> (&str, String) {

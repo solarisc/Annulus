@@ -10,7 +10,9 @@
 
 #![forbid(unsafe_code)]
 
-use annulus_ui::kit::{Id, Theme, Ui};
+use std::sync::Arc;
+
+use annulus_ui::kit::{Event, Id, Key, Modifiers, Role, Theme, Ui, UiState};
 
 /// What the app asks of the window after a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,8 +25,16 @@ pub enum WindowRequest {
     Close,
 }
 
+/// Asks the window for a new frame; callable from any thread (a session with new output).
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
 /// An app the window runs.
 pub trait WindowApp {
+    /// Hands the app the window's waker, once, before the first frame.
+    fn set_waker(&mut self, waker: Waker) {
+        let _ = waker;
+    }
+
     /// Draws one frame. `maximized` tells the title bar which button to show.
     fn frame(&mut self, ui: &mut Ui<'_>, maximized: bool) -> Option<WindowRequest>;
 
@@ -46,6 +56,34 @@ pub enum WindowError {
     Platform(String),
 }
 
+/// Reads the clipboard's text, if any.
+pub(crate) fn clipboard_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+/// Puts the text the frame copied (Ctrl+C in a field) on the clipboard.
+pub(crate) fn publish_clipboard(state: &mut UiState) {
+    if let Some(text) = state.take_clipboard()
+        && let Ok(mut clipboard) = arboard::Clipboard::new()
+    {
+        let _ = clipboard.set_text(text);
+    }
+}
+
+/// Whether a key press pastes: Ctrl+Shift+V and Shift+Insert anywhere, Ctrl+V only in a text
+/// field (in a terminal it belongs to the program).
+pub(crate) fn is_paste(state: &UiState, key: Key, modifiers: Modifiers, insert: bool) -> bool {
+    let v = key == Key::Char('v');
+    (insert && modifiers == Modifiers::SHIFT)
+        || (v && modifiers == Modifiers::CTRL_SHIFT)
+        || (v && modifiers == Modifiers::CTRL && state.focused_role() == Some(Role::TextInput))
+}
+
+/// The paste event for the clipboard's text.
+pub(crate) fn paste_event() -> Option<Event> {
+    clipboard_text().map(Event::Paste)
+}
+
 /// Opens a window titled `title`, `size` DIPs large, and runs `app` until it closes: our
 /// Win32 window on Windows, `winit` elsewhere.
 ///
@@ -65,7 +103,6 @@ pub fn run(
 #[cfg(not(windows))]
 mod portable {
     use std::num::NonZeroU32;
-    use std::rc::Rc;
     use std::time::Instant;
 
     use softbuffer::{Context, Surface};
@@ -78,9 +115,11 @@ mod portable {
     use winit::keyboard::{Key as WinitKey, NamedKey};
     use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
+    use std::sync::Arc;
+
     use crate::cpu::{CpuCanvas, TextEngine};
 
-    use super::{WindowApp, WindowError, WindowRequest};
+    use super::{WindowApp, WindowError, WindowRequest, is_paste, paste_event, publish_clipboard};
 
     /// Runs `app` in a `winit` window until it closes.
     pub(super) fn run(
@@ -107,8 +146,8 @@ mod portable {
     }
 
     struct Shown {
-        window: Rc<Window>,
-        surface: Surface<Rc<Window>, Rc<Window>>,
+        window: Arc<Window>,
+        surface: Surface<Arc<Window>, Arc<Window>>,
     }
 
     struct Host {
@@ -186,6 +225,7 @@ mod portable {
                 self.app.frame(&mut ui, maximized)
             };
             let output = self.state.end_frame();
+            publish_clipboard(&mut self.state);
             if shown.surface.resize(width, height).is_ok()
                 && let Ok(mut buffer) = shown.surface.buffer_mut()
             {
@@ -239,7 +279,7 @@ mod portable {
                 event_loop.exit();
                 return;
             };
-            let window = Rc::new(window);
+            let window = Arc::new(window);
             let Ok(context) = Context::new(window.clone()) else {
                 event_loop.exit();
                 return;
@@ -248,10 +288,13 @@ mod portable {
                 event_loop.exit();
                 return;
             };
+            let waker = window.clone();
+            self.app.set_waker(Arc::new(move || waker.request_redraw()));
             window.request_redraw();
             self.window = Some(Shown { window, surface });
         }
 
+        #[allow(clippy::too_many_lines)] // One match over the window's events.
         fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
             let Some(shown) = self.window.as_ref() else {
                 return;
@@ -336,7 +379,17 @@ mod portable {
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
-                    if let Some(key) = key(&event.logical_key) {
+                    let insert = event.logical_key == WinitKey::Named(NamedKey::Insert);
+                    let mapped = key(&event.logical_key);
+                    let paste_key = mapped.unwrap_or(kit::Key::Space);
+                    if is_paste(&self.state, paste_key, self.modifiers, insert) {
+                        if let Some(paste) = paste_event() {
+                            self.events.push(paste);
+                        }
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some(key) = mapped {
                         self.events.push(Event::Key(key, self.modifiers));
                     }
                     if let Some(text) = event.text.as_ref()

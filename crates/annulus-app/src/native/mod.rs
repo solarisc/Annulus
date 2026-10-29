@@ -5,6 +5,7 @@
 
 pub mod demo;
 pub mod hosts;
+mod live;
 pub mod lock;
 #[cfg(test)]
 mod scenes;
@@ -12,7 +13,8 @@ mod terminal;
 mod titlebar;
 
 use annulus_config::tokens::{Appearance, space};
-use annulus_platform::window::{WindowApp, WindowError, WindowRequest, run};
+use annulus_platform::window::{Waker, WindowApp, WindowError, WindowRequest, run};
+use annulus_session::{Program, SshFiles};
 use annulus_term::Emulator;
 use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
@@ -20,6 +22,7 @@ use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM, SMALL};
 use annulus_vault::vault::Vault;
 
+use crate::connect;
 use crate::terminal_view::TabStatus;
 
 /// The terminal font size in DIPs (the setting joins with live sessions).
@@ -102,15 +105,24 @@ pub enum TabKind {
 
 /// One tab of the title bar.
 pub struct Tab {
+    /// Stable for the tab's life: its zones keep their ids when other tabs close.
+    pub uid: u64,
     /// What it holds.
     pub kind: TabKind,
     /// Its label.
     pub title: String,
     /// Its status dot.
     pub status: Option<TabStatus>,
-    /// The terminal of a terminal tab. Live sessions join in a later step; the preview and the
-    /// scenes replay recorded output.
-    pub terminal: Option<Emulator>,
+    /// The terminal of a terminal tab.
+    pub terminal: Option<TermView>,
+}
+
+/// What a terminal tab shows.
+pub enum TermView {
+    /// Recorded output (the scenes and the demo).
+    Replay(Box<Emulator>),
+    /// A running local shell or SSH session.
+    Live(Box<live::LiveTerminal>),
 }
 
 /// Something only the window can do.
@@ -153,6 +165,13 @@ pub struct NativeApp {
     pub lock: lock::LockView,
     /// Where the vault file lives; `None` for the preview's throwaway vault.
     pub vault_path: Option<std::path::PathBuf>,
+    /// Where SSH keeps its known hosts and default keys.
+    pub ssh_files: SshFiles,
+    /// Repaints the window from a session's thread.
+    pub waker: Option<Waker>,
+    /// Terminal tabs to open after this frame: title and program.
+    opens: Vec<(String, Program)>,
+    next_uid: u64,
 }
 
 impl NativeApp {
@@ -161,6 +180,7 @@ impl NativeApp {
     pub fn new(vault: Option<Vault>) -> Self {
         Self {
             tabs: vec![Tab {
+                uid: 0,
                 kind: TabKind::Vault,
                 title: "Vault".into(),
                 status: None,
@@ -173,6 +193,53 @@ impl NativeApp {
             maximized: false,
             lock: lock::LockView::new(lock::Mode::Unlock),
             vault_path: None,
+            ssh_files: SshFiles {
+                known_hosts: std::env::temp_dir().join("annulus-preview-known_hosts"),
+                key_dir: directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".ssh")),
+            },
+            waker: None,
+            opens: Vec::new(),
+            next_uid: 1,
+        }
+    }
+
+    /// Adds a terminal tab showing `view`, in front.
+    pub fn push_terminal(&mut self, title: impl Into<String>, view: TermView) {
+        self.tabs.push(Tab {
+            uid: self.next_uid,
+            kind: TabKind::Terminal,
+            title: title.into(),
+            status: None,
+            terminal: Some(view),
+        });
+        self.next_uid += 1;
+        self.active = self.tabs.len() - 1;
+    }
+
+    /// Opens a live terminal tab running `program` after this frame.
+    pub fn open(&mut self, title: impl Into<String>, program: Program) {
+        self.opens.push((title.into(), program));
+    }
+
+    /// What the Hosts screen asked for, as a tab to open.
+    fn act(&mut self, action: hosts::HostsAction) {
+        match action {
+            hosts::HostsAction::Connect(id) => {
+                let Some(vault) = &self.vault else { return };
+                let Some(host) = vault.hosts().iter().find(|host| host.id == id) else {
+                    return;
+                };
+                let program = connect::host(vault, &self.ssh_files, host);
+                let title = host.label.clone();
+                self.open(title, program);
+            }
+            hosts::HostsAction::QuickConnect(target) => {
+                let program = connect::quick(&target, &self.ssh_files);
+                self.open(target, program);
+            }
+            hosts::HostsAction::LocalTerminal => self.open("Local", Program::DefaultShell),
+            // TODO: the ssh_config import preview in the new UI.
+            hosts::HostsAction::ImportSshConfig => {}
         }
     }
 
@@ -226,6 +293,13 @@ impl NativeApp {
         if ui.key(Key::Tab, Modifiers::CTRL) && !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
         }
+        if ui.key(Key::Char('t'), Modifiers::CTRL_SHIFT) {
+            self.open("Local", Program::DefaultShell);
+        }
+        if ui.key(Key::Char('w'), Modifiers::CTRL_SHIFT) && self.active > 0 {
+            self.tabs.remove(self.active);
+            self.active -= 1;
+        }
         let kind = self.tabs.get(self.active).map(|tab| tab.kind);
         if kind == Some(TabKind::Vault) {
             let compact = ui.viewport.w < COLLAPSE_BELOW;
@@ -239,35 +313,58 @@ impl NativeApp {
             } else {
                 match self.section {
                     Section::Hosts => {
-                        self.hosts.draw(ui, content, self.vault.as_mut());
+                        if let Some(action) = self.hosts.draw(ui, content, self.vault.as_mut()) {
+                            self.act(action);
+                        }
                     }
                     other => placeholder(ui, content, other.title()),
                 }
             }
-        } else if let Some(emulator) = self
-            .tabs
-            .get_mut(self.active)
-            .and_then(|tab| tab.terminal.as_mut())
+        } else if let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(view) = tab.terminal.as_mut()
         {
             let font = Font::mono(TERMINAL_FONT);
-            let screen = emulator.screen();
+            let palette = annulus_term::Palette::annulus_dark();
             let background = Color::rgba(
-                screen.background.r,
-                screen.background.g,
-                screen.background.b,
+                palette.background.r,
+                palette.background.g,
+                palette.background.b,
                 255,
             );
             let content = panel_filled(ui, area, background);
-            let inner = content.inset(space::L, space::M);
-            let (columns, rows) = terminal::grid_size(ui, inner, font);
-            emulator.resize(columns, rows);
-            let screen = emulator.screen();
-            terminal::draw(ui, inner, &screen, font, true);
+            match view {
+                TermView::Replay(emulator) => {
+                    let inner = content.inset(space::L, space::M);
+                    let (columns, rows) = terminal::grid_size(ui, inner, font);
+                    emulator.resize(columns, rows);
+                    let screen = emulator.screen();
+                    terminal::draw(ui, inner, &screen, font, true);
+                }
+                TermView::Live(live) => {
+                    let id = Id::new(("terminal", tab.uid));
+                    live.draw(ui, content, font, self.waker.as_ref(), id);
+                    if let Some(title) = &live.title {
+                        title.clone_into(&mut tab.title);
+                    }
+                }
+            }
         } else {
             let content = panel(ui, area);
             placeholder(ui, content, "Terminal");
         }
         ui.overlays();
+        for tab in &mut self.tabs {
+            if let Some(TermView::Live(live)) = &tab.terminal {
+                tab.status = live.status();
+            }
+        }
+        for (title, program) in std::mem::take(&mut self.opens) {
+            self.push_terminal(
+                title,
+                TermView::Live(Box::new(live::LiveTerminal::new(program))),
+            );
+            ui.request_repaint();
+        }
         action
     }
 
@@ -418,6 +515,10 @@ struct Preview {
 }
 
 impl WindowApp for Preview {
+    fn set_waker(&mut self, waker: Waker) {
+        self.app.waker = Some(waker);
+    }
+
     fn frame(&mut self, ui: &mut Ui<'_>, maximized: bool) -> Option<WindowRequest> {
         self.app.maximized = maximized;
         self.app.frame(ui).map(|action| match action {
@@ -440,6 +541,36 @@ impl WindowApp for Preview {
     }
 }
 
+/// Runs the new UI over the real vault in `data_dir` (`annulus-app --native`): the lock screen
+/// first, then live sessions.
+///
+/// # Errors
+/// When the OS refuses a window.
+pub fn run_native(light: bool, data_dir: &std::path::Path) -> Result<(), WindowError> {
+    let mut app = NativeApp::new(None);
+    let vault_path = data_dir.join("vault.anv");
+    app.lock = lock::LockView::new(if vault_path.exists() {
+        lock::Mode::Unlock
+    } else {
+        lock::Mode::Setup
+    });
+    app.vault_path = Some(vault_path);
+    app.ssh_files.known_hosts = data_dir.join("known_hosts");
+    let _ = std::fs::create_dir_all(data_dir);
+    run(
+        "Annulus",
+        (1100.0, 720.0),
+        Preview {
+            app,
+            theme: Theme::new(if light {
+                Appearance::Light
+            } else {
+                Appearance::Dark
+            }),
+        },
+    )
+}
+
 /// Runs the preview window until it is closed.
 ///
 /// # Errors
@@ -451,12 +582,8 @@ pub fn run_preview(light: bool) -> Result<(), WindowError> {
         Appearance::Dark
     };
     let mut app = NativeApp::new(Some(demo::fixture_vault("preview", true)));
-    app.tabs.push(Tab {
-        kind: TabKind::Terminal,
-        title: "prod-db".into(),
-        status: None,
-        terminal: Some(demo::terminal()),
-    });
+    app.push_terminal("prod-db", TermView::Replay(Box::new(demo::terminal())));
+    app.active = 0;
     run(
         "Annulus",
         (1100.0, 720.0),

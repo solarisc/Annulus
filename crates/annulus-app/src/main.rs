@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod command_palette;
+mod connect;
 mod forwards_screen;
 mod groups_view;
 mod hosts_screen;
@@ -53,6 +54,13 @@ fn data_dir() -> std::path::PathBuf {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--native") {
+        let light = args.iter().any(|arg| arg == "--light");
+        return match native::run_native(light, &data_dir()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     if args.iter().any(|arg| arg == "--preview") {
         let light = args.iter().any(|arg| arg == "--light");
         return match native::run_preview(light) {

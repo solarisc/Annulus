@@ -291,8 +291,13 @@ impl Ui<'_> {
             for typed in self.take_typed() {
                 let (key, modifiers) = match typed {
                     Typed::Key(key, modifiers) => (key, modifiers),
-                    Typed::Text(text) => {
-                        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                    Typed::Text(text) | Typed::Paste(text) => {
+                        // A pasted line break becomes a space: fields are one line.
+                        let text: String = text
+                            .chars()
+                            .map(|c| if c == '\n' { ' ' } else { c })
+                            .filter(|c| !c.is_control())
+                            .collect();
                         if !text.is_empty() {
                             let (from, to) = state.range();
                             buffer.replace_range(from..to, &text);

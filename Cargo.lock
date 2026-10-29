@@ -6022,6 +6022,7 @@ dependencies = [
 name = "annulus-platform"
 version = "0.0.0"
 dependencies = [
+ "arboard",
  "parley",
  "softbuffer",
  "swash",

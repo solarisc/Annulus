@@ -20,7 +20,7 @@ use annulus_ui::kit::{Button, Event, FrameOutput, Key, Modifiers, Role, Theme, U
 
 use super::demo::fixture_vault;
 use super::hosts::Mode;
-use super::{NativeApp, Tab, TabKind};
+use super::{NativeApp, TermView};
 use crate::terminal_view::TabStatus;
 
 /// One step of a scene's script, applied between frames.
@@ -73,12 +73,10 @@ fn with_tabs(app: &mut NativeApp) {
         ("web-1", Some(TabStatus::Unread)),
         ("bastion", Some(TabStatus::Error)),
     ] {
-        app.tabs.push(Tab {
-            kind: TabKind::Terminal,
-            title: title.into(),
-            status,
-            terminal: Some(super::demo::terminal()),
-        });
+        app.push_terminal(title, TermView::Replay(Box::new(super::demo::terminal())));
+        if let Some(tab) = app.tabs.last_mut() {
+            tab.status = status;
+        }
     }
 }
 
