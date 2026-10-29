@@ -61,13 +61,26 @@ pub enum KeyKind {
     Ed25519,
     /// ECDSA on NIST P-256, for servers that need a NIST curve.
     EcdsaP256,
+    /// ECDSA on NIST P-384.
+    EcdsaP384,
+    /// ECDSA on NIST P-521.
+    EcdsaP521,
     /// RSA, 3072 bits (signing with SHA-512), for old servers.
     Rsa3072,
+    /// RSA, 4096 bits; slower to make and use than 3072.
+    Rsa4096,
 }
 
 impl KeyKind {
     /// Every kind, default first.
-    pub const ALL: [KeyKind; 3] = [KeyKind::Ed25519, KeyKind::EcdsaP256, KeyKind::Rsa3072];
+    pub const ALL: [KeyKind; 6] = [
+        KeyKind::Ed25519,
+        KeyKind::EcdsaP256,
+        KeyKind::EcdsaP384,
+        KeyKind::EcdsaP521,
+        KeyKind::Rsa3072,
+        KeyKind::Rsa4096,
+    ];
 
     /// The name shown in the keychain.
     #[must_use]
@@ -75,7 +88,10 @@ impl KeyKind {
         match self {
             KeyKind::Ed25519 => "Ed25519",
             KeyKind::EcdsaP256 => "ECDSA P-256",
+            KeyKind::EcdsaP384 => "ECDSA P-384",
+            KeyKind::EcdsaP521 => "ECDSA P-521",
             KeyKind::Rsa3072 => "RSA 3072",
+            KeyKind::Rsa4096 => "RSA 4096",
         }
     }
 }
@@ -85,17 +101,18 @@ impl KeyKind {
 /// # Errors
 /// No randomness.
 pub fn generate(kind: KeyKind, comment: &str) -> Result<KeyPair, KeyError> {
-    let mut rng = rand::rng();
+    let ecdsa = |curve| PrivateKey::random(&mut rand::rng(), Algorithm::Ecdsa { curve });
+    let rsa = |bits| {
+        russh::keys::ssh_key::private::RsaKeypair::random(&mut rand::rng(), bits)
+            .and_then(|pair| PrivateKey::new(pair.into(), comment))
+    };
     let mut key = match kind {
-        KeyKind::Ed25519 => PrivateKey::random(&mut rng, Algorithm::Ed25519),
-        KeyKind::EcdsaP256 => PrivateKey::random(
-            &mut rng,
-            Algorithm::Ecdsa {
-                curve: EcdsaCurve::NistP256,
-            },
-        ),
-        KeyKind::Rsa3072 => russh::keys::ssh_key::private::RsaKeypair::random(&mut rng, 3072)
-            .and_then(|pair| PrivateKey::new(pair.into(), comment)),
+        KeyKind::Ed25519 => PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519),
+        KeyKind::EcdsaP256 => ecdsa(EcdsaCurve::NistP256),
+        KeyKind::EcdsaP384 => ecdsa(EcdsaCurve::NistP384),
+        KeyKind::EcdsaP521 => ecdsa(EcdsaCurve::NistP521),
+        KeyKind::Rsa3072 => rsa(3072),
+        KeyKind::Rsa4096 => rsa(4096),
     }
     .map_err(|_| KeyError::Generate)?;
     key.set_comment(comment);
@@ -166,6 +183,8 @@ mod tests {
     fn ecdsa_and_rsa_keys_generate_and_decode_for_signing() {
         for (kind, prefix) in [
             (KeyKind::EcdsaP256, "ecdsa-sha2-nistp256 "),
+            (KeyKind::EcdsaP384, "ecdsa-sha2-nistp384 "),
+            (KeyKind::EcdsaP521, "ecdsa-sha2-nistp521 "),
             (KeyKind::Rsa3072, "ssh-rsa "),
         ] {
             let generated = generate(kind, "me@laptop").unwrap();
