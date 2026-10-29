@@ -1,6 +1,6 @@
 //! Target parsing, and whole connections against an in-process russh server on localhost:
-//! host-key trust and change detection, password retries, an echoing shell, and the SFTP
-//! subsystem.
+//! host-key trust and change detection, password retries, an echoing shell, the SFTP
+//! subsystem, and port forwarding through echoing `direct-tcpip` channels.
 
 // The test server implements russh's async trait; some handlers have nothing to await.
 #![allow(clippy::unused_async_trait_impl)]
@@ -99,6 +99,21 @@ impl server::Handler for TestServer {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.channels.lock().unwrap().insert(channel.id(), channel);
+        reply.accept().await;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)] // The trait's signature.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        _channel: ServerChannel<ServerMsg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
         reply.accept().await;
         Ok(())
     }
@@ -270,6 +285,66 @@ async fn the_sftp_subsystem_opens_on_a_connection() {
     let stream = connection.sftp_stream().await.unwrap();
     let sftp = russh_sftp::client::SftpSession::new(stream).await.unwrap();
     assert_eq!(sftp.canonicalize(".").await.unwrap(), "/home/alice");
+}
+
+#[tokio::test]
+async fn local_and_socks_forwards_carry_bytes_and_a_busy_port_is_reported() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let port = serve(new_key()).await;
+    let script = Script::new(true, &["secret"]);
+    let connection = Arc::new(
+        connect(
+            &target(port, "alice"),
+            &known_hosts("forward"),
+            None,
+            script,
+        )
+        .await
+        .unwrap(),
+    );
+    let any_port: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let local = forward::start(
+        connection.clone(),
+        forward::Rule::Local {
+            bind: any_port,
+            host: "echo.internal".into(),
+            port: 7,
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = tokio::net::TcpStream::connect(local.local()).await.unwrap();
+    client.write_all(b"ping").await.unwrap();
+    let mut echoed = [0u8; 4];
+    client.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+    assert_eq!(local.connections(), 1);
+
+    let busy = forward::start(
+        connection.clone(),
+        forward::Rule::Dynamic {
+            bind: local.local(),
+        },
+    )
+    .await;
+    assert!(matches!(busy, Err(forward::ForwardError::PortInUse(_))));
+
+    let socks = forward::start(connection, forward::Rule::Dynamic { bind: any_port })
+        .await
+        .unwrap();
+    let mut client = tokio::net::TcpStream::connect(socks.local()).await.unwrap();
+    client
+        .write_all(&[5, 1, 0, 5, 1, 0, 3, 4, b'h', b'o', b's', b't', 0, 80])
+        .await
+        .unwrap();
+    let mut replies = [0u8; 12];
+    client.read_exact(&mut replies).await.unwrap();
+    assert_eq!(replies[..2], [5, 0]);
+    assert_eq!(replies[2..4], [5, 0]);
+    client.write_all(b"pong").await.unwrap();
+    client.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"pong");
 }
 
 #[tokio::test]
