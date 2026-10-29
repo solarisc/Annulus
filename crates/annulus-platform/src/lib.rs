@@ -7,6 +7,7 @@
 pub mod cpu;
 #[cfg(windows)]
 pub mod d2d;
+pub mod process;
 #[cfg(windows)]
 mod win32;
 pub mod window;

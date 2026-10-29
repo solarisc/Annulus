@@ -55,8 +55,10 @@ pub(crate) fn downloads() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Writes `log` to `dir` under a free name (never over an existing file).
+/// Writes `log` to `dir` under a free name (never over an existing file), readable only by
+/// its owner on Unix: a session's output can hold anything.
 pub(crate) fn export(log: &SessionLog, dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
     let name = file_name(log);
     let mut path = dir.join(&name);
     let mut n = 1;
@@ -64,7 +66,14 @@ pub(crate) fn export(log: &SessionLog, dir: &std::path::Path) -> std::io::Result
         path = dir.join(name.replace(".txt", &format!(" ({n}).txt")));
         n += 1;
     }
-    std::fs::write(&path, &log.text)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(&path)?.write_all(log.text.as_bytes())?;
     Ok(path)
 }
 
@@ -90,6 +99,12 @@ mod tests {
             "admin_db_22___prod-1970-01-01-00-00.txt"
         );
         assert_ne!(first, second);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&second).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "only its owner reads it");
+        }
         assert_eq!(std::fs::read_to_string(second).unwrap(), "hello\n");
     }
 }

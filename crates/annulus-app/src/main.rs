@@ -36,6 +36,7 @@ fn data_dir() -> std::path::PathBuf {
 }
 
 fn main() -> ExitCode {
+    annulus_platform::process::harden();
     let args: Vec<String> = std::env::args().collect();
     let light = args.iter().any(|arg| arg == "--light");
     let ran = if args.iter().any(|arg| arg == "--preview") {

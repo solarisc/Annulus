@@ -23,6 +23,8 @@ base64 = "0.22.1"
 chacha20poly1305 = "0.11.0"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
+# setrlimit and prctl, to keep the open vault out of core dumps.
+libc = "0.2.191"
 sha2 = "0.11.1"
 # Only to turn on prebuilt NASM objects on Windows, so builds need no NASM (ADR-0004).
 aws-lc-rs = { version = "1.16.2", features = ["prebuilt-nasm"] }
