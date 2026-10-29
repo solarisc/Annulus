@@ -1567,7 +1567,7 @@ mod tests {
         assert!(!joining.exists());
         assert!(Vault::unlock(&live, "account pw").is_ok());
         assert!(
-            Vault::unlock(&crate::files::backup_path(&live), "local pw").is_ok(),
+            Vault::unlock(crate::files::backup_path(&live), "local pw").is_ok(),
             "the replaced vault is kept"
         );
         assert!(matches!(
