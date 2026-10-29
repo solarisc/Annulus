@@ -165,6 +165,8 @@ mod tests {
             via: Vec::new(),
             proxy: None,
             reconnect: false,
+            env: Vec::new(),
+            startup: None,
         };
         let mut task = SshTask::exec(program, "true".into(), || {});
         assert!(finish(&mut task).is_err());

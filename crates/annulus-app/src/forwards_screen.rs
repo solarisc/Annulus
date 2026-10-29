@@ -643,6 +643,8 @@ mod tests {
             via: Vec::new(),
             proxy: None,
             reconnect: true,
+            env: Vec::new(),
+            startup: None,
         };
         let mut running = start(&rule, program, || {});
         wait_for(&mut running, |status| matches!(status, Status::Active(_)));

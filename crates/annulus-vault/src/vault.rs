@@ -337,6 +337,8 @@ impl Vault {
             proxy: None,
             no_reconnect: false,
             group: None,
+            env: Vec::new(),
+            startup: String::new(),
         }
     }
 

@@ -325,6 +325,8 @@ impl Found {
             proxy: None,
             no_reconnect: false,
             group: None,
+            env: Vec::new(),
+            startup: String::new(),
         }
     }
 
@@ -492,6 +494,8 @@ mod tests {
             proxy: None,
             no_reconnect: false,
             group: None,
+            env: Vec::new(),
+            startup: String::new(),
         }
     }
 }

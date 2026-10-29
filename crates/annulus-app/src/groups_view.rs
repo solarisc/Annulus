@@ -177,6 +177,60 @@ pub fn holds(hosts: usize, subgroups: usize) -> String {
     }
 }
 
+/// Environment variables as the editors show them: one `NAME=value` per line.
+#[must_use]
+pub fn format_env(env: &[(String, String)]) -> String {
+    env.iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Reads `NAME=value` lines (blank lines skipped), or says which line is wrong. Names are
+/// letters, digits and `_`, not starting with a digit, as shells require.
+pub fn parse_env(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut env = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let valid = |name: &str| {
+            name.chars()
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+                && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+        };
+        match line.split_once('=') {
+            Some((name, value)) if valid(name.trim()) => {
+                env.push((name.trim().to_owned(), value.to_owned()));
+            }
+            _ => {
+                return Err(format!(
+                    "Environment line {}: write NAME=value (letters, digits and _).",
+                    number + 1
+                ));
+            }
+        }
+    }
+    Ok(env)
+}
+
+/// The editors' Environment and Startup command rows; `hints` are the placeholders.
+pub fn session_rows(ui: &mut Ui, env: &mut String, startup: &mut String, hints: (&str, &str)) {
+    ui.label("Environment");
+    ui.add(
+        egui::TextEdit::multiline(env)
+            .hint_text(hints.0)
+            .desired_rows(2)
+            .desired_width(f32::INFINITY),
+    );
+    ui.end_row();
+    ui.label("Startup command");
+    ui.add(egui::TextEdit::singleline(startup).hint_text(hints.1))
+        .on_hover_text("Typed into the shell once it opens");
+    ui.end_row();
+}
+
 /// A picker of a key or host by id, or "Not set".
 fn id_picker(ui: &mut Ui, id: &str, chosen: &mut Option<u64>, choices: &[(u64, String)]) {
     let shown = chosen
@@ -196,6 +250,7 @@ fn id_picker(ui: &mut Ui, id: &str, chosen: &mut Option<u64>, choices: &[(u64, S
 pub struct GroupDraft {
     group: Group,
     port: String,
+    env: String,
     proxy: SecretText,
     problem: Option<String>,
     is_new: bool,
@@ -212,6 +267,7 @@ impl GroupDraft {
                 .map(|port| port.to_string())
                 .unwrap_or_default(),
             proxy: SecretText::from(group.defaults.proxy.as_ref().map_or("", |url| url.expose())),
+            env: format_env(&group.defaults.env),
             problem: None,
             is_new,
             group,
@@ -274,6 +330,12 @@ impl GroupDraft {
                 ui.label("Proxy");
                 secret_line(ui, &mut self.proxy, "Not set");
                 ui.end_row();
+                session_rows(
+                    ui,
+                    &mut self.env,
+                    &mut self.group.defaults.startup,
+                    ("LANG=en_US.UTF-8", "Not set"),
+                );
             });
         if let Some(problem) = &self.problem {
             ui.add_space(space::S);
@@ -332,6 +394,8 @@ impl GroupDraft {
             return Err("The proxy must look like socks5://host:port or http://host:port.".into());
         }
         group.defaults.proxy = (!proxy.is_empty()).then(|| Secret::new(proxy));
+        group.defaults.env = parse_env(&self.env)?;
+        group.defaults.startup = group.defaults.startup.trim().to_owned();
         Ok(group)
     }
 }
@@ -365,6 +429,22 @@ mod tests {
         assert_eq!(for_prod, ["c"], "not itself, not its subgroup");
         assert_eq!(holds(1, 0), "1 host");
         assert_eq!(holds(3, 2), "3 hosts \u{b7} 2 groups");
+    }
+
+    #[test]
+    fn environment_lines_round_trip_and_bad_names_are_refused() {
+        let env = parse_env("LANG=C.UTF-8\n\n  TZ=Etc/UTC\nEMPTY=\nURL=a=b").unwrap();
+        assert_eq!(
+            format_env(&env),
+            "LANG=C.UTF-8\nTZ=Etc/UTC\nEMPTY=\nURL=a=b",
+            "a value may hold = and may be empty"
+        );
+        assert_eq!(
+            parse_env("OK=1\n2BAD=x"),
+            Err("Environment line 2: write NAME=value (letters, digits and _).".into())
+        );
+        assert!(parse_env("no equals sign").is_err());
+        assert!(parse_env("A B=1").is_err());
     }
 
     #[test]

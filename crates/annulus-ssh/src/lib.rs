@@ -474,10 +474,29 @@ impl Connection {
     /// # Errors
     /// The server refused the channel, the PTY or the shell.
     pub async fn shell(&self, columns: u32, rows: u32) -> Result<Shell, SshError> {
+        self.shell_with_env(columns, rows, &[]).await
+    }
+
+    /// [`Connection::shell`], first sending `env` (F-SSH-012). A server that does not accept
+    /// a variable (sshd's `AcceptEnv`) ignores it; that is not an error.
+    ///
+    /// # Errors
+    /// The server refused the channel, the PTY or the shell.
+    pub async fn shell_with_env(
+        &self,
+        columns: u32,
+        rows: u32,
+        env: &[(String, String)],
+    ) -> Result<Shell, SshError> {
         let channel = self.handle.channel_open_session().await?;
         channel
             .request_pty(true, "xterm-256color", columns, rows, 0, 0, &[])
             .await?;
+        for (name, value) in env {
+            channel
+                .set_env(false, name.as_str(), value.as_str())
+                .await?;
+        }
         channel.request_shell(true).await?;
         Ok(Shell {
             channel,

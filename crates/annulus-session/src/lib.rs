@@ -63,6 +63,7 @@ pub struct SshFiles {
 
 /// The program a session runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Made once per tab and moved, never stored in bulk.
 pub enum Program {
     /// The user's default shell (`$SHELL`, or PowerShell/cmd on Windows).
     DefaultShell,
@@ -89,6 +90,10 @@ pub enum Program {
         proxy: Option<Password>,
         /// Reconnect on its own when the connection drops (F-SSH-009).
         reconnect: bool,
+        /// Environment variables for the shell (F-SSH-012).
+        env: Vec<(String, String)>,
+        /// A command typed into the shell once it opens (F-SSH-013).
+        startup: Option<String>,
     },
 }
 
@@ -451,6 +456,8 @@ impl Session {
                 identity,
                 via,
                 proxy,
+                env,
+                startup,
                 ..
             } => Backend::Ssh(spawn_ssh(
                 SshLogin {
@@ -462,6 +469,8 @@ impl Session {
                     },
                     files: files.clone(),
                     via: via.clone(),
+                    env: env.clone(),
+                    startup: startup.clone(),
                 },
                 size,
                 term.clone(),
@@ -637,6 +646,8 @@ struct SshLogin {
     last: Hop,
     files: SshFiles,
     via: Vec<Hop>,
+    env: Vec<(String, String)>,
+    startup: Option<String>,
 }
 
 fn spawn_ssh(
@@ -672,10 +683,23 @@ fn spawn_ssh(
                     };
                 let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
                 let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
-                let mut shell = match connection.shell(columns, rows).await {
+                let mut shell = match connection.shell_with_env(columns, rows, &login.env).await {
                     Ok(shell) => shell,
                     Err(error) => return listener.send(SessionEvent::Failed(error.to_string())),
                 };
+                // The PTY holds the typed command until the shell reads it.
+                if let Some(startup) = login
+                    .startup
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    && shell
+                        .write(format!("{startup}\r").as_bytes())
+                        .await
+                        .is_err()
+                {
+                    return listener.send(SessionEvent::Lost);
+                }
                 let mut parser: Processor = Processor::new();
                 loop {
                     tokio::select! {
@@ -808,6 +832,8 @@ mod tests {
                 via: Vec::new(),
                 proxy: None,
                 reconnect: false,
+                env: Vec::new(),
+                startup: None,
             },
             Size::new(80, 24),
             8,

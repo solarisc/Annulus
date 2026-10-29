@@ -840,6 +840,8 @@ mod tests {
             proxy: None,
             no_reconnect: false,
             group: None,
+            env: Vec::new(),
+            startup: String::new(),
         };
         copy.apply(
             "host-sync-id",
@@ -891,6 +893,8 @@ mod tests {
             proxy: None,
             no_reconnect: false,
             group: None,
+            env: Vec::new(),
+            startup: String::new(),
         });
         // Many entries, so random ids would put some rule before some host by chance.
         for _ in 0..20 {

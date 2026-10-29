@@ -45,6 +45,13 @@ pub struct Host {
     /// The group it is in ([`crate::groups::Group::uid`]); `None` is the top level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Environment variables sent before the shell starts (F-SSH-012); its groups add the
+    /// names it does not set. The server accepts only those its `AcceptEnv` allows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    /// A command typed into the shell once it opens (F-SSH-013); empty inherits.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub startup: String,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -187,6 +194,8 @@ mod tests {
             proxy: None,
             no_reconnect: false,
             group: None,
+            env: Vec::new(),
+            startup: String::new(),
         }
     }
 

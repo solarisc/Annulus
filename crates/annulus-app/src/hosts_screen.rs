@@ -43,6 +43,8 @@ struct Draft {
     forget_password: bool,
     /// The proxy URL, edited as text (it may hold a login).
     proxy: SecretText,
+    /// Environment variables, one `NAME=value` per line.
+    env: String,
 }
 
 /// The Hosts screen's state, over an unlocked vault.
@@ -87,6 +89,8 @@ impl HostsScreen {
                 via: Vec::new(),
                 proxy: None,
                 reconnect: true,
+                env: Vec::new(),
+                startup: None,
             },
             None => Program::system_ssh(target),
         }
@@ -140,6 +144,7 @@ impl HostsScreen {
     /// The program that connects to a saved host: through its jump hosts, with its key and
     /// saved password.
     pub fn connect_host(&self, host: &Host) -> Program {
+        let (resolved, _) = self.vault.resolve(host);
         match self.hop(host) {
             Some(hop) => Program::Ssh {
                 target: hop.target,
@@ -149,6 +154,8 @@ impl HostsScreen {
                 via: self.jump_chain(host),
                 proxy: hop.proxy,
                 reconnect: !host.no_reconnect,
+                env: resolved.env,
+                startup: Some(resolved.startup).filter(|command| !command.trim().is_empty()),
             },
             None => Program::system_ssh(&self.vault.resolve(host).0.target()),
         }
@@ -240,6 +247,7 @@ impl HostsScreen {
                     password: SecretText::new(),
                     forget_password: false,
                     proxy: SecretText::from(host.proxy.as_ref().map_or("", |url| url.expose())),
+                    env: groups_view::format_env(&host.env),
                     host: host.clone(),
                 });
             }
@@ -389,6 +397,7 @@ impl HostsScreen {
                 password: SecretText::new(),
                 forget_password: false,
                 proxy: SecretText::new(),
+                env: String::new(),
                 host,
             });
         }
@@ -576,6 +585,12 @@ impl HostsScreen {
                 ui.label("Proxy");
                 secret_line(ui, &mut draft.proxy, &inherited.proxy);
                 ui.end_row();
+                groups_view::session_rows(
+                    ui,
+                    &mut draft.env,
+                    &mut draft.host.startup,
+                    (&inherited.env, &inherited.startup),
+                );
                 reconnect_row(ui, &mut draft.host);
                 password_rows(ui, draft);
             });
@@ -636,6 +651,14 @@ impl HostsScreen {
             return;
         }
         draft.host.proxy = (!proxy.is_empty()).then(|| Secret::new(proxy));
+        match groups_view::parse_env(&draft.env) {
+            Ok(env) => draft.host.env = env,
+            Err(problem) => {
+                draft.problem = Some(problem);
+                return;
+            }
+        }
+        draft.host.startup = draft.host.startup.trim().to_owned();
         draft.host.tags = draft
             .tags
             .split(',')
@@ -725,6 +748,8 @@ struct Hints {
     key: String,
     jump: String,
     proxy: String,
+    env: String,
+    startup: String,
 }
 
 fn inherited_hints(
@@ -735,6 +760,7 @@ fn inherited_hints(
 ) -> Hints {
     let mut bare = host.clone();
     (bare.port, bare.key_id, bare.jump_id, bare.proxy) = (None, None, None, None);
+    bare.startup.clear();
     bare.username.clear();
     let (resolved, sources) = vault.resolve(&bare);
     let from = |value: String, source: Option<String>, otherwise: &str| match source {
@@ -765,6 +791,18 @@ fn inherited_hints(
             sources.proxy,
             "socks5://host:1080 or http://host:8080",
         ),
+        env: if resolved.env.len() > host.env.len() {
+            let names: Vec<&str> = resolved
+                .env
+                .iter()
+                .filter(|(name, _)| !host.env.iter().any(|(own, _)| own == name))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            format!("Groups add: {}", names.join(", "))
+        } else {
+            "LANG=en_US.UTF-8".to_owned()
+        },
+        startup: from(resolved.startup, sources.startup, "e.g. tmux attach"),
     }
 }
 
@@ -1125,6 +1163,71 @@ mod tests {
         };
         let titles: Vec<&str> = tabs.iter().map(|(title, _)| title.as_str()).collect();
         assert_eq!(titles, ["web1", "web2"], "not the host outside the group");
+    }
+
+    /// End to end on test VM 1: a group's environment variable (Ubuntu's sshd accepts
+    /// `LC_*`) and startup command reach a real shell through a terminal session.
+    #[test]
+    #[ignore = "needs the test servers"]
+    fn e2e_the_groups_environment_and_startup_command_reach_the_shell() {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+        let pair = annulus_ssh::keys::import(
+            &std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut screen = screen_with("e2e-startup");
+        let key = annulus_vault::keychain::SshKey {
+            id: screen.vault.next_key_id(),
+            label: "test key".into(),
+            private: Secret::new(pair.private.as_str()),
+            public: pair.public.clone(),
+            fingerprint: pair.fingerprint.clone(),
+        };
+        screen.vault.upsert_key(key.clone()).unwrap();
+        let mut group = screen.vault.draft_group(None).unwrap();
+        group.name = "lab".into();
+        group.defaults.username = var("ANNULUS_E2E_USER");
+        group.defaults.key_id = Some(key.id);
+        group.defaults.env = vec![("LC_ANNULUS".into(), "hello".into())];
+        group.defaults.startup = "echo started-$((6*7)) [$LC_ANNULUS]".into();
+        screen.vault.upsert_group(group.clone()).unwrap();
+        let mut host = screen.vault.draft_host();
+        (host.label, host.address) = ("vm1".into(), var("ANNULUS_E2E_VM1"));
+        host.group = Some(group.uid);
+        screen.vault.upsert_host(host.clone()).unwrap();
+
+        let program = screen.connect_host(&host);
+        let session = annulus_session::Session::spawn(
+            &program,
+            annulus_term::Size::new(100, 30),
+            8,
+            16,
+            || {},
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            for event in session.take_events() {
+                match event {
+                    annulus_session::SessionEvent::HostKey(_) => session.answers().host_key(true),
+                    annulus_session::SessionEvent::Password { .. } => {
+                        session.answers().password(None);
+                    }
+                    annulus_session::SessionEvent::Failed(why) => panic!("{why}"),
+                    _ => {}
+                }
+            }
+            if session.transcript().contains("started-42 [hello]") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no startup output: {}",
+                session.transcript()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     #[test]

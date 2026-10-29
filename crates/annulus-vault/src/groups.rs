@@ -47,6 +47,12 @@ pub struct Defaults {
     /// A proxy URL (may hold a login).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<Secret>,
+    /// Environment variables; a host or nearer group setting the same name wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    /// A command typed into the shell once it opens.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub startup: String,
 }
 
 /// Where each inherited value of a resolved host came from: the group's name, or `None`
@@ -63,6 +69,8 @@ pub struct Sources {
     pub jump_id: Option<String>,
     /// Proxy.
     pub proxy: Option<String>,
+    /// Startup command.
+    pub startup: Option<String>,
 }
 
 /// A new random group uid.
@@ -124,6 +132,15 @@ pub fn resolve(host: &Host, groups: &[Group]) -> (Host, Sources) {
             resolved.proxy.clone_from(&defaults.proxy);
             sources.proxy = Some(group.name.clone());
         }
+        if resolved.startup.trim().is_empty() && !defaults.startup.trim().is_empty() {
+            resolved.startup.clone_from(&defaults.startup);
+            sources.startup = Some(group.name.clone());
+        }
+        for (name, value) in &defaults.env {
+            if !resolved.env.iter().any(|(set, _)| set == name) {
+                resolved.env.push((name.clone(), value.clone()));
+            }
+        }
     }
     (resolved, sources)
 }
@@ -165,6 +182,8 @@ mod tests {
             proxy: None,
             no_reconnect: false,
             group: Some(group.into()),
+            env: Vec::new(),
+            startup: String::new(),
         }
     }
 
@@ -179,6 +198,8 @@ mod tests {
                     key_id: Some(7),
                     jump_id: Some(1),
                     proxy: None,
+                    env: vec![("LANG".into(), "C".into()), ("TZ".into(), "UTC".into())],
+                    startup: "uptime".into(),
                 },
             ),
             group(
@@ -206,6 +227,21 @@ mod tests {
         assert_eq!(resolve(&other, &tree()).0.jump_id, Some(1));
         assert_eq!(resolved.proxy, None);
         assert_eq!(sources.proxy, None);
+        assert_eq!(
+            (resolved.startup.as_str(), sources.startup.as_deref()),
+            ("uptime", Some("PROD"))
+        );
+        let mut own = host_in("db");
+        own.env = vec![("TZ".into(), "Etc/UTC".into())];
+        let names: Vec<(String, String)> = resolve(&own, &tree()).0.env;
+        assert_eq!(
+            names,
+            [
+                ("TZ".to_owned(), "Etc/UTC".to_owned()),
+                ("LANG".to_owned(), "C".to_owned())
+            ],
+            "the host's own value wins; the group adds the rest"
+        );
     }
 
     #[test]
