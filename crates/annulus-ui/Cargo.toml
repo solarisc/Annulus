@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+accesskit.workspace = true
 thiserror.workspace = true
 annulus-config = { path = "../annulus-config" }
 unicode-segmentation.workspace = true

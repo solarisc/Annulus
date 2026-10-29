@@ -131,6 +131,17 @@ pub trait Widget {
         None
     }
 
+    /// The checked state of a check box, switch or radio button; `None` for other widgets.
+    fn checked(&self) -> Option<bool> {
+        None
+    }
+
+    /// The current value screen readers announce (field text, chosen option). Password
+    /// fields return `None`: their secret is never exposed.
+    fn value(&self) -> Option<String> {
+        None
+    }
+
     /// The size this widget's own content needs (text, icon), not counting padding or
     /// children, when at most `available` is free (either side may be infinite). Containers
     /// keep the default of zero.

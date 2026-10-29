@@ -51,6 +51,10 @@ impl Widget for Select {
         Some(&self.label)
     }
 
+    fn value(&self) -> Option<String> {
+        self.options.get(self.selected).cloned()
+    }
+
     fn content_size(&self, _available: Size, measure: &mut dyn TextMeasure) -> Size {
         let widest = self
             .options
@@ -203,6 +207,10 @@ impl Widget for Segmented {
 
     fn label(&self) -> Option<&str> {
         Some(&self.label)
+    }
+
+    fn value(&self) -> Option<String> {
+        self.options.get(self.selected).cloned()
     }
 
     #[allow(clippy::cast_precision_loss)] // A handful of segments.

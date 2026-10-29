@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+mod accessibility;
 pub mod animation;
 pub mod display_list;
 pub mod geometry;

@@ -22,6 +22,15 @@ pub struct NodeId {
     generation: u32,
 }
 
+impl NodeId {
+    /// A number unique among the live and removed nodes of a tree, for identifiers outside
+    /// it (the accessibility tree).
+    #[must_use]
+    pub fn to_raw(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+}
+
 /// What must be redone for a node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Dirty(u8);

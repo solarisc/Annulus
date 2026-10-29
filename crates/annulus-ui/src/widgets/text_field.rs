@@ -119,6 +119,11 @@ impl Widget for TextField {
         Some(&self.placeholder)
     }
 
+    fn value(&self) -> Option<String> {
+        (self.style != FieldStyle::Password && !self.editor.text().is_empty())
+            .then(|| self.editor.text().to_owned())
+    }
+
     fn content_size(&self, _available: Size, measure: &mut dyn TextMeasure) -> Size {
         let shown = measure.measure(&self.editor.display_text(), text::BODY, None);
         let icon = if self.style == FieldStyle::Search {

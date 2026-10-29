@@ -50,6 +50,10 @@ impl Widget for Checkbox {
         Some(&self.label)
     }
 
+    fn checked(&self) -> Option<bool> {
+        Some(self.checked)
+    }
+
     fn content_size(&self, _available: Size, measure: &mut dyn TextMeasure) -> Size {
         row_size(BOX, &self.label, measure)
     }
@@ -140,6 +144,10 @@ impl Widget for Switch {
         Some(&self.label)
     }
 
+    fn checked(&self) -> Option<bool> {
+        Some(self.on)
+    }
+
     fn content_size(&self, _available: Size, measure: &mut dyn TextMeasure) -> Size {
         row_size(TRACK.width, &self.label, measure)
     }
@@ -220,6 +228,10 @@ impl Widget for Radio {
 
     fn label(&self) -> Option<&str> {
         Some(&self.label)
+    }
+
+    fn checked(&self) -> Option<bool> {
+        Some(self.selected)
     }
 
     fn content_size(&self, _available: Size, measure: &mut dyn TextMeasure) -> Size {
