@@ -46,6 +46,8 @@ pub enum Role {
     Dialog,
     /// An important message announced when it appears.
     Alert,
+    /// A popup list of commands or options.
+    Menu,
 }
 
 /// What the tree knows about a node when it is painted.
