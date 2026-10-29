@@ -778,6 +778,44 @@ mod vaults {
     }
 
     #[test]
+    fn a_draft_left_open_during_a_sync_never_overwrites_the_arrival() {
+        let server = server();
+        let (a_token, b_token) = tokens(&server);
+        let (a_id, b_id) = (
+            server.authenticate(&a_token).unwrap(),
+            server.authenticate(&b_token).unwrap(),
+        );
+        let (mut laptop, _) = Vault::create(temp("draft-a"), "pw", CHEAP_KDF).unwrap();
+        round(&server, a_id, &mut laptop);
+        let mut desktop =
+            Vault::join(temp("draft-b"), &laptop.key_file_bytes(), "pw", account(2)).unwrap();
+        round(&server, b_id, &mut desktop);
+
+        // The laptop's "New host" editor is open (its draft not saved) while the desktop
+        // adds a host and the laptop syncs.
+        let mut draft = laptop.draft_host();
+        (draft.label, draft.address) = ("mine".into(), "10.0.0.1".into());
+        let mut theirs = desktop.draft_host();
+        (theirs.label, theirs.address) = ("theirs".into(), "10.0.0.2".into());
+        desktop.upsert_host(theirs).unwrap();
+        round(&server, b_id, &mut desktop);
+        round(&server, a_id, &mut laptop);
+        laptop.upsert_host(draft).unwrap();
+
+        let labels: Vec<&str> = laptop.hosts().iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, ["mine", "theirs"], "both kept");
+        assert_ne!(laptop.hosts()[0].id, laptop.hosts()[1].id);
+        round(&server, a_id, &mut laptop);
+        round(&server, b_id, &mut desktop);
+        let there: Vec<&str> = desktop.hosts().iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(
+            there,
+            ["mine", "theirs"],
+            "nothing overwritten on the other device"
+        );
+    }
+
+    #[test]
     fn a_deleted_host_comes_back_from_the_trash_on_every_device() {
         let server = server();
         let (a_token, b_token) = tokens(&server);

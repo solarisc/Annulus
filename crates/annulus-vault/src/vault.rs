@@ -5,7 +5,9 @@
 //! This single-file container is the step before SQLite storage; the key hierarchy
 //! and record format carry over unchanged.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -128,6 +130,10 @@ pub struct Vault {
     sync: SyncState,
     /// Counts saved changes, so a sync result made from an older snapshot is not applied.
     generation: u64,
+    /// Ids handed out by the `draft_*` calls and not saved yet, by entity kind. A sync can
+    /// give one of them to an arriving entity while the editor is open; saving the draft
+    /// then takes a new id instead of overwriting the arrival (ADR-0008 data-loss rules).
+    drafts: Mutex<HashSet<(u8, u64)>>,
 }
 
 impl Vault {
@@ -160,6 +166,7 @@ impl Vault {
             groups: Vec::new(),
             sync: SyncState::new()?,
             generation: 0,
+            drafts: Mutex::default(),
         };
         vault.save_all(&vault.parts())?;
         Ok((vault, recovery))
@@ -266,6 +273,7 @@ impl Vault {
             groups,
             sync,
             generation: 0,
+            drafts: Mutex::default(),
         })
     }
 
@@ -318,12 +326,50 @@ impl Vault {
         self.hosts.iter().filter(move |host| host.matches(query))
     }
 
+    /// An id for a new draft of `kind`: above `fresh` (what the vault and sync state know)
+    /// and above every other draft still open, noted as handed out.
+    fn issue(&self, kind: u8, fresh: u64) -> u64 {
+        let Ok(mut drafts) = self.drafts.lock() else {
+            return fresh;
+        };
+        let open = drafts
+            .iter()
+            .filter(|(of, _)| *of == kind)
+            .map(|(_, id)| id + 1)
+            .max()
+            .unwrap_or(0);
+        let id = fresh.max(open);
+        drafts.insert((kind, id));
+        id
+    }
+
+    /// The id a saved entity of `kind` gets: its own, unless it is a draft whose id was
+    /// meanwhile taken (by an entity a sync brought in), then a new one.
+    fn settle_id(&self, kind: u8, id: u64, taken: impl Iterator<Item = u64> + Clone) -> u64 {
+        let was_draft = self
+            .drafts
+            .lock()
+            .is_ok_and(|mut drafts| drafts.remove(&(kind, id)));
+        if was_draft && taken.clone().any(|existing| existing == id) {
+            let fresh = self.sync.fresh_id(kind, taken);
+            let id = self.issue(kind, fresh);
+            // Saved now, so no longer a draft.
+            if let Ok(mut drafts) = self.drafts.lock() {
+                drafts.remove(&(kind, id));
+            }
+            id
+        } else {
+            id
+        }
+    }
+
     /// A new, unsaved host with a fresh id.
     #[must_use]
     pub fn draft_host(&self) -> Host {
-        let id = self
+        let fresh = self
             .sync
             .fresh_id(kind::HOST, self.hosts.iter().map(|host| host.id));
+        let id = self.issue(kind::HOST, fresh);
         Host {
             id,
             label: String::new(),
@@ -347,7 +393,8 @@ impl Vault {
     ///
     /// # Errors
     /// Writing the file.
-    pub fn upsert_host(&mut self, host: Host) -> Result<(), VaultError> {
+    pub fn upsert_host(&mut self, mut host: Host) -> Result<(), VaultError> {
+        host.id = self.settle_id(kind::HOST, host.id, self.hosts.iter().map(|h| h.id));
         let id = host.id;
         let mut next = self.hosts.clone();
         match next.iter_mut().find(|existing| existing.id == host.id) {
@@ -499,9 +546,10 @@ impl Vault {
     /// A new local rule through `host_id` with a fresh id; not saved until upserted.
     #[must_use]
     pub fn draft_forward(&self, host_id: u64) -> PortForward {
-        let id = self
+        let fresh = self
             .sync
             .fresh_id(kind::FORWARD, self.forwards.iter().map(|rule| rule.id));
+        let id = self.issue(kind::FORWARD, fresh);
         PortForward::new(id, host_id)
     }
 
@@ -509,7 +557,8 @@ impl Vault {
     ///
     /// # Errors
     /// Writing the file.
-    pub fn upsert_forward(&mut self, rule: PortForward) -> Result<(), VaultError> {
+    pub fn upsert_forward(&mut self, mut rule: PortForward) -> Result<(), VaultError> {
+        rule.id = self.settle_id(kind::FORWARD, rule.id, self.forwards.iter().map(|r| r.id));
         let id = rule.id;
         let mut next = self.forwards.clone();
         match next.iter_mut().find(|existing| existing.id == rule.id) {
@@ -836,6 +885,7 @@ impl Vault {
             groups: Vec::new(),
             sync,
             generation: 0,
+            drafts: Mutex::default(),
         };
         vault.save_all(&vault.parts())?;
         Ok(vault)
@@ -852,10 +902,12 @@ impl Vault {
     /// # Errors
     /// No randomness for its uid.
     pub fn draft_group(&self, parent: Option<String>) -> Result<Group, VaultError> {
+        let fresh = self
+            .sync
+            .fresh_id(kind::GROUP, self.groups.iter().map(|group| group.id));
+        let id = self.issue(kind::GROUP, fresh);
         Ok(Group {
-            id: self
-                .sync
-                .fresh_id(kind::GROUP, self.groups.iter().map(|group| group.id)),
+            id,
             uid: groups::new_uid()?,
             name: String::new(),
             parent,
@@ -868,7 +920,7 @@ impl Vault {
     /// # Errors
     /// [`VaultError::Refused`] for an empty name or a parent inside the group itself;
     /// writing the file.
-    pub fn upsert_group(&mut self, group: Group) -> Result<(), VaultError> {
+    pub fn upsert_group(&mut self, mut group: Group) -> Result<(), VaultError> {
         if group.name.trim().is_empty() {
             return Err(VaultError::Refused("Give the group a name."));
         }
@@ -877,6 +929,7 @@ impl Vault {
         {
             return Err(VaultError::Refused("A group can't go inside itself."));
         }
+        group.id = self.settle_id(kind::GROUP, group.id, self.groups.iter().map(|g| g.id));
         let id = group.id;
         let mut next = self.groups.clone();
         match next.iter_mut().find(|existing| existing.id == id) {
@@ -1107,10 +1160,12 @@ impl Vault {
     /// A new, unsaved snippet with a fresh id.
     #[must_use]
     pub fn draft_snippet(&self) -> Snippet {
+        let fresh = self
+            .sync
+            .fresh_id(kind::SNIPPET, self.snippets.iter().map(|s| s.id));
+        let id = self.issue(kind::SNIPPET, fresh);
         Snippet {
-            id: self
-                .sync
-                .fresh_id(kind::SNIPPET, self.snippets.iter().map(|s| s.id)),
+            id,
             label: String::new(),
             script: String::new(),
             package: String::new(),
@@ -1121,7 +1176,12 @@ impl Vault {
     ///
     /// # Errors
     /// Writing the file.
-    pub fn upsert_snippet(&mut self, snippet: Snippet) -> Result<(), VaultError> {
+    pub fn upsert_snippet(&mut self, mut snippet: Snippet) -> Result<(), VaultError> {
+        snippet.id = self.settle_id(
+            kind::SNIPPET,
+            snippet.id,
+            self.snippets.iter().map(|s| s.id),
+        );
         let id = snippet.id;
         let mut next = self.snippets.clone();
         match next.iter_mut().find(|existing| existing.id == id) {
@@ -1303,6 +1363,26 @@ mod tests {
         host.label = label.into();
         host.address = format!("{label}.example.com");
         host
+    }
+
+    #[test]
+    fn two_drafts_open_at_once_never_share_an_id() {
+        let (mut vault, _) = Vault::create(temp("two-drafts"), "pw", KdfParams::TEST).unwrap();
+        let mut first = vault.draft_host();
+        let mut second = vault.draft_host();
+        assert_ne!(first.id, second.id);
+        (second.label, second.address) = ("second".into(), "b".into());
+        vault.upsert_host(second).unwrap();
+        (first.label, first.address) = ("first".into(), "a".into());
+        vault.upsert_host(first).unwrap();
+        let labels: Vec<&str> = vault.hosts().iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, ["first", "second"]);
+        // Saving an existing host again is an edit, not a new one.
+        let mut edited = vault.hosts()[0].clone();
+        edited.address = "a2".into();
+        vault.upsert_host(edited).unwrap();
+        assert_eq!(vault.hosts().len(), 2);
+        assert_eq!(vault.hosts()[0].address, "a2");
     }
 
     #[test]
