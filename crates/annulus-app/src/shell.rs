@@ -17,6 +17,7 @@ use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::SyncScreen;
 use crate::terminal_view::{FONT_SIZES, TerminalTab};
 use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
+use annulus_session::profiles::{self, Profile};
 
 /// A section of the vault's left navigation (F-APP-003).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +135,10 @@ pub struct Shell {
     applied: Option<Appearance>,
     /// The settings as last saved.
     saved: Settings,
+    /// The local shells found at start (F-LOCAL-002).
+    profiles: Vec<Profile>,
+    /// The profile chosen for new local tabs, by name.
+    default_profile: Option<String>,
 }
 
 /// The device settings' file name in the data folder.
@@ -167,7 +172,29 @@ impl Shell {
             auto_lock_minutes: settings.auto_lock_minutes,
             last_input: 0.0,
             applied: None,
+            default_profile: settings.default_profile.clone(),
             saved: settings,
+            profiles: profiles::detect(),
+        }
+    }
+
+    /// The profile new local tabs use: the one chosen in Settings, else the first found.
+    fn default_profile(&self) -> Option<&Profile> {
+        self.default_profile
+            .as_ref()
+            .and_then(|name| self.profiles.iter().find(|profile| &profile.name == name))
+            .or_else(|| self.profiles.first())
+    }
+
+    /// Opens a local terminal with `profile`, or the default one.
+    pub fn open_local(&mut self, profile: Option<usize>) {
+        let chosen = profile
+            .and_then(|index| self.profiles.get(index))
+            .or_else(|| self.default_profile())
+            .cloned();
+        match chosen {
+            Some(profile) => self.open_terminal(profile.name.clone(), profile.program()),
+            None => self.open_terminal("Local", Program::DefaultShell),
         }
     }
 
@@ -177,6 +204,7 @@ impl Shell {
             theme: self.theme_mode,
             font_size: self.font_size,
             auto_lock_minutes: self.auto_lock_minutes,
+            default_profile: self.default_profile.clone(),
             ..self.saved.clone()
         }
     }
@@ -354,7 +382,7 @@ impl Shell {
             self.lock_vault();
         }
         if new_tab {
-            self.open_terminal("Local", Program::DefaultShell);
+            self.open_local(None);
         }
         if close_tab {
             self.close_tab(self.active_tab);
@@ -391,7 +419,7 @@ impl Shell {
     fn tab_strip(&mut self, ui: &mut Ui) {
         let mut close = None;
         let mut select = None;
-        let mut new_local = false;
+        let mut new_local: Option<Option<usize>> = None;
         ui.horizontal(|ui| {
             for (index, tab) in self.tabs.iter().enumerate() {
                 let response = ui.selectable_label(index == self.active_tab, tab.title());
@@ -410,7 +438,18 @@ impl Shell {
             new_local = ui
                 .button("+")
                 .on_hover_text("New local terminal (Ctrl+Shift+T)")
-                .clicked();
+                .clicked()
+                .then_some(None);
+            ui.menu_button("\u{25be}", |ui| {
+                for (index, profile) in self.profiles.iter().enumerate() {
+                    if ui.button(&profile.name).clicked() {
+                        new_local = Some(Some(index));
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Open a terminal with another shell");
         });
         if let Some(index) = select {
             self.active_tab = index;
@@ -418,8 +457,8 @@ impl Shell {
         if let Some(index) = close {
             self.close_tab(index);
         }
-        if new_local {
-            self.open_terminal("Local", Program::DefaultShell);
+        if let Some(profile) = new_local {
+            self.open_local(profile);
         }
     }
 
@@ -485,6 +524,9 @@ impl Shell {
                 let palette = self.palette();
                 if let Some(hosts) = &mut self.hosts {
                     match hosts.ui(ui, &palette) {
+                        Some(Request::Open(title, Program::DefaultShell)) if title == "Local" => {
+                            self.open_local(None);
+                        }
                         Some(Request::Open(title, program)) => self.open_terminal(title, program),
                         Some(Request::Sftp(title, program)) => self.open_sftp(title, program),
                         None => {}
@@ -571,6 +613,24 @@ impl Shell {
         ui.add_space(space::M);
         ui.label("Lock the vault after idle minutes (0 = never)");
         ui.add(egui::DragValue::new(&mut self.auto_lock_minutes).range(0..=240));
+        ui.add_space(space::M);
+        ui.label("New local terminals open");
+        let current = self
+            .default_profile()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_default();
+        egui::ComboBox::from_id_salt("default-profile")
+            .selected_text(&current)
+            .show_ui(ui, |ui| {
+                for profile in &self.profiles {
+                    if ui
+                        .selectable_label(profile.name == current, &profile.name)
+                        .clicked()
+                    {
+                        self.default_profile = Some(profile.name.clone());
+                    }
+                }
+            });
         ui.add_space(space::L);
         let palette = self.palette();
         let vault_path = self.data_dir.join(VAULT_FILE);

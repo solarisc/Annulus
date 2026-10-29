@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod profiles;
+
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
