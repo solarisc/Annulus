@@ -50,6 +50,10 @@ pub enum Role {
     Menu,
     /// A tree of expandable items.
     Tree,
+    /// A movable divider between two panes.
+    Splitter,
+    /// A row of tabs.
+    TabList,
 }
 
 /// What the tree knows about a node when it is painted.
@@ -97,6 +101,17 @@ pub enum Action {
     Expand(usize),
     /// The tree row at this index asks to hide its children.
     Collapse(usize),
+    /// A split pane's first pane should now get this share, in per mille.
+    Resize(u16),
+    /// The tab at this index asks to be closed.
+    Close(usize),
+    /// The tab at `from` was dragged onto position `to`.
+    Move {
+        /// Where it was.
+        from: usize,
+        /// Where it goes.
+        to: usize,
+    },
 }
 
 /// Lets a widget report actions while it handles an event.
