@@ -17,7 +17,7 @@ use annulus_ui::widgets::{
 };
 
 use super::ask::{self, Ask};
-use crate::local_pane::read_dir;
+use crate::local_pane::{read_dir, tilde};
 use crate::sftp_view::{
     Command, Dialog, SftpTab, SortBy, TransferState, conflict_name, format_time, human_size, pace,
     parse_mode, properties, sort_entries, valid_name,
@@ -471,11 +471,14 @@ impl SftpView {
 
     fn local_pane(&mut self, ui: &mut Ui<'_>, rect: Rect) {
         let dir = self.tab.local.dir.clone();
+        let home = directories::BaseDirs::new()
+            .map(|dirs| dirs.home_dir().display().to_string())
+            .unwrap_or_default();
         let mut inner = Self::pane_frame(
             ui,
             rect,
             "This computer",
-            &dir.display().to_string(),
+            &tilde(&dir.display().to_string(), &home),
             icons::DEVICE,
         );
         let mut bar = inner.take_top(CONTROL);
@@ -518,13 +521,14 @@ impl SftpView {
             } else {
                 human_size(entry.size)
             };
+            let modified = entry.modified.map(format_time).unwrap_or_default();
             let (clicked, double, acted, _) = Self::file_row(
                 ui,
                 Id::new(("local", entry.name.as_str())),
                 row,
                 (&entry.name, entry.is_dir),
                 &size,
-                "",
+                &modified,
                 self.local_selected.as_deref() == Some(entry.name.as_str()),
                 (icons::UPLOAD, "Upload to the host"),
                 &[],
@@ -553,7 +557,8 @@ impl SftpView {
         let t = ui.theme;
         let cwd = self.tab.cwd.clone().unwrap_or_default();
         let title = self.tab.title.clone();
-        let mut inner = Self::pane_frame(ui, rect, &title, &cwd, icons::SERVER);
+        let shown = tilde(&cwd, &self.tab.home);
+        let mut inner = Self::pane_frame(ui, rect, &title, &shown, icons::SERVER);
         let mut bar = inner.take_top(CONTROL);
         let up = bar.take_left(CONTROL);
         bar.take_left(4.0);

@@ -13,6 +13,23 @@ pub struct LocalEntry {
     pub is_dir: bool,
     /// Size in bytes (0 for folders).
     pub size: u64,
+    /// Last modification, seconds since the Unix epoch.
+    pub modified: Option<u32>,
+}
+
+/// `path` with the home folder `home` written as `~`, the way a shell prompt shows it:
+/// `/home/me/app` is `~/app`, `C:\Users\me\Downloads` is `~\Downloads`.
+#[must_use]
+pub fn tilde(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return path.to_owned();
+    }
+    match path.strip_prefix(home) {
+        Some("") => "~".to_owned(),
+        Some(rest) if rest.starts_with(['/', '\\']) => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
 }
 
 /// The entries of `dir`: folders first, then files, by name; hidden ones (dot files) only
@@ -26,10 +43,16 @@ pub fn read_dir(dir: &Path, hidden: bool) -> std::io::Result<Vec<LocalEntry>> {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|since| u32::try_from(since.as_secs()).ok());
         entries.push(LocalEntry {
             name,
             is_dir: meta.is_dir(),
             size: if meta.is_dir() { 0 } else { meta.len() },
+            modified,
         });
     }
     entries.sort_by(|a, b| {
@@ -79,6 +102,22 @@ impl LocalPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_home_folder_is_written_as_a_tilde() {
+        assert_eq!(tilde("/home/me/app", "/home/me"), "~/app");
+        assert_eq!(tilde("/home/me", "/home/me/"), "~");
+        assert_eq!(
+            tilde("/home/meadow", "/home/me"),
+            "/home/meadow",
+            "not a prefix by name"
+        );
+        assert_eq!(
+            tilde("C:\\Users\\me\\Downloads", "C:\\Users\\me"),
+            "~\\Downloads"
+        );
+        assert_eq!(tilde("/srv/app", ""), "/srv/app");
+    }
 
     #[test]
     fn folders_come_first_and_dot_files_hide_unless_asked() {
