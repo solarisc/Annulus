@@ -23,8 +23,8 @@ pub enum Mode {
     Recovery,
 }
 
-/// What the user asked the vault to do.
-#[derive(Debug, PartialEq, Eq)]
+/// What the user asked the vault to do. Its `Debug` never shows the password or key.
+#[derive(PartialEq, Eq)]
 pub enum LockAction {
     /// Create a vault with this master password.
     Create(Zeroizing<String>),
@@ -37,6 +37,19 @@ pub enum LockAction {
     },
     /// The recovery key was confirmed: the new vault can open.
     Confirmed,
+}
+
+impl std::fmt::Debug for LockAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Create(_) => f.write_str("Create(..)"),
+            Self::Unlock { recovery, .. } => f
+                .debug_struct("Unlock")
+                .field("recovery", recovery)
+                .finish_non_exhaustive(),
+            Self::Confirmed => f.write_str("Confirmed"),
+        }
+    }
 }
 
 /// The lock screen's state.
@@ -448,6 +461,18 @@ mod tests {
         );
         view.confirm = Zeroizing::new("long enough pw".into());
         assert_eq!(view.check_new(), Ok(()));
+    }
+
+    #[test]
+    fn what_the_lock_screen_hands_over_never_prints_the_secret() {
+        let create = LockAction::Create(Zeroizing::new("hunter2-but-longer".into()));
+        let unlock = LockAction::Unlock {
+            secret: Zeroizing::new("ABCD-EFGH-JKLM".into()),
+            recovery: true,
+        };
+        let printed = format!("{create:?} {unlock:?}");
+        assert!(!printed.contains("hunter2") && !printed.contains("ABCD"), "{printed}");
+        assert!(printed.contains("recovery: true"), "{printed}");
     }
 
     #[test]

@@ -9,7 +9,9 @@
 //! ```
 //!
 //! A password change re-wraps the account key and leaves every record untouched; the
-//! recovery key unlocks when the password is forgotten. All keys are zeroized on drop.
+//! recovery key unlocks when the password is forgotten. Keys are made in place and zeroized
+//! on drop, and so are Argon2's working memory and the cipher's key schedule (the crates'
+//! `zeroize` features). Decrypted records are `Zeroizing`; serde's own buffers are not.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -82,21 +84,22 @@ impl Key {
     /// # Errors
     /// [`CryptoError::Randomness`].
     pub fn random() -> Result<Self, CryptoError> {
-        let mut key = [0u8; 32];
-        getrandom::fill(&mut key).map_err(|_| CryptoError::Randomness)?;
-        Ok(Self(key))
+        // Filled in place, so no copy of the key is left behind.
+        let mut key = Self([0u8; 32]);
+        getrandom::fill(&mut key.0).map_err(|_| CryptoError::Randomness)?;
+        Ok(key)
     }
 
     fn derive(&self, info: &[u8]) -> Key {
-        let mut out = [0u8; 32];
+        let mut out = Key([0u8; 32]);
         let hkdf = hkdf::Hkdf::<sha2::Sha256>::new(None, &self.0);
         // 32 bytes is always a valid HKDF-SHA256 output length.
-        let _ = hkdf.expand(info, &mut out);
-        Key(out)
+        let _ = hkdf.expand(info, &mut out.0);
+        out
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
-        XChaCha20Poly1305::new(&self.0.into())
+        XChaCha20Poly1305::new((&self.0).into())
     }
 }
 
@@ -212,11 +215,11 @@ fn master_key(password: &str, salt: &[u8], params: KdfParams) -> Result<Key, Cry
         argon2::Version::V0x13,
         argon_params,
     );
-    let mut out = [0u8; 32];
+    let mut out = Key([0u8; 32]);
     argon
-        .hash_password_into(password.as_bytes(), salt, &mut out)
+        .hash_password_into(password.as_bytes(), salt, &mut out.0)
         .map_err(|_| CryptoError::Parameters)?;
-    Ok(Key(out))
+    Ok(out)
 }
 
 const WRAP_AAD: &[u8] = b"annulus v1 account key";
