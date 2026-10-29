@@ -105,6 +105,7 @@ fn ax_role(role: Role) -> AxRole {
         Role::Dialog => AxRole::Dialog,
         Role::Alert => AxRole::Alert,
         Role::Menu => AxRole::Menu,
+        Role::Tree => AxRole::Tree,
     }
 }
 

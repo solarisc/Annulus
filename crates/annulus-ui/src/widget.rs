@@ -48,6 +48,8 @@ pub enum Role {
     Alert,
     /// A popup list of commands or options.
     Menu,
+    /// A tree of expandable items.
+    Tree,
 }
 
 /// What the tree knows about a node when it is painted.
@@ -91,6 +93,10 @@ pub enum Action {
     Open,
     /// A dialog, menu or banner asks to be closed (Escape, close button).
     Dismiss,
+    /// The tree row at this index asks to show its children.
+    Expand(usize),
+    /// The tree row at this index asks to hide its children.
+    Collapse(usize),
 }
 
 /// Lets a widget report actions while it handles an event.

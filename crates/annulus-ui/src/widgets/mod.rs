@@ -10,6 +10,7 @@ mod menu;
 mod notice;
 mod text_field;
 mod toggle;
+mod tree_view;
 
 #[cfg(test)]
 mod tests;
@@ -22,6 +23,7 @@ pub use menu::Menu;
 pub use notice::{Banner, Severity, Toast, ToastQueue};
 pub use text_field::{FieldStyle, TextField};
 pub use toggle::{Checkbox, Radio, Switch};
+pub use tree_view::{TreeRow, TreeView};
 
 use annulus_config::tokens::{Palette, Rgb};
 
