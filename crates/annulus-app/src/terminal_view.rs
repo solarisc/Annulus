@@ -129,6 +129,8 @@ pub struct TerminalTab {
     pub skip_broadcast: bool,
     /// The links on screen, listed for the keyboard (Ctrl+Shift+O) while open.
     link_list: Option<Vec<String>>,
+    /// A paste of several lines waiting for a yes, since each line would run (F-TERM-006).
+    held_paste: Option<String>,
 }
 
 /// Tries before an automatic reconnect gives up and shows the error.
@@ -172,6 +174,7 @@ impl TerminalTab {
             drawn: Arc::new(AtomicBool::new(false)),
             skip_broadcast: false,
             link_list: None,
+            held_paste: None,
         }
     }
 
@@ -301,6 +304,45 @@ impl TerminalTab {
         }
     }
 
+    /// Asks before pasting several lines: paste them, paste them as one line, or not.
+    fn paste_prompt(&mut self, ui: &Ui) {
+        let Some(text) = &self.held_paste else { return };
+        let lines = text.lines().count().max(1);
+        let mut choice = None;
+        egui::Window::new("Paste several lines?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "The text has {lines} line(s). Each line runs as a command as soon as it is pasted."
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Paste").clicked() {
+                        choice = Some(Some(text.clone()));
+                    }
+                    if ui.button("Paste as one line").clicked() {
+                        choice = Some(Some(text.split(['\r', '\n']).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(None);
+                    }
+                });
+            });
+        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, EguiKey::Escape)) {
+            choice = Some(None);
+        }
+        let Some(choice) = choice else { return };
+        self.held_paste = None;
+        self.focused_once = false;
+        if let (Some(text), Some(session)) = (choice, &self.session) {
+            let bytes = paste_bytes(&text, session.mode());
+            session.scroll_to_bottom();
+            session.write(bytes.clone());
+            self.sent.push(bytes);
+        }
+    }
+
     /// Ctrl+Shift+O lists the links on screen; Tab and Enter open one, Escape closes.
     fn links_ui(&mut self, ui: &Ui) {
         let open = ui.input_mut(|input| {
@@ -367,6 +409,7 @@ impl TerminalTab {
         );
         self.find_bar(ui);
         self.links_ui(ui);
+        self.paste_prompt(ui);
         let area = ui.available_rect_before_wrap();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Floored, small.
         let size = Size::new(
@@ -427,7 +470,7 @@ impl TerminalTab {
         if response.has_focus() {
             keep_keys(ui, id);
             if !prompting {
-                self.sent = handle_input(ui, session);
+                self.sent = handle_input(ui, session, &mut self.held_paste);
             }
         }
 
@@ -941,7 +984,7 @@ fn handle_mouse(response: &egui::Response, session: &Session, origin: Pos2, cell
 
 /// Sends this frame's keyboard and paste input to the program, and returns what was sent
 /// (for broadcast to other panes).
-fn handle_input(ui: &Ui, session: &Session) -> Vec<Vec<u8>> {
+fn handle_input(ui: &Ui, session: &Session, held: &mut Option<String>) -> Vec<Vec<u8>> {
     let term_mode = session.mode();
     let events = ui.input(|input| input.events.clone());
     let mut sent = Vec::new();
@@ -953,6 +996,7 @@ fn handle_input(ui: &Ui, session: &Session) -> Vec<Vec<u8>> {
     for event in events {
         match event {
             egui::Event::Text(text) => emit(text.into_bytes()),
+            egui::Event::Paste(text) if needs_confirm(&text, term_mode) => *held = Some(text),
             egui::Event::Paste(text) => emit(paste_bytes(&text, term_mode)),
             egui::Event::Key {
                 key,
@@ -992,6 +1036,12 @@ fn handle_input(ui: &Ui, session: &Session) -> Vec<Vec<u8>> {
         }
     }
     sent
+}
+
+/// Whether a paste should be confirmed first: it holds a line break and the program did
+/// not ask for bracketed paste, so each line would run as a command.
+fn needs_confirm(text: &str, mode: TermMode) -> bool {
+    !mode.contains(TermMode::BRACKETED_PASTE) && text.contains(['\n', '\r'])
 }
 
 /// Pasted text, wrapped in bracketed-paste markers when the program asked for them, so a
@@ -1191,6 +1241,17 @@ mod tests {
             carried("$ ls\nfile\n\n"),
             "$ ls\nfile\n\u{2500}\u{2500} reconnected \u{2500}\u{2500}\n"
         );
+    }
+
+    #[test]
+    fn several_lines_are_confirmed_unless_the_program_brackets_pastes() {
+        assert!(needs_confirm("ls\nrm -rf x", TermMode::empty()));
+        assert!(
+            needs_confirm("reboot\r", TermMode::empty()),
+            "a trailing Enter runs it too"
+        );
+        assert!(!needs_confirm("one line", TermMode::empty()));
+        assert!(!needs_confirm("ls\nrm", TermMode::BRACKETED_PASTE));
     }
 
     #[test]
