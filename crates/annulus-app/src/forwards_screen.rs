@@ -22,6 +22,8 @@ use crate::ssh_dialogs::SshDialogs;
 enum Status {
     Starting,
     Active(usize),
+    /// The connection dropped; the reason, while retrying.
+    Reconnecting(String),
     Failed(String),
 }
 
@@ -44,95 +46,164 @@ impl Running {
     }
 }
 
+/// Sets a rule's status and asks for a repaint.
+type SetStatus = Arc<dyn Fn(Status) + Send + Sync>;
+
 fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + 'static) -> Running {
     let status = Arc::new(Mutex::new(Status::Starting));
     let (events_tx, events) = channel();
-    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let answers = Answers::default();
-    let wake = Arc::new(wake);
-    let set = {
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let set: SetStatus = {
         let status = status.clone();
         let wake = wake.clone();
-        move |next: Status| {
+        Arc::new(move |next: Status| {
             if let Ok(mut status) = status.lock() {
                 *status = next;
             }
             wake();
-        }
+        })
     };
-    let Program::Ssh {
+    let running = |status| Running {
+        status,
+        events,
+        answers: answers.clone(),
+        dialogs: SshDialogs::default(),
+        _stop: stop,
+    };
+    let (
+        Program::Ssh {
+            target,
+            files,
+            password,
+        },
+        Some(forward_rule),
+    ) = (program, engine_rule(rule))
+    else {
+        set(Status::Failed(
+            "The rule is not valid, or its host is not one Annulus can connect to itself.".into(),
+        ));
+        return running(status);
+    };
+    let notify: Arc<dyn Fn(SessionEvent) + Send + Sync> = Arc::new(move |event| {
+        let _ = events_tx.send(event);
+        wake();
+    });
+    let connect = Connect {
         target,
         files,
         password,
-    } = program
-    else {
-        set(Status::Failed(
-            "The host is not one Annulus can connect to itself.".into(),
-        ));
-        return Running {
-            status,
-            events,
-            answers,
-            dialogs: SshDialogs::default(),
-            _stop: stop,
-        };
+        answers: answers.clone(),
+        notify,
     };
-    let forward_rule = engine_rule(rule);
-    let prompt_answers = answers.clone();
+    let thread_set = set.clone();
     let thread = std::thread::Builder::new()
         .name("port forward".into())
         .spawn(move || {
-            let Some(forward_rule) = forward_rule else {
-                return set(Status::Failed("The rule is not valid.".into()));
-            };
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-            else {
-                return set(Status::Failed("Could not start the forwarding thread.".into()));
-            };
-            runtime.block_on(async move {
-                let notify_wake = wake.clone();
-                let prompt = Arc::new(AskUi::new(
-                    prompt_answers,
-                    password.map(annulus_session::Password::into_secret),
-                    move |event| {
-                        let _ = events_tx.send(event);
-                        notify_wake();
-                    },
-                ));
-                let connection = tokio::select! {
-                    connected = annulus_ssh::connect(&target, &files.known_hosts, files.key_dir.as_deref(), prompt) => connected,
-                    _ = &mut stopped => return,
-                };
-                let connection = match connection {
-                    Ok(connection) => Arc::new(connection),
-                    Err(error) => return set(Status::Failed(error.to_string())),
-                };
-                let running = match forward::start(connection, forward_rule).await {
-                    Ok(running) => running,
-                    Err(error) => return set(Status::Failed(error.to_string())),
-                };
-                loop {
-                    set(Status::Active(running.connections()));
-                    tokio::select! {
-                        _ = &mut stopped => return,
-                        () = tokio::time::sleep(Duration::from_secs(1)) => {}
-                    }
+            {
+                Ok(runtime) => {
+                    runtime.block_on(run_rule(connect, forward_rule, thread_set, stopped));
                 }
-            });
+                Err(_) => thread_set(Status::Failed(
+                    "Could not start the forwarding thread.".into(),
+                )),
+            }
         });
-    if thread.is_err()
-        && let Ok(mut slot) = status.lock()
-    {
-        *slot = Status::Failed("Could not start the forwarding thread.".into());
+    if thread.is_err() {
+        set(Status::Failed(
+            "Could not start the forwarding thread.".into(),
+        ));
     }
-    Running {
-        status,
-        events,
-        answers,
-        dialogs: SshDialogs::default(),
-        _stop: stop,
+    running(status)
+}
+
+/// What a rule needs to (re)connect.
+struct Connect {
+    target: annulus_session::Target,
+    files: annulus_session::SshFiles,
+    password: Option<annulus_session::Password>,
+    answers: Answers,
+    notify: Arc<dyn Fn(SessionEvent) + Send + Sync>,
+}
+
+impl Connect {
+    async fn connect(&self) -> Result<Arc<annulus_ssh::Connection>, String> {
+        let notify = self.notify.clone();
+        let prompt = Arc::new(AskUi::new(
+            self.answers.clone(),
+            self.password
+                .clone()
+                .map(annulus_session::Password::into_secret),
+            move |event| notify(event),
+        ));
+        annulus_ssh::connect(
+            &self.target,
+            &self.files.known_hosts,
+            self.files.key_dir.as_deref(),
+            prompt,
+        )
+        .await
+        .map(Arc::new)
+        .map_err(|error| error.to_string())
+    }
+}
+
+/// Seconds to wait before reconnect attempt `attempt` (1, 2, 4, … up to 30).
+fn backoff(attempt: u32) -> u64 {
+    1u64.checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u64::MAX)
+        .min(30)
+}
+
+/// Connects and runs the rule until `stopped`. A first failure ends the rule with its
+/// reason; a connection lost later is retried with growing pauses.
+async fn run_rule(
+    connect: Connect,
+    rule: Rule,
+    set: SetStatus,
+    mut stopped: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut attempt = 0u32;
+    loop {
+        let connection = tokio::select! {
+            connected = connect.connect() => connected,
+            _ = &mut stopped => return,
+        };
+        let connection = match connection {
+            Ok(connection) => connection,
+            Err(reason) if attempt == 0 => return set(Status::Failed(reason)),
+            Err(reason) => {
+                attempt += 1;
+                set(Status::Reconnecting(reason));
+                tokio::select! {
+                    _ = &mut stopped => return,
+                    () = tokio::time::sleep(Duration::from_secs(backoff(attempt))) => continue,
+                }
+            }
+        };
+        let running = match forward::start(connection.clone(), rule.clone()).await {
+            Ok(running) => running,
+            Err(error) => return set(Status::Failed(error.to_string())),
+        };
+        attempt = 0;
+        while !connection.is_closed() {
+            set(Status::Active(running.connections()));
+            tokio::select! {
+                _ = &mut stopped => return,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+        drop(running);
+        attempt += 1;
+        set(Status::Reconnecting("the connection was lost".into()));
+        tokio::select! {
+            _ = &mut stopped => return,
+            () = tokio::time::sleep(Duration::from_secs(backoff(attempt))) => {}
+        }
     }
 }
 
@@ -326,6 +397,10 @@ impl ForwardsScreen {
                 match &status {
                     None => ui.label("Stopped"),
                     Some(Status::Starting) => ui.label("Starting\u{2026}"),
+                    Some(Status::Reconnecting(reason)) => ui.colored_label(
+                        theme::color(palette.status_warn),
+                        format!("Reconnecting\u{2026} ({reason})"),
+                    ),
                     Some(Status::Active(1)) => {
                         ui.colored_label(theme::color(palette.status_ok), "Active, 1 connection")
                     }
@@ -370,7 +445,10 @@ impl ForwardsScreen {
                 if ui.button("Edit").clicked() {
                     self.editor = Some(Draft::new(rule.clone(), false));
                 }
-                let running = matches!(status, Some(Status::Starting | Status::Active(_)));
+                let running = matches!(
+                    status,
+                    Some(Status::Starting | Status::Active(_) | Status::Reconnecting(_))
+                );
                 if running {
                     if ui.button("Stop").clicked() {
                         self.running.remove(&rule.id);
@@ -505,6 +583,13 @@ fn fields(ui: &mut Ui, draft: &mut Draft, host_names: &[(u64, String)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnects_back_off_up_to_thirty_seconds() {
+        let waits: Vec<u64> = (1..=7).map(backoff).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
+        assert_eq!(backoff(200), 30);
+    }
 
     #[test]
     fn the_draft_parses_ports_and_reports_the_first_problem() {

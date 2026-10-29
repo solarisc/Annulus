@@ -323,6 +323,13 @@ pub async fn connect(
 }
 
 impl Connection {
+    /// Whether the connection has ended (the server closed it, or the network dropped it
+    /// and keepalives failed).
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
     /// Opens a shell with a PTY of `columns` by `rows`, advertising `TERM=xterm-256color`.
     ///
     /// # Errors
