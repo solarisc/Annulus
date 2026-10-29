@@ -66,6 +66,11 @@ impl Canvas {
         self.text = Some(engine);
     }
 
+    /// Gives back the text engine, e.g. to measure the next frame's layout.
+    pub fn take_text_engine(&mut self) -> Option<TextEngine> {
+        self.text.take()
+    }
+
     /// Fills the whole canvas with `color`.
     pub fn clear(&mut self, color: Color) {
         if let Some((frame, _)) = self.layers.first_mut() {

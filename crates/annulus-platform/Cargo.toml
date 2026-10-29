@@ -15,7 +15,9 @@ workspace = true
 thiserror.workspace = true
 parley.workspace = true
 swash.workspace = true
+softbuffer.workspace = true
 tiny-skia.workspace = true
+winit.workspace = true
 annulus-ui = { path = "../annulus-ui" }
 
 [dev-dependencies]

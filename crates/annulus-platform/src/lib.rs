@@ -3,3 +3,4 @@
 //! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4.
 
 pub mod cpu;
+pub mod window;

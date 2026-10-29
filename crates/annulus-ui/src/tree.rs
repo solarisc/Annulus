@@ -325,6 +325,12 @@ impl Tree {
         self.damage
     }
 
+    /// The active theme's colors.
+    #[must_use]
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
     /// Switches the theme; everything repaints.
     pub fn set_palette(&mut self, palette: Palette) {
         if palette != self.palette {
