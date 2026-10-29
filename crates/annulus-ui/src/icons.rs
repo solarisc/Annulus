@@ -232,6 +232,8 @@ icons! {
     ];
     /// Previous match, collapse.
     CHEVRON_UP = 37, "chevron-up", [Move(4.0, 10.0), Line(8.0, 6.0), Line(12.0, 10.0)];
+    /// Back.
+    CHEVRON_LEFT = 49, "chevron-left", [Move(10.0, 4.0), Line(6.0, 8.0), Line(10.0, 12.0)];
     /// This device: a local vault.
     DEVICE = 36, "device", [
         Move(2.0, 2.75), Line(14.0, 2.75), Line(14.0, 10.75), Line(2.0, 10.75), Close,

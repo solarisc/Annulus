@@ -43,6 +43,46 @@ pub enum Kind {
     Danger,
 }
 
+/// Text on keycaps.
+const KEYCAP: Font = Font::ui(11.0).weight(Weight::Medium);
+/// Height of a keycap.
+pub const KEYCAP_H: f32 = 20.0;
+/// Space between the keycaps of one chord.
+const KEYCAP_GAP: f32 = 4.0;
+
+/// The keys of `chord`, split at its `+` signs ("Ctrl+=" is Ctrl and =; "Ctrl++" is Ctrl and
+/// +).
+#[must_use]
+pub fn chord_keys(chord: &str) -> Vec<&str> {
+    let mut keys = Vec::new();
+    let mut rest = chord;
+    while !rest.is_empty() {
+        // A key is at least one character, so a "+" right at the start is the key itself.
+        let first = rest.chars().next().map_or(1, char::len_utf8);
+        let end = rest[first..].find('+').map_or(rest.len(), |at| at + first);
+        keys.push(&rest[..end]);
+        rest = rest[end..].strip_prefix('+').unwrap_or("");
+    }
+    keys
+}
+
+fn keycap_width(canvas: &mut dyn Canvas, key: &str) -> f32 {
+    (canvas.measure(key, KEYCAP).width + 12.0)
+        .max(KEYCAP_H)
+        .ceil()
+}
+
+/// The width [`Ui::keys`] takes for `chord`.
+pub fn keys_width(canvas: &mut dyn Canvas, chord: &str) -> f32 {
+    let keys = chord_keys(chord);
+    #[allow(clippy::cast_precision_loss)] // A chord has a handful of keys.
+    let gaps = keys.len().saturating_sub(1) as f32 * KEYCAP_GAP;
+    keys.iter()
+        .map(|key| keycap_width(canvas, key))
+        .sum::<f32>()
+        + gaps
+}
+
 /// The width a button needs for `label` and an optional leading icon.
 pub fn button_width(canvas: &mut dyn Canvas, label: &str, icon: Option<IconId>) -> f32 {
     let label_width = if label.is_empty() {
@@ -997,6 +1037,28 @@ impl Ui<'_> {
         );
     }
 
+    /// Draws the key chord `chord` ("Ctrl+Shift+K") as keycaps, one per key, from `at` (their
+    /// top-left corner), [`KEYCAP_H`] tall; returns the width taken. See [`keys_width`].
+    pub fn keys(&mut self, at: Point, chord: &str) -> f32 {
+        let t = self.theme;
+        let mut x = at.x;
+        for (index, key) in chord_keys(chord).iter().enumerate() {
+            if index > 0 {
+                x += KEYCAP_GAP;
+            }
+            let width = keycap_width(&mut self.gfx, key);
+            let cap = Rect::new(x, at.y, width, KEYCAP_H);
+            // A key: its face, and a darker lip along the bottom.
+            self.gfx
+                .fill_rect(cap.offset(0.0, 1.5), 5.0, t.line_strong.alpha(0.9));
+            self.gfx.fill_rect(cap, 5.0, t.surface.mix(t.hover, 0.6));
+            self.gfx.stroke_rect(cap, 5.0, 1.0, t.line_strong);
+            self.gfx.text(cap, key, KEYCAP, t.text, Align::Center);
+            x += width;
+        }
+        x - at.x
+    }
+
     /// A rounded tag chip; returns its width.
     pub fn chip(&mut self, at: Point, label: &str, color: Color) -> f32 {
         let width = self.gfx.measure(label, SMALL).width + 2.0 * space::S;
@@ -1573,6 +1635,16 @@ mod tests {
         );
         state.set_focus(Some(id), true);
         assert!(drawn(&mut state, &[], 2.1), "on keyboard focus at once");
+    }
+
+    #[test]
+    fn a_chord_splits_into_its_keys_even_when_a_key_is_plus() {
+        assert_eq!(chord_keys("Ctrl+Shift+K"), ["Ctrl", "Shift", "K"]);
+        assert_eq!(chord_keys("Ctrl+="), ["Ctrl", "="]);
+        assert_eq!(chord_keys("Ctrl++"), ["Ctrl", "+"]);
+        assert_eq!(chord_keys("+"), ["+"]);
+        assert_eq!(chord_keys("Enter"), ["Enter"]);
+        assert_eq!(chord_keys(""), Vec::<&str>::new());
     }
 
     #[test]

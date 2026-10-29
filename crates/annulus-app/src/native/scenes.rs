@@ -150,6 +150,39 @@ fn first_run(app: &mut NativeApp) {
 
 fn terminal_tab(app: &mut NativeApp) {
     with_tabs(app);
+    app.active = super::FIXED_TABS;
+}
+
+/// A New Tab page after a few connections from this device.
+fn new_tab(app: &mut NativeApp) {
+    with_tabs(app);
+    let now = crate::sync_screen::now_secs();
+    for (label, ago) in [
+        ("staging-db", 86_400 * 3),
+        ("web-1", 3 * 3600),
+        ("prod-db", 240),
+    ] {
+        if let Some(id) = app.vault.as_ref().and_then(|vault| {
+            vault
+                .hosts()
+                .iter()
+                .find(|host| host.label == label)
+                .map(|host| host.id)
+        }) {
+            app.settings.connected(id, now - ago);
+        }
+    }
+    // A saved host's terminal, so its tab shows the server's mark.
+    if let Some(id) = app.vault.as_ref().map(|vault| vault.hosts()[1].id) {
+        app.push_terminal("web-1", TermView::Replay(Box::new(super::demo::terminal())));
+        if let Some(tab) = app.tabs.last_mut() {
+            tab.origin = Some(OpenTab::Host(id));
+        }
+    }
+    app.open_new_tab();
+}
+
+fn sftp_picker(app: &mut NativeApp) {
     app.active = 1;
 }
 
@@ -301,6 +334,53 @@ const SCENES: &[Scene] = &[
         setup: list_mode,
         acts: &[Act::Hover("grafana"), Act::RightClick("grafana")],
     },
+    // The New Tab page: recent connections, then the newest saved hosts filling the page.
+    Scene {
+        name: "new-tab",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: new_tab,
+        acts: &[],
+    },
+    Scene {
+        name: "new-tab-search",
+        width: 1100,
+        height: 720,
+        scale: 1.25,
+        populated: true,
+        setup: new_tab,
+        acts: &[Act::Type("api"), Act::Press(Key::Down, Modifiers::NONE)],
+    },
+    Scene {
+        name: "new-tab-quick-connect",
+        width: 900,
+        height: 600,
+        scale: 1.0,
+        populated: true,
+        setup: new_tab,
+        acts: &[Act::Type("root@10.9.8.7")],
+    },
+    Scene {
+        name: "new-tab-empty",
+        width: 900,
+        height: 600,
+        scale: 1.0,
+        populated: false,
+        setup: |app| app.open_new_tab(),
+        acts: &[],
+    },
+    // The SFTP tab beside the vault picks a host.
+    Scene {
+        name: "sftp-picker",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp_picker,
+        acts: &[Act::Hover("nas")],
+    },
     // On a narrow card the hover buttons squeezed the name and address.
     // Now only Edit shows, in room kept for it, and the tags stay.
     Scene {
@@ -361,7 +441,7 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: nothing,
-        acts: &[Act::Hover("New connection")],
+        acts: &[Act::Hover("New tab")],
     },
     Scene {
         name: "hosts-keyboard-focus",
@@ -1694,7 +1774,7 @@ fn move_to_group_puts_the_host_in_the_chosen_group_or_back_on_top() {
     let mut state = UiState::default();
     let mut output = step(&mut app, &mut state, &[], 0.0);
     output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 1.0);
-    let more = click_within(&output, "prod-db", "More actions");
+    let more = right_click_on(&output, "prod-db");
     output = step(&mut app, &mut state, &more, 2.0);
     let menu = click_on(&output, "Move to Production");
     output = step(&mut app, &mut state, &menu, 3.0);
@@ -1705,7 +1785,7 @@ fn move_to_group_puts_the_host_in_the_chosen_group_or_back_on_top() {
     // It left the top level: open Production to find it, then move it back up.
     output = step(&mut app, &mut state, &click_on(&output, "Production"), 4.0);
     output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 5.0);
-    let more = click_within(&output, "prod-db", "More actions");
+    let more = right_click_on(&output, "prod-db");
     output = step(&mut app, &mut state, &more, 6.0);
     let menu = click_on(&output, "Move to the top level");
     step(&mut app, &mut state, &menu, 7.0);
@@ -1714,7 +1794,7 @@ fn move_to_group_puts_the_host_in_the_chosen_group_or_back_on_top() {
 
 #[test]
 fn duplicate_saves_a_copy_with_a_new_id_and_the_same_address() {
-    // From a row of the list, whose More menu is its own.
+    // From a row of the list, whose context menu is its own.
     let mut app = NativeApp::new(Some(fixture_vault("duplicate", true)));
     app.hosts.mode = Mode::List;
     let before = app.vault.as_ref().unwrap().hosts().len();
@@ -1722,7 +1802,7 @@ fn duplicate_saves_a_copy_with_a_new_id_and_the_same_address() {
     let mut output = step(&mut app, &mut state, &[], 0.0);
     let hover = [Event::PointerMoved(zone_center(&output.zones, "grafana"))];
     output = step(&mut app, &mut state, &hover, 1.0);
-    let more = click_within(&output, "grafana", "More actions");
+    let more = right_click_on(&output, "grafana");
     output = step(&mut app, &mut state, &more, 2.0);
     step(&mut app, &mut state, &click_on(&output, "Duplicate"), 3.0);
     assert_eq!(app.vault.as_ref().unwrap().hosts().len(), before + 1);
@@ -1948,10 +2028,13 @@ fn a_snippet_runs_on_the_hosts_ticked_in_one_tab_of_panes() {
         &click_on(&output, "Run on 2 hosts"),
         4.0,
     );
-    assert_eq!(titles(&app), ["Vault", "Tail the app log on 2 hosts"]);
+    assert_eq!(
+        titles(&app),
+        ["Vault", "SFTP", "Tail the app log on 2 hosts"]
+    );
     let panes = front_panes(&app);
     assert_eq!(panes.len(), 2, "a pane per host, side by side");
-    assert_eq!(app.active, 1);
+    assert_eq!(app.active, 2);
 }
 
 #[test]
@@ -2001,33 +2084,61 @@ fn the_lock_screen_takes_the_password_without_a_click() {
 }
 
 #[test]
-fn the_plus_button_opens_the_saved_hosts_ready_to_search() {
+fn the_plus_button_opens_a_new_tab_whose_search_connects_in_its_place() {
     let mut app = NativeApp::new(Some(fixture_vault("plus-hosts", true)));
     replay(&mut app, "build");
-    app.section = super::Section::Settings;
     let mut state = UiState::default();
     let output = step(&mut app, &mut state, &[], 0.0);
-    assert_eq!(app.active, 1, "a terminal in front");
-    step(
-        &mut app,
-        &mut state,
-        &click_on(&output, "New connection"),
-        1.0,
-    );
-    assert_eq!(app.active, 0, "the vault");
-    assert_eq!(app.section, super::Section::Hosts);
+    assert_eq!(app.active, 2, "a terminal in front");
+    let output = step(&mut app, &mut state, &click_on(&output, "New tab"), 1.0);
+    assert_eq!(titles(&app), ["Vault", "SFTP", "build", "New Tab"]);
+    assert_eq!(app.tabs[app.active].kind, super::TabKind::NewTab);
+    // The search has the keyboard at once, and the saved hosts are listed newest first.
+    let focused = output
+        .zones
+        .iter()
+        .find(|zone| Some(zone.id) == state.focus());
     assert_eq!(
-        state.focus(),
-        Some(annulus_ui::kit::Id::new("hosts.search"))
+        focused.map(|zone| zone.role),
+        Some(Role::TextInput),
+        "the search is focused"
     );
-    // Typing a saved host's name and Enter connects to it.
+    assert!(output.zones.iter().any(|zone| zone.label == "router"));
+    // Typing a saved host's name and Enter connects to it, in the new tab's place.
     let typed = [
         Event::Text("prod-db".into()),
         Event::Key(Key::Enter, Modifiers::NONE),
     ];
     step(&mut app, &mut state, &typed, 2.0);
     step(&mut app, &mut state, &[], 3.0);
-    assert!(titles(&app).contains(&"prod-db"), "{:?}", titles(&app));
+    assert_eq!(titles(&app), ["Vault", "SFTP", "build", "prod-db"]);
+    assert_eq!(app.active, 3);
+    // And it is the first of the recent connections now.
+    let prod = host_named(&app, "prod-db").id;
+    assert_eq!(app.settings.recent[0].host, prod);
+}
+
+#[test]
+fn the_sftp_tab_picks_a_host_and_goes_back_to_the_picker() {
+    let mut app = NativeApp::new(Some(fixture_vault("sftp-tab", true)));
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let output = step(&mut app, &mut state, &click_on(&output, "SFTP"), 1.0);
+    assert_eq!(app.active, 1);
+    assert!(output.zones.iter().any(|zone| zone.label == "nas"));
+    let output = step(&mut app, &mut state, &click_on(&output, "nas"), 2.0);
+    assert!(
+        app.tabs[1].sftp.is_some(),
+        "its files, in the SFTP tab itself"
+    );
+    assert_eq!(app.tabs.len(), super::FIXED_TABS, "no tab was added");
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Back to the hosts"),
+        3.0,
+    );
+    assert!(app.tabs[1].sftp.is_none());
 }
 
 #[test]
@@ -2183,7 +2294,7 @@ fn a_locked_vault_hides_every_open_tab_and_the_palette() {
         .collect();
     assert!(!names.contains(&"web-1 session"), "{names:?}");
     assert!(
-        !names.contains(&"New connection"),
+        !names.contains(&"New tab") && !names.contains(&"SFTP"),
         "no new tab while locked"
     );
     for keys in [
@@ -2916,8 +3027,8 @@ fn tabs_are_listed_for_the_next_launch_and_host_tabs_wait_for_the_vault() {
     drive(&mut next, &mut state, &[], 1.0);
     drive(&mut next, &mut state, &[], 2.0);
     assert_eq!(next.pending_hosts, Vec::<u64>::new());
-    assert_eq!(next.tabs.len(), 2, "the host's tab is open again");
-    assert_eq!(next.active, 1);
+    assert_eq!(next.tabs.len(), 3, "the host's tab is open again");
+    assert_eq!(next.active, 2);
     // Quitting at the lock screen keeps a host tab that is still waiting for the vault.
     let mut locked = NativeApp::new(None);
     locked.settings = next.settings.clone();
@@ -2960,8 +3071,9 @@ fn the_palette_lists_tabs_and_commands_and_runs_them() {
         "locked: no hosts, the tabs come first"
     );
     assert!(kinds.contains(&("Settings", "Command")));
-    app.run_action(Action::Tab(1));
-    assert_eq!(app.active, 1);
+    assert!(kinds.contains(&("SFTP", "Command")));
+    app.run_action(Action::Tab(2));
+    assert_eq!(app.active, 2);
     app.run_action(Action::Settings);
     assert_eq!((app.active, app.section), (0, super::Section::Settings));
     app.run_action(Action::NewLocal);
@@ -2969,16 +3081,18 @@ fn the_palette_lists_tabs_and_commands_and_runs_them() {
 }
 
 #[test]
-fn the_vault_tab_cannot_be_closed_and_closing_moves_focus_left() {
+fn the_fixed_tabs_cannot_be_closed_and_closing_moves_focus_left() {
     let mut app = NativeApp::new(None);
     replay(&mut app, "a");
     replay(&mut app, "b");
     app.close_tab(0);
-    assert_eq!(app.tabs.len(), 3);
-    app.close_tab(2);
-    assert_eq!((app.tabs.len(), app.active), (2, 1));
     app.close_tab(1);
-    assert_eq!((titles(&app), app.active), (vec!["Vault"], 0));
+    assert_eq!(titles(&app), ["Vault", "SFTP", "a", "b"]);
+    app.close_tab(3);
+    assert_eq!((app.tabs.len(), app.active), (3, 2));
+    // The last session gone, the vault is in front, not the SFTP picker.
+    app.close_tab(2);
+    assert_eq!((titles(&app), app.active), (vec!["Vault", "SFTP"], 0));
 }
 
 #[test]
@@ -2986,9 +3100,66 @@ fn closing_a_background_tab_keeps_the_front_tab() {
     let mut app = NativeApp::new(None);
     replay(&mut app, "a");
     replay(&mut app, "b");
-    app.active = 2;
-    app.close_tab(1);
+    app.active = 3;
+    app.close_tab(2);
     assert_eq!(app.tabs[app.active].title, "b");
+}
+
+#[test]
+fn a_tab_moves_among_the_sessions_and_the_one_in_front_stays_in_front() {
+    let mut app = NativeApp::new(None);
+    for title in ["a", "b", "c"] {
+        replay(&mut app, title);
+    }
+    app.active = 2;
+    app.move_tab(2, 4);
+    assert_eq!(titles(&app), ["Vault", "SFTP", "b", "c", "a"]);
+    assert_eq!(app.tabs[app.active].title, "a");
+    // Fixed tabs never move, and nothing moves in among them.
+    app.move_tab(0, 3);
+    app.move_tab(4, 1);
+    assert_eq!(titles(&app), ["Vault", "SFTP", "b", "c", "a"]);
+    // By keyboard: the tab in front, one place left.
+    let mut state = UiState::default();
+    app.vault = Some(fixture_vault("move-tab", false));
+    step(&mut app, &mut state, &[], 0.0);
+    step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::PageUp, Modifiers::CTRL_SHIFT)],
+        1.0,
+    );
+    assert_eq!(titles(&app), ["Vault", "SFTP", "b", "a", "c"]);
+    assert_eq!(app.tabs[app.active].title, "a");
+}
+
+#[test]
+fn a_tab_dragged_past_its_neighbour_takes_its_place() {
+    let mut app = NativeApp::new(Some(fixture_vault("drag-tab", false)));
+    for title in ["first", "second"] {
+        replay(&mut app, title);
+    }
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let from = zone_center(&output.zones, "first");
+    let past = zone_center(&output.zones, "second");
+    let drag = [
+        Event::PointerMoved(from),
+        Event::PointerDown(Button::Primary),
+        Event::PointerMoved(Point::new(past.x + 40.0, past.y)),
+    ];
+    step(&mut app, &mut state, &drag, 1.0);
+    step(
+        &mut app,
+        &mut state,
+        &[Event::PointerUp(Button::Primary)],
+        2.0,
+    );
+    assert_eq!(titles(&app), ["Vault", "SFTP", "second", "first"]);
+    assert_eq!(
+        app.tabs[app.active].title, "first",
+        "the dragged tab is in front"
+    );
 }
 
 #[test]

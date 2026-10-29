@@ -952,6 +952,12 @@ impl<'a> Ui<'a> {
         self.dragging(id).then(|| self.state.dragged()).flatten()
     }
 
+    /// Where the pointer was when the button now held went down (where a drag took hold).
+    #[must_use]
+    pub fn pressed_at(&self) -> Option<Point> {
+        self.state.pressed.and(self.state.pressed_at)
+    }
+
     /// Where a drag that started on `id` was let go, in the frame it ended.
     #[must_use]
     pub fn drag_released(&self, id: Id) -> Option<Point> {
@@ -1143,6 +1149,13 @@ impl<'a> Ui<'a> {
             self.state.repaint = true;
         }
         spring.value
+    }
+
+    /// Puts the spring `id` at `value`, at rest: the next [`Self::spring`] glides from there (a
+    /// tab let go where it was dragged to).
+    pub fn spring_set(&mut self, id: Id, value: f32) {
+        let now = self.state.time;
+        self.state.springs.insert(id, Spring::at(value, now));
     }
 
     /// Draws everything until the matching [`Self::pop_layer`] moved, scaled and faded by

@@ -2147,8 +2147,9 @@ fn host_card(
     let id = Id::new(("host", card.id));
     let response = ui.zone(id, rect, Role::ListItem, &card.label);
     let t = ui.theme;
-    // The card stays lit while its context menu is open over it.
-    let hovered = ui.hover_within(rect) || ui.menu_open(id);
+    // On the card itself or on its button (whose last place may be a frame behind while the
+    // card moves in), and lit while its context menu is open over it.
+    let hovered = response.hovered || ui.hover_within(rect) || ui.menu_open(id);
     let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
     let press = ui.ease(id.with("press"), if response.pressed { 1.0 } else { 0.0 });
     let chosen = ui.animate(
@@ -2342,7 +2343,7 @@ fn host_row(
     let id = Id::new(("host", card.id));
     let response = ui.zone(id, rect, Role::ListItem, &card.label);
     let t = ui.theme;
-    let hovered = ui.hover_within(rect) || ui.menu_open(id);
+    let hovered = response.hovered || ui.hover_within(rect) || ui.menu_open(id);
     let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
     let chosen = ui.animate(
         id.with("selected"),

@@ -35,7 +35,23 @@ pub struct Settings {
     pub open_tabs: Vec<OpenTab>,
     /// No animations: everything changes at once (UI-SPEC §8).
     pub reduce_motion: bool,
+    /// Saved hosts connected to from this device, the latest first, for the New Tab page
+    /// (F-APP-004). By vault id and time only: this file is not encrypted, so no name or
+    /// address is ever written here.
+    pub recent: Vec<Recent>,
 }
+
+/// One connection to a saved host, for the New Tab page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recent {
+    /// The host's id in the vault.
+    pub host: u64,
+    /// When, in seconds since the Unix epoch.
+    pub at: u64,
+}
+
+/// How many recent connections are kept.
+pub const RECENT_KEPT: usize = 20;
 
 /// A terminal tab to reopen: what it ran, never what it showed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,11 +74,20 @@ impl Default for Settings {
             restore_tabs: false,
             open_tabs: Vec::new(),
             reduce_motion: false,
+            recent: Vec::new(),
         }
     }
 }
 
 impl Settings {
+    /// Notes a connection to host `host` at `at`: it goes to the front of the recent ones, once,
+    /// and the oldest beyond [`RECENT_KEPT`] are forgotten.
+    pub fn connected(&mut self, host: u64, at: u64) {
+        self.recent.retain(|recent| recent.host != host);
+        self.recent.insert(0, Recent { host, at });
+        self.recent.truncate(RECENT_KEPT);
+    }
+
     /// The settings stored at `path`, or the defaults when there is no readable file.
     #[must_use]
     pub fn load(path: &Path) -> Self {
@@ -113,6 +138,10 @@ mod tests {
             restore_tabs: true,
             open_tabs: vec![OpenTab::Local("bash".into()), OpenTab::Host(7)],
             reduce_motion: true,
+            recent: vec![Recent {
+                host: 7,
+                at: 1_800_000_000,
+            }],
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -124,5 +153,27 @@ mod tests {
 
         std::fs::write(&path, b"not json").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
+    }
+
+    #[test]
+    fn a_connection_goes_to_the_front_of_the_recent_ones_once_and_old_ones_drop_off() {
+        let mut settings = Settings::default();
+        for host in 1..=25 {
+            settings.connected(host, 1000 + host);
+        }
+        assert_eq!(settings.recent.len(), RECENT_KEPT);
+        assert_eq!(settings.recent[0], Recent { host: 25, at: 1025 });
+        // Again to one already there: it moves to the front with the new time, not twice.
+        settings.connected(10, 2000);
+        assert_eq!(settings.recent[0], Recent { host: 10, at: 2000 });
+        assert_eq!(
+            settings
+                .recent
+                .iter()
+                .filter(|recent| recent.host == 10)
+                .count(),
+            1
+        );
+        assert_eq!(settings.recent.len(), RECENT_KEPT);
     }
 }

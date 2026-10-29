@@ -2,14 +2,16 @@
 //! badge and the window buttons. Empty space drags the window; the window host finds it, and
 //! the buttons, by their zone ids ([`DRAG`], [`MINIMIZE`], [`MAXIMIZE`], [`CLOSE`]).
 
+use annulus_config::settings::OpenTab;
 use annulus_config::tokens::space;
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Point, Rect};
-use annulus_ui::icons;
+use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Role, Ui};
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{BODY_MEDIUM, SMALL};
 
-use super::{NativeApp, SyncBadge, TabKind, WindowAction};
+use super::{FIXED_TABS, NativeApp, SyncBadge, TabKind, WindowAction};
 use crate::terminal_view::TabStatus;
 
 /// The zone of the title bar's empty space: dragging it moves the window.
@@ -27,6 +29,7 @@ const CAPTION_W: f32 = 46.0;
 const TAB_H: f32 = 30.0;
 
 /// Draws the title bar into `bar`; returns what the window must do.
+#[allow(clippy::too_many_lines)] // Left to right: window buttons, mark, tabs, +, badge.
 pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAction> {
     let drag = ui.zone(Id::new(DRAG), bar, Role::Backdrop, "Annulus");
     let mut action = drag.double_clicked.then_some(WindowAction::ToggleMaximize);
@@ -81,50 +84,136 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     } else {
         app.tabs.len()
     };
+    // Where each tab belongs, left to right. Tabs glide to their places (a tab closed, moved
+    // or renamed), but take clicks in them, so what is clicked never moves under the pointer.
+    let mut slots: Vec<Rect> = Vec::with_capacity(shown);
+    let mut x = row.x;
     for index in 0..shown {
-        let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind);
-        let available = row.w - 2.0 * 32.0;
-        if available < 60.0 {
+        if index == FIXED_TABS {
+            x += DIVIDER;
+        }
+        let room = row.r() - PLUS_W - space::S - x;
+        if room < 60.0 {
             break;
         }
-        let slot = row.take_left(width.min(available));
-        let rect = slot.centered(slot.w, TAB_H);
-        match tab(ui, rect, app, index) {
+        let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind).min(room);
+        slots.push(Rect::new(x, row.center().y - TAB_H / 2.0, width, TAB_H));
+        x += width + 2.0;
+    }
+    if slots.len() > FIXED_TABS {
+        // The fixed tabs, then a hairline, then the sessions.
+        let line = Rect::new(
+            slots[FIXED_TABS].x - DIVIDER / 2.0 - 1.0,
+            row.center().y - 9.0,
+            1.0,
+            18.0,
+        );
+        ui.gfx.fill_rect(line, 0.0, ui.theme.line_strong);
+    }
+    let dragged = drag_tab(app, ui, &slots);
+    for (index, slot) in slots.iter().enumerate() {
+        if dragged.is_some_and(|(at, _)| at == index) {
+            continue;
+        }
+        let place = Id::new(("tab", app.tabs[index].uid)).with("x");
+        let at = ui.spring(place, slot.x);
+        match tab(ui, *slot, at, app, index) {
             TabEvent::Select => app.active = index,
             TabEvent::Close => close_tab = Some(index),
             TabEvent::None => {}
         }
-        row.take_left(2.0);
+    }
+    // The dragged tab last, over its neighbours.
+    if let Some((index, at)) = dragged
+        && let TabEvent::Close = tab(ui, slots[index], at, app, index)
+    {
+        close_tab = Some(index);
     }
     if !locked {
-        row.take_left(space::XS);
-        let plus = row.take_left(30.0).centered(30.0, 30.0);
-        let new_tab = ui
-            .icon_button(
-                Id::new("tab.new"),
-                plus,
-                icons::PLUS,
-                "New connection",
-                false,
-            )
-            .clicked;
-        ui.tooltip(
-            Id::new("tab.new"),
-            plus,
-            "Connect to a saved host (Ctrl+Shift+T: a local terminal)",
-        );
-        // The saved hosts, with the search ready: type a name and press Enter.
-        if new_tab {
-            app.show_hosts(ui);
+        let slot = Rect::new(x + space::XS, row.center().y - 15.0, 30.0, 30.0);
+        let at = ui.spring(Id::new("tab.new").with("x"), slot.x);
+        let id = Id::new("tab.new");
+        let response = ui.zone(id, slot, Role::Button, "New tab");
+        ui.tooltip(id, slot, "New tab (Ctrl+Shift+T)");
+        plus_button(ui, Rect::new(at, slot.y, slot.w, slot.h), &response);
+        if response.clicked {
+            app.open_new_tab();
         }
     }
     sync_badge(ui, badge, &sync);
-    if let Some(index) = close_tab
-        && index > 0
-    {
+    if let Some(index) = close_tab {
         app.close_tab(index);
     }
     action
+}
+
+/// Space between the fixed tabs and the sessions, where the hairline goes.
+const DIVIDER: f32 = 13.0;
+/// Room kept for the + button after the tabs.
+const PLUS_W: f32 = 36.0;
+
+/// The + button: a quiet square that lights on hover, its plus turning a little as it does.
+fn plus_button(ui: &mut Ui<'_>, rect: Rect, response: &annulus_ui::kit::Response) {
+    let t = ui.theme;
+    let id = Id::new("tab.new");
+    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    let press = ui.ease(id.with("press"), if response.pressed { 1.0 } else { 0.0 });
+    ui.gfx.fill_rect(rect, 8.0, t.hover.alpha(hover));
+    if response.focus_ring {
+        ui.focus_ring(rect, 8.0);
+    }
+    let size = 14.0 - 2.0 * press;
+    ui.gfx.icon(
+        icons::PLUS,
+        rect.centered(size, size),
+        t.text2.mix(t.text, hover),
+    );
+    if response.hovered {
+        ui.set_cursor(Cursor::Pointer);
+    }
+}
+
+/// A session tab dragged along the strip follows the pointer, and passing the middle of a
+/// neighbour swaps the two, the neighbour gliding into the gap (F-APP-001). Fixed tabs never
+/// move. Returns the tab being dragged and where to draw it.
+fn drag_tab(app: &mut NativeApp, ui: &mut Ui<'_>, slots: &[Rect]) -> Option<(usize, f32)> {
+    let id_of = |app: &NativeApp, index: usize| Id::new(("tab", app.tabs[index].uid));
+    for index in FIXED_TABS..slots.len() {
+        if ui.drag_released(id_of(app, index)).is_some() {
+            app.tab_grab = None;
+        }
+    }
+    let index =
+        (FIXED_TABS..slots.len()).find(|index| ui.drag_moved(id_of(app, *index)).is_some())?;
+    let uid = app.tabs[index].uid;
+    let pointer = ui.drag_moved(id_of(app, index))?;
+    let grab = match app.tab_grab {
+        Some((held, grab)) if held == uid => grab,
+        _ => {
+            let held = ui.pressed_at().unwrap_or(pointer);
+            let grab = held.x - slots[index].x;
+            app.tab_grab = Some((uid, grab));
+            app.active = index;
+            grab
+        }
+    };
+    let first = slots[FIXED_TABS].x;
+    let last = slots.last().map_or(first, |slot| slot.r() - slots[index].w);
+    let x = (pointer.x - grab).clamp(first, last.max(first));
+    // Let go, it glides from where it was dropped into its place.
+    ui.spring_set(Id::new(("tab", uid)).with("x"), x);
+    // Where the pointer has it, past the strip's ends too: drawn inside the strip, it can
+    // still pass the middle of the last tab.
+    let center = pointer.x - grab + slots[index].w / 2.0;
+    let to = if index > FIXED_TABS && center < slots[index - 1].center().x {
+        index - 1
+    } else if index + 1 < slots.len() && center > slots[index + 1].center().x {
+        index + 1
+    } else {
+        index
+    };
+    app.move_tab(index, to);
+    Some((to, x))
 }
 
 #[derive(Clone, Copy)]
@@ -233,13 +322,14 @@ fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
     );
 }
 
-/// The width a tab wants.
+/// The width a tab wants: fixed tabs fit their name, the others have a close button too and
+/// stay between a narrowest and a widest.
 fn tab_width(ui: &mut Ui<'_>, title: &str, kind: TabKind) -> f32 {
     let text = ui.gfx.measure(title, BODY_MEDIUM).width;
     match kind {
-        TabKind::Vault => (text + 16.0 + 8.0 + 2.0 * space::M).ceil(),
-        TabKind::Terminal | TabKind::Sftp => {
-            (text + 8.0 + 8.0 + 16.0 + 6.0 + 2.0 * space::M).clamp(132.0, 220.0)
+        TabKind::Vault | TabKind::Files => (text + 16.0 + 8.0 + 2.0 * space::M).ceil(),
+        TabKind::Terminal | TabKind::Sftp | TabKind::NewTab => {
+            (text + 16.0 + 8.0 + 18.0 + 6.0 + 2.0 * space::M).clamp(132.0, 220.0)
         }
     }
 }
@@ -250,7 +340,26 @@ enum TabEvent {
     Close,
 }
 
-fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
+/// What a tab's icon is: the host's OS mark for a session with a saved host whose OS is known,
+/// else one for what it holds.
+fn tab_icon(app: &NativeApp, tab: &super::Tab) -> Result<&'static super::os::Os, IconId> {
+    let host = match (&tab.origin, &app.vault) {
+        (Some(OpenTab::Host(id)), Some(vault)) => vault.hosts().iter().find(|host| host.id == *id),
+        _ => None,
+    };
+    if let Some(os) = host.and_then(super::os::of) {
+        return Ok(os);
+    }
+    Err(match tab.kind {
+        TabKind::Vault => icons::GRID_VIEW,
+        TabKind::Files | TabKind::Sftp => icons::FOLDER,
+        TabKind::Terminal => icons::TERMINAL,
+        TabKind::NewTab => icons::PLUS,
+    })
+}
+
+/// Draws tab `index`, taking clicks in `slot` and drawn at `x` (it glides there).
+fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> TabEvent {
     let tab = &app.tabs[index];
     let id = Id::new(("tab", tab.uid));
     let active = app.active == index;
@@ -259,68 +368,87 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
         Some(status) => format!("{}, {}", tab.title, status.describe()),
         None => tab.title.clone(),
     };
-    let response = ui.zone(id, rect, Role::Tab, &name);
+    let response = ui.zone(id, slot, Role::Tab, &name);
     let t = ui.theme;
     // Still hovered on its close button.
-    let hovered = ui.hover_within(rect);
+    let hovered = response.hovered || ui.hover_within(slot);
     let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
-    let fill = if active {
-        t.surface
-    } else {
-        t.hover.alpha(hover * 0.7)
-    };
-    ui.gfx.fill_rect(rect, 8.0, fill);
-    if active {
-        ui.gfx.stroke_rect(rect, 8.0, 1.0, t.line);
+    let lit = ui.animate(
+        id.with("active"),
+        if active { 1.0 } else { 0.0 },
+        Motion::BASE,
+    );
+    let dragged = ui.drag_moved(id).is_some();
+    let rect = Rect::new(x, slot.y, slot.w, slot.h);
+    // A new tab grows into place.
+    let open = ui.entrance(id.with("open"), Motion::POP);
+    ui.push_layer(Layer::appear(open, rect.center(), 0.7, 0.0));
+    if dragged {
+        ui.gfx.shadow(rect, 9.0, 16.0, 5.0, t.shadow.alpha(0.6));
+    }
+    // Every tab is a soft pill; the one in front is the surface it opens onto.
+    let idle = t.hover.alpha(0.35 + 0.45 * hover);
+    let fill = idle.mix(t.surface, lit);
+    ui.gfx.fill_rect(rect, 9.0, fill);
+    if lit > 0.0 {
+        ui.gfx
+            .stroke_rect(rect, 9.0, 1.0, t.line_strong.alpha(lit * 0.8));
+        // Light from above along its top edge.
+        let top = Rect::new(rect.x + 8.0, rect.y + 0.5, rect.w - 16.0, 1.0);
+        ui.gfx.fill_rect(
+            top,
+            0.5,
+            Color::WHITE.alpha(lit * if t.dark { 0.06 } else { 0.5 }),
+        );
     }
     if response.focus_ring {
-        ui.focus_ring(rect, 8.0);
+        ui.focus_ring(rect, 9.0);
     }
     let mut inner = rect.inset(space::M, 0.0);
-    let ink = if active {
-        t.text
-    } else {
-        t.text2.mix(t.text, hover)
-    };
-    match tab.kind {
-        TabKind::Vault => {
-            let icon = inner.take_left(16.0).centered(16.0, 16.0);
-            ui.gfx
-                .icon(icons::GRID_VIEW, icon, if active { t.accent } else { ink });
-            inner.take_left(8.0);
-        }
-        TabKind::Terminal | TabKind::Sftp => {
-            let dot = inner.take_left(8.0);
-            let color = match tab.status {
-                Some(TabStatus::Unread) => t.accent,
-                Some(TabStatus::Input) => t.warn,
-                Some(TabStatus::Error) => t.error,
-                None => t.ok.alpha(0.85),
-            };
-            ui.gfx.fill_circle(dot.center(), 3.5, color);
-            inner.take_left(8.0);
-        }
+    let ink = t.text2.mix(t.text, hover.max(lit));
+    let icon = inner.take_left(16.0).centered(16.0, 16.0);
+    match tab_icon(app, tab) {
+        Ok(os) => super::os::tile(ui, icon, &tab.title, Some(os)),
+        Err(glyph) => ui.gfx.icon(glyph, icon, ink.mix(t.accent, lit)),
     }
+    if let Some(status) = tab.status {
+        // A dot on the icon's corner, ringed in the tab's own color.
+        let color = match status {
+            TabStatus::Unread => t.accent,
+            TabStatus::Input => t.warn,
+            TabStatus::Error => t.error,
+        };
+        let at = Point::new(icon.r() - 1.0, icon.y + 1.0);
+        let under = t.chrome.mix(fill, f32::from(fill.a) / 255.0);
+        ui.gfx.fill_circle(at, 4.5, under);
+        ui.gfx.fill_circle(at, 3.0, color);
+    }
+    inner.take_left(8.0);
     let mut event = if response.clicked {
         TabEvent::Select
     } else {
         TabEvent::None
     };
-    if tab.kind != TabKind::Vault {
+    if !tab.fixed() {
         let close = inner.take_right(18.0).centered(18.0, 18.0);
-        if active || hovered || hover > 0.0 {
+        let shown = lit.max(hover);
+        if shown > 0.0 {
             let close_id = id.with("close");
-            let x = ui.zone(close_id, close, Role::Button, "Close tab");
-            ui.tooltip(close_id, close, "Close tab (Ctrl+Shift+W)");
-            if x.hovered {
-                ui.gfx.fill_rect(close, 4.0, t.hover);
-            }
+            // In the slot, where it stays while the tab glides.
+            let target = Rect::new(close.x - x + slot.x, close.y, close.w, close.h);
+            let button = ui.zone(close_id, target, Role::Button, "Close tab");
+            ui.tooltip(close_id, target, "Close tab (Ctrl+Shift+W)");
+            let over = ui.ease(
+                close_id.with("hover"),
+                if button.hovered { 1.0 } else { 0.0 },
+            );
+            ui.gfx.fill_rect(close, 5.0, t.hover.alpha(over));
             ui.gfx.icon(
                 icons::CLOSE,
-                close.centered(12.0, 12.0),
-                t.text2.alpha(if active { 1.0 } else { hover }),
+                close.centered(11.0, 11.0),
+                t.text2.mix(t.text, over).alpha(shown),
             );
-            if x.clicked {
+            if button.clicked {
                 event = TabEvent::Close;
             }
         }
@@ -331,6 +459,7 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
     }
     ui.gfx
         .text(inner, &tab.title, BODY_MEDIUM, ink, Align::Start);
+    ui.pop_layer();
     if response.hovered {
         ui.set_cursor(Cursor::Pointer);
     }

@@ -17,6 +17,7 @@ mod panes;
 mod scenes;
 mod screens;
 mod sftp;
+mod start;
 mod terminal;
 mod titlebar;
 
@@ -30,7 +31,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
-use annulus_ui::widgets::{BODY, BODY_MEDIUM, SMALL};
+use annulus_ui::widgets::{BODY, BODY_MEDIUM, Kind, SMALL};
 use annulus_vault::vault::Vault;
 
 use crate::connect;
@@ -107,11 +108,19 @@ impl Section {
 pub enum TabKind {
     /// The vault; always first, never closed.
     Vault,
+    /// The SFTP tab beside the vault (F-APP-001): always there, never closed; it picks a host,
+    /// then shows that host's files.
+    Files,
     /// A terminal, local or SSH.
     Terminal,
     /// A host's files.
     Sftp,
+    /// A new tab, picking what to open (F-APP-004).
+    NewTab,
 }
+
+/// How many tabs are fixed at the start of the strip: the vault and SFTP.
+pub const FIXED_TABS: usize = 2;
 
 /// One tab of the title bar.
 pub struct Tab {
@@ -125,10 +134,34 @@ pub struct Tab {
     pub status: Option<TabStatus>,
     /// The terminal of a terminal tab.
     pub terminal: Option<TermView>,
-    /// The files of an SFTP tab.
+    /// The files of an SFTP tab, or of the host the SFTP tab picked.
     pub sftp: Option<Box<sftp::SftpView>>,
+    /// The picker of a new tab or of the SFTP tab.
+    pub start: Option<Box<start::StartView>>,
     /// What to reopen at the next start (F-APP-008).
     pub origin: Option<OpenTab>,
+}
+
+impl Tab {
+    /// A tab holding nothing yet.
+    fn new(uid: u64, kind: TabKind, title: impl Into<String>) -> Self {
+        Self {
+            uid,
+            kind,
+            title: title.into(),
+            status: None,
+            terminal: None,
+            sftp: None,
+            start: None,
+            origin: None,
+        }
+    }
+
+    /// The vault and SFTP tabs: always there, first, and never closed or moved.
+    #[must_use]
+    pub fn fixed(&self) -> bool {
+        matches!(self.kind, TabKind::Vault | TabKind::Files)
+    }
 }
 
 /// What a terminal tab shows.
@@ -219,6 +252,12 @@ pub struct NativeApp {
     /// When input last arrived, on the window's clock (auto-lock).
     last_input: Option<f64>,
     next_uid: u64,
+    /// The new tab (by uid) that the tab opened next takes the place of: what a New Tab page
+    /// chose replaces it.
+    replacing: Option<u64>,
+    /// The tab being dragged along the strip (by uid), and where the pointer holds it from
+    /// its left edge.
+    tab_grab: Option<(u64, f32)>,
 }
 
 impl NativeApp {
@@ -226,15 +265,13 @@ impl NativeApp {
     #[must_use]
     pub fn new(vault: Option<Vault>) -> Self {
         Self {
-            tabs: vec![Tab {
-                uid: 0,
-                kind: TabKind::Vault,
-                title: "Vault".into(),
-                status: None,
-                terminal: None,
-                sftp: None,
-                origin: None,
-            }],
+            tabs: vec![
+                Tab::new(0, TabKind::Vault, "Vault"),
+                Tab {
+                    start: Some(Box::default()),
+                    ..Tab::new(1, TabKind::Files, "SFTP")
+                },
+            ],
             active: 0,
             section: Section::Hosts,
             vault,
@@ -267,37 +304,74 @@ impl NativeApp {
             account: account::AccountView::default(),
             account_h: 0.0,
             last_input: None,
-            next_uid: 1,
+            next_uid: FIXED_TABS as u64,
+            replacing: None,
+            tab_grab: None,
         }
+    }
+
+    /// Moves tab `from` to place `to`, the tab in front staying in front; fixed tabs never move
+    /// and nothing moves among them.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        let count = self.tabs.len();
+        if from == to || from < FIXED_TABS || to < FIXED_TABS || from >= count || to >= count {
+            return;
+        }
+        let front = self.tabs.get(self.active).map(|tab| tab.uid);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if let Some(at) = front.and_then(|uid| self.tabs.iter().position(|tab| tab.uid == uid)) {
+            self.active = at;
+        }
+    }
+
+    /// Puts `tab` in front: in the place of the new tab it was chosen from, or last.
+    fn place(&mut self, tab: Tab) {
+        let at = self
+            .replacing
+            .take()
+            .and_then(|uid| self.tabs.iter().position(|tab| tab.uid == uid));
+        if let Some(at) = at {
+            self.tabs[at] = tab;
+            self.active = at;
+        } else {
+            self.tabs.push(tab);
+            self.active = self.tabs.len() - 1;
+        }
+    }
+
+    /// A uid for a new tab.
+    fn take_uid(&mut self) -> u64 {
+        self.next_uid += 1;
+        self.next_uid - 1
     }
 
     /// Adds a terminal tab showing `view`, in front.
     pub fn push_terminal(&mut self, title: impl Into<String>, view: TermView) {
-        self.tabs.push(Tab {
-            uid: self.next_uid,
-            kind: TabKind::Terminal,
-            title: title.into(),
-            status: None,
+        let uid = self.take_uid();
+        self.place(Tab {
             terminal: Some(view),
-            sftp: None,
-            origin: None,
+            ..Tab::new(uid, TabKind::Terminal, title)
         });
-        self.next_uid += 1;
-        self.active = self.tabs.len() - 1;
     }
 
     /// Adds an SFTP tab in front.
     pub fn push_sftp(&mut self, tab: crate::sftp_view::SftpTab) {
-        self.tabs.push(Tab {
-            uid: self.next_uid,
-            kind: TabKind::Sftp,
-            title: tab.title.clone(),
-            status: None,
-            terminal: None,
+        let uid = self.take_uid();
+        let title = tab.title.clone();
+        self.place(Tab {
             sftp: Some(Box::new(sftp::SftpView::new(tab))),
-            origin: None,
+            ..Tab::new(uid, TabKind::Sftp, title)
         });
-        self.next_uid += 1;
+    }
+
+    /// Opens a New Tab page in front, its search taking the keyboard (+, Ctrl+Shift+T).
+    pub fn open_new_tab(&mut self) {
+        let uid = self.take_uid();
+        self.tabs.push(Tab {
+            start: Some(Box::default()),
+            ..Tab::new(uid, TabKind::NewTab, "New Tab")
+        });
         self.active = self.tabs.len() - 1;
     }
 
@@ -306,17 +380,22 @@ impl NativeApp {
         self.opens.push((title.into(), program, None));
     }
 
-    /// Closes tab `index` (never the vault), saving its sessions' logs when logging is on.
+    /// Closes tab `index` (never a fixed one), saving its sessions' logs when logging is on.
     pub fn close_tab(&mut self, index: usize) {
-        if index == 0 || index >= self.tabs.len() {
+        if self.tabs.get(index).is_none_or(Tab::fixed) {
             return;
         }
         let tab = self.tabs.remove(index);
         if let Some(TermView::Live(panes)) = &tab.terminal {
             self.save_logs(panes.transcripts());
         }
+        let was_front = self.active == index;
         if self.active >= index {
             self.active = self.active.saturating_sub(1);
+        }
+        // The last session closed: back to the vault rather than onto the SFTP picker.
+        if was_front && self.active < FIXED_TABS {
+            self.active = 0;
         }
     }
 
@@ -378,13 +457,63 @@ impl NativeApp {
         }
     }
 
-    /// Shows the vault's saved hosts with the search field taking the keyboard, to connect
-    /// to one by typing its name (the tab strip's + button).
-    pub fn show_hosts(&mut self, ui: &mut Ui<'_>) {
-        self.active = 0;
-        self.section = Section::Hosts;
-        self.hosts.editor = None;
-        ui.state.set_focus(Some(Id::new("hosts.search")), false);
+    /// Does what the picker of tab `uid` chose: a New Tab page turns into the session it chose;
+    /// the SFTP tab shows the files of the host it chose.
+    fn start_choice(&mut self, uid: u64, choice: start::Choice) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.uid == uid) else {
+            return;
+        };
+        if self.tabs[index].kind == TabKind::Files {
+            if let start::Choice::Host(id) = choice
+                && let Some(files) = self.sftp_for(id)
+            {
+                self.tabs[index].sftp = Some(Box::new(sftp::SftpView::new(files)));
+            }
+            return;
+        }
+        match choice {
+            start::Choice::Host(id) => {
+                self.replacing = Some(uid);
+                self.act(hosts::HostsAction::Connect(id));
+            }
+            start::Choice::Quick(target) => {
+                self.replacing = Some(uid);
+                self.act(hosts::HostsAction::QuickConnect(target));
+            }
+            start::Choice::Local => {
+                self.replacing = Some(uid);
+                self.open_local();
+            }
+            start::Choice::Sftp => {
+                self.tabs.remove(index);
+                self.active = 1;
+            }
+            start::Choice::NewHost => {
+                self.tabs.remove(index);
+                self.active = 0;
+                self.section = Section::Hosts;
+                if let Some(vault) = &self.vault {
+                    self.hosts.new_host(vault);
+                }
+            }
+        }
+    }
+
+    /// The SFTP session for saved host `id`, or why there can be none.
+    fn sftp_for(&mut self, id: u64) -> Option<crate::sftp_view::SftpTab> {
+        let vault = self.vault.as_ref()?;
+        let host = vault.hosts().iter().find(|host| host.id == id)?;
+        let title = format!("{} files", host.label);
+        self.sync.sync_soon();
+        Some(match connect::login(vault, host) {
+            Some((last, via)) => {
+                crate::sftp_view::SftpTab::new(title, last, self.ssh_files.clone(), via)
+            }
+            None => crate::sftp_view::SftpTab::unavailable(
+                title,
+                "Annulus cannot reach this host itself: check its address and port.",
+            ),
+        })
     }
 
     /// Opens the default local shell (Settings, Local shells).
@@ -480,7 +609,8 @@ impl NativeApp {
     fn palette_items(&self) -> Vec<crate::command_palette::Item> {
         use crate::command_palette::{Action, Item};
         let mut items: Vec<Item> = Vec::new();
-        for (index, tab) in self.tabs.iter().enumerate().skip(1) {
+        // The sessions; the SFTP tab comes as a command below.
+        for (index, tab) in self.tabs.iter().enumerate().skip(FIXED_TABS) {
             items.push(Item {
                 label: tab.title.clone(),
                 kind: "Tab",
@@ -505,6 +635,7 @@ impl NativeApp {
         }
         for (label, action) in [
             ("New local terminal", Action::NewLocal),
+            ("SFTP", Action::Tab(1)),
             ("Settings", Action::Settings),
             ("Lock the vault", Action::Lock),
         ] {
@@ -593,6 +724,11 @@ impl NativeApp {
                 self.opens.push((title, program, Some(OpenTab::Host(id))));
                 // Connecting: the account's latest comes in now, not at the next minute.
                 self.sync.sync_soon();
+                // For the New Tab page's recent connections.
+                self.settings.connected(id, crate::sync_screen::now_secs());
+                if let Some(path) = &self.settings_path {
+                    let _ = self.settings.save(path);
+                }
             }
             hosts::HostsAction::ConnectAll(uid) => {
                 // The hosts directly in the group, not those of its subgroups.
@@ -623,22 +759,9 @@ impl NativeApp {
             }
             hosts::HostsAction::LocalTerminal => self.open_local(),
             hosts::HostsAction::Sftp(id) => {
-                let Some(vault) = &self.vault else { return };
-                let Some(host) = vault.hosts().iter().find(|host| host.id == id) else {
-                    return;
-                };
-                let title = format!("{} files", host.label);
-                self.sync.sync_soon();
-                let tab = match connect::login(vault, host) {
-                    Some((last, via)) => {
-                        crate::sftp_view::SftpTab::new(title, last, self.ssh_files.clone(), via)
-                    }
-                    None => crate::sftp_view::SftpTab::unavailable(
-                        title,
-                        "Annulus cannot reach this host itself: check its address and port.",
-                    ),
-                };
-                self.push_sftp(tab);
+                if let Some(tab) = self.sftp_for(id) {
+                    self.push_sftp(tab);
+                }
             }
             // The Hosts screen opens its import card itself.
             hosts::HostsAction::ImportSshConfig => {}
@@ -873,11 +996,26 @@ impl NativeApp {
                 self.active = (self.active + 1) % self.tabs.len();
             }
             if ui.key(Key::Char('t'), Modifiers::CTRL_SHIFT) {
+                self.open_new_tab();
+            }
+            if ui.key(Key::Char('l'), Modifiers::CTRL_SHIFT) {
                 self.open_local();
+            }
+            // The tab in front, one place left or right (as dragging it would).
+            for (key, step) in [(Key::PageUp, -1_isize), (Key::PageDown, 1)] {
+                if ui.key(key, Modifiers::CTRL_SHIFT)
+                    && let Some(to) = self.active.checked_add_signed(step)
+                {
+                    self.move_tab(self.active, to);
+                }
             }
             self.pane_shortcuts(ui);
         }
         let kind = self.tabs.get(self.active).map(|tab| tab.kind);
+        let picking = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.start.is_some() && tab.sftp.is_none());
         if kind == Some(TabKind::Vault) {
             let compact = ui.viewport.w < COLLAPSE_BELOW;
             let nav = area.take_left(if compact { NAV_COMPACT_W } else { NAV_W });
@@ -893,14 +1031,41 @@ impl NativeApp {
             } else {
                 self.section_screen(ui, content);
             }
-        } else if let Some(view) = self
-            .tabs
-            .get_mut(self.active)
-            .and_then(|tab| tab.sftp.as_mut())
-        {
+        } else if picking {
             area.take_left(PANEL_GAP);
             let content = panel(ui, area);
-            view.draw(ui, content, self.waker.as_ref());
+            let hosts = self.vault.as_ref().map_or(&[][..], Vault::hosts);
+            let now = crate::sync_screen::now_secs();
+            let tab = &mut self.tabs[self.active];
+            let uid = tab.uid;
+            let files = tab.kind == TabKind::Files;
+            let chosen = tab.start.as_mut().and_then(|start| {
+                start.draw(ui, content, uid, (hosts, &self.settings.recent, now), files)
+            });
+            if let Some(choice) = chosen {
+                self.start_choice(uid, choice);
+            }
+        } else if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.sftp.is_some()
+        {
+            area.take_left(PANEL_GAP);
+            let mut content = panel(ui, area);
+            // The SFTP tab goes back to its host picker; another SFTP tab is closed instead.
+            if tab.kind == TabKind::Files {
+                let bar = content.take_top(44.0).inset(space::L, 6.0);
+                let back = Rect::new(bar.x, bar.y, 92.0, bar.h);
+                let id = Id::new("files.back");
+                if ui
+                    .button(id, back, "Hosts", Some(icons::CHEVRON_LEFT), Kind::Ghost)
+                    .clicked
+                {
+                    tab.sftp = None;
+                }
+                ui.set_name(id, "Back to the hosts");
+            }
+            if let Some(view) = tab.sftp.as_mut() {
+                view.draw(ui, content, self.waker.as_ref());
+            }
         } else if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(view) = tab.terminal.as_mut()
         {
@@ -975,7 +1140,8 @@ impl NativeApp {
                     program,
                 )))),
             );
-            if let Some(tab) = self.tabs.last_mut() {
+            // In front: last, or where the new tab it was chosen from was.
+            if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.origin = origin;
             }
             ui.request_repaint();
@@ -986,6 +1152,8 @@ impl NativeApp {
             self.push_terminal(title, TermView::Live(Box::new(panes)));
             ui.request_repaint();
         }
+        // A choice that opened nothing leaves its new tab as it was.
+        self.replacing = None;
         self.remember_tabs();
         action
     }
