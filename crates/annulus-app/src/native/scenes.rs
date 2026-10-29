@@ -186,6 +186,23 @@ fn sftp_picker(app: &mut NativeApp) {
     app.active = 1;
 }
 
+/// An SSH tab part-way through connecting, its log open.
+fn connecting(app: &mut NativeApp) {
+    let program = crate::connect::quick("deploy@web-1.example.com", &app.ssh_files);
+    let terminal = super::live::LiveTerminal::held_at(
+        program,
+        1,
+        &[
+            "Reaching web-1.example.com:22 as deploy",
+            "web-1.example.com's key is trusted",
+        ],
+    );
+    app.push_terminal(
+        "web-1",
+        TermView::Live(Box::new(super::panes::Panes::new(terminal))),
+    );
+}
+
 /// An SFTP tab with transfers in every state: under way, done, skipped, failed.
 fn sftp_transfers(app: &mut NativeApp) {
     sftp(app);
@@ -406,6 +423,25 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: sftp_transfers,
         acts: &[Act::Click("Hide transfers")],
+    },
+    // An SSH tab connecting: its steps, the one under way spinning, and its log.
+    Scene {
+        name: "terminal-connecting",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: connecting,
+        acts: &[],
+    },
+    Scene {
+        name: "terminal-connecting-narrow",
+        width: 640,
+        height: 560,
+        scale: 1.5,
+        populated: true,
+        setup: connecting,
+        acts: &[Act::Click("Hide log")],
     },
     // The SFTP tab beside the vault picks a host.
     Scene {

@@ -120,6 +120,20 @@ pub trait Prompt: Send + Sync {
         user: String,
         host: String,
     ) -> tokio::sync::oneshot::Receiver<Option<Zeroizing<String>>>;
+
+    /// A step of connecting to `host` passed (the connection's progress, for the UI).
+    fn progress(&self, host: &str, step: Step) {
+        let _ = (host, step);
+    }
+}
+
+/// A step of connecting that passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// The server answered and its key is trusted.
+    KeyChecked,
+    /// The server accepted the login.
+    LoggedIn,
 }
 
 /// Why a connection failed, in terms the app turns into a message with a next step.
@@ -694,6 +708,8 @@ async fn log_in(
     identities: &[Zeroizing<String>],
     prompt: Arc<dyn Prompt>,
 ) -> Result<Connection, SshError> {
+    // The transport is open, so the server's key was checked and trusted.
+    prompt.progress(&target.host, Step::KeyChecked);
     let mut tried = Vec::new();
     let mut offered = String::from("unknown");
     let name = known_hosts_name(&target.host, target.port);
@@ -711,6 +727,7 @@ async fn log_in(
         .await?;
         match answer {
             AuthResult::Success => {
+                prompt.progress(&target.host, Step::LoggedIn);
                 return Ok(Connection {
                     handle,
                     remote,
@@ -741,6 +758,7 @@ async fn log_in(
         .await?;
         match answer {
             AuthResult::Success => {
+                prompt.progress(&target.host, Step::LoggedIn);
                 return Ok(Connection {
                     handle,
                     remote,

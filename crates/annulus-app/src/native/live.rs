@@ -17,9 +17,10 @@ use annulus_term::keys::{self, Mods};
 use annulus_term::select::SelectionKind;
 use annulus_term::{Palette, Size};
 use annulus_ui::gfx::Canvas as _;
-use annulus_ui::gfx::{Align, Font, Rect};
+use annulus_ui::gfx::{Align, Font, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Typed, Ui};
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, button_width,
 };
@@ -60,6 +61,31 @@ pub struct LiveTerminal {
     held_paste: Option<String>,
     /// The SSH server's identification line, once its shell opened (F-HOST-009).
     pub server: Option<String>,
+    /// How far connecting got: 0 reaching the server, 1 its key checked, 2 logged in, 3 the
+    /// shell open (F-APP-007).
+    stage: u8,
+    /// What happened while connecting, for Show log.
+    log: Vec<String>,
+    /// The connecting card shows its log.
+    show_log: bool,
+    /// Held connecting, never started (the scenes).
+    #[cfg(test)]
+    held: bool,
+}
+
+/// The step of Server, Key, Login, Shell under way (4 once all passed) at connecting `stage`:
+/// a question waits on its own step.
+fn active_step(stage: u8, ask: Option<&Ask>) -> usize {
+    match ask {
+        Some(Ask::HostKey(_)) => 1,
+        Some(_) => 2,
+        None => match stage {
+            0 => 0,
+            1 => 2,
+            2 => 3,
+            _ => 4,
+        },
+    }
 }
 
 /// The find bar of a terminal (Ctrl+Shift+F).
@@ -94,16 +120,37 @@ impl LiveTerminal {
             drawn: Arc::new(AtomicBool::new(false)),
             held_paste: None,
             server: None,
+            stage: 0,
+            log: Vec::new(),
+            show_log: false,
+            #[cfg(test)]
+            held: false,
         }
     }
 
     /// An SSH session that has not drawn anything yet: the tab says it is connecting.
     fn connecting(&self) -> bool {
+        #[cfg(test)]
+        if self.held {
+            return true;
+        }
         matches!(self.program, Program::Ssh { .. })
             && self.session.is_some()
             && self.failed.is_none()
             && !self.exited
             && !self.drawn.load(Ordering::Relaxed)
+    }
+
+    /// An SSH terminal held at connecting step `stage`, never dialing out, for the scenes.
+    #[cfg(test)]
+    pub fn held_at(program: Program, stage: u8, log: &[&str]) -> Self {
+        Self {
+            held: true,
+            stage,
+            log: log.iter().map(|line| (*line).to_owned()).collect(),
+            show_log: true,
+            ..Self::new(program)
+        }
     }
 
     /// Takes in the session's news while the tab is not shown, so its dot stays current, and
@@ -447,6 +494,16 @@ impl LiveTerminal {
                 waker();
             }
         };
+        self.stage = 0;
+        self.log = vec![match &self.program {
+            Program::Ssh { target, .. } => {
+                format!(
+                    "Reaching {}:{} as {}",
+                    target.host, target.port, target.user
+                )
+            }
+            _ => "Starting the shell".to_owned(),
+        }];
         match Session::spawn(
             &self.program,
             Size::new(columns, rows),
@@ -488,14 +545,35 @@ impl LiveTerminal {
                 SessionEvent::Lost if reconnects => self.dropped(now, None),
                 SessionEvent::Lost => self.failed = Some("The connection dropped.".into()),
                 SessionEvent::HostKey(_) | SessionEvent::Password { .. } => {
+                    self.log.push(match &event {
+                        SessionEvent::HostKey(question) => format!(
+                            "{} is new: asking whether to trust its {} key",
+                            question.host, question.algorithm
+                        ),
+                        _ => "Asking for the password".to_owned(),
+                    });
                     self.ask = Ask::from_event(event);
+                }
+                SessionEvent::Progress { host, step } => {
+                    let (stage, line) = match step {
+                        annulus_session::Step::KeyChecked => {
+                            (1, format!("{host}'s key is trusted"))
+                        }
+                        annulus_session::Step::LoggedIn => (2, format!("Logged in to {host}")),
+                    };
+                    self.stage = self.stage.max(stage);
+                    self.log.push(line);
                 }
                 // A reconnect that fails waits and tries again.
                 SessionEvent::Failed(message) if self.reconnect.tries > 0 => {
                     self.dropped(now, Some(message));
                 }
                 SessionEvent::Failed(message) => self.failed = Some(message),
-                SessionEvent::Server(id) => self.server = Some(id),
+                SessionEvent::Server(id) => {
+                    self.stage = 3;
+                    self.log.push(format!("Shell open on {}", id.trim()));
+                    self.server = Some(id);
+                }
             }
         }
     }
@@ -511,7 +589,11 @@ impl LiveTerminal {
     ) {
         let inner = rect.inset(space::L, space::M);
         let grid = terminal::grid_size(ui, inner, font);
-        if self.session.is_none() && self.failed.is_none() && !self.exited {
+        #[cfg(test)]
+        let held = self.held;
+        #[cfg(not(test))]
+        let held = false;
+        if self.session.is_none() && self.failed.is_none() && !self.exited && !held {
             self.start(ui, font, grid, waker);
             ui.state.set_focus(Some(id), false);
         } else if self.grid != Some(grid)
@@ -588,15 +670,7 @@ impl LiveTerminal {
             }
         }
         if self.connecting() {
-            let t = ui.theme;
-            let line = Rect::new(inner.x, inner.y, inner.w, 20.0);
-            ui.gfx.text(
-                line,
-                &format!("Connecting to {}\u{2026}", self.name()),
-                BODY,
-                t.text2,
-                Align::Start,
-            );
+            self.connect_card(ui, rect, id);
         }
         if let Some(bar) = bar {
             self.find_bar(ui, bar, id);
@@ -604,6 +678,147 @@ impl LiveTerminal {
         self.ask_card(ui, rect, id);
         self.paste_card(ui, rect, id);
         self.ended_banner(ui, rect, id);
+    }
+
+    /// Where an SSH session is while it connects (F-APP-007): the host, its four steps on a
+    /// track that fills as each passes (the one under way spins, one waiting for an answer
+    /// says so), and what happened so far behind Show log.
+    #[allow(clippy::too_many_lines)] // The card top to bottom: head, track, log, hint.
+    fn connect_card(&mut self, ui: &mut Ui<'_>, rect: Rect, terminal: Id) {
+        const STEPS: [&str; 4] = ["Server", "Key", "Login", "Shell"];
+        let t = ui.theme;
+        let id = terminal.with("connect");
+        let (who, route) = match &self.program {
+            Program::Ssh { target, .. } => (
+                target.host.clone(),
+                format!("SSH {}@{}:{}", target.user, target.host, target.port),
+            ),
+            _ => (self.name(), String::new()),
+        };
+        let active = active_step(self.stage, self.ask.as_ref());
+        let log_h = if self.show_log { 132.0 } else { 0.0 };
+        let width = (rect.w - 2.0 * space::XL).clamp(0.0, 520.0);
+        let height = 196.0 + log_h;
+        let top = rect.y + (rect.h * 0.16).max(space::XL);
+        let card = Rect::new(rect.center().x - width / 2.0, top, width, height);
+        let shown = ui.entrance(id.with("enter"), Motion::SLOW);
+        ui.push_layer(Layer::appear(shown, card.center(), 0.96, 10.0));
+        ui.gfx.shadow(card, 16.0, 30.0, 10.0, t.shadow);
+        ui.gfx.fill_rect(card, 16.0, t.raised);
+        ui.gfx.stroke_rect(card, 16.0, 1.0, t.line);
+        let mut inner = card.inset(space::XL, space::XL);
+        // The host, and Show log.
+        let mut head = inner.take_top(44.0);
+        let tile = head.take_left(44.0).centered(40.0, 40.0);
+        super::os::tile(ui, tile, &who, None);
+        head.take_left(space::M);
+        let label = if self.show_log {
+            "Hide log"
+        } else {
+            "Show log"
+        };
+        let toggle = head.take_right(button_width(&mut ui.gfx, label, None));
+        let name = Rect::new(head.x, head.y + 2.0, head.w - space::S, 22.0);
+        ui.gfx.text(name, &who, HEADING, t.text, Align::Start);
+        let detail = Rect::new(head.x, head.y + 24.0, head.w - space::S, 18.0);
+        ui.gfx.text(detail, &route, SMALL, t.text2, Align::Start);
+        if ui
+            .button(
+                id.with("log"),
+                toggle.centered(toggle.w, CONTROL),
+                label,
+                None,
+                Kind::Secondary,
+            )
+            .clicked
+        {
+            self.show_log = !self.show_log;
+        }
+        inner.take_top(space::XL);
+        // The track: a node per step, the line between them filling as steps pass.
+        let track = inner.take_top(28.0);
+        let span = track.w - 28.0;
+        #[allow(clippy::cast_precision_loss)] // Four steps.
+        let node_x = |step: f32| track.x + 14.0 + span * step / (STEPS.len() - 1) as f32;
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let reached = ui.animate(id.with("track"), active.min(3) as f32, Motion::SLOW);
+        let y = track.center().y;
+        ui.gfx.fill_rect(
+            Rect::new(node_x(0.0), y - 1.5, span, 3.0),
+            1.5,
+            t.line_strong,
+        );
+        ui.gfx.fill_rect(
+            Rect::new(node_x(0.0), y - 1.5, node_x(reached) - node_x(0.0), 3.0),
+            1.5,
+            t.accent,
+        );
+        let labels = inner.take_top(22.0);
+        for (index, step) in STEPS.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // As above.
+            let center = Point::new(node_x(index as f32), y);
+            let done = index < active;
+            if done {
+                ui.gfx.fill_circle(center, 11.0, t.accent);
+                ui.gfx.icon(
+                    icons::CHECK,
+                    Rect::new(center.x - 7.0, center.y - 7.0, 14.0, 14.0),
+                    t.on_accent,
+                );
+            } else if index == active {
+                ui.gfx.fill_circle(center, 11.0, t.raised);
+                ui.gfx.stroke_circle(center, 10.0, 2.0, t.accent.alpha(0.3));
+                // A quarter turn of the ring, going round while this step is under way.
+                #[allow(clippy::cast_possible_truncation)] // An angle for drawing.
+                let turn = (ui.time() * 300.0 % 360.0) as f32;
+                let arc: Vec<Point> = annulus_ui::icons::Segment::arc_points(
+                    center.x,
+                    center.y,
+                    10.0,
+                    turn,
+                    turn + 100.0,
+                )
+                .into_iter()
+                .map(|(x, y)| Point::new(x, y))
+                .collect();
+                ui.gfx.polyline(&arc, false, 2.5, t.accent);
+                ui.request_repaint_after(std::time::Duration::from_millis(16));
+            } else {
+                ui.gfx.fill_circle(center, 11.0, t.raised);
+                ui.gfx.stroke_circle(center, 10.0, 2.0, t.line_strong);
+            }
+            let cell = Rect::new(center.x - 40.0, labels.y + 4.0, 80.0, 18.0);
+            let ink = if index == active { t.text } else { t.text2 };
+            ui.gfx.text(cell, step, SMALL, ink, Align::Center);
+        }
+        inner.take_top(space::M);
+        let waiting = match &self.ask {
+            Some(Ask::HostKey(_)) => "Waiting for you to check the server's key",
+            Some(_) => "Waiting for the password",
+            None => match active {
+                0 => "Reaching the server\u{2026}",
+                1 | 2 => "Logging in\u{2026}",
+                _ => "Opening the shell\u{2026}",
+            },
+        };
+        ui.gfx
+            .text(inner.take_top(20.0), waiting, BODY, t.text2, Align::Center);
+        if self.show_log {
+            inner.take_top(space::M);
+            let box_rect = inner.take_top(log_h - space::M);
+            ui.gfx.fill_rect(box_rect, 10.0, t.field);
+            let mut lines = box_rect.inset(space::M, space::S);
+            for line in self.log.iter().rev().take(6).rev() {
+                ui.gfx.text(
+                    lines.take_top(18.0),
+                    line,
+                    Font::mono(11.5),
+                    t.text2,
+                    Align::Start,
+                );
+            }
+        }
+        ui.pop_layer();
     }
 
     /// Asks before pasting several lines into a program that did not ask for bracketed
@@ -1106,6 +1321,27 @@ mod tests {
         live.drawn.store(false, Ordering::Relaxed);
         live.failed = Some("refused".into());
         assert!(!live.connecting(), "a failure shows instead");
+    }
+
+    #[test]
+    fn the_connecting_card_follows_the_steps_and_waits_on_a_question() {
+        let key = Ask::from_event(SessionEvent::HostKey(annulus_session::HostKeyQuestion {
+            host: "web-1".into(),
+            algorithm: "ssh-ed25519".into(),
+            fingerprint: "SHA256:abc".into(),
+        }))
+        .unwrap();
+        let password = Ask::from_event(SessionEvent::Password {
+            user: "deploy".into(),
+            host: "web-1".into(),
+        })
+        .unwrap();
+        // Reaching the server, then past Server and Key, then past Login, then all done.
+        let steps: Vec<usize> = (0..4).map(|stage| active_step(stage, None)).collect();
+        assert_eq!(steps, [0, 2, 3, 4]);
+        // A question holds its own step, whatever came before.
+        assert_eq!(active_step(0, Some(&key)), 1);
+        assert_eq!(active_step(1, Some(&password)), 2);
     }
 
     #[test]

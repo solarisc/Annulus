@@ -26,7 +26,7 @@ use annulus_term::select::{self, SelectionKind};
 use annulus_term::{Palette, Screen, Size, config, snapshot};
 use zeroize::Zeroizing;
 
-pub use annulus_ssh::{HostKeyQuestion, Target};
+pub use annulus_ssh::{HostKeyQuestion, Step, Target};
 
 /// What a session tells the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +53,13 @@ pub enum SessionEvent {
     /// SSH: the shell opened on a server that identified itself with this line
     /// ("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13"); it can name the OS (F-HOST-009).
     Server(String),
+    /// SSH: a step of connecting to `host` passed (a jump host's steps come first).
+    Progress {
+        /// The host, the last one or a jump host on the way.
+        host: String,
+        /// The step.
+        step: Step,
+    },
 }
 
 /// Where SSH keeps its files.
@@ -457,6 +464,13 @@ impl Prompt for AskUi {
         }
         (self.notify)(SessionEvent::Password { user, host });
         rx
+    }
+
+    fn progress(&self, host: &str, step: Step) {
+        (self.notify)(SessionEvent::Progress {
+            host: host.to_owned(),
+            step,
+        });
     }
 }
 
