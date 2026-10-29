@@ -312,6 +312,30 @@ impl Panes {
         }
     }
 
+    /// Drops every pane's secrets, as when the vault locks.
+    pub fn forget_secrets(&mut self) {
+        for pane in &mut self.all {
+            pane.terminal.forget_secrets();
+        }
+    }
+
+    /// Gives every pane `program` from its next start on (a host tab after an unlock).
+    pub fn set_program(&mut self, program: &Program) {
+        for pane in &mut self.all {
+            pane.terminal.set_program(program.clone());
+        }
+    }
+
+    /// What each pane runs (the tests look at the secrets it carries).
+    #[cfg(test)]
+    #[must_use]
+    pub fn programs(&self) -> Vec<Program> {
+        self.all
+            .iter()
+            .map(|pane| pane.terminal.program())
+            .collect()
+    }
+
     /// How many panes there are.
     #[must_use]
     pub fn len(&self) -> usize {

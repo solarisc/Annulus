@@ -73,7 +73,14 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     row.take_left(space::M);
 
     let mut close_tab = None;
-    for index in 0..app.tabs.len() {
+    // While the vault is locked, open sessions stay out of sight and out of reach.
+    let locked = app.vault.is_none();
+    let shown = if locked {
+        1.min(app.tabs.len())
+    } else {
+        app.tabs.len()
+    };
+    for index in 0..shown {
         let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind);
         let available = row.w - 2.0 * 32.0;
         if available < 60.0 {
@@ -88,20 +95,22 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         }
         row.take_left(2.0);
     }
-    row.take_left(space::XS);
-    let plus = row.take_left(30.0).centered(30.0, 30.0);
-    let new_tab = ui
-        .icon_button(
-            Id::new("tab.new"),
-            plus,
-            icons::PLUS,
-            "New terminal tab",
-            false,
-        )
-        .clicked;
-    ui.tooltip(Id::new("tab.new"), plus, "New terminal tab (Ctrl+Shift+T)");
-    if new_tab {
-        app.open_local();
+    if !locked {
+        row.take_left(space::XS);
+        let plus = row.take_left(30.0).centered(30.0, 30.0);
+        let new_tab = ui
+            .icon_button(
+                Id::new("tab.new"),
+                plus,
+                icons::PLUS,
+                "New terminal tab",
+                false,
+            )
+            .clicked;
+        ui.tooltip(Id::new("tab.new"), plus, "New terminal tab (Ctrl+Shift+T)");
+        if new_tab {
+            app.open_local();
+        }
     }
     sync_badge(ui, badge, &sync);
     if let Some(index) = close_tab

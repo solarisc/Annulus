@@ -82,7 +82,7 @@ pub(crate) struct Worker {
 
 impl Worker {
     fn start(
-        login: Login,
+        login: Arc<Mutex<Login>>,
         wake: impl Fn() + std::marker::Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
@@ -157,7 +157,8 @@ impl Worker {
 
 /// Logs in again whenever the session is gone.
 struct Opener {
-    login: Login,
+    /// Shared with the tab, which wipes its secrets when the vault locks.
+    login: Arc<Mutex<Login>>,
     answers: Answers,
     send: Send,
 }
@@ -168,9 +169,13 @@ impl Opener {
         let notify = self.send.clone();
         let notify: Arc<dyn Fn(SessionEvent) + std::marker::Send + Sync> =
             Arc::new(move |event| notify(Reply::Session(event)));
-        let (via, last, files) = &self.login;
+        let (via, last, files) = self
+            .login
+            .lock()
+            .map_err(|_| "The connection's login is gone.".to_owned())?
+            .clone();
         let connection =
-            annulus_session::connect_chain(via, last, files, &self.answers, notify).await?;
+            annulus_session::connect_chain(&via, &last, &files, &self.answers, notify).await?;
         let sftp = Sftp::open(&connection)
             .await
             .map_err(|error| format!("SFTP is not available: {error}"))?;
@@ -388,6 +393,8 @@ pub struct SftpTab {
     /// The tab's title.
     pub title: String,
     pub(crate) start: Option<Login>,
+    /// The login the worker reconnects with, once started.
+    login: Option<Arc<Mutex<Login>>>,
     pub(crate) worker: Option<Worker>,
     pub(crate) failed: Option<String>,
     /// The folder shown; `None` until connected.
@@ -422,6 +429,7 @@ impl SftpTab {
         Self {
             title: title.into(),
             start: Some((via, last, files)),
+            login: None,
             worker: None,
             failed: None,
             cwd: None,
@@ -620,12 +628,28 @@ impl SftpTab {
     /// Starts the connection if it has not started; `wake` repaints the window.
     pub(crate) fn start_with(&mut self, wake: impl Fn() + std::marker::Send + Sync + 'static) {
         if let Some(login) = self.start.take() {
+            let login = Arc::new(Mutex::new(login));
+            self.login = Some(login.clone());
             match Worker::start(login, wake) {
                 Ok(worker) => self.worker = Some(worker),
                 Err(error) => {
                     self.failed = Some(format!("Could not start the connection: {error}"));
                 }
             }
+        }
+    }
+
+    /// Drops the login's secrets, as when the vault locks: a reconnect asks for a password.
+    pub(crate) fn forget_secrets(&mut self) {
+        let forget = |(via, last, _): &mut Login| {
+            last.forget_secrets();
+            via.iter_mut().for_each(Hop::forget_secrets);
+        };
+        if let Some(login) = &mut self.start {
+            forget(login);
+        }
+        if let Some(mut login) = self.login.as_ref().and_then(|login| login.lock().ok()) {
+            forget(&mut login);
         }
     }
 
@@ -881,7 +905,8 @@ mod tests {
             known_hosts: dir.join("known_hosts"),
             key_dir: None,
         };
-        let (worker, home) = ready(Worker::start((Vec::new(), hop, files), || {}).unwrap());
+        let login = Arc::new(Mutex::new((Vec::new(), hop, files)));
+        let (worker, home) = ready(Worker::start(login, || {}).unwrap());
         let recipe = Recipe::Download {
             remote: join(&home, "annulus-slots.bin"),
             to: dir.clone(),
@@ -949,7 +974,8 @@ mod tests {
             known_hosts: dir.join("known_hosts"),
             key_dir: None,
         };
-        let (worker, home) = ready(Worker::start((Vec::new(), hop, files), || {}).unwrap());
+        let login = Arc::new(Mutex::new((Vec::new(), hop, files)));
+        let (worker, home) = ready(Worker::start(login, || {}).unwrap());
         let recipe = Recipe::Download {
             remote: join(&home, "annulus-retry.bin"),
             to: dir.clone(),

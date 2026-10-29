@@ -1839,6 +1839,102 @@ fn a_tag_is_deleted_from_every_host_only_after_a_yes() {
 }
 
 #[test]
+fn a_locked_vault_hides_every_open_tab_and_the_palette() {
+    let mut app = NativeApp::new(Some(fixture_vault("locked-tabs", true)));
+    replay(&mut app, "web-1 session");
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    app.lock_vault();
+    let mut output = step(&mut app, &mut state, &[], 1.0);
+    let names: Vec<&str> = output
+        .zones
+        .iter()
+        .map(|zone| zone.label.as_str())
+        .collect();
+    assert!(!names.contains(&"web-1 session"), "{names:?}");
+    assert!(
+        !names.contains(&"New terminal tab"),
+        "no new tab while locked"
+    );
+    for keys in [
+        vec![Event::Key(Key::Tab, Modifiers::CTRL)],
+        vec![Event::Key(Key::Char('k'), Modifiers::CTRL_SHIFT)],
+        vec![Event::Key(Key::Char('t'), Modifiers::CTRL_SHIFT)],
+    ] {
+        output = step(&mut app, &mut state, &keys, 2.0);
+        assert_eq!(app.active, 0, "the lock screen stays in front");
+        assert!(app.palette.is_none() && app.opens.is_empty());
+    }
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label.contains("password"))
+    );
+}
+
+#[test]
+fn locking_drops_the_secrets_open_tabs_hold_and_unlocking_brings_them_back() {
+    let mut vault = fixture_vault("locked-secrets", false);
+    let mut host = vault.draft_host();
+    host.label = "db".into();
+    host.address = "10.0.4.12".into();
+    host.username = "deploy".into();
+    host.password = Some(annulus_vault::hosts::Secret::new("hunter2"));
+    let id = host.id;
+    vault.upsert_host(host).unwrap();
+    let mut app = NativeApp::new(Some(vault));
+    app.act(super::hosts::HostsAction::Connect(id));
+    let mut state = UiState::default();
+    // One frame adds the tab; it is not drawn yet, so it does not connect.
+    drive(&mut app, &mut state, &[], 0.0);
+    let password = |app: &NativeApp| {
+        app.tabs.iter().find_map(|tab| match &tab.terminal {
+            Some(TermView::Live(panes)) => panes.programs().into_iter().next(),
+            _ => None,
+        })
+    };
+    let has_password = |program: Option<annulus_session::Program>| {
+        matches!(
+            program,
+            Some(annulus_session::Program::Ssh {
+                password: Some(_),
+                ..
+            })
+        )
+    };
+    assert!(has_password(password(&app)), "the tab can log in");
+    let path = app.vault.as_ref().unwrap().path().to_path_buf();
+    app.lock_vault();
+    assert!(
+        !has_password(password(&app)),
+        "locked: the password is gone from the tab"
+    );
+    // Unlocking brings the login back from the vault (the lock screen's job, done by hand).
+    app.vault = Some(annulus_vault::vault::Vault::unlock(path, "pw").unwrap());
+    app.unlocked();
+    assert!(
+        has_password(password(&app)),
+        "unlocked: it can log in again"
+    );
+}
+
+#[test]
+fn the_palette_cannot_lock_while_the_recovery_key_is_shown() {
+    let mut app = NativeApp::new(None);
+    app.lock = super::lock::LockView::new(super::lock::Mode::Setup);
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Char('k'), Modifiers::CTRL_SHIFT)],
+        1.0,
+    );
+    assert!(app.palette.is_none(), "no palette before a vault is open");
+}
+
+#[test]
 fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
     let mut app = NativeApp::new(Some(fixture_vault("import-key", true)));
     app.section = super::Section::Keychain;

@@ -632,6 +632,19 @@ impl NativeApp {
         }));
     }
 
+    /// After an unlock, host tabs get their login back from the vault, for reconnecting.
+    fn unlocked(&mut self) {
+        let Some(vault) = &self.vault else { return };
+        for tab in &mut self.tabs {
+            if let (Some(OpenTab::Host(id)), Some(TermView::Live(panes))) =
+                (&tab.origin, &mut tab.terminal)
+                && let Some(host) = vault.hosts().iter().find(|host| host.id == *id)
+            {
+                panes.set_program(&connect::host(vault, &self.ssh_files, host));
+            }
+        }
+    }
+
     /// Takes the vault the lock screen's work opened, once it is done.
     fn poll_lock(&mut self) {
         let Some(job) = &self.lock.working else {
@@ -646,7 +659,10 @@ impl NativeApp {
         match result {
             // A new vault shows its recovery key first; it opens once that is confirmed.
             Ok((vault, Some(key))) => self.lock.show_recovery(vault, key),
-            Ok((vault, None)) => self.vault = Some(vault),
+            Ok((vault, None)) => {
+                self.vault = Some(vault);
+                self.unlocked();
+            }
             Err(annulus_vault::vault::VaultError::WrongPassword) => {
                 self.lock.error = Some(if self.lock.recovery_mode() {
                     "That recovery key does not open this vault.".into()
@@ -677,8 +693,13 @@ impl NativeApp {
         if ui.had_input() || self.last_input.is_none() {
             self.last_input = Some(now);
         }
-        // Tabs not on screen keep their dots current and reconnect dropped sessions.
-        let active = self.active;
+        // Tabs not on screen keep their dots current and reconnect dropped sessions; not while
+        // the vault is locked, when their logins are gone.
+        let active = if self.vault.is_none() {
+            usize::MAX
+        } else {
+            self.active
+        };
         let waker = self.waker.clone();
         let next_try = self
             .tabs
@@ -725,8 +746,18 @@ impl NativeApp {
         }
     }
 
-    /// Locks the vault: its keys, decrypted entities, drafts and typed passwords go.
+    /// Locks the vault: its keys, decrypted entities, drafts and typed passwords go, and so do
+    /// the secrets open tabs hold for reconnecting; the tabs stay out of sight until unlock.
     pub fn lock_vault(&mut self) {
+        for tab in &mut self.tabs {
+            if let Some(TermView::Live(panes)) = &mut tab.terminal {
+                panes.forget_secrets();
+            }
+            if let Some(view) = &mut tab.sftp {
+                view.forget_secrets();
+            }
+        }
+        self.palette = None;
         self.vault = None;
         self.lock = lock::LockView::new(lock::Mode::Unlock);
         self.hosts = hosts::HostsView::default();
@@ -745,21 +776,28 @@ impl NativeApp {
         let mut area = ui.viewport;
         ui.gfx.fill_rect(area, 0.0, t.chrome);
         let bar = area.take_top(TITLE_H);
+        // Locked: the lock screen is all there is (sessions keep running out of sight).
+        let locked = self.vault.is_none();
+        if locked {
+            self.active = 0;
+        }
         self.background(ui);
-        if ui.key(Key::Char('k'), Modifiers::CTRL_SHIFT) {
+        if !locked && ui.key(Key::Char('k'), Modifiers::CTRL_SHIFT) {
             self.palette = match self.palette.take() {
                 Some(_) => None,
                 None => Some(palette::PaletteView::default()),
             };
         }
         let action = titlebar::draw(self, ui, bar);
-        if ui.key(Key::Tab, Modifiers::CTRL) && !self.tabs.is_empty() {
-            self.active = (self.active + 1) % self.tabs.len();
+        if !locked {
+            if ui.key(Key::Tab, Modifiers::CTRL) && !self.tabs.is_empty() {
+                self.active = (self.active + 1) % self.tabs.len();
+            }
+            if ui.key(Key::Char('t'), Modifiers::CTRL_SHIFT) {
+                self.open_local();
+            }
+            self.pane_shortcuts(ui);
         }
-        if ui.key(Key::Char('t'), Modifiers::CTRL_SHIFT) {
-            self.open_local();
-        }
-        self.pane_shortcuts(ui);
         let kind = self.tabs.get(self.active).map(|tab| tab.kind);
         if kind == Some(TabKind::Vault) {
             let compact = ui.viewport.w < COLLAPSE_BELOW;

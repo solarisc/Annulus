@@ -62,6 +62,11 @@ impl SftpView {
         self.focus_card = true;
     }
 
+    /// Drops the connection's secrets, as when the vault locks.
+    pub fn forget_secrets(&mut self) {
+        self.tab.forget_secrets();
+    }
+
     /// Draws the tab into `rect`.
     pub fn draw(&mut self, ui: &mut Ui<'_>, rect: Rect, waker: Option<&Waker>) {
         let waker = waker.cloned();

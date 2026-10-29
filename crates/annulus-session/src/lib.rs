@@ -112,6 +112,15 @@ pub struct Hop {
     pub proxy: Option<Password>,
 }
 
+impl Hop {
+    /// Drops this hop's secrets: its saved password, keychain key and proxy login.
+    pub fn forget_secrets(&mut self) {
+        self.password = None;
+        self.identity = None;
+        self.proxy = None;
+    }
+}
+
 /// Connects through `via`, in order, to `last` (F-SSH-014). Each hop checks its own host
 /// key and logs in with its own credentials; a failure names the hop it happened at.
 ///
@@ -221,6 +230,24 @@ impl std::fmt::Debug for Password {
 }
 
 impl Program {
+    /// Drops the secrets this program carries (saved passwords, the private key, proxy logins,
+    /// the jump hosts' too), as when the vault locks; a new connection needs them back.
+    pub fn forget_secrets(&mut self) {
+        if let Program::Ssh {
+            password,
+            identity,
+            via,
+            proxy,
+            ..
+        } = self
+        {
+            *password = None;
+            *identity = None;
+            *proxy = None;
+            via.iter_mut().for_each(Hop::forget_secrets);
+        }
+    }
+
     /// The system OpenSSH client for `target` (`user@host`, `host`, `user@host:port`), for
     /// when Annulus's own client can't be used. The options come first and `--` ends them, so
     /// a target such as `-oProxyCommand=…` (typed, imported or synced) is only ever a
@@ -689,7 +716,7 @@ struct SshLogin {
 }
 
 fn spawn_ssh(
-    login: SshLogin,
+    mut login: SshLogin,
     size: Size,
     term: Arc<FairMutex<Term<Listener>>>,
     listener: Listener,
@@ -721,6 +748,9 @@ fn spawn_ssh(
                     };
                 let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
                 let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
+                // Logged in: the secrets are not needed again (a reconnect is a new session).
+                login.last.forget_secrets();
+                login.via.iter_mut().for_each(Hop::forget_secrets);
                 let mut shell = match connection
                     .shell_with_env(columns, rows, &login.term, &login.env)
                     .await

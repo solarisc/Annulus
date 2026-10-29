@@ -150,6 +150,17 @@ impl LiveTerminal {
         })
     }
 
+    /// Drops the program's secrets, as when the vault locks; reconnecting needs them back
+    /// through [`LiveTerminal::set_program`].
+    pub fn forget_secrets(&mut self) {
+        self.program.forget_secrets();
+    }
+
+    /// Runs `program` from the next start on (the host's login again, after an unlock).
+    pub fn set_program(&mut self, program: Program) {
+        self.program = program;
+    }
+
     /// The program this terminal runs (a split pane runs it again).
     #[must_use]
     pub fn program(&self) -> Program {
