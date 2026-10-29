@@ -11,10 +11,13 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto::{CryptoError, KdfParams, KeyFile, Keys, Sealed};
+use crate::forwards::PortForward;
 use crate::hosts::{DEFAULT_PORT, Host};
 
 /// Record kind of a saved host.
 const KIND_HOST: u8 = 1;
+/// Record kind of a port-forwarding rule.
+const KIND_FORWARD: u8 = 2;
 
 /// Why the vault could not be used.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +68,7 @@ pub struct Vault {
     key_file: KeyFile,
     keys: Keys,
     hosts: Vec<Host>,
+    forwards: Vec<PortForward>,
 }
 
 impl Vault {
@@ -90,8 +94,9 @@ impl Vault {
             key_file,
             keys,
             hosts: Vec::new(),
+            forwards: Vec::new(),
         };
-        vault.save(&vault.hosts)?;
+        vault.save(&vault.hosts, &vault.forwards)?;
         Ok((vault, recovery))
     }
 
@@ -119,26 +124,34 @@ impl Vault {
 
     fn open_records(path: PathBuf, file: VaultFile, keys: Keys) -> Result<Self, VaultError> {
         let mut hosts = Vec::new();
+        let mut forwards = Vec::new();
         for record in &file.records {
-            if record.kind != KIND_HOST {
+            let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
+            match record.kind {
+                KIND_HOST => {
+                    let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
+                    hosts.push(serde_json::from_slice::<Host>(&plaintext).map_err(damaged)?);
+                }
+                KIND_FORWARD => {
+                    let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
+                    forwards
+                        .push(serde_json::from_slice::<PortForward>(&plaintext).map_err(damaged)?);
+                }
                 // A newer version wrote kinds this one doesn't know; saving would drop them, so
                 // refuse to open rather than lose data silently.
-                return Err(VaultError::Damaged(format!(
-                    "unknown record kind {}",
-                    record.kind
-                )));
+                other => {
+                    return Err(VaultError::Damaged(format!("unknown record kind {other}")));
+                }
             }
-            let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
-            let host: Host = serde_json::from_slice(&plaintext)
-                .map_err(|error| VaultError::Damaged(error.to_string()))?;
-            hosts.push(host);
         }
         hosts.sort_by_key(|host| host.label.to_lowercase());
+        forwards.sort_by_key(|rule| rule.label.to_lowercase());
         Ok(Self {
             path,
             key_file: file.keys,
             keys,
             hosts,
+            forwards,
         })
     }
 
@@ -149,7 +162,7 @@ impl Vault {
     pub fn change_password(&mut self, password: &str) -> Result<(), VaultError> {
         let key_file = self.keys.change_password(&self.key_file, password)?;
         let previous = std::mem::replace(&mut self.key_file, key_file);
-        if let Err(error) = self.save(&self.hosts) {
+        if let Err(error) = self.save(&self.hosts, &self.forwards) {
             self.key_file = previous;
             return Err(error);
         }
@@ -198,7 +211,7 @@ impl Vault {
             None => next.push(host),
         }
         next.sort_by_key(|host| host.label.to_lowercase());
-        self.save(&next)?;
+        self.save(&next, &self.forwards)?;
         self.hosts = next;
         Ok(())
     }
@@ -214,7 +227,7 @@ impl Vault {
             .filter(|host| host.id != id)
             .cloned()
             .collect();
-        self.save(&next)?;
+        self.save(&next, &self.forwards)?;
         self.hosts = next;
         Ok(())
     }
@@ -238,23 +251,77 @@ impl Vault {
             next.push(host);
         }
         next.sort_by_key(|host| host.label.to_lowercase());
-        self.save(&next)?;
+        self.save(&next, &self.forwards)?;
         self.hosts = next;
         std::fs::remove_file(plain)?;
         Ok(imported.len())
     }
 
-    fn save(&self, hosts: &[Host]) -> Result<(), VaultError> {
-        let mut records = Vec::with_capacity(hosts.len());
+    /// The port-forwarding rules, sorted by label.
+    #[must_use]
+    pub fn forwards(&self) -> &[PortForward] {
+        &self.forwards
+    }
+
+    /// A new local rule through `host_id` with a fresh id; not saved until upserted.
+    #[must_use]
+    pub fn draft_forward(&self, host_id: u64) -> PortForward {
+        let id = self.forwards.iter().map(|rule| rule.id).max().unwrap_or(0) + 1;
+        PortForward::new(id, host_id)
+    }
+
+    /// Adds or replaces a rule, then saves. On failure nothing changes.
+    ///
+    /// # Errors
+    /// Writing the file.
+    pub fn upsert_forward(&mut self, rule: PortForward) -> Result<(), VaultError> {
+        let mut next = self.forwards.clone();
+        match next.iter_mut().find(|existing| existing.id == rule.id) {
+            Some(existing) => *existing = rule,
+            None => next.push(rule),
+        }
+        next.sort_by_key(|rule| rule.label.to_lowercase());
+        self.save(&self.hosts, &next)?;
+        self.forwards = next;
+        Ok(())
+    }
+
+    /// Deletes a rule, then saves. On failure nothing changes.
+    ///
+    /// # Errors
+    /// Writing the file.
+    pub fn remove_forward(&mut self, id: u64) -> Result<(), VaultError> {
+        let next: Vec<PortForward> = self
+            .forwards
+            .iter()
+            .filter(|rule| rule.id != id)
+            .cloned()
+            .collect();
+        self.save(&self.hosts, &next)?;
+        self.forwards = next;
+        Ok(())
+    }
+
+    fn save(&self, hosts: &[Host], forwards: &[PortForward]) -> Result<(), VaultError> {
+        let mut records = Vec::with_capacity(hosts.len() + forwards.len());
+        let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
         for host in hosts {
             let id = format!("host-{}", host.id);
-            let plaintext = Zeroizing::new(
-                serde_json::to_vec(host).map_err(|error| VaultError::Damaged(error.to_string()))?,
-            );
+            let plaintext = Zeroizing::new(serde_json::to_vec(host).map_err(damaged)?);
             let sealed = self.keys.seal_record(&id, KIND_HOST, &plaintext)?;
             records.push(Record {
                 id,
                 kind: KIND_HOST,
+                sealed,
+            });
+        }
+        for rule in forwards {
+            let id = format!("forward-{}", rule.id);
+            let plaintext = Zeroizing::new(serde_json::to_vec(rule).map_err(damaged)?);
+            let sealed = self.keys.seal_record(&id, KIND_FORWARD, &plaintext)?;
+            records.push(Record {
+                id,
+                kind: KIND_FORWARD,
                 sealed,
             });
         }
@@ -296,6 +363,36 @@ mod tests {
         host.label = label.into();
         host.address = format!("{label}.example.com");
         host
+    }
+
+    #[test]
+    fn forwarding_rules_survive_lock_and_unlock_beside_the_hosts() {
+        let path = temp("forwards");
+        let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();
+        vault.upsert_host(host(&vault, "bastion")).unwrap();
+        let host_id = vault.hosts()[0].id;
+        let mut rule = vault.draft_forward(host_id);
+        rule.label = "postgres".into();
+        rule.bind_port = 15432;
+        rule.destination_host = "db.internal".into();
+        rule.destination_port = 5432;
+        vault.upsert_forward(rule.clone()).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("db.internal")
+        );
+
+        let mut reopened = Vault::unlock(&path, "pw").unwrap();
+        assert_eq!(reopened.forwards(), [rule.clone()]);
+        assert_eq!(reopened.hosts()[0].label, "bastion");
+        // Editing a host keeps the rules, and removing a rule keeps the host.
+        reopened.upsert_host(host(&reopened, "second")).unwrap();
+        assert_eq!(reopened.forwards().len(), 1);
+        reopened.remove_forward(rule.id).unwrap();
+        let reopened = Vault::unlock(&path, "pw").unwrap();
+        assert_eq!(reopened.forwards(), []);
+        assert_eq!(reopened.hosts().len(), 2);
     }
 
     #[test]
