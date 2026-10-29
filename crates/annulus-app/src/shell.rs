@@ -460,10 +460,8 @@ impl Shell {
                     .default_size(260.0)
                     .show(ui, |ui| snippets_screen::side_panel(ui, search, &snippets))
                     .inner;
-                if let Some((snippet, run)) = chosen
-                    && let Some(pane) = panes.focused_mut()
-                {
-                    pane.send_snippet(&snippet, run);
+                if let Some((snippet, run)) = chosen {
+                    panes.send_snippet(&snippet, run);
                 }
             }
             let frame = egui::Frame::NONE.inner_margin(egui::Margin::same(4));

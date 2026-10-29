@@ -192,6 +192,26 @@ impl Panes {
         None
     }
 
+    /// The panes a snippet goes to: the focused one, and while broadcasting every pane
+    /// broadcast reaches (F-SNIP-005).
+    #[must_use]
+    pub fn snippet_targets(&self) -> Vec<usize> {
+        let mut targets = vec![self.focused];
+        if self.broadcasting() {
+            targets.extend(self.receivers());
+        }
+        targets
+    }
+
+    /// Sends `snippet` to [`Panes::snippet_targets`], running it when `run`.
+    pub fn send_snippet(&mut self, snippet: &annulus_vault::snippets::Snippet, run: bool) {
+        for index in self.snippet_targets() {
+            if let Some(pane) = self.list.get_mut(index) {
+                pane.send_snippet(snippet, run);
+            }
+        }
+    }
+
     /// The panes that typing in the focused one reaches while broadcasting: all others but
     /// those left out.
     #[must_use]
@@ -452,6 +472,13 @@ mod tests {
         assert_eq!(tab.receivers(), [1, 2]);
         tab.list[2].skip_broadcast = true;
         assert_eq!(tab.receivers(), [1]);
+        assert_eq!(
+            tab.snippet_targets(),
+            [0],
+            "not broadcasting: the focused pane only"
+        );
+        tab.toggle_broadcast();
+        assert_eq!(tab.snippet_targets(), [0, 1]);
     }
 
     #[test]
