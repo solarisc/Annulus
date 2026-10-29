@@ -61,6 +61,22 @@ pub struct HostsScreen {
     group_editor: Option<GroupDraft>,
     /// A saved host a terminal was just opened to, for rules that start with it.
     opened: Option<u64>,
+    /// Tags every listed host must have (F-HOST-004).
+    tag_filter: Vec<String>,
+}
+
+/// Every tag in use and how many hosts have it, by name.
+fn all_tags(hosts: &[Host]) -> Vec<(String, usize)> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for tag in hosts.iter().flat_map(|host| &host.tags) {
+        *counts.entry(tag.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// Whether `host` has every tag in `filter`.
+fn has_tags(host: &Host, filter: &[String]) -> bool {
+    filter.iter().all(|tag| host.tags.contains(tag))
 }
 
 impl HostsScreen {
@@ -77,6 +93,7 @@ impl HostsScreen {
             group: None,
             group_editor: None,
             opened: None,
+            tag_filter: Vec::new(),
         }
     }
 
@@ -349,6 +366,7 @@ impl HostsScreen {
             });
         });
         self.import_preview(ui, palette);
+        self.tag_chips(ui);
         ui.add_space(space::M);
 
         if self.search.trim().is_empty() {
@@ -362,7 +380,12 @@ impl HostsScreen {
             }
             return request;
         }
-        let matches: Vec<Host> = self.vault.search(&self.search).cloned().collect();
+        let matches: Vec<Host> = self
+            .vault
+            .search(&self.search)
+            .filter(|host| has_tags(host, &self.tag_filter))
+            .cloned()
+            .collect();
         if self.vault.hosts().is_empty() {
             empty(
                 ui,
@@ -410,6 +433,51 @@ impl HostsScreen {
             host.group.clone_from(&self.group);
             self.open_editor(host, true);
         }
+    }
+
+    /// The tags in use, as chips: a click filters by it (with any others chosen), and the
+    /// right-click menu takes it off every host.
+    fn tag_chips(&mut self, ui: &mut Ui) {
+        let tags = all_tags(self.vault.hosts());
+        if tags.is_empty() {
+            return;
+        }
+        let mut remove = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Tags");
+            for (tag, count) in &tags {
+                let on = self.tag_filter.contains(tag);
+                let chip = ui
+                    .selectable_label(on, format!("{tag} ({count})"))
+                    .on_hover_text("Show only hosts with this tag");
+                if chip.clicked() {
+                    if on {
+                        self.tag_filter.retain(|t| t != tag);
+                    } else {
+                        self.tag_filter.push(tag.clone());
+                    }
+                }
+                chip.context_menu(|ui| {
+                    if ui
+                        .button(format!("Remove {tag} from {count} host(s)"))
+                        .clicked()
+                    {
+                        remove = Some(tag.clone());
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if let Some(tag) = remove {
+            self.tag_filter.retain(|t| *t != tag);
+            self.notice = Some(match self.vault.remove_tag(&tag) {
+                Ok(count) => format!("Removed the tag {tag} from {count} host(s)."),
+                Err(error) => format!("Could not remove the tag: {error}"),
+            });
+        }
+        // A tag no host has any more cannot filter.
+        self.tag_filter
+            .retain(|t| tags.iter().any(|(tag, _)| tag == t));
     }
 
     /// What the search field holds as a new host, when it is an SSH target (`user@host:port`)
@@ -470,7 +538,7 @@ impl HostsScreen {
             .vault
             .hosts()
             .iter()
-            .filter(|host| in_here(host.group.as_deref()))
+            .filter(|host| in_here(host.group.as_deref()) && has_tags(host, &self.tag_filter))
             .cloned()
             .collect();
         if subgroups.is_empty() && hosts.is_empty() {
@@ -1355,6 +1423,27 @@ mod tests {
             screen.unsaved_target("web").is_none(),
             "a bare word is a search"
         );
+    }
+
+    #[test]
+    fn tags_are_counted_and_a_filter_needs_every_chosen_tag() {
+        let mut screen = screen_with("tagged");
+        let mut host = screen.vault.hosts()[0].clone();
+        host.tags = vec!["prod".into(), "db".into()];
+        screen.vault.upsert_host(host.clone()).unwrap();
+        let mut other = screen.vault.draft_host();
+        (other.label, other.address, other.tags) = ("web".into(), "w".into(), vec!["prod".into()]);
+        screen.vault.upsert_host(other.clone()).unwrap();
+        assert_eq!(
+            all_tags(screen.vault.hosts()),
+            [("db".to_owned(), 1), ("prod".to_owned(), 2)]
+        );
+        assert!(has_tags(&host, &["prod".into(), "db".into()]));
+        assert!(
+            !has_tags(&other, &["prod".into(), "db".into()]),
+            "all, not any"
+        );
+        assert!(has_tags(&other, &[]));
     }
 
     #[test]

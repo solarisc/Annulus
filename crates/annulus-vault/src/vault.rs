@@ -367,6 +367,37 @@ impl Vault {
         Ok(())
     }
 
+    /// Takes `tag` off every host that has it, in one save; returns how many changed
+    /// (F-HOST-004).
+    ///
+    /// # Errors
+    /// Writing the file; nothing changes then.
+    pub fn remove_tag(&mut self, tag: &str) -> Result<usize, VaultError> {
+        let mut next = self.hosts.clone();
+        let mut sync = self.sync.clone();
+        let mut changed = 0;
+        for host in next
+            .iter_mut()
+            .filter(|host| host.tags.iter().any(|t| t == tag))
+        {
+            host.tags.retain(|t| t != tag);
+            sync.touch(kind::HOST, host.id, false)?;
+            changed += 1;
+        }
+        if changed == 0 {
+            return Ok(0);
+        }
+        self.save_all(&Parts {
+            hosts: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
+        self.hosts = next;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(changed)
+    }
+
     /// Deletes a host, then saves. On failure nothing changes.
     ///
     /// # Errors
@@ -1271,6 +1302,28 @@ mod tests {
         host.label = label.into();
         host.address = format!("{label}.example.com");
         host
+    }
+
+    #[test]
+    fn a_tag_comes_off_every_host_in_one_go() {
+        let (mut vault, _) = Vault::create(temp("tags"), "pw", KdfParams::TEST).unwrap();
+        for (label, tags) in [
+            ("a", vec!["prod", "db"]),
+            ("b", vec!["prod"]),
+            ("c", vec!["dev"]),
+        ] {
+            let mut host = vault.draft_host();
+            (host.label, host.address) = (label.into(), "x".into());
+            host.tags = tags.into_iter().map(Into::into).collect();
+            vault.upsert_host(host).unwrap();
+        }
+        assert_eq!(vault.remove_tag("prod").unwrap(), 2);
+        let tags: Vec<Vec<String>> = vault.hosts().iter().map(|h| h.tags.clone()).collect();
+        assert_eq!(
+            tags,
+            [vec!["db".to_owned()], vec![], vec!["dev".to_owned()]]
+        );
+        assert_eq!(vault.remove_tag("missing").unwrap(), 0);
     }
 
     #[test]
