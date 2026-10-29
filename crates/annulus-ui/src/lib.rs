@@ -11,6 +11,7 @@ pub mod input;
 mod layout;
 mod routing;
 pub mod style;
+pub mod text_edit;
 pub mod tree;
 pub mod widget;
 

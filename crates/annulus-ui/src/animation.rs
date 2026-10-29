@@ -218,7 +218,7 @@ mod tests {
         assert!(animator.needs_frame());
         assert_eq!(value(&animator.tick(1200, &mut tree)), 1.0);
         assert!(!animator.needs_frame());
-        assert!(animator.tick(1300, &mut tree).is_empty());
+        assert_eq!(animator.tick(1300, &mut tree), Vec::<Update>::new());
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
         let (mut tree, node, mut animator) = setup();
         animator.start(node, Property::Opacity, 0.0, 1.0, 100, Easing::Linear, 0);
         tree.remove(node).unwrap();
-        assert!(animator.tick(10, &mut tree).is_empty());
+        assert_eq!(animator.tick(10, &mut tree), Vec::<Update>::new());
         assert!(!animator.needs_frame());
     }
 
