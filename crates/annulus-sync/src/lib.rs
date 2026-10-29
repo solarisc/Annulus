@@ -3,3 +3,10 @@
 //! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4.
 
 #![forbid(unsafe_code)]
+
+pub mod account;
+pub mod clock;
+pub mod engine;
+
+#[cfg(test)]
+mod tests;
