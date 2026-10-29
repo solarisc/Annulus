@@ -71,6 +71,28 @@ struct VaultFile {
     records: Vec<Record>,
 }
 
+/// The keys and key file of a vault, for changing its password on another thread.
+pub struct PasswordKit {
+    keys: Keys,
+    key_file: KeyFile,
+}
+
+impl PasswordKit {
+    /// Checks `current` and returns the key file re-wrapped for `new` (records and the
+    /// recovery key are untouched). Runs Argon2id twice.
+    ///
+    /// # Errors
+    /// [`VaultError::WrongPassword`] if `current` is wrong, or no randomness.
+    pub fn rewrap(&self, current: &str, new: &str) -> Result<Vec<u8>, VaultError> {
+        let opened = Keys::unlock(&self.key_file, current)?;
+        if !opened.same_account(&self.keys) {
+            return Err(VaultError::WrongPassword);
+        }
+        let file = self.keys.change_password(&self.key_file, new)?;
+        serde_json::to_vec(&file).map_err(|error| VaultError::Damaged(error.to_string()))
+    }
+}
+
 /// An unlocked vault.
 pub struct Vault {
     path: PathBuf,
@@ -216,6 +238,30 @@ impl Vault {
     pub fn change_password(&mut self, password: &str) -> Result<(), VaultError> {
         let key_file = self.keys.change_password(&self.key_file, password)?;
         let previous = std::mem::replace(&mut self.key_file, key_file);
+        if let Err(error) = self.save(&self.hosts, &self.forwards, &self.sync) {
+            self.key_file = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// What a password change needs, to run its Argon2id work off the UI thread.
+    #[must_use]
+    pub fn password_kit(&self) -> PasswordKit {
+        PasswordKit {
+            keys: self.keys.clone(),
+            key_file: self.key_file.clone(),
+        }
+    }
+
+    /// Takes a key file made by [`PasswordKit::rewrap`] and saves.
+    ///
+    /// # Errors
+    /// The bytes are not a key file, or writing failed (the vault keeps the old one).
+    pub fn set_key_file(&mut self, key_file: &[u8]) -> Result<(), VaultError> {
+        let file: KeyFile = serde_json::from_slice(key_file)
+            .map_err(|error| VaultError::Damaged(error.to_string()))?;
+        let previous = std::mem::replace(&mut self.key_file, file);
         if let Err(error) = self.save(&self.hosts, &self.forwards, &self.sync) {
             self.key_file = previous;
             return Err(error);
@@ -965,6 +1011,28 @@ mod tests {
         let reopened = Vault::unlock(&path, "pw").unwrap();
         assert_eq!(reopened.ssh_keys(), []);
         assert_eq!(reopened.hosts()[0].key_id, None);
+    }
+
+    #[test]
+    fn a_password_change_off_the_ui_thread_needs_the_current_password() {
+        let path = temp("rewrap");
+        let (mut vault, _) = Vault::create(&path, "old pw", KdfParams::TEST).unwrap();
+        vault.upsert_host(host(&vault, "db")).unwrap();
+        let kit = vault.password_kit();
+        assert!(matches!(
+            kit.rewrap("wrong", "new pw"),
+            Err(VaultError::WrongPassword)
+        ));
+        let file = kit.rewrap("old pw", "new pw").unwrap();
+        vault.set_key_file(&file).unwrap();
+        assert!(matches!(
+            Vault::unlock(&path, "old pw"),
+            Err(VaultError::WrongPassword)
+        ));
+        assert_eq!(
+            Vault::unlock(&path, "new pw").unwrap().hosts()[0].label,
+            "db"
+        );
     }
 
     #[test]

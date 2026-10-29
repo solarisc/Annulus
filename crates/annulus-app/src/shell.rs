@@ -11,6 +11,7 @@ use crate::forwards_screen::ForwardsScreen;
 use crate::hosts_screen::{HostsScreen, Request};
 use crate::keychain_screen::KeychainScreen;
 use crate::lock_screen::LockScreen;
+use crate::password_screen::PasswordScreen;
 use crate::sftp_view::SftpTab;
 use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::SyncScreen;
@@ -116,6 +117,8 @@ pub struct Shell {
     keychain: KeychainScreen,
     /// The Snippets screen.
     snippets: SnippetsScreen,
+    /// Changing the master password, in Settings.
+    password: PasswordScreen,
     /// The snippet panel beside terminals is open (Ctrl+Shift+S), and its search text.
     snippet_panel: Option<String>,
     /// Setup or unlock, while the vault is locked.
@@ -147,6 +150,7 @@ impl Shell {
             sync: SyncScreen::default(),
             keychain: KeychainScreen::default(),
             snippets: SnippetsScreen::default(),
+            password: PasswordScreen::default(),
             snippet_panel: None,
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
             data_dir: data_dir.to_path_buf(),
@@ -292,6 +296,10 @@ impl Shell {
         // Running rules stop with the lock: their connections used the vault's secrets.
         self.forwards = ForwardsScreen::default();
         self.sync = SyncScreen::default();
+        // Typed passwords, pasted keys and drafts go with it.
+        self.password = PasswordScreen::default();
+        self.keychain = KeychainScreen::default();
+        self.snippets = SnippetsScreen::default();
         self.lock = LockScreen::new(&self.data_dir.join(VAULT_FILE));
     }
 
@@ -539,6 +547,8 @@ impl Shell {
         let vault_path = self.data_dir.join(VAULT_FILE);
         if let Some(hosts) = &mut self.hosts {
             self.sync.ui(ui, &palette, hosts, &vault_path);
+            ui.add_space(space::L);
+            self.password.ui(ui, &palette, hosts);
         }
     }
 }
