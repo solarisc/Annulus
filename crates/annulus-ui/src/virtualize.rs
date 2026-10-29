@@ -17,7 +17,12 @@ pub fn list_window(
     offset: f32,
     overscan: usize,
 ) -> Range<usize> {
-    if count == 0 || !(row_height > 0.0) || !viewport.is_finite() || viewport <= 0.0 {
+    if count == 0
+        || row_height.is_nan()
+        || row_height <= 0.0
+        || !viewport.is_finite()
+        || viewport <= 0.0
+    {
         return 0..0;
     }
     let offset = if offset.is_finite() {
