@@ -372,32 +372,44 @@ impl Vault {
     /// # Errors
     /// Writing the file.
     pub fn remove_host(&mut self, id: u64) -> Result<(), VaultError> {
+        self.remove_hosts(&[id])
+    }
+
+    /// Deletes several hosts in one save; nothing keeps pointing at them (jump links, group
+    /// defaults and forward rules are cleared). On failure nothing changes.
+    ///
+    /// # Errors
+    /// Writing the file.
+    pub fn remove_hosts(&mut self, ids: &[u64]) -> Result<(), VaultError> {
+        let gone = |id: Option<u64>| id.is_some_and(|id| ids.contains(&id));
         let mut next: Vec<Host> = self
             .hosts
             .iter()
-            .filter(|host| host.id != id)
+            .filter(|host| !ids.contains(&host.id))
             .cloned()
             .collect();
         let mut sync = self.sync.clone();
-        // Nothing may keep pointing at the id: a new host could get it and be used instead.
-        for host in next.iter_mut().filter(|host| host.jump_id == Some(id)) {
+        // Nothing may keep pointing at the ids: a new host could get one and be used instead.
+        for host in next.iter_mut().filter(|host| gone(host.jump_id)) {
             host.jump_id = None;
             sync.touch(kind::HOST, host.id, false)?;
         }
         let mut groups = self.groups.clone();
         for group in groups
             .iter_mut()
-            .filter(|group| group.defaults.jump_id == Some(id))
+            .filter(|group| gone(group.defaults.jump_id))
         {
             group.defaults.jump_id = None;
             sync.touch(kind::GROUP, group.id, false)?;
         }
         let mut forwards = self.forwards.clone();
-        for rule in forwards.iter_mut().filter(|rule| rule.host_id == id) {
+        for rule in forwards.iter_mut().filter(|rule| gone(Some(rule.host_id))) {
             rule.host_id = 0;
             sync.touch(kind::FORWARD, rule.id, false)?;
         }
-        sync.touch(kind::HOST, id, true)?;
+        for id in ids {
+            sync.touch(kind::HOST, *id, true)?;
+        }
         self.save_all(&Parts {
             hosts: &next,
             forwards: &forwards,

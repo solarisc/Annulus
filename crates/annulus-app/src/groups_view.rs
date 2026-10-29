@@ -9,6 +9,9 @@ use annulus_vault::groups::{self, Group};
 use annulus_vault::hosts::Secret;
 use annulus_vault::vault::Vault;
 
+/// Ids and labels for a picker.
+type Choices = Vec<(u64, String)>;
+
 /// `uid`'s place in the tree, top first: "prod / db". Unknown uids read as the top level.
 #[must_use]
 pub fn path(groups: &[Group], uid: Option<&str>) -> String {
@@ -246,6 +249,30 @@ fn id_picker(ui: &mut Ui, id: &str, chosen: &mut Option<u64>, choices: &[(u64, S
         });
 }
 
+/// The keychain keys and the hosts, as `(id, label)` for the editor's pickers.
+fn pick_lists(vault: &Vault) -> (Choices, Choices) {
+    let keys = vault
+        .ssh_keys()
+        .iter()
+        .map(|key| (key.id, key.label.clone()))
+        .collect();
+    let hosts = vault
+        .hosts()
+        .iter()
+        .map(|host| (host.id, host.label.clone()))
+        .collect();
+    (keys, hosts)
+}
+
+/// "1 host" or "3 hosts".
+fn groups_holds(hosts: usize) -> String {
+    if hosts == 1 {
+        "1 host".to_owned()
+    } else {
+        format!("{hosts} hosts")
+    }
+}
+
 /// The group editor's working copy.
 pub struct GroupDraft {
     group: Group,
@@ -254,6 +281,35 @@ pub struct GroupDraft {
     proxy: SecretText,
     problem: Option<String>,
     is_new: bool,
+    /// Delete was pressed: asking what happens to the hosts inside.
+    confirm_delete: bool,
+}
+
+/// What deleting a group does with the hosts directly in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deletion {
+    /// They (and its subgroups) move up into its parent.
+    MoveHostsUp,
+    /// They are deleted with it; its subgroups still move up.
+    WithHosts,
+}
+
+/// Deletes `group` from `vault` as `how` says.
+fn delete_group(vault: &mut Vault, group: &Group, how: Deletion) -> Result<(), String> {
+    if how == Deletion::WithHosts {
+        let inside: Vec<u64> = vault
+            .hosts()
+            .iter()
+            .filter(|host| host.group.as_deref() == Some(group.uid.as_str()))
+            .map(|host| host.id)
+            .collect();
+        vault
+            .remove_hosts(&inside)
+            .map_err(|error| error.to_string())?;
+    }
+    vault
+        .remove_group(group.id)
+        .map_err(|error| error.to_string())
 }
 
 impl GroupDraft {
@@ -270,6 +326,7 @@ impl GroupDraft {
             env: format_env(&group.defaults.env),
             problem: None,
             is_new,
+            confirm_delete: false,
             group,
         }
     }
@@ -277,16 +334,7 @@ impl GroupDraft {
     /// Draws the editor; true once it is closed (saved, deleted or cancelled).
     pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, vault: &mut Vault) -> bool {
         let parents = choices(vault.groups(), Some(&self.group.uid));
-        let keys: Vec<(u64, String)> = vault
-            .ssh_keys()
-            .iter()
-            .map(|key| (key.id, key.label.clone()))
-            .collect();
-        let hosts: Vec<(u64, String)> = vault
-            .hosts()
-            .iter()
-            .map(|host| (host.id, host.label.clone()))
-            .collect();
+        let (keys, hosts) = pick_lists(vault);
         ui.add_space(space::M);
         ui.heading(if self.is_new {
             "New group"
@@ -342,24 +390,28 @@ impl GroupDraft {
             ui.colored_label(theme::color(palette.status_error), problem);
         }
         ui.add_space(space::M);
-        let (mut save, mut delete, mut cancel) = (false, false, false);
-        ui.horizontal(|ui| {
-            save = ui.button("Save").clicked();
-            cancel = ui.button("Cancel").clicked();
-            if !self.is_new {
-                delete = ui
-                    .button(RichText::new("Delete").color(theme::color(palette.status_error)))
-                    .on_hover_text("Its hosts and groups move up a level")
-                    .clicked();
-            }
-        });
+        let (mut save, mut delete, mut cancel) = (false, None, false);
+        if self.confirm_delete {
+            delete = self.delete_prompt(ui, vault);
+            cancel = !self.confirm_delete;
+        } else {
+            ui.horizontal(|ui| {
+                save = ui.button("Save").clicked();
+                cancel = ui.button("Cancel").clicked();
+                if !self.is_new
+                    && ui
+                        .button(RichText::new("Delete").color(theme::color(palette.status_error)))
+                        .clicked()
+                {
+                    self.confirm_delete = true;
+                }
+            });
+        }
         if cancel || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             return true;
         }
-        let result = if delete {
-            vault
-                .remove_group(self.group.id)
-                .map_err(|error| error.to_string())
+        let result = if let Some(how) = delete {
+            delete_group(vault, &self.group, how)
         } else if save {
             self.apply()
                 .and_then(|group| vault.upsert_group(group).map_err(|error| error.to_string()))
@@ -373,6 +425,40 @@ impl GroupDraft {
                 false
             }
         }
+    }
+
+    /// Asks what happens to the hosts inside; `None` until a choice is made. Cancel ends the
+    /// prompt (`confirm_delete` goes false).
+    fn delete_prompt(&mut self, ui: &mut Ui, vault: &Vault) -> Option<Deletion> {
+        let inside = vault
+            .hosts()
+            .iter()
+            .filter(|host| host.group.as_deref() == Some(self.group.uid.as_str()))
+            .count();
+        let mut chosen = None;
+        ui.label(format!("Delete the group {}?", self.group.name));
+        ui.horizontal(|ui| {
+            let up = if inside == 0 {
+                "Delete group".to_owned()
+            } else {
+                format!("Delete, move its {} up", groups_holds(inside))
+            };
+            if ui.button(up).clicked() {
+                chosen = Some(Deletion::MoveHostsUp);
+            }
+            if inside > 0
+                && ui
+                    .button(format!("Delete it and its {}", groups_holds(inside)))
+                    .on_hover_text("Synced hosts can be brought back from the trash")
+                    .clicked()
+            {
+                chosen = Some(Deletion::WithHosts);
+            }
+            if ui.button("Keep it").clicked() {
+                self.confirm_delete = false;
+            }
+        });
+        chosen
     }
 
     /// The group as typed, or why it can't be saved.
@@ -445,6 +531,36 @@ mod tests {
         );
         assert!(parse_env("no equals sign").is_err());
         assert!(parse_env("A B=1").is_err());
+    }
+
+    #[test]
+    fn deleting_a_group_moves_its_hosts_up_or_takes_them_along() {
+        let dir = std::env::temp_dir().join(format!("annulus-delgroup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cheap = annulus_vault::crypto::KdfParams {
+            memory_kib: 64,
+            iterations: 1,
+            parallelism: 1,
+        };
+        let (mut vault, _) = Vault::create(dir.join("vault.anv"), "pw", cheap).unwrap();
+        let add = |vault: &mut Vault, name: &str| {
+            let mut group = vault.draft_group(None).unwrap();
+            group.name = name.into();
+            vault.upsert_group(group.clone()).unwrap();
+            let mut host = vault.draft_host();
+            (host.label, host.address) = (format!("{name}-1"), "x".into());
+            host.group = Some(group.uid.clone());
+            vault.upsert_host(host).unwrap();
+            group
+        };
+        let keep = add(&mut vault, "keep");
+        let drop = add(&mut vault, "drop");
+        delete_group(&mut vault, &keep, Deletion::MoveHostsUp).unwrap();
+        delete_group(&mut vault, &drop, Deletion::WithHosts).unwrap();
+        let labels: Vec<&str> = vault.hosts().iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, ["keep-1"]);
+        assert_eq!(vault.hosts()[0].group, None, "moved to the top level");
+        assert_eq!(vault.groups().len(), 0);
     }
 
     #[test]
