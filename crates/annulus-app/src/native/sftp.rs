@@ -1085,9 +1085,9 @@ impl SftpView {
             let y = area.y - offset + place as f32 * (TRANSFER_ROW + 6.0);
             let row = Rect::new(area.x, y, area.w - 10.0, TRANSFER_ROW);
             let id = Id::new(("transfer", transfer.id));
-            // A new transfer slides down into the list.
-            let enter = ui.entrance(id.with("enter"), Motion::BASE);
-            ui.push_layer(Layer::fade(enter).shifted(0.0, -8.0 * (1.0 - enter)));
+            // A new transfer grows into its place in the list.
+            let enter = ui.entrance(id.with("enter"), Motion::POP);
+            ui.push_layer(Layer::appear(enter, row.center(), 0.92, 0.0));
             ui.gfx.fill_rect(row, 10.0, t.surface);
             ui.gfx.stroke_rect(row, 10.0, 1.0, t.line);
             let mut cells = row.inset(space::M, 0.0);

@@ -16,7 +16,9 @@ mod panes;
 #[cfg(test)]
 mod scenes;
 mod screens;
+mod settings;
 mod sftp;
+mod shortcuts;
 mod start;
 mod terminal;
 mod titlebar;
@@ -258,6 +260,8 @@ pub struct NativeApp {
     /// The tab being dragged along the strip (by uid), and where the pointer holds it from
     /// its left edge.
     tab_grab: Option<(u64, f32)>,
+    /// Settings' own navigation and search.
+    pub settings_view: settings::SettingsView,
 }
 
 impl NativeApp {
@@ -307,6 +311,7 @@ impl NativeApp {
             next_uid: FIXED_TABS as u64,
             replacing: None,
             tab_grab: None,
+            settings_view: settings::SettingsView::default(),
         }
     }
 
@@ -541,10 +546,71 @@ impl NativeApp {
             .push((title.clone(), program, Some(OpenTab::Local(title))));
     }
 
+    /// The tab, zoom and app shortcuts (UI-SPEC §7, [`shortcuts`]), taken before the screen in
+    /// front sees the keys.
+    fn app_shortcuts(&mut self, ui: &mut Ui<'_>) {
+        let count = self.tabs.len();
+        if shortcuts::NEXT_TAB.pressed(ui) && count > 0 {
+            self.active = (self.active + 1) % count;
+        }
+        if shortcuts::PREVIOUS_TAB.pressed(ui) && count > 0 {
+            self.active = (self.active + count - 1) % count;
+        }
+        // Alt+1 to Alt+9: the tab at that place (shortcuts::GO_TO_TAB).
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        for (place, digit) in ('1'..='9').enumerate() {
+            if ui.key(Key::Char(digit), alt) && place < count {
+                self.active = place;
+            }
+        }
+        if shortcuts::NEW_TAB.pressed(ui) {
+            self.open_new_tab();
+        }
+        if shortcuts::LOCAL.pressed(ui) {
+            self.open_local();
+        }
+        // The tab in front, one place left or right (as dragging it would).
+        if shortcuts::MOVE_LEFT.pressed(ui)
+            && let Some(to) = self.active.checked_sub(1)
+        {
+            self.move_tab(self.active, to);
+        }
+        if shortcuts::MOVE_RIGHT.pressed(ui) {
+            self.move_tab(self.active, self.active + 1);
+        }
+        if shortcuts::SETTINGS.pressed(ui) {
+            self.active = 0;
+            self.section = Section::Settings;
+        }
+        if shortcuts::LOCK.pressed(ui) {
+            self.lock_vault();
+            return;
+        }
+        let size = self.settings.font_size;
+        let zoomed = if shortcuts::ZOOM_IN.pressed(ui) {
+            (size + 1.0).min(32.0)
+        } else if shortcuts::ZOOM_OUT.pressed(ui) {
+            (size - 1.0).max(8.0)
+        } else if shortcuts::ZOOM_RESET.pressed(ui) {
+            annulus_config::settings::DEFAULT_FONT_SIZE
+        } else {
+            size
+        };
+        if (zoomed - size).abs() > f32::EPSILON {
+            self.settings.font_size = zoomed;
+            if let Some(path) = &self.settings_path {
+                let _ = self.settings.save(path);
+            }
+        }
+    }
+
     /// Split, close, broadcast, focus mode and moving between panes of the terminal tab in
     /// front (UI-SPEC §7). Taken before the terminal sees the keys.
     fn pane_shortcuts(&mut self, ui: &mut Ui<'_>) {
-        let close = ui.key(Key::Char('w'), Modifiers::CTRL_SHIFT);
+        let close = shortcuts::CLOSE.pressed(ui);
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -566,23 +632,19 @@ impl NativeApp {
             self.save_logs(closed);
             return;
         }
-        if ui.key(Key::Char('d'), Modifiers::CTRL_SHIFT) {
+        if shortcuts::SPLIT_RIGHT.pressed(ui) {
             panes.split(true);
         }
-        if ui.key(Key::Char('e'), Modifiers::CTRL_SHIFT) {
+        if shortcuts::SPLIT_DOWN.pressed(ui) {
             panes.split(false);
         }
-        if ui.key(Key::Char('b'), Modifiers::CTRL_SHIFT) {
+        if shortcuts::BROADCAST.pressed(ui) {
             panes.toggle_broadcast();
         }
-        let ctrl_alt_shift = Modifiers {
-            alt: true,
-            ..Modifiers::CTRL_SHIFT
-        };
-        if ui.key(Key::Char('b'), ctrl_alt_shift) {
+        if shortcuts::LEAVE_OUT.pressed(ui) {
             panes.toggle_left_out();
         }
-        if ui.key(Key::Char('m'), Modifiers::CTRL_SHIFT) {
+        if shortcuts::FOCUS_MODE.pressed(ui) {
             panes.toggle_focus_mode();
         }
         let alt = Modifiers {
@@ -982,7 +1044,7 @@ impl NativeApp {
             self.active = 0;
         }
         self.background(ui);
-        if !locked && ui.key(Key::Char('k'), Modifiers::CTRL_SHIFT) {
+        if !locked && shortcuts::PALETTE.pressed(ui) {
             self.palette = match self.palette.take() {
                 Some(_) => None,
                 None => Some(palette::PaletteView::default()),
@@ -992,23 +1054,7 @@ impl NativeApp {
         let for_palette = self.palette.as_ref().map(|_| ui.take_typed());
         let action = titlebar::draw(self, ui, bar);
         if !locked {
-            if ui.key(Key::Tab, Modifiers::CTRL) && !self.tabs.is_empty() {
-                self.active = (self.active + 1) % self.tabs.len();
-            }
-            if ui.key(Key::Char('t'), Modifiers::CTRL_SHIFT) {
-                self.open_new_tab();
-            }
-            if ui.key(Key::Char('l'), Modifiers::CTRL_SHIFT) {
-                self.open_local();
-            }
-            // The tab in front, one place left or right (as dragging it would).
-            for (key, step) in [(Key::PageUp, -1_isize), (Key::PageDown, 1)] {
-                if ui.key(key, Modifiers::CTRL_SHIFT)
-                    && let Some(to) = self.active.checked_add_signed(step)
-                {
-                    self.move_tab(self.active, to);
-                }
-            }
+            self.app_shortcuts(ui);
             self.pane_shortcuts(ui);
         }
         let kind = self.tabs.get(self.active).map(|tab| tab.kind);
@@ -1080,7 +1126,7 @@ impl NativeApp {
             );
             let mut area = area;
             area.take_left(PANEL_GAP);
-            if ui.key(Key::Char('.'), Modifiers::CTRL_SHIFT) {
+            if shortcuts::SNIPPETS.pressed(ui) {
                 self.snippet_panel = match self.snippet_panel.take() {
                     Some(_) => None,
                     None => Some(String::new()),
@@ -1199,9 +1245,9 @@ impl NativeApp {
                     path.as_ref()
                         .map_or(0.0, |path| view.draw(ui, rect, (sync, vault, &pace, path)))
                 };
-                let account: Option<screens::AccountCard<'_>> =
+                let account: Option<settings::AccountCard<'_>> =
                     self.vault_path.is_some().then_some(&mut draw);
-                let (changed, height) = screens::settings(
+                let (changed, height) = self.settings_view.draw(
                     ui,
                     content,
                     (&mut self.settings, &self.profiles),

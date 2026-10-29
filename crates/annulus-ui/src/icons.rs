@@ -234,6 +234,25 @@ icons! {
     CHEVRON_UP = 37, "chevron-up", [Move(4.0, 10.0), Line(8.0, 6.0), Line(12.0, 10.0)];
     /// Back.
     CHEVRON_LEFT = 49, "chevron-left", [Move(10.0, 4.0), Line(6.0, 8.0), Line(10.0, 12.0)];
+    /// Appearance: a sun.
+    SUN = 50, "sun", [
+        Circle(8.0, 8.0, 3.0),
+        Move(8.0, 1.75), Line(8.0, 2.75), Move(8.0, 13.25), Line(8.0, 14.25),
+        Move(1.75, 8.0), Line(2.75, 8.0), Move(13.25, 8.0), Line(14.25, 8.0),
+        Move(3.6, 3.6), Line(4.3, 4.3), Move(11.7, 11.7), Line(12.4, 12.4),
+        Move(12.4, 3.6), Line(11.7, 4.3), Move(4.3, 11.7), Line(3.6, 12.4),
+    ];
+    /// Keyboard shortcuts.
+    KEYBOARD = 51, "keyboard", [
+        Move(1.75, 4.0), Line(14.25, 4.0), Line(14.25, 12.0), Line(1.75, 12.0), Close,
+        Dot(4.5, 6.75, 0.6), Dot(7.0, 6.75, 0.6), Dot(9.5, 6.75, 0.6), Dot(12.0, 6.75, 0.6),
+        Move(5.0, 9.5), Line(11.0, 9.5),
+    ];
+    /// Sessions and time.
+    CLOCK = 52, "clock", [
+        Circle(8.0, 8.0, 5.75),
+        Move(8.0, 4.75), Line(8.0, 8.0), Line(10.5, 9.5),
+    ];
     /// This device: a local vault.
     DEVICE = 36, "device", [
         Move(2.0, 2.75), Line(14.0, 2.75), Line(14.0, 10.75), Line(2.0, 10.75), Close,

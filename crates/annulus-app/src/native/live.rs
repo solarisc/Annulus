@@ -277,15 +277,15 @@ impl LiveTerminal {
         self.sent.clear();
         for typed in ui.take_typed() {
             match typed {
-                Typed::Key(Key::Char('c'), modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
+                Typed::Key(key, modifiers) if super::shortcuts::COPY.is(key, modifiers) => {
                     if let Some(text) = session.selection_text() {
                         ui.copy(text);
                     }
                 }
-                Typed::Key(Key::Char('f'), modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
+                Typed::Key(key, modifiers) if super::shortcuts::FIND.is(key, modifiers) => {
                     self.find.get_or_insert_with(FindBar::default).focus = true;
                 }
-                Typed::Key(Key::Backspace, modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
+                Typed::Key(key, modifiers) if super::shortcuts::CLEAR.is(key, modifiers) => {
                     session.clear_scrollback();
                 }
                 // Each line would run as it arrives: ask first, and send nothing typed after it

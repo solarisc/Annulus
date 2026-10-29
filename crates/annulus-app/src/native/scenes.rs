@@ -775,6 +775,55 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
+        name: "settings-terminal",
+        width: 1100,
+        height: 760,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Click("Terminal")],
+    },
+    Scene {
+        name: "settings-shortcuts",
+        width: 1100,
+        height: 900,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Click("Shortcuts")],
+    },
+    Scene {
+        name: "settings-shortcuts-search",
+        width: 1000,
+        height: 640,
+        scale: 1.25,
+        populated: true,
+        setup: settings,
+        acts: &[
+            Act::Click("Shortcuts"),
+            Act::Click("Search shortcuts"),
+            Act::Type("tab"),
+        ],
+    },
+    Scene {
+        name: "settings-sessions-narrow",
+        width: 820,
+        height: 600,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Click("Sessions")],
+    },
+    Scene {
+        name: "settings-about",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Click("About")],
+    },
+    Scene {
         name: "settings-account",
         width: 1100,
         height: 800,
@@ -1745,7 +1794,7 @@ fn connect_all_opens_every_host_directly_in_the_group() {
     let opened: Vec<(&str, Option<OpenTab>)> = app
         .tabs
         .iter()
-        .skip(1)
+        .skip(super::FIXED_TABS)
         .map(|tab| (tab.title.as_str(), tab.origin.clone()))
         .collect();
     let expected: Vec<(&str, Option<OpenTab>)> = ["api-1", "api-2", "worker-1"]

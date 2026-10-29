@@ -709,7 +709,7 @@ impl HostsView {
                 Kind::Primary,
             )
             .clicked
-            || ui.key(Key::Char('n'), Modifiers::CTRL_SHIFT)
+            || super::shortcuts::NEW_HOST.pressed(ui)
         {
             self.new_host(vault);
         }
@@ -1336,7 +1336,7 @@ impl HostsView {
         if ui
             .button(Id::new("editor.save"), save, "Save", None, Kind::Primary)
             .clicked
-            || ui.key(Key::Char('s'), Modifiers::CTRL)
+            || super::shortcuts::SAVE.pressed(ui)
         {
             let current = vault.hosts().iter().find(|host| host.id == editor.host.id);
             match editor.merged(current) {

@@ -318,7 +318,9 @@ impl StartView {
                         base.with(("row", index, &row.title)),
                         Motion::SLOW.staggered(index),
                     );
-                    ui.push_layer(Layer::fade(enter).shifted(0.0, 8.0 * (1.0 - enter)));
+                    // Grown in place, never slid: a row never covers its neighbour, even when a
+                    // search moves it.
+                    ui.push_layer(Layer::appear(enter, place.center(), 0.94, 0.0));
                     let highlighted = index == self.highlight;
                     match draw_row(ui, base, place, row, highlighted) {
                         RowEvent::Chosen => chosen = Some(row.choice.clone()),
@@ -446,14 +448,15 @@ fn empty(ui: &mut Ui<'_>, rect: Rect, line: &str) {
 mod tests {
     use super::*;
 
-    fn hosts() -> Vec<Host> {
-        let vault = super::super::demo::fixture_vault("start-listing", true);
+    /// The demo hosts, from a vault in a folder of `name`'s own (tests run side by side).
+    fn hosts(name: &str) -> Vec<Host> {
+        let vault = super::super::demo::fixture_vault(name, true);
         vault.hosts().to_vec()
     }
 
     #[test]
     fn recent_connections_come_first_then_the_newest_saved_hosts_fill_the_room() {
-        let hosts = hosts();
+        let hosts = hosts("start-room");
         let id = |label: &str| hosts.iter().find(|host| host.label == label).unwrap().id;
         let recent = [
             Recent {
@@ -484,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_search_lists_every_match_and_at_most_six_recent() {
-        let hosts = hosts();
+        let hosts = hosts("start-search");
         let recent: Vec<Recent> = hosts
             .iter()
             .enumerate()
