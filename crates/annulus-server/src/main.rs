@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use annulus_server::{Server, Signups, router};
+use annulus_server::{Server, Signups, service};
 
 /// Options of `serve`.
 struct Serve {
@@ -124,7 +124,7 @@ fn serve(options: Serve) -> Result<(), String> {
     let server = Arc::new(Server::open(&options.data, options.signups).map_err(|e| e.to_string())?);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async move {
-        let app = router(server).into_make_service();
+        let app = service(server);
         let _ = writeln!(
             std::io::stderr(),
             "annulus-server listening on {} ({})",

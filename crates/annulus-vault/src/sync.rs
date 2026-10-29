@@ -275,7 +275,12 @@ impl SyncCopy {
             kind::FORWARD => {
                 let rule = self.forwards.iter().find(|rule| rule.id == entry.local)?;
                 let synced = SyncedForward {
-                    rule: rule.clone(),
+                    // Auto-start is this device's choice (a rule listening on 0.0.0.0 should
+                    // not start everywhere), so it never syncs.
+                    rule: PortForward {
+                        auto_start: false,
+                        ..rule.clone()
+                    },
                     host: self
                         .state
                         .id_of(kind::HOST, rule.host_id)
@@ -380,6 +385,11 @@ impl SyncCopy {
                 };
                 let mut rule = synced.rule;
                 rule.id = existing.unwrap_or_else(|| next_id(self.forwards.iter().map(|r| r.id)));
+                rule.auto_start = self
+                    .forwards
+                    .iter()
+                    .find(|local| local.id == rule.id)
+                    .is_some_and(|local| local.auto_start);
                 // The host's local id here; 0 shows as "(host deleted)" until it arrives.
                 rule.host_id = synced
                     .host
@@ -488,6 +498,30 @@ mod tests {
         );
         assert_eq!(copy.forwards[0].host_id, copy.hosts[0].id);
         assert_eq!(copy.state.entries["rule-sync-id"].awaits, None);
+    }
+
+    #[test]
+    fn auto_start_stays_on_the_device_that_set_it() {
+        let mut copy = copy();
+        let mut mine = PortForward::new(1, 0);
+        mine.auto_start = true;
+        copy.forwards.push(mine);
+        copy.state.touch(kind::FORWARD, 1, false).unwrap();
+        let (_, body) = copy.pending()[0].content.clone().unwrap();
+        let sent: SyncedForward = serde_json::from_slice(&body).unwrap();
+        assert!(!sent.rule.auto_start, "never sent");
+
+        // An edit from elsewhere keeps this device's choice.
+        let id = copy.pending()[0].id.clone();
+        let mut incoming = sent;
+        incoming.rule.label = "renamed".into();
+        copy.apply(
+            &id,
+            5,
+            Some((kind::FORWARD, 99, serde_json::to_vec(&incoming).unwrap())),
+        );
+        assert_eq!(copy.forwards[0].label, "renamed");
+        assert!(copy.forwards[0].auto_start);
     }
 
     #[test]

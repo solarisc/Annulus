@@ -70,7 +70,7 @@ impl Auth for Direct<'_> {
 
     fn login_start(&mut self, request: &LoginStart) -> Result<LoginStartResponse, SyncError> {
         self.server
-            .login_start(request)
+            .login_start(request, None)
             .map_err(|error| transport(&error))
     }
 
@@ -354,7 +354,7 @@ fn http_server() -> String {
         runtime.block_on(async move {
             listener.set_nonblocking(true).unwrap();
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, annulus_server::router(server))
+            axum::serve(listener, annulus_server::service(server))
                 .await
                 .unwrap();
         });

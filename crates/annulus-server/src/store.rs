@@ -1,6 +1,7 @@
 //! Accounts, devices and records in one SQLite file, and the OPAQUE server side.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -20,8 +21,16 @@ use annulus_proto::{
 /// Versions kept per record besides the current one (ADR-0008 history).
 const HISTORY: i64 = 20;
 
-/// Failed logins per account before it is paused.
-const MAX_FAILURES: u32 = 5;
+/// Failed logins per account before it is paused. Higher than the per-address limit, so
+/// one guesser cannot lock a user out.
+const MAX_ACCOUNT_FAILURES: u32 = 10;
+
+/// Failed logins per client address before it is paused.
+const MAX_ADDRESS_FAILURES: u32 = 5;
+
+/// Most names and addresses tracked for throttling, and most logins in progress; beyond
+/// that, new ones are refused instead of growing memory.
+const MAX_TRACKED: usize = 10_000;
 
 /// How long failed logins count, and how long a paused account waits.
 const FAILURE_WINDOW: Duration = Duration::from_mins(15);
@@ -72,6 +81,7 @@ fn bad(what: &str) -> impl Fn(opaque_ke::errors::ProtocolError) -> ServerError +
 /// A login between its two steps.
 struct PendingLogin {
     account: String,
+    address: Option<IpAddr>,
     state: ServerLogin<Suite>,
     started: Instant,
 }
@@ -295,19 +305,41 @@ impl Server {
         })
     }
 
-    fn throttled(&self, account: &str) -> bool {
+    fn keys(account: &str, address: Option<IpAddr>) -> [(Option<String>, u32); 2] {
+        [
+            (Some(format!("account {account}")), MAX_ACCOUNT_FAILURES),
+            (
+                address.map(|ip| format!("address {ip}")),
+                MAX_ADDRESS_FAILURES,
+            ),
+        ]
+    }
+
+    fn throttled(&self, account: &str, address: Option<IpAddr>) -> bool {
         self.failures.lock().is_ok_and(|failures| {
-            failures.get(account).is_some_and(|(count, since)| {
-                *count >= MAX_FAILURES && since.elapsed() < FAILURE_WINDOW
+            Self::keys(account, address).iter().any(|(key, limit)| {
+                key.as_ref()
+                    .and_then(|key| failures.get(key))
+                    .is_some_and(|(count, since)| {
+                        *count >= *limit && since.elapsed() < FAILURE_WINDOW
+                    })
             })
         })
     }
 
-    fn record_failure(&self, account: &str) {
-        if let Ok(mut failures) = self.failures.lock() {
-            let entry = failures
-                .entry(account.to_owned())
-                .or_insert((0, Instant::now()));
+    fn record_failure(&self, account: &str, address: Option<IpAddr>) {
+        let Ok(mut failures) = self.failures.lock() else {
+            return;
+        };
+        if failures.len() >= MAX_TRACKED {
+            failures.retain(|_, (_, since)| since.elapsed() < FAILURE_WINDOW);
+        }
+        for (key, _) in Self::keys(account, address) {
+            let Some(key) = key else { continue };
+            if failures.len() >= MAX_TRACKED && !failures.contains_key(&key) {
+                continue;
+            }
+            let entry = failures.entry(key).or_insert((0, Instant::now()));
             if entry.1.elapsed() >= FAILURE_WINDOW {
                 *entry = (0, Instant::now());
             }
@@ -315,13 +347,18 @@ impl Server {
         }
     }
 
-    /// Login step 1. Unknown accounts get a response that looks the same as a real one.
+    /// Login step 1 from `address` (the client, if known). Unknown accounts get a response
+    /// that looks the same as a real one.
     ///
     /// # Errors
-    /// The account is throttled, or the request is malformed.
-    pub fn login_start(&self, request: &LoginStart) -> Result<LoginStartResponse, ServerError> {
+    /// The account or address is throttled, or the request is malformed.
+    pub fn login_start(
+        &self,
+        request: &LoginStart,
+        address: Option<IpAddr>,
+    ) -> Result<LoginStartResponse, ServerError> {
         let account = request.account.trim().to_owned();
-        if self.throttled(&account) {
+        if self.throttled(&account, address) {
             return Err(ServerError::Throttled);
         }
         let stored: Option<Vec<u8>> = self
@@ -350,10 +387,14 @@ impl Server {
         let login = random_u64()?;
         if let Ok(mut logins) = self.logins.lock() {
             logins.retain(|_, pending| pending.started.elapsed() < LOGIN_TIMEOUT);
+            if logins.len() >= MAX_TRACKED {
+                return Err(ServerError::Throttled);
+            }
             logins.insert(
                 login,
                 PendingLogin {
                     account,
+                    address,
                     state: result.state,
                     started: Instant::now(),
                 },
@@ -386,7 +427,7 @@ impl Server {
             .finish(finalization, ServerLoginParameters::default())
             .is_err()
         {
-            self.record_failure(&pending.account);
+            self.record_failure(&pending.account, pending.address);
             return Err(FAILED);
         }
         let db = self.db()?;

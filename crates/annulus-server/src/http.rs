@@ -1,11 +1,13 @@
 //! HTTP in front of [`Server`]: postcard bodies, the protocol version header, and bearer
 //! device tokens.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{RawQuery, State};
+use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
+use axum::extract::{ConnectInfo, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,8 +20,30 @@ use annulus_proto::{
 
 use crate::store::{Caller, Server, ServerError};
 
+/// The HTTP API over `server`, ready to serve: handlers see the client's address.
+pub fn service(server: Arc<Server>) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+    router(server).into_make_service_with_connect_info::<SocketAddr>()
+}
+
+/// The client's address: the connection's, or the first `X-Forwarded-For` entry when the
+/// connection comes from a proxy on this machine or a private network (Caddy, nginx, a
+/// container network). A client on the internet cannot pick its own address this way.
+fn client_address(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+    let from_proxy = match peer.ip() {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xFE00) == 0xFC00,
+    };
+    from_proxy
+        .then(|| headers.get("X-Forwarded-For"))
+        .flatten()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .and_then(|first| first.trim().parse().ok())
+        .unwrap_or(peer.ip())
+}
+
 /// The HTTP API over `server`.
-pub fn router(server: Arc<Server>) -> Router {
+fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route(path::HEALTH, get(|| async { "ok" }))
         .route(path::REGISTER_START, post(register_start))
@@ -118,11 +142,12 @@ async fn register_finish(
 
 async fn login_start(
     State(server): State<Arc<Server>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     match read::<LoginStart>(&headers, &body) {
-        Ok(request) => reply(server.login_start(&request)),
+        Ok(request) => reply(server.login_start(&request, Some(client_address(peer, &headers)))),
         Err(response) => *response,
     }
 }
@@ -185,5 +210,24 @@ async fn revoke(State(server): State<Arc<Server>>, headers: HeaderMap, body: Byt
     match decode::<Revoke>(&body) {
         Ok(request) => reply(server.revoke(caller, request.device)),
         Err(error) => failure(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwarded_addresses_are_trusted_only_from_a_local_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", "203.0.113.9, 10.0.0.1".parse().unwrap());
+        let proxy = SocketAddr::from(([172, 18, 0, 2], 40000));
+        let internet = SocketAddr::from(([198, 51, 100, 4], 40000));
+        assert_eq!(
+            client_address(proxy, &headers),
+            IpAddr::from([203, 0, 113, 9])
+        );
+        assert_eq!(client_address(internet, &headers), internet.ip());
+        assert_eq!(client_address(proxy, &HeaderMap::new()), proxy.ip());
     }
 }

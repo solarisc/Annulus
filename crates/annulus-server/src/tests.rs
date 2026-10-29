@@ -60,12 +60,24 @@ fn login(
     account: &str,
     password: &str,
 ) -> Result<annulus_proto::Session, ServerError> {
+    login_from(server, account, password, None)
+}
+
+fn login_from(
+    server: &Server,
+    account: &str,
+    password: &str,
+    address: Option<std::net::IpAddr>,
+) -> Result<annulus_proto::Session, ServerError> {
     let ksf = cheap();
     let start = ClientLogin::<Suite>::start(&mut OsRng, password.as_bytes()).unwrap();
-    let response = server.login_start(&LoginStart {
-        account: account.into(),
-        request: start.message.serialize().to_vec(),
-    })?;
+    let response = server.login_start(
+        &LoginStart {
+            account: account.into(),
+            request: start.message.serialize().to_vec(),
+        },
+        address,
+    )?;
     // A wrong password already fails on the client: it cannot open the envelope. Send a
     // garbage finalization then, as an attacker would.
     let finalization = start
@@ -125,11 +137,29 @@ fn wrong_passwords_and_unknown_accounts_fail_the_same_way_then_throttle() {
         .to_string();
     let unknown = login(&server, "bob", "anything").unwrap_err().to_string();
     assert_eq!(wrong, unknown);
-    for _ in 0..4 {
-        let _ = login(&server, "ana", "battery staple");
+    // One address guessing is stopped after 5 tries, without locking the account for
+    // everyone else.
+    let guesser = Some(std::net::IpAddr::from([203, 0, 113, 7]));
+    for _ in 0..5 {
+        let _ = login_from(&server, "ana", "battery staple", guesser);
     }
     assert!(matches!(
-        login(&server, "ana", "correct horse"),
+        login_from(&server, "ana", "correct horse", guesser),
+        Err(ServerError::Throttled)
+    ));
+    let owner = Some(std::net::IpAddr::from([198, 51, 100, 1]));
+    assert!(login_from(&server, "ana", "correct horse", owner).is_ok());
+    // Many addresses together still pause the account.
+    for last in 0..10u8 {
+        let _ = login_from(
+            &server,
+            "ana",
+            "battery staple",
+            Some(std::net::IpAddr::from([192, 0, 2, last])),
+        );
+    }
+    assert!(matches!(
+        login_from(&server, "ana", "correct horse", owner),
         Err(ServerError::Throttled)
     ));
 }
