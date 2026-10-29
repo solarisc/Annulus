@@ -775,6 +775,42 @@ mod tests {
     }
 
     #[test]
+    fn secrets_never_show_in_debug_output() {
+        let hop = Hop {
+            target: Target {
+                host: "db".into(),
+                port: 22,
+                user: "me".into(),
+            },
+            password: Some(Password::new("hunter2-password")),
+            identity: Some(Password::new(
+                "-----BEGIN OPENSSH PRIVATE KEY----- secret-key",
+            )),
+            proxy: Some(Password::new("socks5://me:proxy-secret@10.0.0.1:1080")),
+        };
+        let program = Program::Ssh {
+            target: hop.target.clone(),
+            files: SshFiles {
+                known_hosts: PathBuf::from("known_hosts"),
+                key_dir: None,
+            },
+            password: hop.password.clone(),
+            identity: hop.identity.clone(),
+            via: vec![hop.clone()],
+            proxy: hop.proxy.clone(),
+            reconnect: true,
+            env: Vec::new(),
+            startup: None,
+        };
+        // A panic message or a log line made from these must not carry a secret (F-SEC-006).
+        for text in [format!("{hop:?}"), format!("{program:?}")] {
+            for secret in ["hunter2-password", "secret-key", "proxy-secret"] {
+                assert!(!text.contains(secret), "{secret} leaked: {text}");
+            }
+        }
+    }
+
+    #[test]
     fn system_ssh_targets_become_arguments() {
         assert_eq!(
             args(&Program::system_ssh("admin@prod-db")),

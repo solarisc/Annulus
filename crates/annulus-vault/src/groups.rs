@@ -214,6 +214,25 @@ mod tests {
     }
 
     #[test]
+    fn keys_and_group_proxies_never_show_in_debug_output() {
+        let key = crate::keychain::SshKey {
+            id: 1,
+            label: "work".into(),
+            private: Secret::new("-----BEGIN OPENSSH PRIVATE KEY----- private-bits"),
+            public: "ssh-ed25519 AAAA".into(),
+            fingerprint: "SHA256:x".into(),
+        };
+        let mut prod = group("prod", None, Defaults::default());
+        prod.defaults.proxy = Some(Secret::new("http://me:proxy-pass@proxy:8080"));
+        let text = format!("{key:?} {prod:?}");
+        assert!(
+            !text.contains("private-bits") && !text.contains("proxy-pass"),
+            "{text}"
+        );
+        assert!(text.contains("work"), "the rest still shows");
+    }
+
+    #[test]
     fn unset_fields_inherit_from_the_nearest_group_that_sets_them() {
         let (resolved, sources) = resolve(&host_in("db"), &tree());
         assert_eq!(resolved.username, "postgres");
