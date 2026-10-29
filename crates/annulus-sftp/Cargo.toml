@@ -16,3 +16,7 @@ russh-sftp.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 annulus-ssh = { path = "../annulus-ssh" }
+
+[dev-dependencies]
+tokio.workspace = true
+zeroize.workspace = true
