@@ -11,6 +11,7 @@ pub mod palette;
 pub mod select;
 pub mod snapshot;
 pub mod themes;
+pub mod transcript;
 
 pub use alacritty_terminal;
 use alacritty_terminal::event::VoidListener;

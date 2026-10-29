@@ -25,6 +25,9 @@ pub struct Settings {
     pub default_profile: Option<String>,
     /// The terminal color theme, by name.
     pub terminal_theme: String,
+    /// Save each finished session's text as a log (F-LOG-001). Off by default, since output
+    /// can contain secrets.
+    pub record_logs: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +38,7 @@ impl Default for Settings {
             auto_lock_minutes: 15,
             default_profile: None,
             terminal_theme: "Annulus Dark".into(),
+            record_logs: false,
         }
     }
 }
@@ -81,6 +85,7 @@ mod tests {
             auto_lock_minutes: 5,
             default_profile: Some("PowerShell 7".into()),
             terminal_theme: "Solarized Dark".into(),
+            record_logs: true,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

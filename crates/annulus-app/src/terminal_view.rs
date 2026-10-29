@@ -30,6 +30,8 @@ pub struct TerminalTab {
     focused_once: bool,
     dialogs: SshDialogs,
     find: Option<FindBar>,
+    /// The text of a session that ended here, waiting to be saved as a log.
+    finished: Option<String>,
 }
 
 impl TerminalTab {
@@ -46,6 +48,7 @@ impl TerminalTab {
             focused_once: false,
             dialogs: SshDialogs::default(),
             find: None,
+            finished: None,
         }
     }
 
@@ -59,7 +62,10 @@ impl TerminalTab {
         for event in events {
             match event {
                 SessionEvent::Title(title) if !title.trim().is_empty() => self.title = title,
-                SessionEvent::Exited => self.exited = true,
+                SessionEvent::Exited => {
+                    self.exited = true;
+                    self.finished = self.transcript();
+                }
                 // A bell asks for attention (the taskbar flashes) instead of making a sound.
                 SessionEvent::Bell => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
@@ -195,6 +201,20 @@ impl TerminalTab {
         if self.exited {
             paint_ended(ui, area.min, cell, size.rows, font);
         }
+    }
+
+    /// The session's text so far, if it has any.
+    #[must_use]
+    pub fn transcript(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .map(Session::transcript)
+            .filter(|text| !text.trim().is_empty())
+    }
+
+    /// The text of a session that ended, once: the caller saves it as a log.
+    pub fn take_finished(&mut self) -> Option<String> {
+        self.finished.take()
     }
 
     /// Gives this pane the keyboard on its next frame.

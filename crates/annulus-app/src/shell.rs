@@ -1,7 +1,7 @@
 //! The window's layout (UI-SPEC §1–2): a top tab strip with the Vault tab first, the vault's
 //! left navigation and the screen for the chosen section, and terminal tabs.
 
-use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
+use eframe::egui::{self, Align, Layout, Sense, Ui};
 use annulus_config::tokens::{Appearance, Palette, ThemeMode, space, text};
 use annulus_session::{Program, SshFiles};
 use annulus_ui::{icons, theme};
@@ -12,6 +12,7 @@ use crate::hosts_screen::{HostsScreen, Request};
 use crate::keychain_screen::KeychainScreen;
 use crate::known_hosts_screen::KnownHostsScreen;
 use crate::lock_screen::LockScreen;
+use crate::logs_screen::LogsScreen;
 use crate::panes::{Layout as PaneLayout, Panes};
 use crate::password_screen::PasswordScreen;
 use crate::sftp_view::SftpTab;
@@ -124,6 +125,8 @@ pub struct Shell {
     snippets: SnippetsScreen,
     /// The Known Hosts screen.
     known_hosts: KnownHostsScreen,
+    /// The Logs screen.
+    logs: LogsScreen,
     /// Changing the master password, in Settings.
     password: PasswordScreen,
     /// The snippet panel beside terminals is open (Ctrl+Shift+.), and its search text.
@@ -146,6 +149,8 @@ pub struct Shell {
     default_profile: Option<String>,
     /// The terminal color theme, by name (F-TERM-013).
     terminal_theme: String,
+    /// Save finished sessions as logs (F-LOG-001).
+    record_logs: bool,
 }
 
 /// The device settings' file name in the data folder.
@@ -170,6 +175,7 @@ impl Shell {
             keychain: KeychainScreen::default(),
             snippets: SnippetsScreen::default(),
             known_hosts: KnownHostsScreen::default(),
+            logs: LogsScreen::default(),
             password: PasswordScreen::default(),
             snippet_panel: None,
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
@@ -182,6 +188,7 @@ impl Shell {
             applied: None,
             default_profile: settings.default_profile.clone(),
             terminal_theme: settings.terminal_theme.clone(),
+            record_logs: settings.record_logs,
             saved: settings,
             profiles: profiles::detect(),
         }
@@ -250,6 +257,7 @@ impl Shell {
             auto_lock_minutes: self.auto_lock_minutes,
             default_profile: self.default_profile.clone(),
             terminal_theme: self.terminal_theme.clone(),
+            record_logs: self.record_logs,
         }
     }
 
@@ -302,9 +310,53 @@ impl Shell {
         if index == 0 || index >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(index);
+        if let Tab::Terminal(mut panes) = self.tabs.remove(index) {
+            let texts: Vec<(String, String)> = panes
+                .all_mut()
+                .filter_map(|pane| {
+                    Some((
+                        pane.title.clone(),
+                        pane.take_finished().or_else(|| pane.transcript())?,
+                    ))
+                })
+                .collect();
+            for (title, text) in texts {
+                self.save_log(&title, &text);
+            }
+        }
         if self.active_tab >= index {
             self.active_tab = self.active_tab.saturating_sub(1).min(self.tabs.len() - 1);
+        }
+    }
+
+    /// Saves a session's text as a log, when logging is on and the vault is open.
+    fn save_log(&mut self, title: &str, text: &str) {
+        if !self.record_logs {
+            return;
+        }
+        if let Some(hosts) = &mut self.hosts {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            // A failed save leaves the vault as it was; the session text is not critical data.
+            let _ = hosts.vault_mut().add_log(title, text, now);
+        }
+    }
+
+    /// Saves the logs of sessions that ended since the last frame.
+    fn collect_logs(&mut self) {
+        let mut finished = Vec::new();
+        for tab in &mut self.tabs {
+            if let Tab::Terminal(panes) = tab {
+                for pane in panes.all_mut() {
+                    if let Some(text) = pane.take_finished() {
+                        finished.push((pane.title.clone(), text));
+                    }
+                }
+            }
+        }
+        for (title, text) in finished {
+            self.save_log(&title, &text);
         }
     }
 
@@ -328,6 +380,7 @@ impl Shell {
     /// Draws the window.
     pub fn ui(&mut self, ui: &mut Ui) {
         self.persist();
+        self.collect_logs();
         self.apply_theme(&ui.ctx().clone());
         // Ctrl+Shift+/-/0 zoom the terminal, not the whole UI.
         ui.ctx()
@@ -438,10 +491,22 @@ impl Shell {
         }
         if close_tab {
             // A split tab closes its focused pane first.
+            let mut text = None;
             let closed_pane = match self.tabs.get_mut(self.active_tab) {
-                Some(Tab::Terminal(panes)) => panes.close_focused(),
+                Some(Tab::Terminal(panes)) if panes.len() > 1 => {
+                    text = panes.focused_mut().and_then(|pane| {
+                        Some((
+                            pane.title.clone(),
+                            pane.take_finished().or_else(|| pane.transcript())?,
+                        ))
+                    });
+                    panes.close_focused()
+                }
                 _ => false,
             };
+            if let Some((title, text)) = text {
+                self.save_log(&title, &text);
+            }
             if !closed_pane {
                 self.close_tab(self.active_tab);
             }
@@ -626,12 +691,15 @@ impl Shell {
                 }
             }
             Section::Settings => self.settings(ui),
-            Section::Logs => empty_state(
-                ui,
-                Section::Logs.title(),
-                "Session logs are not recorded yet.",
-                &self.palette(),
-            ),
+            Section::Logs => {
+                let palette = self.palette();
+                let recording = self.record_logs;
+                if let Some(hosts) = &mut self.hosts {
+                    self.logs.ui(ui, &palette, hosts.vault_mut(), recording);
+                } else {
+                    self.section = Section::Hosts;
+                }
+            }
         }
     }
 
@@ -687,6 +755,9 @@ impl Shell {
                 }
             });
         ui.add_space(space::M);
+        ui.checkbox(&mut self.record_logs, "Save session logs")
+            .on_hover_text("Keeps the text of each finished session (last 5 per host), encrypted in the vault. Output can contain secrets.");
+        ui.add_space(space::M);
         ui.label("New local terminals open");
         let current = self
             .default_profile()
@@ -718,19 +789,6 @@ impl Shell {
 /// Whether `idle` seconds have reached the `timeout`.
 fn idle_expired(idle: f64, timeout: f64) -> bool {
     idle >= timeout
-}
-
-fn empty_state(ui: &mut Ui, title: &str, detail: &str, palette: &Palette) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() / 4.0);
-        ui.label(
-            RichText::new(title)
-                .size(text::TITLE)
-                .color(theme::color(palette.text_primary)),
-        );
-        ui.add_space(space::S);
-        ui.label(RichText::new(detail).color(theme::color(palette.text_secondary)));
-    });
 }
 
 #[cfg(test)]

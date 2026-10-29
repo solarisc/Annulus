@@ -15,6 +15,7 @@ use crate::crypto::{CryptoError, Keys, Sealed};
 use crate::forwards::PortForward;
 use crate::hosts::{Host, Secret};
 use crate::keychain::SshKey;
+use crate::logs::SessionLog;
 use crate::snippets::Snippet;
 
 /// Entity kinds inside synced records.
@@ -27,6 +28,8 @@ pub mod kind {
     pub const KEY: u8 = 3;
     /// A snippet.
     pub const SNIPPET: u8 = 4;
+    /// A session log.
+    pub const LOG: u8 = 5;
 }
 
 /// The record kind (bound into the encryption) of envelopes sent to the server.
@@ -227,6 +230,7 @@ pub struct SyncCopy {
     pub(crate) forwards: Vec<PortForward>,
     pub(crate) ssh_keys: Vec<SshKey>,
     pub(crate) snippets: Vec<Snippet>,
+    pub(crate) logs: Vec<SessionLog>,
     pub(crate) state: SyncState,
     pub(crate) generation: u64,
 }
@@ -323,6 +327,10 @@ impl SyncCopy {
             kind::SNIPPET => {
                 let snippet = self.snippets.iter().find(|s| s.id == entry.local)?;
                 serde_json::to_vec(snippet).ok()
+            }
+            kind::LOG => {
+                let log = self.logs.iter().find(|log| log.id == entry.local)?;
+                serde_json::to_vec(log).ok()
             }
             kind::FORWARD => {
                 let rule = self.forwards.iter().find(|rule| rule.id == entry.local)?;
@@ -423,6 +431,7 @@ impl SyncCopy {
             kind::FORWARD => "Port forward",
             kind::KEY => "Key",
             kind::SNIPPET => "Snippet",
+            kind::LOG => "Session log",
             _ => "Item",
         };
         format!("{what} {name}")
@@ -511,7 +520,7 @@ impl SyncCopy {
                 );
                 local
             }
-            kind::KEY | kind::SNIPPET => match self.take_plain(kind, existing, &body) {
+            kind::KEY | kind::SNIPPET | kind::LOG => match self.take_plain(kind, existing, &body) {
                 Some(local) => local,
                 None => return,
             },
@@ -543,6 +552,7 @@ impl SyncCopy {
                 kind::FORWARD => self.forwards.retain(|rule| rule.id != entry.local),
                 kind::KEY => self.ssh_keys.retain(|key| key.id != entry.local),
                 kind::SNIPPET => self.snippets.retain(|s| s.id != entry.local),
+                kind::LOG => self.logs.retain(|log| log.id != entry.local),
                 _ => {}
             }
             entry.deleted = true;
@@ -578,6 +588,18 @@ impl SyncCopy {
                     |s| s.id,
                     |s| s.label.to_lowercase(),
                 );
+                Some(local)
+            }
+            kind::LOG => {
+                let mut log = serde_json::from_slice::<SessionLog>(body).ok()?;
+                log.id = existing.unwrap_or_else(|| next_id(self.logs.iter().map(|l| l.id)));
+                let local = log.id;
+                match self.logs.iter_mut().find(|l| l.id == local) {
+                    Some(slot) => *slot = log,
+                    None => self.logs.push(log),
+                }
+                self.logs
+                    .sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then(b.id.cmp(&a.id)));
                 Some(local)
             }
             _ => None,
@@ -642,6 +664,7 @@ mod tests {
             forwards: Vec::new(),
             ssh_keys: Vec::new(),
             snippets: Vec::new(),
+            logs: Vec::new(),
             state: SyncState::new().unwrap(),
             generation: 0,
         }

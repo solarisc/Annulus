@@ -529,6 +529,12 @@ impl Session {
         links::link_at(&self.term.lock(), row, column)
     }
 
+    /// The whole text of the session, scrollback included, for a session log.
+    #[must_use]
+    pub fn transcript(&self) -> String {
+        annulus_term::transcript::transcript(&self.term.lock())
+    }
+
     /// Draws with `palette` from now on (a theme change in Settings).
     pub fn set_palette(&mut self, palette: &Palette) {
         if &self.palette != palette {
