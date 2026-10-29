@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod hosts_screen;
 mod shell;
 mod terminal_view;
 
@@ -23,7 +24,17 @@ impl eframe::App for AnnulusApp {
     }
 }
 
+/// Where saved data lives: the OS's per-user data folder (ADR-0007 §Data locations), or the
+/// working directory if the OS reports none.
+fn data_dir() -> std::path::PathBuf {
+    directories::ProjectDirs::from("", "", "Annulus").map_or_else(
+        || std::path::PathBuf::from("annulus-data"),
+        |dirs| dirs.data_dir().to_path_buf(),
+    )
+}
+
 fn main() -> ExitCode {
+    let data_dir = data_dir();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Annulus")
@@ -36,7 +47,7 @@ fn main() -> ExitCode {
         options,
         Box::new(|_| {
             Ok(Box::new(AnnulusApp {
-                shell: shell::Shell::default(),
+                shell: shell::Shell::new(&data_dir),
             }))
         }),
     );

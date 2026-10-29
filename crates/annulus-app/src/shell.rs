@@ -1,11 +1,12 @@
 //! The window's layout (UI-SPEC §1–2): a top tab strip with the Vault tab first, the vault's
 //! left navigation and the screen for the chosen section, and terminal tabs.
 
-use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
+use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Appearance, Palette, ThemeMode, space, text};
 use annulus_session::Program;
 use annulus_ui::{icons, theme};
 
+use crate::hosts_screen::{HostsScreen, Request};
 use crate::terminal_view::TerminalTab;
 
 /// A section of the vault's left navigation (F-APP-003).
@@ -95,19 +96,21 @@ pub struct Shell {
     pub section: Section,
     /// The light/dark choice from Settings.
     pub theme_mode: ThemeMode,
-    /// Text of the search / quick-connect field on the Hosts screen.
-    pub search: String,
+    /// The Hosts screen.
+    pub hosts: HostsScreen,
     applied: Option<Appearance>,
 }
 
-impl Default for Shell {
-    fn default() -> Self {
+impl Shell {
+    /// A window whose saved data lives in `data_dir`.
+    #[must_use]
+    pub fn new(data_dir: &std::path::Path) -> Self {
         Self {
             tabs: vec![Tab::Vault],
             active_tab: 0,
             section: Section::Hosts,
             theme_mode: ThemeMode::System,
-            search: String::new(),
+            hosts: HostsScreen::open(data_dir.join("hosts.json")),
             applied: None,
         }
     }
@@ -283,7 +286,12 @@ impl Shell {
     fn section_screen(&mut self, ui: &mut Ui) {
         ui.add_space(space::S);
         match self.section {
-            Section::Hosts => self.hosts(ui),
+            Section::Hosts => {
+                let palette = self.palette();
+                if let Some(Request::Open(title, program)) = self.hosts.ui(ui, &palette) {
+                    self.open_terminal(title, program);
+                }
+            }
             Section::Settings => self.settings(ui),
             other => empty_state(
                 ui,
@@ -292,44 +300,6 @@ impl Shell {
                 &self.palette(),
             ),
         }
-    }
-
-    fn hosts(&mut self, ui: &mut Ui) {
-        let mut open: Option<(String, Program)> = None;
-        ui.horizontal(|ui| {
-            let field = egui::TextEdit::singleline(&mut self.search)
-                .hint_text("Search hosts or type user@host:port to connect")
-                .desired_width(420.0);
-            let response = ui.add(field);
-            let submitted =
-                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let connect = ui
-                .add_enabled(!self.search.trim().is_empty(), Button::new("Connect"))
-                .clicked();
-            if (submitted || connect) && !self.search.trim().is_empty() {
-                let target = self.search.trim().to_owned();
-                self.search.clear();
-                open = Some((target.clone(), Program::ssh(&target)));
-            }
-            if ui.button("Local terminal").clicked() {
-                open = Some(("Local".to_owned(), Program::DefaultShell));
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let _ = ui
-                    .add_enabled(false, Button::new("New host"))
-                    .on_disabled_hover_text("Arrives with the vault.");
-            });
-        });
-        if let Some((title, program)) = open {
-            self.open_terminal(title, program);
-        }
-        ui.add_space(space::L);
-        empty_state(
-            ui,
-            "No hosts yet",
-            "Type user@host:port above to connect with your system's ssh, or open a local terminal. Saved hosts arrive with the vault.",
-            &self.palette(),
-        );
     }
 
     fn settings(&mut self, ui: &mut Ui) {
@@ -365,13 +335,17 @@ fn empty_state(ui: &mut Ui, title: &str, detail: &str, palette: &Palette) {
 mod tests {
     use super::*;
 
+    fn test_shell() -> Shell {
+        Shell::new(&std::env::temp_dir().join(format!("annulus-shell-test-{}", std::process::id())))
+    }
+
     fn titles(shell: &Shell) -> Vec<&str> {
         shell.tabs.iter().map(Tab::title).collect()
     }
 
     #[test]
     fn the_vault_tab_cannot_be_closed_and_closing_moves_focus_left() {
-        let mut shell = Shell::default();
+        let mut shell = test_shell();
         shell.open_terminal("a", Program::DefaultShell);
         shell.open_terminal("b", Program::DefaultShell);
         shell.close_tab(0);
@@ -384,7 +358,7 @@ mod tests {
 
     #[test]
     fn closing_a_background_tab_keeps_the_front_tab() {
-        let mut shell = Shell::default();
+        let mut shell = test_shell();
         shell.open_terminal("a", Program::DefaultShell);
         shell.open_terminal("b", Program::DefaultShell);
         shell.active_tab = 2;

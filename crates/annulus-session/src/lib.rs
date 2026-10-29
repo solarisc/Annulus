@@ -95,7 +95,6 @@ struct Listener {
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         match event {
-            Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
             Event::Title(title) => {
                 let _ = self.events.send(SessionEvent::Title(title));
             }
@@ -113,7 +112,8 @@ impl EventListener for Listener {
                     let _ = pty.send(Msg::Input(Cow::Owned(reply.into_bytes())));
                 }
             }
-            // OSC 52 clipboard and other requests are ignored until F-TERM settings gate them.
+            // Wake-ups only need the repaint below. OSC 52 clipboard and other requests are
+            // ignored until F-TERM settings gate them.
             _ => {}
         }
         (self.wake)();
@@ -231,6 +231,7 @@ impl Session {
     }
 
     /// Events since the last call.
+    #[must_use]
     pub fn take_events(&self) -> Vec<SessionEvent> {
         self.events.try_iter().collect()
     }
