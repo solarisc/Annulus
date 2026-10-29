@@ -1,7 +1,7 @@
 //! The window's layout (UI-SPEC §1–2): a top tab strip with the Vault tab first, the vault's
 //! left navigation and the screen for the chosen section, and terminal tabs.
 
-use eframe::egui::{self, Align, Layout, Sense, Ui};
+use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Appearance, Palette, ThemeMode, space, text};
 use annulus_session::{Program, SshFiles};
 use annulus_ui::{icons, theme};
@@ -17,7 +17,7 @@ use crate::panes::{Layout as PaneLayout, Panes};
 use crate::password_screen::PasswordScreen;
 use crate::sftp_view::SftpTab;
 use crate::snippets_screen::{self, SnippetsScreen};
-use crate::sync_screen::SyncScreen;
+use crate::sync_screen::{self, Pill, SyncScreen};
 use crate::terminal_view::{FONT_SIZES, PaneRequest, TabStatus};
 use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
 use annulus_session::profiles::{self, Profile};
@@ -579,6 +579,7 @@ impl Shell {
     }
 
     fn tab_strip(&mut self, ui: &mut Ui) {
+        let mut open_settings = false;
         let mut close = None;
         let mut select = None;
         let mut new_local: Option<Option<usize>> = None;
@@ -616,7 +617,28 @@ impl Shell {
             })
             .response
             .on_hover_text("Open a terminal with another shell");
+            if let Some((state, words)) = self.sync_pill() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let color = match state {
+                        Pill::Synced | Pill::Waiting => palette.text_secondary,
+                        Pill::Failed => palette.status_error,
+                    };
+                    let pill = ui
+                        .add(
+                            egui::Button::new(RichText::new(words).color(theme::color(color)))
+                                .frame(false),
+                        )
+                        .on_hover_text("Account and sync settings");
+                    if pill.clicked() {
+                        open_settings = true;
+                    }
+                });
+            }
         });
+        if open_settings {
+            self.active_tab = 0;
+            self.section = Section::Settings;
+        }
         if let Some(index) = select {
             self.active_tab = index;
         }
@@ -626,6 +648,21 @@ impl Shell {
         if let Some(profile) = new_local {
             self.open_local(profile);
         }
+    }
+
+    /// The sync pill's state and words, while the vault is signed in to an account.
+    fn sync_pill(&self) -> Option<(Pill, String)> {
+        let state = self.hosts.as_ref()?.vault().sync_state();
+        state.account.as_ref()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        Some(sync_screen::pill(
+            state.last_synced,
+            state.pending_count(),
+            self.sync.round_failed(),
+            now,
+        ))
     }
 
     fn navigation(&mut self, ui: &mut Ui) {

@@ -70,6 +70,33 @@ pub struct SyncScreen {
     dirty_since: Option<f64>,
     /// The thread that waits for changes from other devices (live sync).
     watcher: Option<Watcher>,
+    /// The last sync round failed (it retries); shown in the status pill.
+    round_failed: bool,
+}
+
+/// How sync is doing, for the pill in the tab strip (F-SYNC-004).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pill {
+    /// Everything is on the server.
+    Synced,
+    /// Changes are waiting to be pushed, or nothing synced yet.
+    Waiting,
+    /// The last round failed.
+    Failed,
+}
+
+/// The pill's state and words for a signed-in vault: when it last synced, how many
+/// changes wait, and whether the last round failed. `now` is seconds since the epoch.
+#[must_use]
+pub fn pill(last_synced: u64, pending: usize, failed: bool, now: u64) -> (Pill, String) {
+    if failed {
+        return (Pill::Failed, "Sync failed, retrying".into());
+    }
+    match (last_synced, pending) {
+        (0, _) => (Pill::Waiting, "Not synced yet".into()),
+        (then, 0) => (Pill::Synced, format!("Synced {}", ago(then, now))),
+        (_, n) => (Pill::Waiting, format!("{n} to sync")),
+    }
 }
 
 /// Waits on the server for changes from other devices and flags them, so a round runs at
@@ -137,6 +164,7 @@ impl Default for SyncScreen {
             last_round: f64::NEG_INFINITY,
             dirty_since: None,
             watcher: None,
+            round_failed: false,
         }
     }
 }
@@ -159,6 +187,12 @@ fn ago(then: u64, now: u64) -> String {
 }
 
 impl SyncScreen {
+    /// Whether the last sync round failed.
+    #[must_use]
+    pub fn round_failed(&self) -> bool {
+        self.round_failed
+    }
+
     fn start(
         &mut self,
         ctx: &egui::Context,
@@ -261,6 +295,7 @@ impl SyncScreen {
             }
             Done::Synced(copy, result) => match result {
                 Ok(report) => {
+                    self.round_failed = false;
                     let mut copy = *copy;
                     copy.mark_synced();
                     // A local edit since the snapshot: drop this result, the next round redoes it.
@@ -284,6 +319,7 @@ impl SyncScreen {
                     ));
                 }
                 Err(error) => {
+                    self.round_failed = true;
                     self.message = Some((
                         true,
                         format!("Sync failed: {error}. It retries automatically."),
@@ -756,6 +792,24 @@ fn run_round(account: &SyncAccount, copy: SyncCopy) -> Done {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pill_says_synced_waiting_or_failed() {
+        let now = 10_000;
+        assert_eq!(
+            pill(now - 120, 0, false, now),
+            (Pill::Synced, "Synced 2 min ago".into())
+        );
+        assert_eq!(
+            pill(now - 120, 3, false, now),
+            (Pill::Waiting, "3 to sync".into())
+        );
+        assert_eq!(
+            pill(0, 0, false, now),
+            (Pill::Waiting, "Not synced yet".into())
+        );
+        assert_eq!(pill(now, 0, true, now).0, Pill::Failed);
+    }
 
     #[test]
     fn last_synced_reads_in_plain_words() {
