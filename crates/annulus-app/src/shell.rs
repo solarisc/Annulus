@@ -245,6 +245,20 @@ impl Shell {
         self.active_tab = 0;
     }
 
+    /// Opens one tab with a pane for each `(title, program)` (a multi-host snippet run).
+    fn open_panes(&mut self, panes: snippets_screen::Panes) {
+        let mut list = panes.into_iter();
+        let Some((title, program)) = list.next() else {
+            return;
+        };
+        let mut tab = Panes::single(title, program);
+        for (title, program) in list {
+            tab.split(PaneLayout::Row, title, program);
+        }
+        self.tabs.push(Tab::Terminal(Box::new(tab)));
+        self.active_tab = self.tabs.len() - 1;
+    }
+
     /// Marks the tab in front as opened for `origin`.
     fn set_origin(&mut self, origin: OpenTab) {
         if let Some(Tab::Terminal(panes)) = self.tabs.get_mut(self.active_tab) {
@@ -829,7 +843,9 @@ impl Shell {
             Section::Snippets => {
                 let palette = self.palette();
                 if let Some(hosts) = &mut self.hosts {
-                    self.snippets.ui(ui, &palette, hosts.vault_mut());
+                    if let Some(panes) = self.snippets.ui(ui, &palette, hosts) {
+                        self.open_panes(panes);
+                    }
                 } else {
                     self.section = Section::Hosts;
                 }

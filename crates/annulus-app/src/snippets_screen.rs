@@ -1,11 +1,35 @@
-//! Snippets (F-SNIP-001…003): the Snippets screen to write and organize saved commands,
-//! and the panel beside a terminal (Ctrl+Shift+.) to run or paste one.
+//! Snippets (F-SNIP-001…004): the Snippets screen to write and organize saved commands,
+//! the panel beside a terminal (Ctrl+Shift+.) to run or paste one, and running one on
+//! several saved hosts at once, a pane each.
 
 use eframe::egui::{self, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
+use annulus_session::Program;
 use annulus_ui::theme;
 use annulus_vault::snippets::Snippet;
 use annulus_vault::vault::Vault;
+
+use crate::hosts_screen::HostsScreen;
+
+/// Panes one multi-host run opens at most.
+pub const MAX_TARGETS: usize = 16;
+
+/// Tabs to open: a title and a program for each pane.
+pub type Panes = Vec<(String, Program)>;
+
+/// `program` with `script` typed once its shell opens, after the host's own startup
+/// command if it has one. Programs that are not Annulus SSH sessions are left alone.
+#[must_use]
+pub fn with_script(mut program: Program, script: &str) -> Program {
+    if let Program::Ssh { startup, .. } = &mut program {
+        let lines: Vec<&str> = [startup.as_deref().unwrap_or_default(), script.trim_end()]
+            .into_iter()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        *startup = Some(lines.join("\n"));
+    }
+    program
+}
 
 /// The Snippets screen's state.
 #[derive(Default)]
@@ -14,17 +38,94 @@ pub struct SnippetsScreen {
     editor: Option<Snippet>,
     confirm_delete: Option<u64>,
     error: Option<String>,
+    /// Running a snippet on hosts: its id and the hosts ticked so far.
+    targets: Option<(u64, Vec<u64>)>,
 }
 
 impl SnippetsScreen {
-    /// Draws the screen.
-    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, vault: &mut Vault) {
+    /// Draws the screen; returns the panes of a multi-host run to open in a new tab.
+    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut HostsScreen) -> Option<Panes> {
+        let mut run = None;
         if self.editor.is_some() {
             egui::Panel::right("snippet-editor")
                 .resizable(true)
                 .default_size(380.0)
-                .show(ui, |ui| self.editor_ui(ui, vault));
+                .show(ui, |ui| self.editor_ui(ui, hosts.vault_mut()));
+        } else if self.targets.is_some() {
+            run = egui::Panel::right("snippet-targets")
+                .resizable(true)
+                .default_size(320.0)
+                .show(ui, |ui| self.targets_ui(ui, hosts))
+                .inner;
         }
+        self.list_ui(ui, palette, hosts.vault_mut());
+        run
+    }
+
+    /// Ticking hosts for a run; returns the panes once Run is pressed.
+    fn targets_ui(&mut self, ui: &mut Ui, hosts: &HostsScreen) -> Option<Panes> {
+        let (snippet_id, chosen) = self.targets.as_mut()?;
+        let Some(snippet) = hosts
+            .vault()
+            .snippets()
+            .iter()
+            .find(|snippet| snippet.id == *snippet_id)
+            .cloned()
+        else {
+            self.targets = None;
+            return None;
+        };
+        ui.add_space(space::M);
+        ui.heading(format!("Run {} on", snippet.label));
+        ui.label(format!(
+            "Each host opens in a pane of one tab (up to {MAX_TARGETS})."
+        ));
+        ui.add_space(space::S);
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for host in hosts.vault().hosts() {
+                    let mut on = chosen.contains(&host.id);
+                    let room = on || chosen.len() < MAX_TARGETS;
+                    if ui
+                        .add_enabled(room, egui::Checkbox::new(&mut on, &host.label))
+                        .changed()
+                    {
+                        if on {
+                            chosen.push(host.id);
+                        } else {
+                            chosen.retain(|id| *id != host.id);
+                        }
+                    }
+                }
+            });
+        let (mut go, mut cancel) = (false, false);
+        ui.horizontal(|ui| {
+            go = ui
+                .add_enabled(!chosen.is_empty(), egui::Button::new("Run"))
+                .clicked();
+            cancel = ui.button("Cancel").clicked();
+        });
+        if cancel {
+            self.targets = None;
+            return None;
+        }
+        if !go {
+            return None;
+        }
+        let panes = chosen
+            .iter()
+            .filter_map(|id| hosts.vault().hosts().iter().find(|host| host.id == *id))
+            .map(|host| {
+                let program = with_script(hosts.connect_host(host), &snippet.script);
+                (host.label.clone(), program)
+            })
+            .collect();
+        self.targets = None;
+        Some(panes)
+    }
+
+    fn list_ui(&mut self, ui: &mut Ui, palette: &Palette, vault: &mut Vault) {
         ui.add_space(space::S);
         ui.horizontal(|ui| {
             ui.add(
@@ -95,6 +196,13 @@ impl SnippetsScreen {
                 }
                 if ui.button("Edit").clicked() {
                     self.editor = Some(snippet.clone());
+                }
+                if ui
+                    .button("Run on hosts\u{2026}")
+                    .on_hover_text("Open the chosen hosts in one tab and run it in each")
+                    .clicked()
+                {
+                    self.targets = Some((snippet.id, Vec::new()));
                 }
             });
         });
@@ -186,4 +294,47 @@ pub fn side_panel(
         }
     });
     chosen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_snippet_runs_after_the_hosts_own_startup_command() {
+        let ssh = |startup: Option<&str>| Program::Ssh {
+            target: annulus_session::Target {
+                host: "web".into(),
+                port: 22,
+                user: "me".into(),
+            },
+            files: annulus_session::SshFiles {
+                known_hosts: std::path::PathBuf::from("known_hosts"),
+                key_dir: None,
+            },
+            password: None,
+            identity: None,
+            via: Vec::new(),
+            proxy: None,
+            reconnect: true,
+            env: Vec::new(),
+            startup: startup.map(Into::into),
+        };
+        let startup = |program: Program| match program {
+            Program::Ssh { startup, .. } => startup,
+            _ => None,
+        };
+        assert_eq!(
+            startup(with_script(ssh(None), "df -h\n")).as_deref(),
+            Some("df -h")
+        );
+        assert_eq!(
+            startup(with_script(ssh(Some("cd /srv")), "ls")).as_deref(),
+            Some("cd /srv\nls")
+        );
+        assert_eq!(
+            with_script(Program::DefaultShell, "ls"),
+            Program::DefaultShell
+        );
+    }
 }
