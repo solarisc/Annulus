@@ -206,7 +206,7 @@ pub struct NativeApp {
     account: account::AccountView,
     account_h: f32,
     /// When input last arrived, on the window's clock (auto-lock).
-    last_input: f64,
+    last_input: Option<f64>,
     next_uid: u64,
 }
 
@@ -251,7 +251,7 @@ impl NativeApp {
             sync: crate::sync_screen::SyncScreen::default(),
             account: account::AccountView::default(),
             account_h: 0.0,
-            last_input: 0.0,
+            last_input: None,
             next_uid: 1,
         }
     }
@@ -314,6 +314,14 @@ impl NativeApp {
                 OpenTab::Local(name) => self.open_profile(Some(name.as_str())),
                 OpenTab::Host(id) => self.pending_hosts.push(*id),
             }
+        }
+    }
+
+    /// Reopens the last run's tabs when Settings ask for it (F-APP-008).
+    pub fn restore(&mut self) {
+        if self.settings.restore_tabs {
+            let tabs = self.settings.open_tabs.clone();
+            self.reopen(&tabs);
         }
     }
 
@@ -456,7 +464,6 @@ impl NativeApp {
     }
 
     fn palette_frame(&mut self, ui: &mut Ui<'_>) {
-        use crate::command_palette::Action;
         if self.palette.is_none() {
             return;
         }
@@ -468,6 +475,12 @@ impl NativeApp {
         let palette::Outcome::Run(action) = outcome else {
             return;
         };
+        self.run_action(action);
+    }
+
+    /// Does what the palette's chosen line says.
+    fn run_action(&mut self, action: crate::command_palette::Action) {
+        use crate::command_palette::Action;
         match action {
             Action::QuickConnect(target) => self.act(hosts::HostsAction::QuickConnect(target)),
             Action::Connect(id) => self.act(hosts::HostsAction::Connect(id)),
@@ -624,8 +637,8 @@ impl NativeApp {
     /// What runs every frame whatever is shown: sync rounds and auto-lock (F-SEC-004).
     fn background(&mut self, ui: &mut Ui<'_>) {
         let now = ui.time();
-        if ui.had_input() || self.last_input == 0.0 {
-            self.last_input = now;
+        if ui.had_input() || self.last_input.is_none() {
+            self.last_input = Some(now);
         }
         // Tabs not on screen keep their dots current and reconnect dropped sessions.
         let active = self.active;
@@ -666,7 +679,7 @@ impl NativeApp {
         let minutes = self.settings.auto_lock_minutes;
         if minutes > 0 {
             let timeout = f64::from(minutes) * 60.0;
-            let idle = now - self.last_input;
+            let idle = now - self.last_input.unwrap_or(now);
             if idle >= timeout {
                 self.lock_vault();
             } else {
@@ -1089,10 +1102,7 @@ pub fn run_native(light: bool, data_dir: &std::path::Path) -> Result<(), WindowE
     let settings_path = data_dir.join("settings.json");
     app.settings = Settings::load(&settings_path);
     app.settings_path = Some(settings_path);
-    if app.settings.restore_tabs {
-        let tabs = app.settings.open_tabs.clone();
-        app.reopen(&tabs);
-    }
+    app.restore();
     let _ = std::fs::create_dir_all(data_dir);
     run(
         "Annulus",

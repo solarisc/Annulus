@@ -1223,26 +1223,133 @@ fn closing_a_tab_saves_its_log_only_when_logging_is_on() {
 }
 
 #[test]
-fn open_tabs_are_remembered_and_reopened_at_the_next_start() {
+fn tabs_are_listed_for_the_next_launch_and_host_tabs_wait_for_the_vault() {
     let mut app = NativeApp::new(Some(fixture_vault("restore", true)));
     app.settings.restore_tabs = true;
     let host = app.vault.as_ref().unwrap().hosts()[0].id;
     app.act(super::hosts::HostsAction::Connect(host));
+    // A tab with no origin to reopen it from is not listed.
+    app.push_terminal("plain", TermView::Replay(Box::new(super::demo::terminal())));
     let mut state = UiState::default();
     drive(&mut app, &mut state, &[], 0.0);
-    assert!(
-        app.settings
-            .open_tabs
-            .contains(&annulus_config::settings::OpenTab::Host(host))
+    assert_eq!(
+        app.settings.open_tabs,
+        [annulus_config::settings::OpenTab::Host(host)]
     );
     // The next start: a host tab waits for the vault, then reconnects.
     let mut next = NativeApp::new(None);
-    let tabs = app.settings.open_tabs.clone();
-    next.reopen(&tabs);
+    next.settings = app.settings.clone();
+    next.restore();
     assert_eq!(next.pending_hosts, [host]);
     next.vault = app.vault.take();
     drive(&mut next, &mut state, &[], 1.0);
     drive(&mut next, &mut state, &[], 2.0);
     assert_eq!(next.pending_hosts, Vec::<u64>::new());
     assert_eq!(next.tabs.len(), 2, "the host's tab is open again");
+    assert_eq!(next.active, 1);
+    // With the setting off, nothing comes back.
+    let mut off = NativeApp::new(None);
+    off.settings = next.settings.clone();
+    off.settings.restore_tabs = false;
+    off.restore();
+    assert!(off.pending_hosts.is_empty() && off.opens.is_empty());
+}
+
+fn replay(app: &mut NativeApp, title: &str) {
+    app.push_terminal(title, TermView::Replay(Box::new(super::demo::terminal())));
+}
+
+fn titles(app: &NativeApp) -> Vec<&str> {
+    app.tabs.iter().map(|tab| tab.title.as_str()).collect()
+}
+
+#[test]
+fn the_palette_lists_tabs_and_commands_and_runs_them() {
+    use crate::command_palette::Action;
+    let mut app = NativeApp::new(None);
+    replay(&mut app, "build");
+    app.active = 0;
+    let items = app.palette_items();
+    let kinds: Vec<(&str, &str)> = items
+        .iter()
+        .map(|item| (item.label.as_str(), item.kind))
+        .collect();
+    assert_eq!(
+        kinds[0],
+        ("build", "Tab"),
+        "locked: no hosts, the tabs come first"
+    );
+    assert!(kinds.contains(&("Settings", "Command")));
+    app.run_action(Action::Tab(1));
+    assert_eq!(app.active, 1);
+    app.run_action(Action::Settings);
+    assert_eq!((app.active, app.section), (0, super::Section::Settings));
+    app.run_action(Action::NewLocal);
+    assert_eq!(app.opens.len(), 1, "a local shell opens after this frame");
+}
+
+#[test]
+fn the_vault_tab_cannot_be_closed_and_closing_moves_focus_left() {
+    let mut app = NativeApp::new(None);
+    replay(&mut app, "a");
+    replay(&mut app, "b");
+    app.close_tab(0);
+    assert_eq!(app.tabs.len(), 3);
+    app.close_tab(2);
+    assert_eq!((app.tabs.len(), app.active), (2, 1));
+    app.close_tab(1);
+    assert_eq!((titles(&app), app.active), (vec!["Vault"], 0));
+}
+
+#[test]
+fn closing_a_background_tab_keeps_the_front_tab() {
+    let mut app = NativeApp::new(None);
+    replay(&mut app, "a");
+    replay(&mut app, "b");
+    app.active = 2;
+    app.close_tab(1);
+    assert_eq!(app.tabs[app.active].title, "b");
+}
+
+#[test]
+fn idle_time_at_or_past_the_timeout_locks() {
+    let mut app = NativeApp::new(Some(fixture_vault("idle", false)));
+    app.settings.auto_lock_minutes = 1;
+    let mut state = UiState::default();
+    // The clock may start at zero: that first frame still counts as the last input.
+    drive(&mut app, &mut state, &[], 0.0);
+    drive(&mut app, &mut state, &[], 59.5);
+    assert!(app.vault.is_some(), "a minute has not passed");
+    drive(&mut app, &mut state, &[], 60.0);
+    assert!(app.vault.is_none(), "idle for the whole minute: locked");
+}
+
+#[test]
+fn locking_drops_the_unlocked_hosts() {
+    let mut app = NativeApp::new(Some(fixture_vault("lock-drops", true)));
+    if let Some(vault) = &app.vault {
+        let id = vault.hosts()[0].id;
+        app.hosts.edit_host(vault, id);
+    }
+    assert!(app.hosts.editor.is_some());
+    app.lock_vault();
+    assert!(app.vault.is_none());
+    assert!(
+        app.hosts.editor.is_none(),
+        "the editor's draft (and password) went too"
+    );
+}
+
+#[test]
+fn settings_is_last_so_it_sits_at_the_bottom() {
+    assert!(!super::Section::MAIN.contains(&super::Section::Settings));
+    let mut app = NativeApp::new(Some(fixture_vault("nav", false)));
+    let mut state = UiState::default();
+    let output = drive(&mut app, &mut state, &[], 0.0);
+    let logs = zone_center(&output.zones, "Logs");
+    let settings = zone_center(&output.zones, "Settings");
+    assert!(
+        settings.y > logs.y && settings.y > 800.0 - 60.0,
+        "{settings:?}"
+    );
 }
