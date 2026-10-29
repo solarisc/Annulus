@@ -300,6 +300,10 @@ fn every_widget_has_a_role_and_an_accessible_name() {
         Box::new(Label::new("Hosts")),
         Box::new(Tooltip::new("Copy ssh command")),
         Box::new(Modal::new("Add host")),
+        Box::new(Banner::new(
+            "Sync paused: server unreachable",
+            Severity::Warning,
+        )),
     ];
     for widget in &widgets {
         assert_ne!(widget.role(), Role::Group, "{}", widget.name());

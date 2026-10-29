@@ -44,6 +44,8 @@ pub enum Role {
     Tooltip,
     /// A modal dialog.
     Dialog,
+    /// An important message announced when it appears.
+    Alert,
 }
 
 /// What the tree knows about a node when it is painted.
