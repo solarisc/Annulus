@@ -437,16 +437,34 @@ async fn a_jump_host_carries_the_connection() {
 
 #[tokio::test]
 #[ignore = "needs the test servers"]
-async fn generated_keychain_keys_of_every_kind_log_in_once_installed() {
+async fn generated_keys_of_every_kind_install_once_and_log_in() {
     let env = env();
     let admin = with_key(&env, &env.vm2, "keychain-admin").await;
     for kind in annulus_ssh::keys::KeyKind::ALL {
         let key = annulus_ssh::keys::generate(kind, "annulus-e2e").unwrap();
-        run(
-            &admin,
-            &format!("echo '{}' >> ~/.ssh/authorized_keys", key.public),
-        )
-        .await;
+        // Installed the way the keychain's "Install on host" does it, twice: one line.
+        for _ in 0..2 {
+            let exec = admin
+                .exec(&annulus_ssh::keys::install_command(&key.public))
+                .await
+                .unwrap();
+            assert_eq!(
+                exec.status,
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&exec.output)
+            );
+        }
+        let check = admin
+            .exec("grep -c annulus-e2e ~/.ssh/authorized_keys; stat -c %a ~/.ssh/authorized_keys")
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&check.output),
+            "1
+600
+"
+        );
         let answers = trusting(None);
         let connection = connect(
             &target(&env.vm2, &env.user),

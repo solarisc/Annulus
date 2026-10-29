@@ -19,6 +19,7 @@ mod sftp_view;
 mod shell;
 mod snippets_screen;
 mod ssh_dialogs;
+mod ssh_task;
 mod sync_screen;
 mod terminal_view;
 

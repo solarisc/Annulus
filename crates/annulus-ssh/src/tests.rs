@@ -195,6 +195,20 @@ impl server::Handler for TestServer {
         session.data(channel, b"welcome\r\n".to_vec())
     }
 
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channels.lock().unwrap().remove(&channel);
+        session.channel_success(channel)?;
+        session.data(channel, [b"ran: ", data].concat())?;
+        session.exit_status_request(channel, 3)?;
+        session.eof(channel)?;
+        session.close(channel)
+    }
+
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
@@ -344,6 +358,24 @@ async fn end_of(shell: &mut crate::Shell) -> Output {
             end => return end,
         }
     }
+}
+
+#[tokio::test]
+async fn exec_returns_the_output_and_the_exit_status() {
+    let port = serve(new_key()).await;
+    let script = Script::new(true, &["secret"]);
+    let connection = connect(
+        &target(port, "alice"),
+        &known_hosts("exec"),
+        None,
+        &[],
+        script,
+    )
+    .await
+    .unwrap();
+    let exec = connection.exec("uptime").await.unwrap();
+    assert_eq!(exec.output, b"ran: uptime");
+    assert_eq!(exec.status, Some(3));
 }
 
 #[tokio::test]

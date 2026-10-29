@@ -485,6 +485,28 @@ impl Connection {
         })
     }
 
+    /// Runs `command` without a PTY and collects what it printed (stdout and stderr) and
+    /// its exit status. Only for an action the user asked for, such as installing a key
+    /// (F-SSH-011: no hidden exec channels).
+    ///
+    /// # Errors
+    /// The server refused the channel or the command.
+    pub async fn exec(&self, command: &str) -> Result<Exec, SshError> {
+        let mut channel = self.handle.channel_open_session().await?;
+        channel.exec(true, command).await?;
+        let mut exec = Exec::default();
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
+                    exec.output.extend_from_slice(&data);
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => exec.status = Some(exit_status),
+                Some(ChannelMsg::Close) | None => return Ok(exec),
+                Some(_) => {}
+            }
+        }
+    }
+
     /// Opens the `sftp` subsystem and returns its byte stream, for `annulus-sftp`.
     ///
     /// # Errors
@@ -496,6 +518,15 @@ impl Connection {
         channel.request_subsystem(true, "sftp").await?;
         Ok(channel.into_stream())
     }
+}
+
+/// How a command run with [`Connection::exec`] ended.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Exec {
+    /// The exit status, if the server sent one.
+    pub status: Option<u32>,
+    /// Everything it printed.
+    pub output: Vec<u8>,
 }
 
 /// An interactive shell channel.

@@ -713,7 +713,7 @@ impl Shell {
             Section::Keychain => {
                 let palette = self.palette();
                 if let Some(hosts) = &mut self.hosts {
-                    self.keychain.ui(ui, &palette, hosts.vault_mut());
+                    self.keychain.ui(ui, &palette, hosts);
                 } else {
                     self.section = Section::Hosts;
                 }

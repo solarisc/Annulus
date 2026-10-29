@@ -1,6 +1,7 @@
 //! The Keychain screen (F-KEY-001…003): SSH keys kept in the vault. Generate an Ed25519
 //! key, import one by pasting it (with its passphrase if it has one), copy a public key for
-//! `authorized_keys`, and delete keys. Hosts pick a key in the host editor.
+//! `authorized_keys`, install it on a saved host (F-KEY-004), and delete keys. Hosts pick
+//! a key in the host editor.
 
 use eframe::egui::{self, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
@@ -10,6 +11,9 @@ use annulus_ui::theme;
 use annulus_vault::hosts::Secret;
 use annulus_vault::keychain::SshKey;
 use annulus_vault::vault::Vault;
+
+use crate::hosts_screen::HostsScreen;
+use crate::ssh_task::{Outcome, SshTask};
 
 /// What the form at the top is doing.
 #[derive(Default)]
@@ -33,6 +37,32 @@ pub struct KeychainScreen {
     form: Form,
     message: Option<(bool, String)>,
     confirm_delete: Option<u64>,
+    install: Option<Install>,
+}
+
+/// Installing a key's public half on a saved host (F-KEY-004).
+struct Install {
+    key_id: u64,
+    host_id: Option<u64>,
+    task: Option<SshTask>,
+}
+
+/// What an install's outcome means: done, or why not.
+fn install_result(outcome: Outcome) -> Result<(), String> {
+    let exec = outcome?;
+    if exec.status == Some(0) {
+        return Ok(());
+    }
+    let output = String::from_utf8_lossy(&exec.output).trim().to_owned();
+    Err(if output.is_empty() {
+        format!(
+            "The host could not add the key (exit status {}).",
+            exec.status
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+        )
+    } else {
+        format!("The host could not add the key: {output}")
+    })
 }
 
 /// The key as stored, from a generated or imported pair.
@@ -57,9 +87,32 @@ fn comment() -> String {
     format!("{user}@{computer}")
 }
 
+/// Sets the host to log in with `key` after it was installed there; the message to show.
+fn link_key(vault: &mut Vault, host_id: Option<u64>, key: &SshKey) -> String {
+    let Some(mut host) =
+        host_id.and_then(|id| vault.hosts().iter().find(|host| host.id == id).cloned())
+    else {
+        return format!("Installed {}.", key.label);
+    };
+    host.key_id = Some(key.id);
+    let label = host.label.clone();
+    match vault.upsert_host(host) {
+        Ok(()) => format!(
+            "Installed {} on {label}; it now logs in with this key.",
+            key.label
+        ),
+        Err(error) => format!(
+            "Installed {} on {label}, but could not save the host: {error}",
+            key.label
+        ),
+    }
+}
+
 impl KeychainScreen {
     /// Draws the screen.
-    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, vault: &mut Vault) {
+    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut HostsScreen) {
+        self.install_ui(ui, hosts);
+        let vault = hosts.vault_mut();
         ui.add_space(space::S);
         ui.horizontal(|ui| {
             if ui.button("Generate key").clicked() {
@@ -96,6 +149,79 @@ impl KeychainScreen {
             return;
         }
         self.list(ui, palette, vault);
+    }
+
+    /// The "Install on host" row: pick a host, then connect and add the key there. On
+    /// success the host is set to log in with the key.
+    fn install_ui(&mut self, ui: &mut Ui, hosts: &mut HostsScreen) {
+        let Some(install) = &mut self.install else {
+            return;
+        };
+        let Some(key) = hosts
+            .vault()
+            .ssh_keys()
+            .iter()
+            .find(|key| key.id == install.key_id)
+            .cloned()
+        else {
+            self.install = None;
+            return;
+        };
+        if let Some(task) = &mut install.task {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!("Installing {}\u{2026}", key.label));
+            });
+            if let Some(outcome) = task.poll(ui.ctx()) {
+                let host_id = install.host_id;
+                self.install = None;
+                self.message = Some(match install_result(outcome) {
+                    Ok(()) => (false, link_key(hosts.vault_mut(), host_id, &key)),
+                    Err(reason) => (true, reason),
+                });
+            }
+            return;
+        }
+        let choices: Vec<(u64, String)> = hosts
+            .vault()
+            .hosts()
+            .iter()
+            .map(|host| (host.id, host.label.clone()))
+            .collect();
+        let (mut start, mut cancel) = (false, false);
+        ui.add_space(space::S);
+        ui.horizontal(|ui| {
+            ui.label(format!("Install {} on", key.label));
+            let shown = install
+                .host_id
+                .and_then(|id| choices.iter().find(|(choice, _)| *choice == id))
+                .map_or("Choose a host", |(_, label)| label.as_str());
+            egui::ComboBox::from_id_salt("install-host")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (id, label) in &choices {
+                        ui.selectable_value(&mut install.host_id, Some(*id), label);
+                    }
+                });
+            start = ui
+                .add_enabled(install.host_id.is_some(), egui::Button::new("Install"))
+                .clicked();
+            cancel = ui.button("Cancel").clicked();
+        });
+        let host = install
+            .host_id
+            .and_then(|id| hosts.vault().hosts().iter().find(|host| host.id == id))
+            .cloned();
+        if cancel {
+            self.install = None;
+        } else if start && let Some(host) = host {
+            let ctx = ui.ctx().clone();
+            install.task = Some(SshTask::exec(
+                hosts.connect_host(&host),
+                keys::install_command(&key.public),
+                move || ctx.request_repaint(),
+            ));
+        }
     }
 
     fn form_ui(&mut self, ui: &mut Ui, vault: &mut Vault) {
@@ -222,6 +348,18 @@ impl KeychainScreen {
                     if ui.button("Delete").clicked() {
                         self.confirm_delete = Some(key.id);
                     }
+                    if ui
+                        .button("Install on host\u{2026}")
+                        .on_hover_text("Add the public key to a saved host's authorized_keys")
+                        .clicked()
+                    {
+                        self.install = Some(Install {
+                            key_id: key.id,
+                            host_id: None,
+                            task: None,
+                        });
+                        self.message = None;
+                    }
                     if ui.button("Copy public key").clicked() {
                         ui.ctx().copy_text(key.public.clone());
                         self.message =
@@ -237,6 +375,26 @@ impl KeychainScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_install_succeeds_only_on_exit_status_zero() {
+        let exec = |status, output: &[u8]| {
+            Ok(annulus_ssh::Exec {
+                status,
+                output: output.to_vec(),
+            })
+        };
+        assert_eq!(install_result(exec(Some(0), b"")), Ok(()));
+        assert_eq!(
+            install_result(exec(Some(1), b"touch: Read-only file system\n")),
+            Err("The host could not add the key: touch: Read-only file system".into())
+        );
+        assert_eq!(
+            install_result(exec(None, b"")),
+            Err("The host could not add the key (exit status unknown).".into())
+        );
+        assert_eq!(install_result(Err("refused".into())), Err("refused".into()));
+    }
 
     #[test]
     fn a_generated_key_is_stored_with_its_public_half_and_a_fresh_id() {

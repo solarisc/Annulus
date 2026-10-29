@@ -124,6 +124,24 @@ pub fn import(text: &str, passphrase: Option<&str>) -> Result<KeyPair, KeyError>
     })
 }
 
+/// The shell command that adds `public` (an `authorized_keys` line) to the remote
+/// `~/.ssh/authorized_keys` once, with the permissions sshd insists on (F-KEY-004). Running
+/// it again changes nothing.
+#[must_use]
+pub fn install_command(public: &str) -> String {
+    let line = public
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('\'', r"'\''");
+    let file = "~/.ssh/authorized_keys";
+    format!(
+        "umask 077 && mkdir -p ~/.ssh && touch {file} && chmod 700 ~/.ssh && chmod 600 {file} \
+         && {{ [ ! -s {file} ] || [ -z \"$(tail -c 1 {file})\" ] || echo >> {file}; }} \
+         && {{ grep -qxF '{line}' {file} || printf '%s\\n' '{line}' >> {file}; }}"
+    )
+}
+
 /// Decodes a stored private key for signing.
 pub(crate) fn decode(private: &str) -> Option<PrivateKey> {
     russh::keys::decode_secret_key(private, None).ok()
@@ -158,6 +176,17 @@ mod tests {
                 generated.public
             );
         }
+    }
+
+    #[test]
+    fn the_install_command_quotes_the_key_line() {
+        let command = install_command("ssh-ed25519 AAAA it's me\n");
+        assert!(
+            command.contains(r"'ssh-ed25519 AAAA it'\''s me'"),
+            "{command}"
+        );
+        assert!(command.contains("chmod 600 ~/.ssh/authorized_keys"));
+        assert!(command.contains("grep -qxF"), "only added when missing");
     }
 
     #[test]
