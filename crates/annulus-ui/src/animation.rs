@@ -186,6 +186,7 @@ mod tests {
 
     use super::*;
     use crate::display_list::DisplayList;
+    use crate::test_support::FixedAdvance;
     use crate::widget::{PaintCx, Widget};
 
     struct Blank;
@@ -195,7 +196,7 @@ mod tests {
             "blank"
         }
 
-        fn paint(&self, _cx: &PaintCx<'_>, _list: &mut DisplayList) {}
+        fn paint(&self, _cx: &mut PaintCx<'_>, _list: &mut DisplayList) {}
     }
 
     fn setup() -> (Tree, NodeId, Animator) {
@@ -267,7 +268,7 @@ mod tests {
     #[test]
     fn tick_marks_animated_nodes_for_repaint() {
         let (mut tree, node, mut animator) = setup();
-        tree.paint();
+        tree.paint(&mut FixedAdvance);
         animator.start(node, Property::Opacity, 0.0, 1.0, 100, Easing::Linear, 0);
         animator.tick(10, &mut tree);
         assert!(tree.dirty(node).unwrap().contains(Dirty::PAINT));

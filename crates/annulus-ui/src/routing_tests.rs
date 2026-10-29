@@ -35,7 +35,7 @@ impl Widget for Probe {
         self.tag
     }
 
-    fn paint(&self, _cx: &PaintCx<'_>, _list: &mut DisplayList) {}
+    fn paint(&self, _cx: &mut PaintCx<'_>, _list: &mut DisplayList) {}
 
     fn focusable(&self) -> bool {
         self.focusable
@@ -206,7 +206,7 @@ fn focus_ring_shows_after_keyboard_focus_but_not_after_a_click() {
     let button = f.add(root, "button", true, &[], height(20.0));
     f.tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
     let has_ring = |tree: &mut Tree| {
-        tree.paint()
+        tree.paint(&mut FixedAdvance)
             .ops()
             .iter()
             .any(|op| matches!(op, Op::Border { .. }))
@@ -303,7 +303,7 @@ impl Widget for Clicker {
         "clicker"
     }
 
-    fn paint(&self, _cx: &PaintCx<'_>, _list: &mut DisplayList) {}
+    fn paint(&self, _cx: &mut PaintCx<'_>, _list: &mut DisplayList) {}
 
     fn handle(&mut self, event: &Event, cx: &mut EventCx) -> Handled {
         match event {
@@ -355,7 +355,7 @@ fn hover_follows_the_pointer_and_repaints_what_it_leaves() {
         position: Point::new(5.0, 5.0),
     });
     assert_eq!(f.tree.hovered(), Some(a));
-    f.tree.paint();
+    f.tree.paint(&mut FixedAdvance);
     f.tree.dispatch(&Event::PointerMove {
         position: Point::new(5.0, 25.0),
     });

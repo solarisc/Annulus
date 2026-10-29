@@ -66,6 +66,8 @@ pub struct PaintCx<'a> {
     pub palette: &'a Palette,
     /// Hover, press and focus.
     pub state: WidgetState,
+    /// Measures text, e.g. to place a caret.
+    pub text: &'a mut dyn TextMeasure,
 }
 
 /// Something the user did to a widget, for the app's view models.
@@ -138,7 +140,7 @@ pub trait Widget {
     }
 
     /// Appends this widget's own drawing (not its children's).
-    fn paint(&self, cx: &PaintCx<'_>, list: &mut DisplayList);
+    fn paint(&self, cx: &mut PaintCx<'_>, list: &mut DisplayList);
 
     /// Whether Tab and clicks can focus this widget.
     fn focusable(&self) -> bool {

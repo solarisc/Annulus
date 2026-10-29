@@ -23,7 +23,7 @@ impl Widget for Leaf {
         self.0
     }
 
-    fn paint(&self, cx: &PaintCx<'_>, list: &mut DisplayList) {
+    fn paint(&self, cx: &mut PaintCx<'_>, list: &mut DisplayList) {
         list.push(Op::Rect {
             rect: cx.bounds,
             color: crate::geometry::Color::rgb(0, 0, 0),
@@ -377,7 +377,7 @@ fn scroll_container_clips_its_children_but_not_overlays() {
     ];
     let (mut tree, _) = build(parent, &children);
     tree.layout(Size::new(50.0, 50.0), &mut FixedAdvance);
-    let ops = tree.paint();
+    let ops = tree.paint(&mut FixedAdvance);
     let kinds: Vec<&str> = ops
         .ops()
         .iter()
@@ -395,7 +395,7 @@ fn scroll_container_clips_its_children_but_not_overlays() {
 fn unchanged_tree_and_viewport_relayout_nothing() {
     let (mut tree, _) = build(row(), &[(fixed(10.0, 10.0), NO_CONTENT)]);
     tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
-    tree.paint();
+    tree.paint(&mut FixedAdvance);
     tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
     assert!(tree.damage().is_empty());
     tree.layout(Size::new(120.0, 100.0), &mut FixedAdvance);

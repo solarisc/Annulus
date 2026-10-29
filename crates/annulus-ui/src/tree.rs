@@ -12,7 +12,7 @@ use crate::geometry::{Color, Rect};
 use annulus_config::tokens::{self, Palette, Rgb};
 
 use crate::style::Style;
-use crate::widget::{Action, PaintCx, Widget, WidgetState};
+use crate::widget::{Action, PaintCx, TextMeasure, Widget, WidgetState};
 
 /// A handle to a node. It stays valid until the node is removed, and never refers to another
 /// node afterwards.
@@ -343,14 +343,14 @@ impl Tree {
     ///
     /// Flow children paint in order, then overlay children above them. A scrolling node clips
     /// its children to its bounds.
-    pub fn paint(&mut self) -> DisplayList {
+    pub fn paint(&mut self, text: &mut dyn TextMeasure) -> DisplayList {
         let mut list = DisplayList::new();
-        self.paint_node(self.root, &mut list);
+        self.paint_node(self.root, &mut list, text);
         self.damage = Rect::default();
         list
     }
 
-    fn paint_node(&mut self, id: NodeId, list: &mut DisplayList) {
+    fn paint_node(&mut self, id: NodeId, list: &mut DisplayList, text: &mut dyn TextMeasure) {
         let Some(node) = self.node_mut(id) else {
             return;
         };
@@ -363,13 +363,14 @@ impl Tree {
             focused,
             focus_visible: focused && self.focus_visible,
         };
-        let cx = PaintCx {
+        let mut cx = PaintCx {
             bounds,
             palette: &self.palette,
             state,
+            text,
         };
         if let Some(node) = self.node(id) {
-            node.widget.paint(&cx, list);
+            node.widget.paint(&mut cx, list);
         }
         if state.focus_visible {
             list.push(focus_ring(bounds, self.palette.accent));
@@ -378,16 +379,16 @@ impl Tree {
         if clips {
             list.clip(bounds, |list| {
                 for child in flow {
-                    self.paint_node(child, list);
+                    self.paint_node(child, list, text);
                 }
             });
         } else {
             for child in flow {
-                self.paint_node(child, list);
+                self.paint_node(child, list, text);
             }
         }
         for child in overlays {
-            self.paint_node(child, list);
+            self.paint_node(child, list, text);
         }
     }
 
@@ -473,6 +474,7 @@ fn focus_ring(bounds: Rect, accent: Rgb) -> Op {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::FixedAdvance;
 
     /// Paints one rectangle whose color encodes `tag`, so tests can read paint order.
     struct Swatch(u8);
@@ -482,7 +484,7 @@ mod tests {
             "swatch"
         }
 
-        fn paint(&self, cx: &PaintCx<'_>, list: &mut DisplayList) {
+        fn paint(&self, cx: &mut PaintCx<'_>, list: &mut DisplayList) {
             list.push(Op::Rect {
                 rect: cx.bounds,
                 color: Color::rgb(self.0, 0, 0),
@@ -526,7 +528,7 @@ mod tests {
         tree.remove(a).unwrap();
         assert!(!tree.contains(a1));
         assert_eq!(tree.children(tree.root()), &[b]);
-        assert_eq!(painted_tags(&tree.paint()), [0, 3]);
+        assert_eq!(painted_tags(&tree.paint(&mut FixedAdvance)), [0, 3]);
     }
 
     #[test]
@@ -541,7 +543,7 @@ mod tests {
         let a = tree.append_child(tree.root(), swatch(1)).unwrap();
         tree.append_child(a, swatch(2)).unwrap();
         tree.append_child(tree.root(), swatch(3)).unwrap();
-        assert_eq!(painted_tags(&tree.paint()), [0, 1, 2, 3]);
+        assert_eq!(painted_tags(&tree.paint(&mut FixedAdvance)), [0, 1, 2, 3]);
     }
 
     #[test]
@@ -552,7 +554,7 @@ mod tests {
         for id in [tree.root(), a, leaf] {
             tree.set_bounds(id, Rect::new(0.0, 0.0, 1.0, 1.0)).unwrap();
         }
-        tree.paint();
+        tree.paint(&mut FixedAdvance);
 
         tree.mark_dirty(leaf, Dirty::PAINT).unwrap();
         assert_eq!(tree.dirty(a), Some(Dirty::NONE));
@@ -567,7 +569,7 @@ mod tests {
         let mut tree = Tree::new(swatch(0));
         tree.set_bounds(tree.root(), Rect::new(0.0, 0.0, 100.0, 100.0))
             .unwrap();
-        tree.paint();
+        tree.paint(&mut FixedAdvance);
         tree.set_bounds(tree.root(), Rect::new(0.0, 0.0, 100.0, 100.0))
             .unwrap();
         assert!(tree.damage().is_empty());
@@ -580,7 +582,7 @@ mod tests {
         let child = tree.append_child(tree.root(), swatch(1)).unwrap();
         tree.set_bounds(child, Rect::new(0.0, 0.0, 10.0, 10.0))
             .unwrap();
-        tree.paint();
+        tree.paint(&mut FixedAdvance);
         tree.set_bounds(child, Rect::new(50.0, 0.0, 10.0, 10.0))
             .unwrap();
         assert_eq!(tree.damage(), Rect::new(0.0, 0.0, 60.0, 10.0));
@@ -592,7 +594,7 @@ mod tests {
         let child = tree.append_child(tree.root(), swatch(1)).unwrap();
         tree.set_bounds(child, Rect::new(5.0, 5.0, 10.0, 10.0))
             .unwrap();
-        tree.paint();
+        tree.paint(&mut FixedAdvance);
         tree.remove(child).unwrap();
         assert_eq!(tree.damage(), Rect::new(5.0, 5.0, 10.0, 10.0));
         assert!(tree.dirty(tree.root()).unwrap().contains(Dirty::LAYOUT));
