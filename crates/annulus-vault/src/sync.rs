@@ -54,6 +54,9 @@ pub struct Entry {
     pub deleted: bool,
     /// When it last changed.
     pub hlc: u64,
+    /// A rule whose host has not arrived yet: the host's sync id, to link once it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaits: Option<String>,
 }
 
 /// Everything the vault stores for sync.
@@ -144,6 +147,7 @@ impl SyncState {
             dirty: true,
             deleted: false,
             hlc,
+            awaits: None,
         });
         entry.dirty = true;
         entry.deleted = deleted;
@@ -224,10 +228,16 @@ impl SyncCopy {
     /// sent at all.
     #[must_use]
     pub fn pending(&self) -> Vec<Pending> {
-        self.state
+        let mut dirty: Vec<(&String, &Entry)> = self
+            .state
             .entries
             .iter()
             .filter(|(_, entry)| entry.dirty && !(entry.deleted && entry.base == 0))
+            .collect();
+        // Hosts before rules, so other devices usually see a rule's host first.
+        dirty.sort_by_key(|(_, entry)| entry.kind);
+        dirty
+            .into_iter()
             .filter_map(|(id, entry)| {
                 let content = if entry.deleted {
                     None
@@ -330,6 +340,7 @@ impl SyncCopy {
         };
         self.state.clock = self.state.clock.max(hlc);
         let existing = self.state.entries.get(id).map(|entry| entry.local);
+        let mut awaits = None;
         let local = match kind {
             kind::HOST => {
                 let Ok(mut host) = serde_json::from_slice::<Host>(&body) else {
@@ -349,9 +360,11 @@ impl SyncCopy {
                 // The host's local id here; 0 shows as "(host deleted)" until it arrives.
                 rule.host_id = synced
                     .host
-                    .and_then(|host| self.state.entries.get(&host))
+                    .as_ref()
+                    .and_then(|host| self.state.entries.get(host))
                     .filter(|entry| entry.kind == kind::HOST && !entry.deleted)
                     .map_or(0, |entry| entry.local);
+                awaits = synced.host.filter(|_| rule.host_id == 0);
                 let local = rule.id;
                 upsert(
                     &mut self.forwards,
@@ -372,8 +385,24 @@ impl SyncCopy {
                 dirty: false,
                 deleted: false,
                 hlc,
+                awaits,
             },
         );
+        if kind == kind::HOST {
+            self.link_waiting_rules(id, local);
+        }
+    }
+
+    /// Links rules that arrived before their host (sync id `host`, local id `local`).
+    fn link_waiting_rules(&mut self, host: &str, local: u64) {
+        for entry in self.state.entries.values_mut() {
+            if entry.awaits.as_deref() == Some(host) {
+                entry.awaits = None;
+                if let Some(rule) = self.forwards.iter_mut().find(|rule| rule.id == entry.local) {
+                    rule.host_id = local;
+                }
+            }
+        }
     }
 }
 
@@ -388,4 +417,96 @@ fn upsert<T, K: Ord>(list: &mut Vec<T>, item: T, id: impl Fn(&T) -> u64, sort: i
         None => list.push(item),
     }
     list.sort_by_key(sort);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::KdfParams;
+
+    fn copy() -> SyncCopy {
+        let (keys, _, _) = Keys::create("pw", KdfParams::TEST).unwrap();
+        SyncCopy {
+            keys,
+            hosts: Vec::new(),
+            forwards: Vec::new(),
+            state: SyncState::new().unwrap(),
+            generation: 0,
+        }
+    }
+
+    #[test]
+    fn a_rule_that_arrives_before_its_host_is_linked_when_the_host_comes() {
+        let mut copy = copy();
+        let rule = SyncedForward {
+            rule: PortForward::new(5, 99),
+            host: Some("host-sync-id".into()),
+        };
+        copy.apply(
+            "rule-sync-id",
+            1,
+            Some((kind::FORWARD, 10, serde_json::to_vec(&rule).unwrap())),
+        );
+        assert_eq!(copy.forwards[0].host_id, 0, "no host yet");
+
+        let host = Host {
+            id: 42,
+            label: "bastion".into(),
+            address: "10.0.0.1".into(),
+            port: 22,
+            username: String::new(),
+            tags: Vec::new(),
+            password: None,
+        };
+        copy.apply(
+            "host-sync-id",
+            2,
+            Some((kind::HOST, 11, serde_json::to_vec(&host).unwrap())),
+        );
+        assert_eq!(copy.forwards[0].host_id, copy.hosts[0].id);
+        assert_eq!(copy.state.entries["rule-sync-id"].awaits, None);
+    }
+
+    #[test]
+    fn hosts_are_pushed_before_rules() {
+        let mut copy = copy();
+        copy.forwards.push(PortForward::new(1, 1));
+        copy.hosts.push(Host {
+            id: 1,
+            label: "h".into(),
+            address: "h".into(),
+            port: 22,
+            username: String::new(),
+            tags: Vec::new(),
+            password: None,
+        });
+        // Many entries, so random ids would put some rule before some host by chance.
+        for _ in 0..20 {
+            copy.state.touch(kind::FORWARD, 1, false).unwrap();
+            copy.state
+                .entries
+                .values_mut()
+                .for_each(|entry| entry.local = 1);
+            let id = random_id().unwrap();
+            copy.state.entries.insert(
+                id,
+                Entry {
+                    kind: kind::HOST,
+                    local: 1,
+                    base: 0,
+                    dirty: true,
+                    deleted: false,
+                    hlc: 1,
+                    awaits: None,
+                },
+            );
+        }
+        let kinds: Vec<u8> = copy
+            .pending()
+            .iter()
+            .filter_map(|p| p.content.as_ref().map(|(k, _)| *k))
+            .collect();
+        let first_rule = kinds.iter().position(|k| *k == kind::FORWARD).unwrap();
+        assert!(kinds[first_rule..].iter().all(|k| *k == kind::FORWARD));
+    }
 }
