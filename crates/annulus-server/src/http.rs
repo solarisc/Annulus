@@ -14,32 +14,73 @@ use axum::routing::{get, post};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use annulus_proto::{
-    Failure, History, Latest, LoginFinish, LoginStart, PROTOCOL_VERSION, Push, RegisterFinish,
-    RegisterStart, Revoke, VERSION_HEADER, decode, encode, path,
+    Failure, History, INVITE_HEADER, Latest, LoginFinish, LoginStart, PROTOCOL_VERSION,
+    PasswordBegin, PasswordChange, Push, RegisterFinish, RegisterStart, Revoke, VERSION_HEADER,
+    decode, encode, path,
 };
 
 use crate::store::{Caller, Server, ServerError};
 
-/// The HTTP API over `server`, ready to serve: handlers see the client's address.
-pub fn service(server: Arc<Server>) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
-    router(server).into_make_service_with_connect_info::<SocketAddr>()
+/// The HTTP API over `server`, ready to serve: handlers see the client's address. With
+/// `behind_proxy` (a TLS proxy in front), the address comes from `X-Forwarded-For`.
+pub fn service(
+    server: Arc<Server>,
+    behind_proxy: bool,
+) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+    router(server)
+        .layer(axum::Extension(BehindProxy(behind_proxy)))
+        .into_make_service_with_connect_info::<SocketAddr>()
 }
 
-/// The client's address: the connection's, or the first `X-Forwarded-For` entry when the
-/// connection comes from a proxy on this machine or a private network (Caddy, nginx, a
-/// container network). A client on the internet cannot pick its own address this way.
-fn client_address(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    let from_proxy = match peer.ip() {
+/// Whether a proxy in front sets `X-Forwarded-For` (`--behind-proxy`).
+#[derive(Clone, Copy)]
+struct BehindProxy(bool);
+
+/// An address a proxy may have: this machine or a private network (Caddy, nginx, a
+/// container network).
+fn trusted_hop(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
         IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
         IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xFE00) == 0xFC00,
-    };
-    from_proxy
-        .then(|| headers.get("X-Forwarded-For"))
-        .flatten()
+    }
+}
+
+/// The client's address. Without a proxy in front it is the connection's. Behind one, the
+/// `X-Forwarded-For` hops are walked from the right, the proxies' end, past every hop on
+/// this machine or a private network: the first other one is the client. Entries to its
+/// left were written by the client itself, so a client cannot pick its own address, and
+/// a client on the internet that connects directly is never believed at all.
+fn client_address(peer: SocketAddr, headers: &HeaderMap, behind_proxy: bool) -> IpAddr {
+    let mut client = peer.ip().to_canonical();
+    if !behind_proxy || !trusted_hop(client) {
+        return client;
+    }
+    let hops: Vec<&str> = headers
+        .get_all("X-Forwarded-For")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .collect();
+    for hop in hops.iter().rev() {
+        // Something unreadable: the last hop that could be read is as far as is known.
+        let Ok(ip) = hop.trim().parse::<IpAddr>() else {
+            break;
+        };
+        client = ip.to_canonical();
+        if !trusted_hop(client) {
+            break;
+        }
+    }
+    client
+}
+
+/// The invite code a registration step carries, if any.
+fn invite(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(INVITE_HEADER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .and_then(|first| first.trim().parse().ok())
-        .unwrap_or(peer.ip())
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
 }
 
 /// The HTTP API over `server`.
@@ -64,8 +105,8 @@ fn router(server: Arc<Server>) -> Router {
         )
         .route(path::HISTORY, get(history))
         .route(path::WAIT, get(wait))
-        .route(path::PASSWORD_START, post(password_start))
-        .route(path::PASSWORD_FINISH, post(password_finish))
+        .route(path::PASSWORD_BEGIN, post(password_begin))
+        .route(path::PASSWORD_CHANGE, post(password_change))
         .route(path::DEVICES, get(devices))
         .route(path::REVOKE, post(revoke))
         .layer(axum::extract::DefaultBodyLimit::max(
@@ -155,7 +196,7 @@ async fn register_start(
     body: Bytes,
 ) -> Response {
     match read::<RegisterStart>(&headers, &body) {
-        Ok(request) => reply(server.register_start(&request)),
+        Ok(request) => reply(server.register_start(&request, invite(&headers))),
         Err(response) => *response,
     }
 }
@@ -166,7 +207,7 @@ async fn register_finish(
     body: Bytes,
 ) -> Response {
     match read::<RegisterFinish>(&headers, &body) {
-        Ok(request) => reply(server.register_finish(&request)),
+        Ok(request) => reply(server.register_finish(&request, invite(&headers))),
         Err(response) => *response,
     }
 }
@@ -174,11 +215,15 @@ async fn register_finish(
 async fn login_start(
     State(server): State<Arc<Server>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Extension(BehindProxy(behind_proxy)): axum::Extension<BehindProxy>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     match read::<LoginStart>(&headers, &body) {
-        Ok(request) => reply(server.login_start(&request, Some(client_address(peer, &headers)))),
+        Ok(request) => {
+            let address = client_address(peer, &headers, behind_proxy);
+            reply(server.login_start(&request, Some(address)))
+        }
         Err(response) => *response,
     }
 }
@@ -281,8 +326,10 @@ async fn history(
     )
 }
 
-async fn password_start(
+async fn password_begin(
     State(server): State<Arc<Server>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Extension(BehindProxy(behind_proxy)): axum::Extension<BehindProxy>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -290,13 +337,16 @@ async fn password_start(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    match decode::<RegisterStart>(&body) {
-        Ok(request) => reply(server.password_start(caller, &request)),
+    match decode::<PasswordBegin>(&body) {
+        Ok(request) => {
+            let address = client_address(peer, &headers, behind_proxy);
+            reply(server.password_begin(caller, &request, Some(address)))
+        }
         Err(error) => failure(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
 
-async fn password_finish(
+async fn password_change(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
     body: Bytes,
@@ -305,8 +355,8 @@ async fn password_finish(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    match decode::<RegisterFinish>(&body) {
-        Ok(request) => reply(server.password_finish(caller, &request)),
+    match decode::<PasswordChange>(&body) {
+        Ok(request) => reply(server.password_change(caller, &request)),
         Err(error) => failure(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -333,17 +383,48 @@ async fn revoke(State(server): State<Arc<Server>>, headers: HeaderMap, body: Byt
 mod tests {
     use super::*;
 
+    fn forwarded(lines: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for line in lines {
+            headers.append("X-Forwarded-For", line.parse().unwrap());
+        }
+        headers
+    }
+
     #[test]
     fn forwarded_addresses_are_trusted_only_from_a_local_proxy() {
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Forwarded-For", "203.0.113.9, 10.0.0.1".parse().unwrap());
         let proxy = SocketAddr::from(([172, 18, 0, 2], 40000));
         let internet = SocketAddr::from(([198, 51, 100, 4], 40000));
+        let client = IpAddr::from([203, 0, 113, 9]);
+        let headers = forwarded(&["203.0.113.9, 10.0.0.1"]);
+        assert_eq!(client_address(proxy, &headers, true), client);
+        assert_eq!(client_address(internet, &headers, true), internet.ip());
+        assert_eq!(client_address(proxy, &HeaderMap::new(), true), proxy.ip());
+        // Without --behind-proxy the header is never read, even from a private address.
+        assert_eq!(client_address(proxy, &headers, false), proxy.ip());
+    }
+
+    #[test]
+    fn a_client_cannot_pick_its_address_by_sending_its_own_forwarded_header() {
+        let proxy = SocketAddr::from(([127, 0, 0, 1], 40000));
+        let client = IpAddr::from([203, 0, 113, 9]);
+        // The client sent "1.2.3.4"; the proxy appended the address it saw.
+        let headers = forwarded(&["1.2.3.4, 203.0.113.9"]);
+        assert_eq!(client_address(proxy, &headers, true), client);
+        // The same with the client's header and the proxy's on separate lines.
+        let headers = forwarded(&["1.2.3.4", "203.0.113.9"]);
+        assert_eq!(client_address(proxy, &headers, true), client);
+        // Garbage to the left of the real hop is ignored; garbage at the proxy's end
+        // leaves only the proxy as known.
+        let headers = forwarded(&["nonsense, 203.0.113.9"]);
+        assert_eq!(client_address(proxy, &headers, true), client);
+        let headers = forwarded(&["203.0.113.9, nonsense"]);
+        assert_eq!(client_address(proxy, &headers, true), proxy.ip());
+        // A client on the private network behind two proxies is the leftmost hop.
+        let headers = forwarded(&["10.1.1.20, 10.0.0.1"]);
         assert_eq!(
-            client_address(proxy, &headers),
-            IpAddr::from([203, 0, 113, 9])
+            client_address(proxy, &headers, true),
+            IpAddr::from([10, 1, 1, 20])
         );
-        assert_eq!(client_address(internet, &headers), internet.ip());
-        assert_eq!(client_address(proxy, &HeaderMap::new()), proxy.ip());
     }
 }

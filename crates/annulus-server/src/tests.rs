@@ -9,7 +9,10 @@ use opaque_ke::{
     ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
 };
 use opaque_rand::rngs::OsRng;
-use annulus_proto::{Change, LoginFinish, LoginStart, RegisterFinish, RegisterStart, Suite};
+use annulus_proto::{
+    Change, LoginFinish, LoginStart, PasswordBegin, PasswordChange, RegisterFinish, RegisterStart,
+    Suite,
+};
 
 use super::*;
 use crate::store::Caller;
@@ -32,12 +35,35 @@ fn register(
     account: &str,
     password: &str,
 ) -> Result<annulus_proto::Session, ServerError> {
+    register_invited(server, account, password, None)
+}
+
+fn register_invited(
+    server: &Server,
+    account: &str,
+    password: &str,
+    invite: Option<&str>,
+) -> Result<annulus_proto::Session, ServerError> {
+    let finish = registration(server, account, password, invite)?;
+    server.register_finish(&finish, invite)
+}
+
+/// Registration step 1, and the client's step 2 request, not yet sent.
+fn registration(
+    server: &Server,
+    account: &str,
+    password: &str,
+    invite: Option<&str>,
+) -> Result<RegisterFinish, ServerError> {
     let ksf = cheap();
     let start = ClientRegistration::<Suite>::start(&mut OsRng, password.as_bytes()).unwrap();
-    let response = server.register_start(&RegisterStart {
-        account: account.into(),
-        request: start.message.serialize().to_vec(),
-    })?;
+    let response = server.register_start(
+        &RegisterStart {
+            account: account.into(),
+            request: start.message.serialize().to_vec(),
+        },
+        invite,
+    )?;
     let finish = start
         .state
         .finish(
@@ -47,12 +73,69 @@ fn register(
             ClientRegistrationFinishParameters::new(Identifiers::default(), Some(&ksf)),
         )
         .unwrap();
-    server.register_finish(&RegisterFinish {
+    Ok(RegisterFinish {
         account: account.into(),
         upload: finish.message.serialize().to_vec(),
         wrapped_keys: b"wrapped".to_vec(),
         device: "laptop".into(),
     })
+}
+
+/// A key file in the vault's format (ADR-0007), as a password change uploads it.
+const KEY_FILE: &[u8] = br#"{"salt":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
+    "kdf":{"memory_kib":65536,"iterations":3,"parallelism":1},
+    "by_password":{"nonce":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYX","ciphertext":"c2VhbGVk"},
+    "by_recovery":{"nonce":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23],
+                   "ciphertext":[1,2,3]}}"#;
+
+/// Changes the password of `token`'s account, proving `current` (a wrong one sends a
+/// garbage proof, as an attacker would).
+fn change_password(
+    server: &Server,
+    token: &str,
+    current: &str,
+    new: &str,
+    wrapped_keys: &[u8],
+) -> Result<(), ServerError> {
+    let ksf = cheap();
+    let me = caller(server, token);
+    let login = ClientLogin::<Suite>::start(&mut OsRng, current.as_bytes()).unwrap();
+    let registration = ClientRegistration::<Suite>::start(&mut OsRng, new.as_bytes()).unwrap();
+    let response = server.password_begin(
+        me,
+        &PasswordBegin {
+            login: login.message.serialize().to_vec(),
+            registration: registration.message.serialize().to_vec(),
+        },
+        None,
+    )?;
+    let finalization = login
+        .state
+        .finish(
+            &mut OsRng,
+            current.as_bytes(),
+            CredentialResponse::deserialize(&response.credential).unwrap(),
+            ClientLoginFinishParameters::new(None, Identifiers::default(), Some(&ksf)),
+        )
+        .map_or_else(|_| vec![0u8; 64], |done| done.message.serialize().to_vec());
+    let upload = registration
+        .state
+        .finish(
+            &mut OsRng,
+            new.as_bytes(),
+            RegistrationResponse::deserialize(&response.registration).unwrap(),
+            ClientRegistrationFinishParameters::new(Identifiers::default(), Some(&ksf)),
+        )
+        .unwrap();
+    server.password_change(
+        me,
+        &PasswordChange {
+            login: response.login,
+            finalization,
+            upload: upload.message.serialize().to_vec(),
+            wrapped_keys: wrapped_keys.to_vec(),
+        },
+    )
 }
 
 fn login(
@@ -306,4 +389,333 @@ fn history_keeps_the_last_twenty_versions() {
             .unwrap();
     }
     assert_eq!(server.history(me, "r1").unwrap().len(), 20);
+}
+
+#[test]
+fn a_password_change_needs_the_current_password_not_just_a_device_token() {
+    let server = server(Signups::Open);
+    let laptop = register(&server, "ana", "old pw").unwrap();
+    let phone = login(&server, "ana", "old pw").unwrap();
+    // Someone holding only the phone's token, guessing the password: refused, nothing
+    // changes, and the guess counts like a failed login.
+    assert!(change_password(&server, &phone.token, "a guess", "theirs", KEY_FILE).is_err());
+    assert!(login(&server, "ana", "theirs").is_err());
+    assert!(server.authenticate(&laptop.token).is_ok());
+
+    // A key file that is not one is refused, even with the right password.
+    let mut too_big = KEY_FILE.to_vec();
+    too_big.resize(5000, b' ');
+    let missing_salt =
+        String::from_utf8_lossy(KEY_FILE).replace("[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]", "[]");
+    for garbage in [
+        &b"new keys"[..],
+        &b"{}"[..],
+        &too_big[..],
+        missing_salt.as_bytes(),
+    ] {
+        assert!(matches!(
+            change_password(&server, &laptop.token, "old pw", "new pw", garbage),
+            Err(ServerError::BadRequest(_))
+        ));
+    }
+    assert!(login(&server, "ana", "new pw").is_err());
+
+    // The right password and a key file: the change goes through, other devices are
+    // signed out, and the new password signs in and returns the new key file.
+    change_password(&server, &laptop.token, "old pw", "new pw", KEY_FILE).unwrap();
+    assert!(matches!(
+        server.authenticate(&phone.token),
+        Err(ServerError::Unauthorized)
+    ));
+    assert!(server.authenticate(&laptop.token).is_ok());
+    assert!(login(&server, "ana", "old pw").is_err());
+    assert_eq!(
+        login(&server, "ana", "new pw").unwrap().wrapped_keys,
+        KEY_FILE
+    );
+}
+
+#[test]
+fn a_login_proves_only_what_and_whom_it_was_started_for() {
+    let server = server(Signups::Open);
+    let ana = register(&server, "ana", "ana's").unwrap();
+    let bob = register(&server, "bob", "bob's").unwrap();
+    let ksf = cheap();
+    // Bob starts a password change and proves his own password...
+    let start = ClientLogin::<Suite>::start(&mut OsRng, b"bob's").unwrap();
+    let registration = ClientRegistration::<Suite>::start(&mut OsRng, b"new").unwrap();
+    let response = server
+        .password_begin(
+            caller(&server, &bob.token),
+            &PasswordBegin {
+                login: start.message.serialize().to_vec(),
+                registration: registration.message.serialize().to_vec(),
+            },
+            None,
+        )
+        .unwrap();
+    let proof = start
+        .state
+        .finish(
+            &mut OsRng,
+            b"bob's",
+            CredentialResponse::deserialize(&response.credential).unwrap(),
+            ClientLoginFinishParameters::new(None, Identifiers::default(), Some(&ksf)),
+        )
+        .unwrap()
+        .message
+        .serialize()
+        .to_vec();
+    let upload = registration
+        .state
+        .finish(
+            &mut OsRng,
+            b"new",
+            RegistrationResponse::deserialize(&response.registration).unwrap(),
+            ClientRegistrationFinishParameters::new(Identifiers::default(), Some(&ksf)),
+        )
+        .unwrap()
+        .message
+        .serialize()
+        .to_vec();
+    // ...which neither changes Ana's password with her token nor signs a device in.
+    let change = PasswordChange {
+        login: response.login,
+        finalization: proof.clone(),
+        upload,
+        wrapped_keys: KEY_FILE.to_vec(),
+    };
+    assert!(
+        server
+            .password_change(caller(&server, &ana.token), &change)
+            .is_err()
+    );
+    assert!(
+        server
+            .login_finish(&LoginFinish {
+                login: response.login,
+                finalization: proof,
+                device: "intruder".into(),
+            })
+            .is_err()
+    );
+    assert!(login(&server, "ana", "ana's").is_ok());
+    assert!(login(&server, "bob", "bob's").is_ok());
+}
+
+#[test]
+fn a_device_token_unused_for_ninety_days_stops_working() {
+    const DAY: i64 = 24 * 60 * 60;
+    let server = server(Signups::Open);
+    let laptop = register(&server, "ana", "pw").unwrap();
+    // Each use counts as seen, so a device in use never expires.
+    server.backdate_devices(89 * DAY);
+    assert!(server.authenticate(&laptop.token).is_ok());
+    server.backdate_devices(89 * DAY);
+    assert!(server.authenticate(&laptop.token).is_ok());
+    server.backdate_devices(91 * DAY);
+    assert!(matches!(
+        server.authenticate(&laptop.token),
+        Err(ServerError::Unauthorized)
+    ));
+    // It is signed out for good, and the device is gone from the list.
+    server.backdate_devices(-91 * DAY);
+    assert!(server.authenticate(&laptop.token).is_err());
+    let phone = login(&server, "ana", "pw").unwrap();
+    let devices = server.devices(caller(&server, &phone.token)).unwrap();
+    assert_eq!(devices.devices.len(), 1);
+}
+
+#[test]
+fn account_names_are_checked_before_anything_is_kept() {
+    let server = server(Signups::Open);
+    let long = "a".repeat(255);
+    let start = ClientLogin::<Suite>::start(&mut OsRng, b"pw").unwrap();
+    assert!(matches!(
+        server.login_start(
+            &LoginStart {
+                account: long.clone(),
+                request: start.message.serialize().to_vec(),
+            },
+            None,
+        ),
+        Err(ServerError::BadRequest(_))
+    ));
+    // A registration started with a good name cannot be finished under a long one.
+    let ksf = cheap();
+    let start = ClientRegistration::<Suite>::start(&mut OsRng, b"pw").unwrap();
+    let response = server
+        .register_start(
+            &RegisterStart {
+                account: "ana".into(),
+                request: start.message.serialize().to_vec(),
+            },
+            None,
+        )
+        .unwrap();
+    let finish = start
+        .state
+        .finish(
+            &mut OsRng,
+            b"pw",
+            RegistrationResponse::deserialize(&response.response).unwrap(),
+            ClientRegistrationFinishParameters::new(Identifiers::default(), Some(&ksf)),
+        )
+        .unwrap();
+    for name in [long.as_str(), "  "] {
+        assert!(matches!(
+            server.register_finish(
+                &RegisterFinish {
+                    account: name.into(),
+                    upload: finish.message.serialize().to_vec(),
+                    wrapped_keys: b"wrapped".to_vec(),
+                    device: "laptop".into(),
+                },
+                None,
+            ),
+            Err(ServerError::BadRequest(_))
+        ));
+    }
+    assert_eq!(server.accounts().unwrap(), []);
+}
+
+#[test]
+fn guessing_without_sending_a_proof_still_counts() {
+    let server = server(Signups::Open);
+    register(&server, "ana", "pw").unwrap();
+    let guesser = Some(std::net::IpAddr::from([203, 0, 113, 7]));
+    // An OPAQUE client sees for itself that a guess was wrong; it need not finish.
+    for _ in 0..5 {
+        let start = ClientLogin::<Suite>::start(&mut OsRng, b"guess").unwrap();
+        server
+            .login_start(
+                &LoginStart {
+                    account: "ana".into(),
+                    request: start.message.serialize().to_vec(),
+                },
+                guesser,
+            )
+            .unwrap();
+    }
+    assert!(matches!(
+        login_from(&server, "ana", "pw", guesser),
+        Err(ServerError::Throttled)
+    ));
+    // Logins that succeed are taken back: the owner signs in as often as needed.
+    let owner = Some(std::net::IpAddr::from([198, 51, 100, 1]));
+    for _ in 0..12 {
+        login_from(&server, "ana", "pw", owner).unwrap();
+    }
+}
+
+#[test]
+fn a_full_failure_table_makes_room_for_a_new_guesser() {
+    let server = server(Signups::Open).with_tracking_limit(4);
+    register(&server, "ana", "pw").unwrap();
+    // Two strangers fill the table with their names and addresses.
+    for last in 1..=2u8 {
+        let _ = login_from(
+            &server,
+            &format!("x{last}"),
+            "pw",
+            Some(std::net::IpAddr::from([192, 0, 2, last])),
+        );
+    }
+    // A new guesser is still tracked, and paused after 5 tries.
+    let guesser = Some(std::net::IpAddr::from([203, 0, 113, 7]));
+    for _ in 0..5 {
+        let _ = login_from(&server, "ana", "wrong", guesser);
+    }
+    assert!(matches!(
+        login_from(&server, "ana", "pw", guesser),
+        Err(ServerError::Throttled)
+    ));
+}
+
+#[test]
+fn a_full_login_table_drops_the_oldest_login() {
+    let server = server(Signups::Open).with_tracking_limit(2);
+    register(&server, "ana", "pw").unwrap();
+    let ksf = cheap();
+    let mut started = Vec::new();
+    for _ in 0..3 {
+        let start = ClientLogin::<Suite>::start(&mut OsRng, b"pw").unwrap();
+        let response = server
+            .login_start(
+                &LoginStart {
+                    account: "ana".into(),
+                    request: start.message.serialize().to_vec(),
+                },
+                None,
+            )
+            .unwrap();
+        started.push((start, response));
+    }
+    let results: Vec<bool> = started
+        .into_iter()
+        .map(|(start, response)| {
+            let finish = start
+                .state
+                .finish(
+                    &mut OsRng,
+                    b"pw",
+                    CredentialResponse::deserialize(&response.response).unwrap(),
+                    ClientLoginFinishParameters::new(None, Identifiers::default(), Some(&ksf)),
+                )
+                .unwrap();
+            server
+                .login_finish(&LoginFinish {
+                    login: response.login,
+                    finalization: finish.message.serialize().to_vec(),
+                    device: "phone".into(),
+                })
+                .is_ok()
+        })
+        .collect();
+    assert_eq!(results, [false, true, true]);
+}
+
+#[test]
+fn closed_signups_take_a_single_use_unexpired_invite() {
+    let server = server(Signups::Closed);
+    let invite = server
+        .create_invite(std::time::Duration::from_hours(24))
+        .unwrap();
+    assert!(matches!(
+        register(&server, "ana", "pw"),
+        Err(ServerError::Refused(_))
+    ));
+    assert!(matches!(
+        register_invited(&server, "ana", "pw", Some("0000-1111")),
+        Err(ServerError::Refused(_))
+    ));
+    // Typed in capitals and without its dashes, it still works; once.
+    let typed = invite.replace('-', "").to_uppercase();
+    register_invited(&server, "ana", "pw", Some(&typed)).unwrap();
+    assert!(matches!(
+        register_invited(&server, "bob", "pw", Some(&invite)),
+        Err(ServerError::Refused(_))
+    ));
+    // Two people start registering the same name; the one who loses it keeps the invite.
+    let first = server
+        .create_invite(std::time::Duration::from_hours(1))
+        .unwrap();
+    let second = server
+        .create_invite(std::time::Duration::from_hours(1))
+        .unwrap();
+    let winner = registration(&server, "bob", "pw", Some(&first)).unwrap();
+    let loser = registration(&server, "bob", "other", Some(&second)).unwrap();
+    server.register_finish(&winner, Some(&first)).unwrap();
+    assert!(matches!(
+        server.register_finish(&loser, Some(&second)),
+        Err(ServerError::Refused("that account name is not available"))
+    ));
+    register_invited(&server, "cleo", "pw", Some(&second)).unwrap();
+    // An expired invite is refused.
+    let expired = server.create_invite(std::time::Duration::ZERO).unwrap();
+    assert!(matches!(
+        register_invited(&server, "dora", "pw", Some(&expired)),
+        Err(ServerError::Refused(_))
+    ));
+    assert_eq!(server.accounts().unwrap().len(), 3);
 }

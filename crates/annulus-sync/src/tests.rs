@@ -56,15 +56,20 @@ impl Auth for Direct<'_> {
     fn register_start(
         &mut self,
         request: &RegisterStart,
+        invite: Option<&str>,
     ) -> Result<RegisterStartResponse, SyncError> {
         self.server
-            .register_start(request)
+            .register_start(request, invite)
             .map_err(|error| transport(&error))
     }
 
-    fn register_finish(&mut self, request: &RegisterFinish) -> Result<Session, SyncError> {
+    fn register_finish(
+        &mut self,
+        request: &RegisterFinish,
+        invite: Option<&str>,
+    ) -> Result<Session, SyncError> {
         self.server
-            .register_finish(request)
+            .register_finish(request, invite)
             .map_err(|error| transport(&error))
     }
 
@@ -344,9 +349,46 @@ fn a_wrong_password_fails_before_the_server_can_check_it() {
     assert!(account::login(&mut direct, &cheap(), "ana", "wrong", "c").is_err());
 }
 
+/// A key file in the vault's shape, which the server checks a password change uploads.
+const KEY_FILE: &[u8] = br#"{"salt":[1,2,3,4,5,6,7,8],"kdf":{"memory_kib":8,"iterations":1,"parallelism":1},"by_password":{"nonce":"AAAA","ciphertext":"AAAA"},"by_recovery":{"nonce":"AAAA","ciphertext":"AAAA"}}"#;
+
+#[test]
+fn closed_sign_ups_take_an_invite_code_over_http() {
+    let server = std::sync::Arc::new(Server::open(Path::new(":memory:"), Signups::Closed).unwrap());
+    let invite = server
+        .create_invite(std::time::Duration::from_hours(1))
+        .unwrap();
+    let base = http_server_with(server);
+    let mut http = crate::http::HttpServer::new(&base, None).unwrap();
+    let create = |http: &mut crate::http::HttpServer, name: &str, invite: Option<&str>| {
+        account::register_with_invite(
+            http,
+            &cheap(),
+            name,
+            "pw",
+            KEY_FILE.to_vec(),
+            "laptop",
+            invite,
+        )
+    };
+    assert!(create(&mut http, "ana", None).is_err());
+    assert!(account::register(&mut http, &cheap(), "ana", "pw", KEY_FILE.to_vec(), "x").is_err());
+    let session = create(&mut http, "ana", Some(&format!(" {invite} "))).unwrap();
+    assert_eq!(session.wrapped_keys, KEY_FILE);
+    assert!(
+        create(&mut http, "bob", Some(&invite)).is_err(),
+        "single use"
+    );
+    assert!(account::login(&mut http, &cheap(), "ana", "pw", "phone").is_ok());
+}
+
 /// Starts the real HTTP server on a free loopback port, on its own thread.
 fn http_server() -> String {
-    let server = std::sync::Arc::new(server());
+    http_server_with(std::sync::Arc::new(server()))
+}
+
+/// Serves `server` over HTTP on a free loopback port, on its own thread.
+fn http_server_with(server: std::sync::Arc<Server>) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -354,7 +396,7 @@ fn http_server() -> String {
         runtime.block_on(async move {
             listener.set_nonblocking(true).unwrap();
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, annulus_server::service(server))
+            axum::serve(listener, annulus_server::service(server, false))
                 .await
                 .unwrap();
         });
@@ -500,9 +542,14 @@ fn a_full_round_over_http_then_a_revoked_device_is_refused() {
         "the first version is in history"
     );
 
-    // A password change re-registers the account and signs the other devices out; the
-    // new password then signs in and the old one does not.
-    account::change_password(&mut laptop, &cheap(), "new pw", b"new keys".to_vec()).unwrap();
+    // A password change proves the current password: the phone's token alone cannot.
+    assert!(
+        account::change_password(&mut phone, &cheap(), "a guess", "theirs", KEY_FILE.to_vec())
+            .is_err()
+    );
+    // It re-registers the account and signs the other devices out; the new password then
+    // signs in and the old one does not.
+    account::change_password(&mut laptop, &cheap(), "pw", "new pw", KEY_FILE.to_vec()).unwrap();
     assert!(matches!(
         sync(&mut phone, &mut phone_copy),
         Err(SyncError::Unauthorized)
@@ -510,7 +557,7 @@ fn a_full_round_over_http_then_a_revoked_device_is_refused() {
     let mut tablet = crate::http::HttpServer::new(&base, None).unwrap();
     assert!(account::login(&mut tablet, &cheap(), "ana", "pw", "tablet").is_err());
     let tablet_session = account::login(&mut tablet, &cheap(), "ana", "new pw", "tablet").unwrap();
-    assert_eq!(tablet_session.wrapped_keys, b"new keys");
+    assert_eq!(tablet_session.wrapped_keys, KEY_FILE);
     sync(&mut laptop, &mut device).unwrap();
     laptop.revoke(tablet_session.device).unwrap();
     tablet.set_token(Some(tablet_session.token));

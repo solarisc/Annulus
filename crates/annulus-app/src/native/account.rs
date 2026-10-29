@@ -21,6 +21,8 @@ use crate::sync_screen::{SyncScreen, ago, now_secs, pill};
 #[derive(Default)]
 pub struct AccountView {
     password: Zeroizing<String>,
+    /// The single-use code a server with closed sign-ups needs to create an account.
+    invite: Zeroizing<String>,
     current: Zeroizing<String>,
     new: Zeroizing<String>,
     confirm: Zeroizing<String>,
@@ -126,6 +128,25 @@ impl AccountView {
                         ..FieldStyle::default()
                     },
                 );
+                inner.take_top(space::S);
+                let mut row = inner.take_top(CONTROL);
+                ui.text_field(
+                    Id::new("account.invite"),
+                    row.take_left(half),
+                    &mut self.invite,
+                    FieldStyle {
+                        placeholder: "Invite code (to create an account)",
+                        ..FieldStyle::default()
+                    },
+                );
+                row.take_left(space::M);
+                ui.gfx.text(
+                    row,
+                    "Only where sign-ups are closed.",
+                    SMALL,
+                    t.text2,
+                    Align::Start,
+                );
                 inner.take_top(space::M);
                 let ready = busy.is_none()
                     && !sync.server.trim().is_empty()
@@ -154,7 +175,8 @@ impl AccountView {
                     if sign_in {
                         sync.join(pace, vault, vault_path);
                     } else {
-                        sync.create(pace, vault);
+                        sync.create(pace, vault, &self.invite);
+                        self.invite = Zeroizing::new(String::new());
                     }
                 }
                 inner.take_top(space::S);
@@ -427,6 +449,7 @@ impl AccountView {
                         account::change_password(
                             &mut http,
                             &account::default_ksf(),
+                            &current,
                             &new,
                             key_file.clone(),
                         )
