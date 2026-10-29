@@ -1028,6 +1028,61 @@ fn a_snippet_runs_on_the_hosts_ticked_a_tab_each() {
 }
 
 #[test]
+fn escape_closes_the_open_card_and_keeps_what_a_delete_would_remove() {
+    let escape = [Event::Key(Key::Escape, Modifiers::NONE)];
+    let mut app = NativeApp::new(Some(fixture_vault("escape", true)));
+    app.section = super::Section::Keychain;
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    output = step(&mut app, &mut state, &click_on(&output, "Import key"), 1.0);
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Name, e.g. id_ed25519")
+    );
+    output = step(&mut app, &mut state, &escape, 2.0);
+    assert!(
+        !output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Name, e.g. id_ed25519")
+    );
+    output = step(&mut app, &mut state, &click_on(&output, "Delete"), 3.0);
+    assert!(output.zones.iter().any(|zone| zone.label == "Delete key"));
+    output = step(&mut app, &mut state, &escape, 4.0);
+    assert!(!output.zones.iter().any(|zone| zone.label == "Delete key"));
+    assert_eq!(
+        app.vault.as_ref().unwrap().ssh_keys().len(),
+        1,
+        "the key stays"
+    );
+    // Snippets and Port Forwarding cards too.
+    app.section = super::Section::Snippets;
+    output = step(&mut app, &mut state, &[], 5.0);
+    output = step(&mut app, &mut state, &click_on(&output, "New snippet"), 6.0);
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Label, e.g. Restart nginx")
+    );
+    output = step(&mut app, &mut state, &escape, 7.0);
+    assert!(
+        !output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Label, e.g. Restart nginx")
+    );
+    app.section = super::Section::PortForwarding;
+    output = step(&mut app, &mut state, &[], 8.0);
+    output = step(&mut app, &mut state, &click_on(&output, "New rule"), 9.0);
+    assert!(output.zones.iter().any(|zone| zone.label == "Save"));
+    output = step(&mut app, &mut state, &escape, 10.0);
+    assert!(!output.zones.iter().any(|zone| zone.label == "Save"));
+}
+
+#[test]
 fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
     let mut app = NativeApp::new(Some(fixture_vault("import-key", true)));
     app.section = super::Section::Keychain;

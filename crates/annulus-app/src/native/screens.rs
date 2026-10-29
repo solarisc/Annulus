@@ -12,7 +12,7 @@ use annulus_ssh::keys::{self, KeyKind, KeyPair};
 use annulus_ssh::known::{self, KnownHost};
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
-use annulus_ui::kit::{Id, Ui};
+use annulus_ui::kit::{Id, Key, Modifiers, Ui};
 use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SMALL, button_width};
 use annulus_vault::forwards::{ForwardKind, PortForward};
 use annulus_vault::keychain::SshKey;
@@ -114,6 +114,9 @@ fn confirm_delete(ui: &mut Ui<'_>, row: Rect, id: Id, delete: &str) -> (Option<b
         .clicked
     {
         answer = Some(true);
+    }
+    if ui.key(Key::Escape, Modifiers::NONE) {
+        answer = Some(false);
     }
     (answer, remainder)
 }
@@ -333,7 +336,7 @@ impl KeychainView {
                 let mut line = card.take_top(CONTROL);
                 let kind_rect = line.take_right(170.0);
                 line.take_right(space::S);
-                ui.text_field(
+                let name_field = ui.text_field(
                     Id::new("key.label"),
                     line,
                     label,
@@ -364,10 +367,12 @@ impl KeychainView {
                 let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
                 close |= ui
                     .button(Id::new("key.cancel"), cancel, "Cancel", None, Kind::Ghost)
-                    .clicked;
+                    .clicked
+                    || ui.key(Key::Escape, Modifiers::NONE);
                 let clicked = ui
                     .button(Id::new("key.go"), go, &go_label, None, Kind::Primary)
-                    .clicked;
+                    .clicked
+                    || name_field.submitted;
                 if clicked && !busy {
                     if label.trim().is_empty() {
                         *label = format!("{} key {}", kind.name(), vault.ssh_keys().len() + 1);
@@ -415,7 +420,7 @@ impl KeychainView {
                 line.take_right(space::S);
                 let cancel = line.take_right(button_width(ui.gfx, "Cancel", None));
                 line.take_right(space::M);
-                ui.text_field(
+                let passphrase_field = ui.text_field(
                     Id::new("import.passphrase"),
                     line,
                     passphrase,
@@ -432,10 +437,12 @@ impl KeychainView {
                         None,
                         Kind::Ghost,
                     )
-                    .clicked;
+                    .clicked
+                    || ui.key(Key::Escape, Modifiers::NONE);
                 let clicked = ui
                     .button(Id::new("import.go"), go, "Import", None, Kind::Primary)
-                    .clicked;
+                    .clicked
+                    || passphrase_field.submitted;
                 if clicked && !private.trim().is_empty() {
                     done = Some(keys::import(private, Some(passphrase)).map(|pair| {
                         let name = if label.trim().is_empty() {
@@ -552,7 +559,8 @@ impl KeychainView {
                 None,
                 Kind::Ghost,
             )
-            .clicked;
+            .clicked
+            || ui.key(Key::Escape, Modifiers::NONE);
         let start = ui
             .button(Id::new("install.go"), go, go_label, None, Kind::Primary)
             .clicked
@@ -779,7 +787,8 @@ impl SnippetsView {
                 None,
                 Kind::Ghost,
             )
-            .clicked;
+            .clicked
+            || ui.key(Key::Escape, Modifiers::NONE);
         let run = ui
             .button(
                 Id::new("snippet.targets.go"),
@@ -883,7 +892,8 @@ impl SnippetsView {
                     None,
                     Kind::Ghost,
                 )
-                .clicked;
+                .clicked
+                || ui.key(Key::Escape, Modifiers::NONE);
             let saved = ui
                 .button(Id::new("snippet.save"), save, "Save", None, Kind::Primary)
                 .clicked;
@@ -1395,7 +1405,8 @@ impl ForwardsView {
                     None,
                     Kind::Ghost,
                 )
-                .clicked;
+                .clicked
+                || ui.key(Key::Escape, Modifiers::NONE);
             if ui
                 .button(Id::new("forward.save"), save, "Save", None, Kind::Primary)
                 .clicked
