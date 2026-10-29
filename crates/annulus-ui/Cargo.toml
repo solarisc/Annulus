@@ -11,9 +11,8 @@ publish.workspace = true
 [lints]
 workspace = true
 
+
 [dependencies]
-accesskit.workspace = true
-thiserror.workspace = true
+egui.workspace = true
 annulus-config = { path = "../annulus-config" }
-unicode-segmentation.workspace = true
 zeroize.workspace = true

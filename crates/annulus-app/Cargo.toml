@@ -11,6 +11,8 @@ publish.workspace = true
 [lints]
 workspace = true
 
+
 [dependencies]
-annulus-platform = { path = "../annulus-platform" }
+eframe.workspace = true
+annulus-config = { path = "../annulus-config" }
 annulus-ui = { path = "../annulus-ui" }

@@ -2,7 +2,9 @@
 //! stroked 1.5 units wide with round caps and joins. Renderers scale them into the icon's
 //! rectangle, so they stay sharp at any size and DPI.
 
-use crate::display_list::IconId;
+/// Identifies one of our icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IconId(pub u16);
 
 /// One drawing step, in 16x16 grid units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,6 +111,43 @@ pub fn icon(id: IconId) -> Option<&'static Icon> {
     ALL.iter()
         .find(|(known, _)| *known == id)
         .map(|(_, icon)| icon)
+}
+
+/// Draws `id` scaled into `rect` with `color`, as 1.5-unit round-capped strokes. Unknown
+/// icons draw nothing.
+pub fn paint(painter: &egui::Painter, id: IconId, rect: egui::Rect, color: egui::Color32) {
+    let Some(icon) = icon(id) else { return };
+    let unit = rect.width().min(rect.height()) / GRID;
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x * unit, y * unit);
+    let stroke = egui::Stroke::new(STROKE * unit, color);
+    let mut line: Vec<egui::Pos2> = Vec::new();
+    let mut start = None;
+    let flush = |line: &mut Vec<egui::Pos2>| {
+        if line.len() > 1 {
+            painter.add(egui::Shape::line(std::mem::take(line), stroke));
+        }
+        line.clear();
+    };
+    for segment in icon.segments {
+        match *segment {
+            Segment::Move(x, y) => {
+                flush(&mut line);
+                line.push(at(x, y));
+                start = Some(at(x, y));
+            }
+            Segment::Line(x, y) => line.push(at(x, y)),
+            Segment::Close => {
+                if let Some(start) = start {
+                    line.push(start);
+                }
+            }
+            Segment::Circle(x, y, r) => {
+                flush(&mut line);
+                painter.circle_stroke(at(x, y), r * unit, stroke);
+            }
+        }
+    }
+    flush(&mut line);
 }
 
 /// The size of the design grid.

@@ -11,14 +11,3 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[dependencies]
-thiserror.workspace = true
-parley.workspace = true
-swash.workspace = true
-softbuffer.workspace = true
-tiny-skia.workspace = true
-winit.workspace = true
-annulus-ui = { path = "../annulus-ui" }
-
-[dev-dependencies]
-tiny-skia.workspace = true
