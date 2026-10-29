@@ -413,6 +413,8 @@ pub struct SftpTab {
     notice: Option<String>,
     show_hidden: bool,
     filter: String,
+    /// The column the listing is sorted by, and whether ascending.
+    sort: (SortBy, bool),
     conflict: Conflict,
     transfers: Vec<Transfer>,
     next_id: u64,
@@ -441,6 +443,7 @@ impl SftpTab {
             notice: None,
             show_hidden: false,
             filter: String::new(),
+            sort: (SortBy::Name, true),
             conflict: Conflict::KeepBoth,
             transfers: Vec::new(),
             next_id: 0,
@@ -758,6 +761,31 @@ impl SftpTab {
         ui.add_space(space::XS);
     }
 
+    /// "Sort by" buttons over the listing; clicking the current one flips the order.
+    fn sort_header(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Sort by");
+            for (by, name) in [
+                (SortBy::Name, "Name"),
+                (SortBy::Size, "Size"),
+                (SortBy::Modified, "Modified"),
+            ] {
+                let current = self.sort.0 == by;
+                let arrow = match (current, self.sort.1) {
+                    (false, _) => "",
+                    (true, true) => " \u{25b2}",
+                    (true, false) => " \u{25bc}",
+                };
+                if ui
+                    .selectable_label(current, format!("{name}{arrow}"))
+                    .clicked()
+                {
+                    self.sort = (by, !current || !self.sort.1);
+                }
+            }
+        });
+    }
+
     fn listing(&mut self, ui: &mut Ui, palette: &Palette) {
         if let Some(error) = &self.list_error {
             ui.colored_label(theme::color(palette.status_error), error);
@@ -766,13 +794,15 @@ impl SftpTab {
             ui.colored_label(theme::color(palette.status_error), notice);
         }
         let filter = self.filter.to_lowercase();
-        let visible: Vec<Entry> = self
+        let mut visible: Vec<Entry> = self
             .entries
             .iter()
             .filter(|entry| self.show_hidden || !entry.name.starts_with('.'))
             .filter(|entry| filter.is_empty() || entry.name.to_lowercase().contains(&filter))
             .cloned()
             .collect();
+        sort_entries(&mut visible, self.sort.0, self.sort.1);
+        self.sort_header(ui);
         if visible.is_empty() {
             ui.label(
                 RichText::new("This folder is empty.").color(theme::color(palette.text_secondary)),
@@ -1093,6 +1123,28 @@ fn permissions_dialog(
     command
 }
 
+/// What the SFTP listing can be sorted by (F-SFTP-001).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortBy {
+    Name,
+    Size,
+    Modified,
+}
+
+/// Sorts `entries` by `by`, folders always first; names break ties.
+fn sort_entries(entries: &mut [Entry], by: SortBy, ascending: bool) {
+    entries.sort_by(|a, b| {
+        let order = match by {
+            SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortBy::Size => a.size.cmp(&b.size),
+            SortBy::Modified => a.modified.cmp(&b.modified),
+        }
+        .then_with(|| a.name.cmp(&b.name));
+        let order = if ascending { order } else { order.reverse() };
+        b.is_dir().cmp(&a.is_dir()).then(order)
+    });
+}
+
 /// Permission bits typed in octal: three or four digits, `644` or `0755`.
 fn parse_mode(text: &str) -> Option<u32> {
     let text = text.trim();
@@ -1352,6 +1404,30 @@ mod tests {
         assert_eq!(parse_mode("648"), None);
         assert_eq!(parse_mode("12345"), None);
         assert_eq!(parse_mode("rw-"), None);
+    }
+
+    #[test]
+    fn listings_sort_by_name_size_or_date_with_folders_first() {
+        let entry = |name: &str, dir: bool, size: u64, modified: u32| Entry {
+            name: name.into(),
+            kind: if dir { Kind::Dir } else { Kind::File },
+            size,
+            modified: Some(modified),
+            permissions: None,
+        };
+        let mut entries = vec![
+            entry("b.txt", false, 10, 3),
+            entry("A.txt", false, 30, 1),
+            entry("zdir", true, 0, 9),
+            entry("c.txt", false, 20, 2),
+        ];
+        let names = |entries: &[Entry]| entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        sort_entries(&mut entries, SortBy::Name, true);
+        assert_eq!(names(&entries), ["zdir", "A.txt", "b.txt", "c.txt"]);
+        sort_entries(&mut entries, SortBy::Size, false);
+        assert_eq!(names(&entries), ["zdir", "A.txt", "c.txt", "b.txt"]);
+        sort_entries(&mut entries, SortBy::Modified, true);
+        assert_eq!(names(&entries), ["zdir", "A.txt", "c.txt", "b.txt"]);
     }
 
     #[test]
