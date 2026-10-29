@@ -529,6 +529,13 @@ impl Session {
         links::link_at(&self.term.lock(), row, column)
     }
 
+    /// Draws with `palette` from now on (a theme change in Settings).
+    pub fn set_palette(&mut self, palette: &Palette) {
+        if &self.palette != palette {
+            self.palette = palette.clone();
+        }
+    }
+
     /// What the terminal shows now.
     #[must_use]
     pub fn screen(&self) -> Screen {

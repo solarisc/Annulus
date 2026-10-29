@@ -10,6 +10,7 @@ pub mod links;
 pub mod palette;
 pub mod select;
 pub mod snapshot;
+pub mod themes;
 
 pub use alacritty_terminal;
 use alacritty_terminal::event::VoidListener;

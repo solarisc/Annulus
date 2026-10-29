@@ -18,6 +18,7 @@ use crate::sync_screen::SyncScreen;
 use crate::terminal_view::{FONT_SIZES, TerminalTab};
 use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
 use annulus_session::profiles::{self, Profile};
+use annulus_term::themes;
 
 /// A section of the vault's left navigation (F-APP-003).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +140,8 @@ pub struct Shell {
     profiles: Vec<Profile>,
     /// The profile chosen for new local tabs, by name.
     default_profile: Option<String>,
+    /// The terminal color theme, by name (F-TERM-013).
+    terminal_theme: String,
 }
 
 /// The device settings' file name in the data folder.
@@ -173,6 +176,7 @@ impl Shell {
             last_input: 0.0,
             applied: None,
             default_profile: settings.default_profile.clone(),
+            terminal_theme: settings.terminal_theme.clone(),
             saved: settings,
             profiles: profiles::detect(),
         }
@@ -205,7 +209,7 @@ impl Shell {
             font_size: self.font_size,
             auto_lock_minutes: self.auto_lock_minutes,
             default_profile: self.default_profile.clone(),
-            ..self.saved.clone()
+            terminal_theme: self.terminal_theme.clone(),
         }
     }
 
@@ -309,6 +313,9 @@ impl Shell {
             egui::CentralPanel::default().show(ui, |ui| self.section_screen(ui));
         } else if let Some(Tab::Terminal(terminal)) = self.tabs.get_mut(self.active_tab) {
             let font_size = self.font_size;
+            let theme = themes::theme(&self.terminal_theme)
+                .unwrap_or_else(annulus_term::Palette::annulus_dark);
+            terminal.set_palette(&theme);
             if let Some(search) = &mut self.snippet_panel {
                 let snippets = self
                     .hosts
@@ -613,6 +620,15 @@ impl Shell {
         ui.add_space(space::M);
         ui.label("Lock the vault after idle minutes (0 = never)");
         ui.add(egui::DragValue::new(&mut self.auto_lock_minutes).range(0..=240));
+        ui.add_space(space::M);
+        ui.label("Terminal colors");
+        egui::ComboBox::from_id_salt("terminal-theme")
+            .selected_text(&self.terminal_theme)
+            .show_ui(ui, |ui| {
+                for name in themes::THEMES {
+                    ui.selectable_value(&mut self.terminal_theme, name.to_owned(), name);
+                }
+            });
         ui.add_space(space::M);
         ui.label("New local terminals open");
         let current = self

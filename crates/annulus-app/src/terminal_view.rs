@@ -197,6 +197,13 @@ impl TerminalTab {
         }
     }
 
+    /// Draws with `palette` (the terminal theme from Settings).
+    pub fn set_palette(&mut self, palette: &annulus_term::Palette) {
+        if let Some(session) = &mut self.session {
+            session.set_palette(palette);
+        }
+    }
+
     /// Sends a snippet to the program: typed and run, or pasted at the prompt.
     pub fn send_snippet(&mut self, snippet: &annulus_vault::snippets::Snippet, run: bool) {
         let Some(session) = &self.session else { return };
