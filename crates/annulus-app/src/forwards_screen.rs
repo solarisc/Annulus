@@ -181,7 +181,11 @@ async fn run_rule(
         };
         let connection = match connection {
             Ok(connection) => connection,
-            Err(reason) if attempt == 0 => return set(Status::Failed(reason)),
+            // The first try, or a failure no retry fixes (a changed or refused host key, a
+            // refused login): it stops and says why.
+            Err(reason) if attempt == 0 || is_final(&reason) => {
+                return set(Status::Failed(reason));
+            }
             Err(reason) => {
                 attempt += 1;
                 set(Status::Reconnecting(reason));
@@ -211,6 +215,15 @@ async fn run_rule(
             () = tokio::time::sleep(Duration::from_secs(backoff(attempt))) => {}
         }
     }
+}
+
+/// Whether a connection failure is one that trying again cannot fix: the host's key changed
+/// or was not trusted, or the login was refused. Those stop a rule instead of retrying it.
+pub(crate) fn is_final(reason: &str) -> bool {
+    let reason = reason.to_lowercase();
+    ["has changed", "was not trusted", "authentication failed"]
+        .iter()
+        .any(|final_reason| reason.contains(final_reason))
 }
 
 /// Whether `rule` starts when a terminal to `host_id` opens.
@@ -373,6 +386,22 @@ mod tests {
         rule.with_host = true;
         assert!(starts_with(&rule, 7));
         assert!(!starts_with(&rule, 8), "another host's terminal");
+    }
+
+    #[test]
+    fn a_changed_key_or_a_refused_login_stops_a_rule_instead_of_retrying() {
+        assert!(is_final(
+            "web: the host key of web has changed (SHA256:x); the connection was stopped"
+        ));
+        assert!(is_final(
+            "authentication failed (tried: publickey; the server accepts: password)"
+        ));
+        assert!(is_final("the host key was not trusted"));
+        assert!(
+            !is_final("could not reach web:22: timed out"),
+            "the network comes back"
+        );
+        assert!(!is_final("the connection was lost"));
     }
 
     #[test]

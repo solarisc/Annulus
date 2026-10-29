@@ -170,7 +170,13 @@ pub async fn start(connection: Arc<Connection>, rule: Rule) -> Result<Forward, F
     let active = Arc::new(AtomicUsize::new(0));
     let counter = active.clone();
     let task = tokio::spawn(async move {
-        while let Ok((socket, peer)) = listener.accept().await {
+        loop {
+            // One failed accept (too many open files, a reset before it was taken) is not the
+            // end of the rule: wait a moment and keep listening.
+            let Ok((socket, peer)) = listener.accept().await else {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                continue;
+            };
             let connection = connection.clone();
             let rule = rule.clone();
             let counter = counter.clone();

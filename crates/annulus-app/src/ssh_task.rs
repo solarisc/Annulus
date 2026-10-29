@@ -16,6 +16,8 @@ pub struct SshTask {
     events: Receiver<SessionEvent>,
     answers: Answers,
     outcome: Arc<Mutex<Option<Outcome>>>,
+    /// Dropped with the task (Cancel, a lock): the connection and command stop.
+    _stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl SshTask {
@@ -40,10 +42,12 @@ impl SshTask {
                 wake();
             }
         };
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let task = Self {
             events,
             answers: answers.clone(),
             outcome,
+            _stop: stop,
         };
         let Program::Ssh {
             target,
@@ -78,15 +82,25 @@ impl SshTask {
                 else {
                     return finish_thread(Err("Could not start the connection.".into()));
                 };
-                finish_thread(runtime.block_on(async {
-                    let connection =
-                        annulus_session::connect_chain(&via, &last, &files, &answers, notify)
-                            .await?;
-                    connection
-                        .exec(&command)
-                        .await
-                        .map_err(|error| error.to_string())
-                }));
+                let outcome = runtime.block_on(async {
+                    let run = async {
+                        let connection =
+                            annulus_session::connect_chain(&via, &last, &files, &answers, notify)
+                                .await?;
+                        connection
+                            .exec(&command)
+                            .await
+                            .map_err(|error| error.to_string())
+                    };
+                    tokio::select! {
+                        outcome = run => Some(outcome),
+                        // The task was dropped: nothing more is done, nothing is reported.
+                        _ = stopped => None,
+                    }
+                });
+                if let Some(outcome) = outcome {
+                    finish_thread(outcome);
+                }
             });
         if spawned.is_err() {
             finish(Err("Could not start the connection.".into()));
@@ -128,6 +142,50 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn cancelling_a_task_while_it_connects_closes_the_connection() {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed, closing) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let mut buffer = [0_u8; 256];
+                while matches!(socket.read(&mut buffer), Ok(n) if n > 0) {}
+                let _ = closed.send(());
+            }
+        });
+        let program = Program::Ssh {
+            target: annulus_session::Target {
+                host: "127.0.0.1".into(),
+                port,
+                user: "nobody".into(),
+            },
+            files: annulus_session::SshFiles {
+                known_hosts: std::env::temp_dir().join("annulus-task-silent-known_hosts"),
+                key_dir: None,
+            },
+            password: None,
+            identity: None,
+            via: Vec::new(),
+            proxy: None,
+            reconnect: false,
+            env: Vec::new(),
+            startup: None,
+            term: String::new(),
+        };
+        let task = SshTask::exec(program, "true".into(), || {});
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Cancel (or a lock) drops the task: nothing should stay connected.
+        drop(task);
+        assert!(
+            closing
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the connection outlived the cancelled task"
+        );
     }
 
     #[test]

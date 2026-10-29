@@ -1270,6 +1270,12 @@ impl ForwardsView {
                 }
             }
         }
+        // A rule whose host was deleted stops (it would keep that host's login alive).
+        self.running.retain(|id, _| {
+            vault.forwards().iter().any(|rule| {
+                rule.id == *id && vault.hosts().iter().any(|host| host.id == rule.host_id)
+            })
+        });
         self.asks.retain(|id, _| self.running.contains_key(id));
         let mut area = pages::page(rect);
         let count = vault.forwards().len();
@@ -1872,4 +1878,57 @@ pub fn snippet_panel(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn deleting_a_host_stops_its_running_rules() {
+        let mut vault = crate::native::demo::fixture_vault("rule-host-gone", false);
+        let mut host = vault.draft_host();
+        (host.label, host.address) = ("db".into(), "127.0.0.1".into());
+        let host_id = host.id;
+        vault.upsert_host(host).unwrap();
+        let mut rule = vault.draft_forward(host_id);
+        rule.bind_port = 1;
+        rule.destination_host = "127.0.0.1".into();
+        rule.destination_port = 1;
+        let rule_id = rule.id;
+        vault.upsert_forward(rule).unwrap();
+        let files = SshFiles {
+            known_hosts: std::env::temp_dir().join("annulus-rule-host-gone-known_hosts"),
+            key_dir: None,
+        };
+        let mut view = ForwardsView::default();
+        view.start_rule(rule_id, &vault, &files, None);
+        assert!(view.running.contains_key(&rule_id));
+        vault.remove_host(host_id).unwrap();
+        let mut canvas = annulus_platform::cpu::CpuCanvas::new(
+            800,
+            600,
+            1.0,
+            annulus_platform::cpu::TextEngine::new(),
+        )
+        .unwrap();
+        let mut state = annulus_ui::kit::UiState::default();
+        state.begin_frame(&[], 0.0);
+        let mut ui = Ui::new(
+            &mut canvas,
+            annulus_ui::kit::Theme::new(annulus_config::tokens::Appearance::Dark),
+            &mut state,
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+        );
+        view.draw(
+            &mut ui,
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+            &mut vault,
+            &files,
+            None,
+        );
+        assert!(view.running.is_empty(), "the rule stopped with its host");
+    }
 }

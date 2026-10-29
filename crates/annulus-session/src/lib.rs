@@ -739,24 +739,33 @@ fn spawn_ssh(
                 let notifier = listener.clone();
                 let notify: Arc<dyn Fn(SessionEvent) + Send + Sync> =
                     Arc::new(move |event| notifier.send(event));
-                let connection =
-                    match connect_chain(&login.via, &login.last, &login.files, &answers, notify)
-                        .await
-                    {
-                        Ok(connection) => connection,
-                        Err(message) => return listener.send(SessionEvent::Failed(message)),
-                    };
+                // The tab can close while this waits (on a host-key or password question):
+                // then it stops, and what was typed meanwhile is kept for the shell.
+                let mut early = Vec::new();
+                let connection = tokio::select! {
+                    result = connect_chain(&login.via, &login.last, &login.files, &answers, notify) => {
+                        match result {
+                            Ok(connection) => connection,
+                            Err(message) => return listener.send(SessionEvent::Failed(message)),
+                        }
+                    }
+                    () = closed(&mut input, &mut early) => return,
+                };
                 let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
                 let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
                 // Logged in: the secrets are not needed again (a reconnect is a new session).
                 login.last.forget_secrets();
                 login.via.iter_mut().for_each(Hop::forget_secrets);
-                let mut shell = match connection
-                    .shell_with_env(columns, rows, &login.term, &login.env)
-                    .await
-                {
-                    Ok(shell) => shell,
-                    Err(error) => return listener.send(SessionEvent::Failed(error.to_string())),
+                let mut shell = tokio::select! {
+                    result = connection.shell_with_env(columns, rows, &login.term, &login.env) => {
+                        match result {
+                            Ok(shell) => shell,
+                            Err(error) => {
+                                return listener.send(SessionEvent::Failed(error.to_string()));
+                            }
+                        }
+                    }
+                    () = closed(&mut input, &mut early) => return,
                 };
                 // The PTY holds the typed command until the shell reads it.
                 if let Some(startup) = login
@@ -770,6 +779,22 @@ fn spawn_ssh(
                         .is_err()
                 {
                     return listener.send(SessionEvent::Lost);
+                }
+                // What was typed before the shell was there, in order.
+                for message in early {
+                    match message {
+                        SshInput::Data(bytes) => {
+                            if shell.write(&bytes).await.is_err() {
+                                return listener.send(SessionEvent::Lost);
+                            }
+                        }
+                        SshInput::Resize(size) => {
+                            let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
+                            let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
+                            let _ = shell.resize(columns, rows).await;
+                        }
+                        SshInput::Close => return,
+                    }
                 }
                 let mut parser: Processor = Processor::new();
                 loop {
@@ -803,6 +828,20 @@ fn spawn_ssh(
     Ok(input_tx)
 }
 
+/// Resolves once the tab is closed (or its session dropped), keeping the input that arrives
+/// meanwhile in `early`.
+async fn closed(
+    input: &mut tokio::sync::mpsc::UnboundedReceiver<SshInput>,
+    early: &mut Vec<SshInput>,
+) {
+    loop {
+        match input.recv().await {
+            Some(SshInput::Close) | None => return,
+            Some(other) => early.push(other),
+        }
+    }
+}
+
 fn window_size(size: Size, cell_width: u16, cell_height: u16) -> WindowSize {
     let clamp = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
     WindowSize {
@@ -822,6 +861,58 @@ mod tests {
             Program::Command { args, .. } => args.clone(),
             _ => Vec::new(),
         }
+    }
+
+    /// A server that takes the connection and never speaks: the handshake waits as it does
+    /// on an unanswered host-key question. Returns its port and a receiver that reports when
+    /// the client's end of the socket closes.
+    pub(crate) fn silent_server() -> (u16, std::sync::mpsc::Receiver<()>) {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed, closing) = channel();
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let mut buffer = [0_u8; 256];
+                // Everything until the client hangs up (0 bytes, or an error).
+                while matches!(socket.read(&mut buffer), Ok(n) if n > 0) {}
+                let _ = closed.send(());
+            }
+        });
+        (port, closing)
+    }
+
+    #[test]
+    fn closing_a_tab_while_it_connects_closes_the_connection() {
+        let (port, closing) = silent_server();
+        let program = Program::Ssh {
+            target: Target {
+                host: "127.0.0.1".into(),
+                port,
+                user: "nobody".into(),
+            },
+            files: SshFiles {
+                known_hosts: std::env::temp_dir().join("annulus-silent-known_hosts"),
+                key_dir: None,
+            },
+            password: None,
+            identity: None,
+            via: Vec::new(),
+            proxy: None,
+            reconnect: false,
+            env: Vec::new(),
+            startup: None,
+            term: String::new(),
+        };
+        let session = Session::spawn(&program, Size::new(80, 24), 8, 16, || {}).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(session);
+        assert!(
+            closing
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the socket stayed open after the tab closed"
+        );
     }
 
     #[test]

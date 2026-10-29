@@ -219,6 +219,15 @@ async fn run(
         Command::Download { .. } | Command::Upload { .. } => slots.acquire_owned().await.ok(),
         _ => None,
     };
+    // Cancelled while it waited its turn: it never opens a file.
+    if let Command::Download { id, cancel, .. } | Command::Upload { id, cancel, .. } = &command
+        && cancel.load(Ordering::Relaxed)
+    {
+        return send(Reply::Finished {
+            id: *id,
+            result: Err(annulus_sftp::SftpError::Cancelled.to_string()),
+        });
+    }
     let failed = move |reply: Reply| {
         let bad = matches!(
             &reply,
