@@ -159,6 +159,19 @@ pub const LIGHT: Palette = Palette {
     status_ok: Rgb::new(0x24, 0x93, 0x4F),
 };
 
+/// Host tile colors: each host gets one from its label, so a list is easy to scan. Muted so
+/// white initials stay readable on every one (3:1, tested), in both themes.
+pub const TILES: [Rgb; 8] = [
+    Rgb::new(0x1F, 0x8A, 0x7E),
+    Rgb::new(0x3B, 0x6E, 0xC4),
+    Rgb::new(0x7A, 0x5A, 0xC8),
+    Rgb::new(0xB0, 0x5E, 0x2A),
+    Rgb::new(0xB8, 0x45, 0x6A),
+    Rgb::new(0x3F, 0x8A, 0x3E),
+    Rgb::new(0x5A, 0x67, 0x78),
+    Rgb::new(0x8C, 0x6D, 0x1F),
+];
+
 /// Corner radii in DIPs.
 pub mod radius {
     /// Inputs and chips.
@@ -253,6 +266,15 @@ mod tests {
     fn both_themes_meet_wcag_aa() {
         assert_eq!(failures(&DARK), Vec::<String>::new(), "dark");
         assert_eq!(failures(&LIGHT), Vec::<String>::new(), "light");
+    }
+
+    #[test]
+    fn white_initials_are_readable_on_every_host_tile() {
+        let white = Rgb::new(0xFF, 0xFF, 0xFF);
+        for tile in TILES {
+            let ratio = white.contrast(tile);
+            assert!(ratio >= NON_TEXT_AA, "{tile:?}: {ratio:.2}");
+        }
     }
 
     #[test]

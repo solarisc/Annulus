@@ -1,4 +1,8 @@
-//! Platform traits and their per-OS implementations: PTYs, secret stores, biometrics, FIDO2. The only crate allowed to use unsafe.
+//! Platform code and the per-OS implementations behind it: the renderers and windows of our
+//! own UI ([ADR-0017](../../docs/adr/0017-native-ui.md)), PTYs, secret stores,
+//! biometrics, FIDO2. The only crate allowed to use `unsafe`.
 //!
-//! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4. Windows, input and drawing
-//! come from eframe ([ADR-0015](../../docs/adr/0015-egui-instead-of-hand-built-ui.md)).
+//! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4.
+
+pub mod cpu;
+pub mod window;

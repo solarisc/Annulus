@@ -3,6 +3,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod gfx;
 pub mod icons;
+pub mod kit;
 pub mod secret;
 pub mod theme;
+pub mod widgets;

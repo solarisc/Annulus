@@ -16,6 +16,7 @@ mod known_hosts_screen;
 mod local_pane;
 mod lock_screen;
 mod logs_screen;
+mod native;
 mod panes;
 mod password_screen;
 mod sftp_view;
@@ -51,6 +52,14 @@ fn data_dir() -> std::path::PathBuf {
 }
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--preview") {
+        let light = args.iter().any(|arg| arg == "--light");
+        return match native::run_preview(light) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     let data_dir = data_dir();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
