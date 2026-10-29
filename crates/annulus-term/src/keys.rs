@@ -59,11 +59,11 @@ impl Mods {
     }
 }
 
-/// The bytes for `key` with `mods`, in terminal `mode` (application cursor keys change the
+/// The bytes for `key` with `mods`, in terminal `term_mode` (application cursor keys change the
 /// arrows). `None` for combinations that send nothing.
 #[must_use]
-pub fn encode(key: Key, mods: Mods, mode: TermMode) -> Option<Vec<u8>> {
-    let app_cursor = mode.contains(TermMode::APP_CURSOR);
+pub fn encode(key: Key, mods: Mods, term_mode: TermMode) -> Option<Vec<u8>> {
+    let app_cursor = term_mode.contains(TermMode::APP_CURSOR);
     let bytes = match key {
         Key::Enter => alt_prefixed(mods, b"\r"),
         Key::Backspace => alt_prefixed(mods, if mods.ctrl { b"\x08" } else { b"\x7f" }),
@@ -101,13 +101,12 @@ fn control_byte(c: char) -> Option<u8> {
     match c {
         '@'..='_' => u8::try_from(c).ok().map(|b| b - b'@'),
         ' ' | '2' => Some(0),
-        '?' => Some(0x7f),
+        '?' | '8' => Some(0x7f),
         '3' => Some(0x1b),
         '4' => Some(0x1c),
         '5' => Some(0x1d),
         '6' => Some(0x1e),
         '7' | '/' => Some(0x1f),
-        '8' => Some(0x7f),
         _ => None,
     }
 }

@@ -20,8 +20,7 @@ pub struct Palette {
     pub selection: Rgb,
 }
 
-const fn rgb(value: u32) -> Rgb {
-    let [_, r, g, b] = value.to_be_bytes();
+const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
 }
 
@@ -31,27 +30,27 @@ impl Palette {
     pub fn annulus_dark() -> Self {
         Self {
             ansi: [
-                rgb(0x1C_1F_22),
-                rgb(0xE5_53_4B),
-                rgb(0x4C_C2_7A),
-                rgb(0xE0_A4_3A),
-                rgb(0x4D_9D_E0),
-                rgb(0xB7_7E_DB),
-                rgb(0x2B_B3_A3),
-                rgb(0xC9_CE_D3),
-                rgb(0x5C_64_6C),
-                rgb(0xF0_7A_72),
-                rgb(0x72_D8_98),
-                rgb(0xF2_C2_6B),
-                rgb(0x7A_B8_EE),
-                rgb(0xCF_A2_EC),
-                rgb(0x5F_D3_C4),
-                rgb(0xF4_F6_F8),
+                rgb(0x1C, 0x1F, 0x22),
+                rgb(0xE5, 0x53, 0x4B),
+                rgb(0x4C, 0xC2, 0x7A),
+                rgb(0xE0, 0xA4, 0x3A),
+                rgb(0x4D, 0x9D, 0xE0),
+                rgb(0xB7, 0x7E, 0xDB),
+                rgb(0x2B, 0xB3, 0xA3),
+                rgb(0xC9, 0xCE, 0xD3),
+                rgb(0x5C, 0x64, 0x6C),
+                rgb(0xF0, 0x7A, 0x72),
+                rgb(0x72, 0xD8, 0x98),
+                rgb(0xF2, 0xC2, 0x6B),
+                rgb(0x7A, 0xB8, 0xEE),
+                rgb(0xCF, 0xA2, 0xEC),
+                rgb(0x5F, 0xD3, 0xC4),
+                rgb(0xF4, 0xF6, 0xF8),
             ],
-            foreground: rgb(0xE8_EA_ED),
-            background: rgb(0x12_14_16),
-            cursor: rgb(0x2B_B3_A3),
-            selection: rgb(0x1F_5C_56),
+            foreground: rgb(0xE8, 0xEA, 0xED),
+            background: rgb(0x12, 0x14, 0x16),
+            cursor: rgb(0x2B, 0xB3, 0xA3),
+            selection: rgb(0x1F, 0x5C, 0x56),
         }
     }
 
@@ -102,17 +101,16 @@ impl Palette {
             return self.ansi[usize::from(ansi)];
         }
         match named {
+            NamedColor::Foreground => self.foreground,
             NamedColor::Background => self.background,
             NamedColor::Cursor => self.cursor,
             NamedColor::DimForeground => dim(self.foreground),
             NamedColor::BrightForeground => self.ansi[15],
             other => {
-                // Dim versions of the 8 normal colors follow the foreground entries.
-                let dim_index = (other as usize).saturating_sub(NamedColor::DimBlack as usize);
-                if dim_index < 8 {
-                    dim(self.ansi[dim_index])
-                } else {
-                    self.foreground
+                // DimBlack..DimWhite: faint versions of the 8 normal colors.
+                match (other as usize).checked_sub(NamedColor::DimBlack as usize) {
+                    Some(index) if index < 8 => dim(self.ansi[index]),
+                    _ => self.foreground,
                 }
             }
         }

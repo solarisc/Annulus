@@ -10,6 +10,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use crate::palette::Palette;
 
 /// One visible cell.
+#[allow(clippy::struct_excessive_bools)] // Independent text attributes, as SGR sets them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     /// The character (a space for blanks; wide characters are followed by a spacer cell
