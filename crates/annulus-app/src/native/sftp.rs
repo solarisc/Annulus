@@ -702,6 +702,21 @@ impl SftpView {
             .cloned()
             .collect();
         sort_entries(&mut entries, self.tab.sort.0, self.tab.sort.1);
+        // An empty listing says why: nothing there, only hidden files, or nothing matches.
+        if entries.is_empty() && self.tab.cwd.is_some() {
+            let why = if !filter.is_empty() {
+                format!(
+                    "Nothing here matches \u{201c}{}\u{201d}.",
+                    self.tab.filter.trim()
+                )
+            } else if self.tab.entries.is_empty() {
+                "This folder is empty.".to_owned()
+            } else {
+                "Only hidden files here; Hidden files shows them.".to_owned()
+            };
+            let line = Rect::new(list.x, list.y + space::XL, list.w, 20.0);
+            ui.gfx.text(line, &why, BODY, t.text2, Align::Center);
+        }
         #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.
         let offset = ui.scroll_view(
             Id::new("sftp.remote.scroll"),

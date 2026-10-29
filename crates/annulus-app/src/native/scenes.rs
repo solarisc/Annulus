@@ -360,6 +360,18 @@ const SCENES: &[Scene] = &[
         acts: &[Act::Hover("deploy.sh")],
     },
     Scene {
+        name: "sftp-filtered",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[
+            Act::Click("Filter this folder"),
+            Act::Type("nothing-like-this"),
+        ],
+    },
+    Scene {
         name: "sftp-menu",
         width: 1100,
         height: 720,
