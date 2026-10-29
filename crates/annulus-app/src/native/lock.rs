@@ -69,6 +69,9 @@ pub struct LockView {
     typed: String,
     /// How hard the new master password is to guess, while one is typed.
     strength: Option<Strength>,
+    /// The screen was just shown: the password field takes the keyboard, so typing the
+    /// password needs no click first.
+    fresh: bool,
 }
 
 /// What creating or unlocking gives: the vault, and a new vault's recovery key.
@@ -92,6 +95,7 @@ impl LockView {
             key: Zeroizing::new(String::new()),
             typed: String::new(),
             strength: None,
+            fresh: true,
         }
     }
 
@@ -296,6 +300,9 @@ impl LockView {
             (false, false) => "Master password",
             (false, true) => "Recovery key",
         };
+        if std::mem::take(&mut self.fresh) {
+            ui.state.set_focus(Some(Id::new("lock.password")), false);
+        }
         let first = ui.text_field(
             Id::new("lock.password"),
             column.take_top(CONTROL),

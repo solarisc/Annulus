@@ -27,7 +27,7 @@ use super::{NativeApp, TermView};
 use crate::terminal_view::TabStatus;
 
 /// One step of a scene's script, applied between frames.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Act {
     /// Move the pointer over the zone with this accessible name.
     Hover(&'static str),
@@ -349,6 +349,78 @@ const SCENES: &[Scene] = &[
             Act::Press(Key::Tab, Modifiers::NONE),
             Act::Press(Key::Tab, Modifiers::NONE),
         ],
+    },
+    Scene {
+        name: "keychain-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[Act::Press(Key::Tab, Modifiers::NONE); 11],
+    },
+    Scene {
+        name: "snippets-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: snippets,
+        acts: &[Act::Press(Key::Tab, Modifiers::NONE); 11],
+    },
+    Scene {
+        name: "forwards-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards,
+        acts: &[Act::Press(Key::Tab, Modifiers::NONE); 11],
+    },
+    Scene {
+        name: "known-hosts-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: known_hosts,
+        acts: &[Act::Press(Key::Tab, Modifiers::NONE); 11],
+    },
+    Scene {
+        name: "logs-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: logs,
+        acts: &[Act::Press(Key::Tab, Modifiers::NONE); 11],
+    },
+    Scene {
+        name: "sftp-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::Press(Key::Tab, Modifiers::NONE); 11],
+    },
+    Scene {
+        name: "settings-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Press(Key::Tab, Modifiers::NONE); 11],
+    },
+    Scene {
+        name: "lock-keyboard-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: false,
+        setup: locked,
+        acts: &[Act::Type("pw"), Act::Press(Key::Tab, Modifiers::NONE)],
     },
     Scene {
         name: "hosts-narrow",
@@ -1786,6 +1858,25 @@ fn trusting_a_servers_certificate_pins_it_until_the_address_changes() {
     events.push(Event::Text("1".into()));
     step(&mut app, &mut state, &events, 3.0);
     assert_eq!(app.sync.pin, None);
+}
+
+#[test]
+fn the_lock_screen_takes_the_password_without_a_click() {
+    let vault = fixture_vault("type-to-unlock", true);
+    let mut app = NativeApp::new(None);
+    app.vault_path = Some(vault.path().to_path_buf());
+    drop(vault);
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    let typed = [
+        Event::Text("not the password".into()),
+        Event::Key(Key::Enter, Modifiers::NONE),
+    ];
+    step(&mut app, &mut state, &typed, 1.0);
+    assert!(
+        app.lock.working.is_some() || app.lock.error.is_some(),
+        "typing went into the password field and Enter tried it"
+    );
 }
 
 #[test]

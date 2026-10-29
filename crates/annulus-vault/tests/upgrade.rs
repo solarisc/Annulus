@@ -38,7 +38,9 @@ fn write(path: &std::path::Path) {
     let key = SshKey {
         id: vault.next_key_id(),
         label: "laptop".into(),
-        private: Secret::new("-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n"),
+        private: Secret::new(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n",
+        ),
         public: "ssh-ed25519 AAAAfixture laptop".into(),
         fingerprint: "SHA256:fixture".into(),
     };
