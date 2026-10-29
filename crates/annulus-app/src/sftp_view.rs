@@ -374,6 +374,8 @@ enum Dialog {
         name: String,
         mode: String,
     },
+    /// What is known about an entry.
+    Properties(Entry),
 }
 
 impl Dialog {
@@ -786,6 +788,27 @@ impl SftpTab {
         });
     }
 
+    /// A listing entry's right-click menu; true when Download was chosen.
+    fn entry_menu(&mut self, ui: &mut Ui, entry: &Entry) -> bool {
+        let download = !entry.is_dir() && ui.button("Download").clicked();
+        if ui.button("Rename").clicked() {
+            self.dialog = Some(Dialog::Rename {
+                from: entry.name.clone(),
+                to: entry.name.clone(),
+            });
+        }
+        if ui.button("Delete").clicked() {
+            self.dialog = Some(Dialog::Delete(entry.clone()));
+        }
+        if ui.button("Permissions\u{2026}").clicked() {
+            self.dialog = Some(Dialog::permissions(entry));
+        }
+        if ui.button("Properties").clicked() {
+            self.dialog = Some(Dialog::Properties(entry.clone()));
+        }
+        download
+    }
+
     fn listing(&mut self, ui: &mut Ui, palette: &Palette) {
         if let Some(error) = &self.list_error {
             ui.colored_label(theme::color(palette.status_error), error);
@@ -849,20 +872,8 @@ impl SftpTab {
                             open = Some(entry.clone());
                         }
                         response.context_menu(|ui| {
-                            if !entry.is_dir() && ui.button("Download").clicked() {
+                            if self.entry_menu(ui, entry) {
                                 open = Some(entry.clone());
-                            }
-                            if ui.button("Rename").clicked() {
-                                self.dialog = Some(Dialog::Rename {
-                                    from: entry.name.clone(),
-                                    to: entry.name.clone(),
-                                });
-                            }
-                            if ui.button("Delete").clicked() {
-                                self.dialog = Some(Dialog::Delete(entry.clone()));
-                            }
-                            if ui.button("Permissions\u{2026}").clicked() {
-                                self.dialog = Some(Dialog::permissions(entry));
                             }
                         });
                         ui.label(if entry.is_dir() {
@@ -1013,6 +1024,21 @@ impl SftpTab {
             Dialog::Permissions { name, mode } => {
                 command = permissions_dialog(ctx, &cwd, name, mode, &mut close);
             }
+            Dialog::Properties(entry) => {
+                egui::Window::new("Properties")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        for (name, value) in properties(&cwd, entry) {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(name).strong());
+                                ui.label(value);
+                            });
+                        }
+                        close |= ui.button("Close").clicked();
+                    });
+            }
             Dialog::Delete(entry) => {
                 window("Delete").show(ctx, |ui| {
                     ui.label(format!("Delete {} from the server?", entry.name));
@@ -1143,6 +1169,53 @@ fn sort_entries(entries: &mut [Entry], by: SortBy, ascending: bool) {
         let order = if ascending { order } else { order.reverse() };
         b.is_dir().cmp(&a.is_dir()).then(order)
     });
+}
+
+/// The Properties dialog's lines for `entry` in folder `cwd`.
+fn properties(cwd: &str, entry: &Entry) -> Vec<(&'static str, String)> {
+    let kind = match entry.kind {
+        Kind::Dir => "Folder".to_owned(),
+        Kind::File => "File".to_owned(),
+        Kind::Link { to_dir: true } => "Link to a folder".to_owned(),
+        Kind::Link { to_dir: false } => "Link".to_owned(),
+        Kind::Other => "Other (device, socket or pipe)".to_owned(),
+    };
+    let mut lines = vec![
+        ("Name", entry.name.clone()),
+        ("Path", join(cwd, &entry.name)),
+        ("Kind", kind),
+    ];
+    if !entry.is_dir() {
+        lines.push((
+            "Size",
+            format!("{} ({} bytes)", human_size(entry.size), entry.size),
+        ));
+    }
+    if let Some(modified) = entry.modified {
+        lines.push(("Modified", format_time(modified)));
+    }
+    if let Some(bits) = entry.permissions {
+        lines.push((
+            "Permissions",
+            format!("{:o} ({})", bits & 0o7777, mode_text(bits)),
+        ));
+    }
+    lines
+}
+
+/// `0o754` as `rwxr-xr--`.
+fn mode_text(bits: u32) -> String {
+    (0..9)
+        .map(|i| {
+            let on = bits & (0o400 >> i) != 0;
+            match (on, i % 3) {
+                (false, _) => '-',
+                (true, 0) => 'r',
+                (true, 1) => 'w',
+                (true, _) => 'x',
+            }
+        })
+        .collect()
 }
 
 /// Permission bits typed in octal: three or four digits, `644` or `0755`.
@@ -1428,6 +1501,28 @@ mod tests {
         assert_eq!(names(&entries), ["zdir", "A.txt", "c.txt", "b.txt"]);
         sort_entries(&mut entries, SortBy::Modified, true);
         assert_eq!(names(&entries), ["zdir", "A.txt", "c.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn properties_spell_out_size_and_permissions() {
+        let entry = Entry {
+            name: "notes.txt".into(),
+            kind: Kind::File,
+            size: 2048,
+            modified: Some(0),
+            permissions: Some(0o754),
+        };
+        let lines = properties("/home/me", &entry);
+        let get = |name: &str| {
+            lines
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("Path").as_deref(), Some("/home/me/notes.txt"));
+        assert_eq!(get("Size").as_deref(), Some("2.0 KiB (2048 bytes)"));
+        assert_eq!(get("Permissions").as_deref(), Some("754 (rwxr-xr--)"));
+        assert_eq!(mode_text(0o640), "rw-r-----");
     }
 
     #[test]
