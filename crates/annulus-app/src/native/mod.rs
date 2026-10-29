@@ -263,6 +263,8 @@ pub struct NativeApp {
     tab_grab: Option<(u64, f32)>,
     /// Settings' own navigation and search.
     pub settings_view: settings::SettingsView,
+    /// The OS was asked for fewer animations; read when the window opens.
+    os_reduces_motion: bool,
 }
 
 impl NativeApp {
@@ -313,6 +315,7 @@ impl NativeApp {
             replacing: None,
             tab_grab: None,
             settings_view: settings::SettingsView::default(),
+            os_reduces_motion: false,
         }
     }
 
@@ -1051,7 +1054,7 @@ impl NativeApp {
     /// Draws one frame. Returns what the window itself must do.
     #[allow(clippy::too_many_lines)] // The window top to bottom: title bar, then the tab in front.
     pub fn frame(&mut self, ui: &mut Ui<'_>) -> Option<WindowAction> {
-        ui.state.reduce_motion = self.settings.reduce_motion;
+        ui.state.reduce_motion = self.settings.reduce_motion || self.os_reduces_motion;
         let t = ui.theme;
         let mut area = ui.viewport;
         ui.gfx.fill_rect(area, 0.0, t.chrome);
@@ -1536,6 +1539,7 @@ fn instance_lock(data_dir: &std::path::Path) -> Option<std::fs::File> {
 
 pub fn run_native(light: bool, data_dir: &std::path::Path) -> Result<(), WindowError> {
     let mut app = NativeApp::new(None);
+    app.os_reduces_motion = annulus_platform::window::os_reduces_motion();
     let vault_path = data_dir.join("vault.anv");
     app.lock = lock::LockView::new(if vault_path.exists() {
         lock::Mode::Unlock
@@ -1582,6 +1586,7 @@ pub fn run_preview(light: bool) -> Result<(), WindowError> {
         Appearance::Dark
     };
     let mut app = NativeApp::new(Some(demo::fixture_vault("preview", true)));
+    app.os_reduces_motion = annulus_platform::window::os_reduces_motion();
     app.ssh_files.known_hosts = demo::known_hosts("preview");
     app.push_terminal("prod-db", TermView::Replay(Box::new(demo::terminal())));
     app.push_sftp(demo::sftp_tab("preview"));

@@ -173,7 +173,14 @@ fn new_tab(app: &mut NativeApp) {
         }
     }
     // A saved host's terminal, so its tab shows the server's mark.
-    if let Some(id) = app.vault.as_ref().map(|vault| vault.hosts()[1].id) {
+    let web = app.vault.as_ref().and_then(|vault| {
+        vault
+            .hosts()
+            .iter()
+            .find(|host| host.label == "web-1")
+            .map(|host| host.id)
+    });
+    if let Some(id) = web {
         app.push_terminal("web-1", TermView::Replay(Box::new(super::demo::terminal())));
         if let Some(tab) = app.tabs.last_mut() {
             tab.origin = Some(OpenTab::Host(id));

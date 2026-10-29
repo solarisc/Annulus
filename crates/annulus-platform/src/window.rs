@@ -32,6 +32,20 @@ pub enum WindowRequest {
 /// Asks the window for a new frame; callable from any thread (a session with new output).
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
+/// Whether the user asked the OS for fewer animations. Read on Windows; elsewhere not yet,
+/// so it says no.
+#[must_use]
+pub fn os_reduces_motion() -> bool {
+    #[cfg(windows)]
+    {
+        crate::win32::animations_off()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// An app the window runs.
 pub trait WindowApp {
     /// Hands the app the window's waker, once, before the first frame.

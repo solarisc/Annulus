@@ -109,6 +109,26 @@ impl ActivationHandler for Initial {
     }
 }
 
+/// Whether "Animation effects" is off in Windows' settings (Accessibility, Visual effects).
+#[must_use]
+pub fn animations_off() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut on: i32 = 1;
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL, an i32, to the pointer given, which
+    // points at `on` for the whole call.
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&raw mut on).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    read.is_ok() && on == 0
+}
+
 /// Runs `app` in a new window until it closes.
 ///
 /// # Errors
