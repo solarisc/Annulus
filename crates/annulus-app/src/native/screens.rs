@@ -1072,6 +1072,9 @@ impl LogsView {
 #[derive(Default)]
 pub struct KnownView {
     entries: Option<Vec<KnownHost>>,
+    /// The file's size and time when `entries` was read: a change (a key trusted while
+    /// connecting) reads it again (UI review #10).
+    read_at: Option<(u64, Option<std::time::SystemTime>)>,
     message: Option<String>,
 }
 
@@ -1084,6 +1087,13 @@ impl KnownView {
         path: &std::path::Path,
         openssh: Option<&std::path::Path>,
     ) {
+        let stamp = std::fs::metadata(path)
+            .ok()
+            .map(|meta| (meta.len(), meta.modified().ok()));
+        if stamp != self.read_at {
+            self.read_at = stamp;
+            self.entries = None;
+        }
         let entries = self
             .entries
             .get_or_insert_with(|| known::read(path))
@@ -1145,11 +1155,11 @@ impl KnownView {
                 true,
             );
             if clicked == Some(0) {
-                forget = Some(entry.line);
+                forget = Some(entry.clone());
             }
         });
-        if let Some(line) = forget {
-            self.message = Some(match known::forget(path, line) {
+        if let Some(entry) = forget {
+            self.message = Some(match known::forget(path, &entry) {
                 Ok(()) => "Forgotten. The next connection asks again.".into(),
                 Err(error) => format!("Could not change the file: {error}"),
             });
@@ -1885,6 +1895,49 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    fn canvas() -> annulus_platform::cpu::CpuCanvas {
+        annulus_platform::cpu::CpuCanvas::new(
+            800,
+            600,
+            1.0,
+            annulus_platform::cpu::TextEngine::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn known_hosts_shows_a_key_trusted_since_it_was_opened() {
+        let dir = std::env::temp_dir().join(format!("annulus-known-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("known_hosts");
+        let mut view = KnownView::default();
+        let mut canvas = canvas();
+        let mut state = annulus_ui::kit::UiState::default();
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut draw = |view: &mut KnownView| {
+            state.begin_frame(&[], 0.0);
+            let mut ui = Ui::new(
+                &mut canvas,
+                annulus_ui::kit::Theme::new(annulus_config::tokens::Appearance::Dark),
+                &mut state,
+                rect,
+            );
+            view.draw(&mut ui, rect, &path, None);
+            state.end_frame();
+        };
+        draw(&mut view);
+        assert_eq!(view.entries.as_ref().map(Vec::len), Some(0));
+        // A connection trusts a new key while the screen is open.
+        std::fs::write(
+            &path,
+            "web ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHhb4m8U3xS0ycLC2nBqGDbB0kPPw8IVPBCWd2HjWcZ1\n",
+        )
+        .unwrap();
+        draw(&mut view);
+        assert_eq!(view.entries.as_ref().map(Vec::len), Some(1));
+    }
 
     #[test]
     fn deleting_a_host_stops_its_running_rules() {

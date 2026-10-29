@@ -36,6 +36,8 @@ pub struct SftpView {
     tab: SftpTab,
     ask: Option<Ask>,
     edit: Option<Edit>,
+    /// The folder the edit was started in: it ends when another folder is shown.
+    edit_dir: String,
     remote_selected: Option<String>,
     local_selected: Option<String>,
     /// A card just opened: its first control takes the keyboard.
@@ -50,6 +52,7 @@ impl SftpView {
             tab,
             ask: None,
             edit: None,
+            edit_dir: String::new(),
             remote_selected: None,
             local_selected: None,
             focus_card: false,
@@ -608,6 +611,7 @@ impl SftpView {
             .clicked
         {
             self.edit = Some(Edit::NewFolder(String::new()));
+            self.edit_dir.clone_from(&cwd);
         }
         let kind = if self.tab.show_hidden {
             Kind::Secondary
@@ -658,6 +662,10 @@ impl SftpView {
             self.tab.conflict = conflicts[chosen];
         }
         inner.take_top(space::S);
+        // A rename typed for one folder never applies to the next one (UI review #9).
+        if self.edit_dir != cwd {
+            self.edit = None;
+        }
         if let Some(edit) = &mut self.edit {
             let mut line = inner.take_top(CONTROL);
             let save = line.take_right(80.0);
@@ -830,6 +838,7 @@ impl SftpView {
                 from: name.clone(),
                 to: name,
             });
+            self.edit_dir = self.tab.cwd.clone().unwrap_or_default();
         }
         if let Some(card) = card {
             self.open_card(card);
@@ -967,6 +976,25 @@ mod tests {
             Event::PointerDown(Button::Primary),
             Event::PointerUp(Button::Primary),
         ]
+    }
+
+    #[test]
+    fn a_rename_started_in_one_folder_ends_when_another_is_shown() {
+        let mut tab = SftpTab::unavailable("files", "offline");
+        tab.cwd = Some("/home/a".into());
+        tab.failed = None;
+        let mut view = SftpView::new(tab);
+        view.edit = Some(Edit::Rename {
+            from: "notes.txt".into(),
+            to: "notes.txt".into(),
+        });
+        view.edit_dir = "/home/a".into();
+        let mut state = UiState::default();
+        frame(&mut view, &mut state, &[], 0.0);
+        assert!(view.edit.is_some(), "same folder: still renaming");
+        view.tab.cwd = Some("/home/a/sub".into());
+        frame(&mut view, &mut state, &[], 1.0);
+        assert!(view.edit.is_none());
     }
 
     /// End to end on test VM 1: a folder made with New folder appears, and Delete removes

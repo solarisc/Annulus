@@ -63,12 +63,27 @@ pub fn read(path: &Path) -> Vec<KnownHost> {
         .unwrap_or_default()
 }
 
-/// Removes line `line` (counting from 1) from the file at `path`, atomically.
+/// Removes `entry` from the file at `path`, atomically. It is found by what it says (host
+/// names, kind, fingerprint), not by a line number that may have moved since it was read.
 ///
 /// # Errors
-/// The file cannot be read or written; it is left as it was.
-pub fn forget(path: &Path, line: usize) -> std::io::Result<()> {
+/// The file cannot be read or written, or no longer has that entry; it is left as it was.
+pub fn forget(path: &Path, entry: &KnownHost) -> std::io::Result<()> {
     let text = std::fs::read_to_string(path)?;
+    let line = parse(&text)
+        .into_iter()
+        .find(|found| {
+            found.hosts == entry.hosts
+                && found.algorithm == entry.algorithm
+                && found.fingerprint == entry.fingerprint
+        })
+        .map(|found| found.line)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "that key is no longer in the file",
+            )
+        })?;
     let kept: Vec<&str> = text
         .lines()
         .enumerate()
@@ -362,10 +377,17 @@ mod tests {
             format!("a ssh-ed25519 {ED25519}\nb ssh-ed25519 {ED25519}\n"),
         )
         .unwrap();
-        forget(&path, 1).unwrap();
-        let left = read(&path);
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].hosts, ["b"]);
+        let a = read(&path).remove(0);
+        // A line added above it since it was read: the right entry still goes.
+        std::fs::write(
+            &path,
+            format!("c ssh-ed25519 {ED25519}\na ssh-ed25519 {ED25519}\nb ssh-ed25519 {ED25519}\n"),
+        )
+        .unwrap();
+        forget(&path, &a).unwrap();
+        let left: Vec<_> = read(&path).into_iter().map(|entry| entry.hosts).collect();
+        assert_eq!(left, [["c"], ["b"]]);
+        assert!(forget(&path, &a).is_err(), "gone already");
         assert_eq!(read(&dir.join("missing")), []);
     }
 }
