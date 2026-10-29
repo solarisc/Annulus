@@ -224,6 +224,8 @@ fn known_hosts_name(host: &str, port: u16) -> String {
 pub struct Connection {
     handle: Handle<Checker>,
     remote: forward::RemoteMap,
+    /// The jump host this connection runs through, kept open while this one lives.
+    _via: Option<Arc<Connection>>,
 }
 
 /// The keys to offer, in order: keychain keys, then the default unencrypted key files.
@@ -259,6 +261,44 @@ pub async fn connect(
     identities: &[Zeroizing<String>],
     prompt: Arc<dyn Prompt>,
 ) -> Result<Connection, SshError> {
+    let (handle, remote) = handshake(target, known_hosts, prompt.clone(), None).await?;
+    log_in(handle, remote, None, target, key_dir, identities, prompt).await
+}
+
+/// As [`connect`], but through `jump`: the connection to `target` runs inside a
+/// `direct-tcpip` channel of the jump host's connection (OpenSSH's `ProxyJump`), with its
+/// own host-key check and login. The jump connection stays open while the result lives.
+///
+/// # Errors
+/// As [`connect`]; [`SshError::Unreachable`] when the jump host cannot reach `target`.
+pub async fn connect_via(
+    jump: Arc<Connection>,
+    target: &Target,
+    known_hosts: &Path,
+    key_dir: Option<&Path>,
+    identities: &[Zeroizing<String>],
+    prompt: Arc<dyn Prompt>,
+) -> Result<Connection, SshError> {
+    let (handle, remote) = handshake(target, known_hosts, prompt.clone(), Some(&jump)).await?;
+    log_in(
+        handle,
+        remote,
+        Some(jump),
+        target,
+        key_dir,
+        identities,
+        prompt,
+    )
+    .await
+}
+
+/// Opens the SSH transport to `target` (directly, or through `via`) and checks its host key.
+async fn handshake(
+    target: &Target,
+    known_hosts: &Path,
+    prompt: Arc<dyn Prompt>,
+    via: Option<&Arc<Connection>>,
+) -> Result<(Handle<Checker>, forward::RemoteMap), SshError> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
         ..client::Config::default()
@@ -269,31 +309,60 @@ pub async fn connect(
         host: target.host.clone(),
         port: target.port,
         known_hosts: known_hosts.to_path_buf(),
-        prompt: prompt.clone(),
+        prompt,
         changed: changed.clone(),
         remote: remote.clone(),
     };
-    let address = (target.host.as_str(), target.port);
-    let mut handle = match client::connect(config, address, checker).await {
-        Ok(handle) => handle,
+    let name = known_hosts_name(&target.host, target.port);
+    let connected = match via {
+        None => client::connect(config, (target.host.as_str(), target.port), checker).await,
+        Some(jump) => {
+            let channel = jump
+                .handle
+                .channel_open_direct_tcpip(
+                    target.host.as_str(),
+                    u32::from(target.port),
+                    "127.0.0.1",
+                    0,
+                )
+                .await
+                .map_err(|error| {
+                    SshError::Unreachable(
+                        name.clone(),
+                        format!("the jump host could not connect: {error}"),
+                    )
+                })?;
+            client::connect_stream(config, channel.into_stream(), checker).await
+        }
+    };
+    match connected {
+        Ok(handle) => Ok((handle, remote)),
         Err(error) => {
             if let Some(fingerprint) = changed.lock().ok().and_then(|mut slot| slot.take()) {
                 return Err(SshError::HostKeyChanged {
-                    host: known_hosts_name(&target.host, target.port),
+                    host: name,
                     fingerprint,
                 });
             }
-            return Err(match error {
+            Err(match error {
                 russh::Error::UnknownKey => SshError::HostKeyRejected,
-                russh::Error::IO(io) => SshError::Unreachable(
-                    known_hosts_name(&target.host, target.port),
-                    io.to_string(),
-                ),
+                russh::Error::IO(io) => SshError::Unreachable(name, io.to_string()),
                 other => SshError::Protocol(other.to_string()),
-            });
+            })
         }
-    };
+    }
+}
 
+/// Logs in on an open transport: keys first, then up to three passwords.
+async fn log_in(
+    mut handle: Handle<Checker>,
+    remote: forward::RemoteMap,
+    via: Option<Arc<Connection>>,
+    target: &Target,
+    key_dir: Option<&Path>,
+    identities: &[Zeroizing<String>],
+    prompt: Arc<dyn Prompt>,
+) -> Result<Connection, SshError> {
     let mut tried = Vec::new();
     let mut offered = String::from("unknown");
     for (label, key) in candidate_keys(identities, key_dir) {
@@ -306,7 +375,13 @@ pub async fn connect(
         tried.push(label);
         let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
         match handle.authenticate_publickey(&target.user, key).await? {
-            AuthResult::Success => return Ok(Connection { handle, remote }),
+            AuthResult::Success => {
+                return Ok(Connection {
+                    handle,
+                    remote,
+                    _via: via,
+                });
+            }
             AuthResult::Failure {
                 remaining_methods, ..
             } => offered = format!("{remaining_methods:?}"),
@@ -326,7 +401,13 @@ pub async fn connect(
             .authenticate_password(&target.user, password.as_str())
             .await?
         {
-            AuthResult::Success => return Ok(Connection { handle, remote }),
+            AuthResult::Success => {
+                return Ok(Connection {
+                    handle,
+                    remote,
+                    _via: via,
+                });
+            }
             AuthResult::Failure {
                 remaining_methods, ..
             } => offered = format!("{remaining_methods:?}"),

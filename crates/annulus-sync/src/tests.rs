@@ -438,6 +438,15 @@ mod vaults {
         }
     }
 
+    /// Adds host "web" (sorted after "bastion"), reached through host `jump`.
+    fn add_web_behind(vault: &mut Vault, jump: u64) {
+        let mut web = vault.draft_host();
+        web.label = "web".into();
+        web.address = "web.internal".into();
+        web.jump_id = Some(jump);
+        vault.upsert_host(web).unwrap();
+    }
+
     #[test]
     fn hosts_and_rules_reach_a_device_that_joins_and_edits_come_back() {
         let server = server();
@@ -462,6 +471,7 @@ mod vaults {
         rule.destination_host = "db".into();
         rule.destination_port = 5432;
         laptop.upsert_forward(rule).unwrap();
+        add_web_behind(&mut laptop, host_id);
         let mut snippet = laptop.draft_snippet();
         snippet.label = "disk".into();
         snippet.script = "df -h".into();
@@ -508,6 +518,11 @@ mod vaults {
         );
         assert_eq!(desktop.ssh_keys()[0].label, "work key");
         assert_eq!(desktop.snippets()[0].script, "df -h");
+        assert_eq!(
+            desktop.hosts()[1].jump_id,
+            Some(desktop.hosts()[0].id),
+            "jump link"
+        );
         assert_eq!(
             desktop.hosts()[0].key_id,
             Some(desktop.ssh_keys()[0].id),

@@ -321,6 +321,7 @@ impl Found {
             tags: vec!["ssh_config".into()],
             password: None,
             key_id: None,
+            jump_id: None,
         }
     }
 
@@ -484,6 +485,7 @@ mod tests {
             tags: Vec::new(),
             password: None,
             key_id: None,
+            jump_id: None,
         }
     }
 }

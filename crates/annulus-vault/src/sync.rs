@@ -63,6 +63,9 @@ pub struct Entry {
     /// A rule whose host has not arrived yet: the host's sync id, to link once it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaits: Option<String>,
+    /// A host whose jump host has not arrived yet: that host's sync id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaits_jump: Option<String>,
 }
 
 /// Everything the vault stores for sync.
@@ -154,6 +157,7 @@ impl SyncState {
             deleted: false,
             hlc,
             awaits: None,
+            awaits_jump: None,
         });
         entry.dirty = true;
         entry.deleted = deleted;
@@ -191,6 +195,8 @@ struct SyncedHost {
     host: Host,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jump: Option<String>,
 }
 
 /// A forward rule as synced: it names its host by sync id, since local ids differ per
@@ -298,8 +304,13 @@ impl SyncCopy {
                         .key_id
                         .and_then(|key| self.state.id_of(kind::KEY, key))
                         .map(str::to_owned),
+                    jump: host
+                        .jump_id
+                        .and_then(|jump| self.state.id_of(kind::HOST, jump))
+                        .map(str::to_owned),
                     host: Host {
                         key_id: None,
+                        jump_id: None,
                         ..host.clone()
                     },
                 };
@@ -401,6 +412,7 @@ impl SyncCopy {
         self.state.clock = self.state.clock.max(hlc);
         let existing = self.state.entries.get(id).map(|entry| entry.local);
         let mut awaits = None;
+        let mut awaits_jump = None;
         let local = match kind {
             kind::HOST => {
                 let Ok(synced) = serde_json::from_slice::<SyncedHost>(&body) else {
@@ -415,6 +427,13 @@ impl SyncCopy {
                     .filter(|entry| entry.kind == kind::KEY && !entry.deleted)
                     .map(|entry| entry.local);
                 awaits = synced.key.filter(|_| host.key_id.is_none());
+                host.jump_id = synced
+                    .jump
+                    .as_ref()
+                    .and_then(|jump| self.state.entries.get(jump))
+                    .filter(|entry| entry.kind == kind::HOST && !entry.deleted)
+                    .map(|entry| entry.local);
+                awaits_jump = synced.jump.filter(|_| host.jump_id.is_none());
                 let local = host.id;
                 upsert(&mut self.hosts, host, |h| h.id, |h| h.label.to_lowercase());
                 local
@@ -463,6 +482,7 @@ impl SyncCopy {
                 deleted: false,
                 hlc,
                 awaits,
+                awaits_jump,
             },
         );
         if kind == kind::HOST || kind == kind::KEY {
@@ -523,6 +543,12 @@ impl SyncCopy {
     /// `local`): rules waiting for their host, hosts waiting for their key.
     fn link_waiting(&mut self, target: &str, local: u64) {
         for entry in self.state.entries.values_mut() {
+            if entry.awaits_jump.as_deref() == Some(target) {
+                entry.awaits_jump = None;
+                if let Some(host) = self.hosts.iter_mut().find(|host| host.id == entry.local) {
+                    host.jump_id = Some(local);
+                }
+            }
             if entry.awaits.as_deref() != Some(target) {
                 continue;
             }
@@ -599,6 +625,7 @@ mod tests {
             tags: Vec::new(),
             password: None,
             key_id: None,
+            jump_id: None,
         };
         copy.apply(
             "host-sync-id",
@@ -646,6 +673,7 @@ mod tests {
             tags: Vec::new(),
             password: None,
             key_id: None,
+            jump_id: None,
         });
         // Many entries, so random ids would put some rule before some host by chance.
         for _ in 0..20 {
@@ -665,6 +693,7 @@ mod tests {
                     deleted: false,
                     hlc: 1,
                     awaits: None,
+                    awaits_jump: None,
                 },
             );
         }

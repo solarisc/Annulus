@@ -175,7 +175,17 @@ impl Shell {
                 files,
                 password,
                 identity,
-            } => SftpTab::new(title, target, files, password, identity),
+                via,
+            } => SftpTab::new(
+                title,
+                annulus_session::Hop {
+                    target,
+                    password,
+                    identity,
+                },
+                files,
+                via,
+            ),
             _ => SftpTab::unavailable(title, "SFTP needs a host Annulus can connect to itself."),
         };
         self.tabs.push(Tab::Sftp(Box::new(tab)));

@@ -4,13 +4,19 @@
 
 use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Palette, space, text};
-use annulus_session::{Password, Program, SshFiles, Target, local_user};
+use annulus_session::{Hop, Password, Program, SshFiles, Target, local_user};
 use annulus_ui::secret::{SecretText, secret_field};
 use annulus_ui::{icons, theme};
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
 
 use crate::import_dialog::ImportPreview;
+
+/// Longest jump chain followed; longer ones are cut, so a mistake cannot hang a connect.
+const MAX_JUMPS: usize = 8;
+
+/// Ids and labels for a picker.
+type Choices = Vec<(u64, String)>;
 
 /// Something the screen asks the shell to do.
 pub enum Request {
@@ -61,28 +67,73 @@ impl HostsScreen {
     /// Annulus's SSH client for `target` text (`user@host:port`), or the system `ssh` if the
     /// text is not a target Annulus understands.
     fn ssh(&self, target: &str) -> Program {
-        self.ssh_with(target, None, None)
-    }
-
-    /// As [`Self::ssh`], logging in with keychain key `key` first and trying `password`
-    /// before asking.
-    fn ssh_with(&self, target: &str, password: Option<&Secret>, key: Option<u64>) -> Program {
         match Target::parse(target, &local_user()) {
             Some(target) => Program::Ssh {
                 target,
                 files: self.ssh_files.clone(),
-                password: password.map(|secret| Password::new(secret.expose())),
-                identity: key
-                    .and_then(|id| self.vault.ssh_key(id))
-                    .map(|key| Password::new(key.private.expose())),
+                password: None,
+                identity: None,
+                via: Vec::new(),
             },
             None => Program::system_ssh(target),
         }
     }
 
-    /// The program that connects to a saved host, with its saved password.
+    /// How to log in to a saved host: its target, saved password and keychain key.
+    fn hop(&self, host: &Host) -> Option<Hop> {
+        Some(Hop {
+            target: Target::parse(&host.target(), &local_user())?,
+            password: host
+                .password
+                .as_ref()
+                .map(|secret| Password::new(secret.expose())),
+            identity: host
+                .key_id
+                .and_then(|id| self.vault.ssh_key(id))
+                .map(|key| Password::new(key.private.expose())),
+        })
+    }
+
+    /// The jump hosts in front of `host`, outermost first. A loop or a missing host ends the
+    /// chain where it is.
+    fn jump_chain(&self, host: &Host) -> Vec<Hop> {
+        let mut chain = Vec::new();
+        let mut seen = vec![host.id];
+        let mut next = host.jump_id;
+        while let Some(id) = next {
+            if seen.contains(&id) || chain.len() >= MAX_JUMPS {
+                break;
+            }
+            seen.push(id);
+            let Some(jump) = self
+                .vault
+                .hosts()
+                .iter()
+                .find(|candidate| candidate.id == id)
+            else {
+                break;
+            };
+            let Some(hop) = self.hop(jump) else { break };
+            chain.push(hop);
+            next = jump.jump_id;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// The program that connects to a saved host: through its jump hosts, with its key and
+    /// saved password.
     pub fn connect_host(&self, host: &Host) -> Program {
-        self.ssh_with(&host.target(), host.password.as_ref(), host.key_id)
+        match self.hop(host) {
+            Some(hop) => Program::Ssh {
+                target: hop.target,
+                files: self.ssh_files.clone(),
+                password: hop.password,
+                identity: hop.identity,
+                via: self.jump_chain(host),
+            },
+            None => Program::system_ssh(&host.target()),
+        }
     }
 
     /// The import and export buttons for `ssh_config` (F-IMP-001, F-IMP-003).
@@ -241,13 +292,27 @@ impl HostsScreen {
         Request::Open(query.to_owned(), self.ssh(query))
     }
 
-    fn editor_ui(&mut self, ui: &mut Ui, palette: &Palette) {
-        let keys: Vec<(u64, String)> = self
+    /// The other hosts (as jump hosts) and the keychain keys, for the editor's pickers.
+    fn pick_lists(&self) -> (Choices, Choices) {
+        let editing = self.editor.as_ref().map(|draft| draft.host.id);
+        let others = self
+            .vault
+            .hosts()
+            .iter()
+            .filter(|host| Some(host.id) != editing)
+            .map(|host| (host.id, host.label.clone()))
+            .collect();
+        let keys = self
             .vault
             .ssh_keys()
             .iter()
             .map(|key| (key.id, key.label.clone()))
             .collect();
+        (others, keys)
+    }
+
+    fn editor_ui(&mut self, ui: &mut Ui, palette: &Palette) {
+        let (others, keys) = self.pick_lists();
         let Some(draft) = &mut self.editor else {
             return;
         };
@@ -282,6 +347,9 @@ impl HostsScreen {
                 ui.end_row();
                 ui.label("Key");
                 key_picker(ui, &mut draft.host.key_id, &keys);
+                ui.end_row();
+                ui.label("Jump host");
+                jump_picker(ui, &mut draft.host.jump_id, &others);
                 ui.end_row();
                 ui.label("Password");
                 let saved = draft.host.password.is_some() && !draft.forget_password;
@@ -375,6 +443,21 @@ impl HostsScreen {
             }
         }
     }
+}
+
+/// The host editor's choice of a saved host to connect through.
+fn jump_picker(ui: &mut Ui, jump_id: &mut Option<u64>, hosts: &[(u64, String)]) {
+    let chosen = jump_id
+        .and_then(|id| hosts.iter().find(|(host, _)| *host == id))
+        .map_or("None (direct)", |(_, label)| label.as_str());
+    egui::ComboBox::from_id_salt("host-jump")
+        .selected_text(chosen)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(jump_id, None, "None (direct)");
+            for (id, label) in hosts {
+                ui.selectable_value(jump_id, Some(*id), label);
+            }
+        });
 }
 
 /// The host editor's choice of keychain key.
@@ -503,6 +586,64 @@ mod tests {
                 key_dir: None,
             },
         )
+    }
+
+    #[test]
+    fn a_jump_chain_runs_outermost_first_and_stops_at_a_loop() {
+        let mut screen = screen_with("inner");
+        let mut add = |label: &str| {
+            let mut host = screen.vault.draft_host();
+            host.label = label.into();
+            host.address = format!("{label}.example.com");
+            screen.vault.upsert_host(host.clone()).unwrap();
+            host.id
+        };
+        let middle = add("middle");
+        let outer = add("outer");
+        let set_jump = |screen: &mut HostsScreen, id: u64, jump: u64| {
+            let mut host = screen
+                .vault
+                .hosts()
+                .iter()
+                .find(|h| h.id == id)
+                .unwrap()
+                .clone();
+            host.jump_id = Some(jump);
+            screen.vault.upsert_host(host).unwrap();
+        };
+        let inner = screen
+            .vault
+            .hosts()
+            .iter()
+            .find(|h| h.label == "inner")
+            .unwrap()
+            .id;
+        set_jump(&mut screen, inner, middle);
+        set_jump(&mut screen, middle, outer);
+        let host = screen
+            .vault
+            .hosts()
+            .iter()
+            .find(|h| h.id == inner)
+            .unwrap()
+            .clone();
+        let hops: Vec<String> = screen
+            .jump_chain(&host)
+            .into_iter()
+            .map(|hop| hop.target.host)
+            .collect();
+        assert_eq!(hops, ["outer.example.com", "middle.example.com"]);
+
+        // outer → inner closes a loop: the chain stops instead of going round.
+        set_jump(&mut screen, outer, inner);
+        let host = screen
+            .vault
+            .hosts()
+            .iter()
+            .find(|h| h.id == inner)
+            .unwrap()
+            .clone();
+        assert_eq!(screen.jump_chain(&host).len(), 2);
     }
 
     fn opened(request: &Request) -> (&str, String) {

@@ -9,10 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Key, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
-use annulus_session::{Answers, AskUi, Password, SessionEvent, SshFiles, Target};
+use annulus_session::{Answers, Hop, SessionEvent, SshFiles, Target};
 use annulus_sftp::{Conflict, Entry, Kind, Outcome, Sftp, join, parent};
 use annulus_ui::{icons, theme};
-use zeroize::Zeroizing;
 
 use crate::ssh_dialogs::SshDialogs;
 
@@ -82,10 +81,7 @@ struct Worker {
 
 impl Worker {
     fn start(
-        target: Target,
-        files: SshFiles,
-        saved_password: Option<Zeroizing<String>>,
-        identity: Option<Zeroizing<String>>,
+        login: Login,
         wake: impl Fn() + std::marker::Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
@@ -107,24 +103,22 @@ impl Worker {
             .spawn(move || {
                 runtime.block_on(async move {
                     let notify = send.clone();
-                    let prompt =
-                        Arc::new(AskUi::new(prompt_answers, saved_password, move |event| {
-                            notify(Reply::Session(event));
-                        }));
+                    let notify: Arc<dyn Fn(SessionEvent) + std::marker::Send + Sync> =
+                        Arc::new(move |event| notify(Reply::Session(event)));
                     let failed =
                         |message: String| send(Reply::Session(SessionEvent::Failed(message)));
-                    let identities: Vec<Zeroizing<String>> = identity.into_iter().collect();
-                    let connection = match annulus_ssh::connect(
-                        &target,
-                        &files.known_hosts,
-                        files.key_dir.as_deref(),
-                        &identities,
-                        prompt,
+                    let (via, last, files) = login;
+                    let connection = match annulus_session::connect_chain(
+                        &via,
+                        &last,
+                        &files,
+                        &prompt_answers,
+                        notify,
                     )
                     .await
                     {
                         Ok(connection) => connection,
-                        Err(error) => return failed(error.to_string()),
+                        Err(message) => return failed(message),
                     };
                     let sftp = match Sftp::open(&connection).await {
                         Ok(sftp) => Arc::new(sftp),
@@ -235,13 +229,8 @@ enum Dialog {
     Delete(Entry),
 }
 
-/// Where and how a tab logs in: target, files, saved password, keychain key.
-type Login = (
-    Target,
-    SshFiles,
-    Option<Zeroizing<String>>,
-    Option<Zeroizing<String>>,
-);
+/// Where and how a tab logs in: the jump hosts, the destination, and the SSH files.
+type Login = (Vec<Hop>, Hop, SshFiles);
 
 /// One SFTP tab.
 pub struct SftpTab {
@@ -272,23 +261,12 @@ pub struct SftpTab {
 }
 
 impl SftpTab {
-    /// A tab that connects to `target` when first shown, trying `password` before asking.
+    /// A tab that connects to `last` (through `via`) when first shown.
     #[must_use]
-    pub fn new(
-        title: impl Into<String>,
-        target: Target,
-        files: SshFiles,
-        password: Option<Password>,
-        identity: Option<Password>,
-    ) -> Self {
+    pub fn new(title: impl Into<String>, last: Hop, files: SshFiles, via: Vec<Hop>) -> Self {
         Self {
             title: title.into(),
-            start: Some((
-                target,
-                files,
-                password.map(Password::into_secret),
-                identity.map(Password::into_secret),
-            )),
+            start: Some((via, last, files)),
             worker: None,
             dialogs: SshDialogs::default(),
             failed: None,
@@ -315,17 +293,20 @@ impl SftpTab {
     pub fn unavailable(title: impl Into<String>, why: &str) -> Self {
         let mut tab = Self::new(
             title,
-            Target {
-                user: String::new(),
-                host: String::new(),
-                port: 22,
+            Hop {
+                target: Target {
+                    user: String::new(),
+                    host: String::new(),
+                    port: 22,
+                },
+                password: None,
+                identity: None,
             },
             SshFiles {
                 known_hosts: PathBuf::new(),
                 key_dir: None,
             },
-            None,
-            None,
+            Vec::new(),
         );
         tab.start = None;
         tab.failed = Some(why.to_owned());
@@ -475,9 +456,9 @@ impl SftpTab {
 
     /// Draws the tab.
     pub fn ui(&mut self, ui: &mut Ui, palette: &Palette) {
-        if let Some((target, files, password, identity)) = self.start.take() {
+        if let Some(login) = self.start.take() {
             let ctx = ui.ctx().clone();
-            match Worker::start(target, files, password, identity, move || {
+            match Worker::start(login, move || {
                 ctx.request_repaint();
             }) {
                 Ok(worker) => self.worker = Some(worker),

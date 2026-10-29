@@ -79,7 +79,84 @@ pub enum Program {
         password: Option<Password>,
         /// A keychain private key (OpenSSH text), tried before the default key files.
         identity: Option<Password>,
+        /// Jump hosts to go through, in order (empty: connect directly).
+        via: Vec<Hop>,
     },
+}
+
+/// One hop of a jump chain: where, and what to log in with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hop {
+    /// Where to connect.
+    pub target: Target,
+    /// A saved password, tried before asking.
+    pub password: Option<Password>,
+    /// A keychain private key.
+    pub identity: Option<Password>,
+}
+
+/// Connects through `via`, in order, to `last` (F-SSH-014). Each hop checks its own host
+/// key and logs in with its own credentials; a failure names the hop it happened at.
+///
+/// # Errors
+/// The first hop that failed, as text for the user.
+pub async fn connect_chain(
+    via: &[Hop],
+    last: &Hop,
+    files: &SshFiles,
+    answers: &Answers,
+    notify: Arc<dyn Fn(SessionEvent) + Send + Sync>,
+) -> Result<annulus_ssh::Connection, String> {
+    let mut jump: Option<Arc<annulus_ssh::Connection>> = None;
+    let hops: Vec<&Hop> = via.iter().chain(std::iter::once(last)).collect();
+    for (index, hop) in hops.iter().enumerate() {
+        let notify = notify.clone();
+        let prompt = Arc::new(AskUi::new(
+            answers.clone(),
+            hop.password.clone().map(Password::into_secret),
+            move |event| notify(event),
+        ));
+        let identities: Vec<Zeroizing<String>> = hop
+            .identity
+            .clone()
+            .map(Password::into_secret)
+            .into_iter()
+            .collect();
+        let (known_hosts, key_dir) = (&files.known_hosts, files.key_dir.as_deref());
+        let result = match jump.take() {
+            None => {
+                annulus_ssh::connect(&hop.target, known_hosts, key_dir, &identities, prompt).await
+            }
+            Some(through) => {
+                annulus_ssh::connect_via(
+                    through,
+                    &hop.target,
+                    known_hosts,
+                    key_dir,
+                    &identities,
+                    prompt,
+                )
+                .await
+            }
+        };
+        let connection = result.map_err(|error| {
+            if hops.len() == 1 {
+                error.to_string()
+            } else {
+                format!(
+                    "{} (hop {} of {}): {error}",
+                    hop.target.host,
+                    index + 1,
+                    hops.len()
+                )
+            }
+        })?;
+        if index + 1 == hops.len() {
+            return Ok(connection);
+        }
+        jump = Some(Arc::new(connection));
+    }
+    Err("nothing to connect to".into())
 }
 
 /// A password handed to a session: wiped on drop, never shown by `Debug`.
@@ -342,12 +419,16 @@ impl Session {
                 files,
                 password,
                 identity,
+                via,
             } => Backend::Ssh(spawn_ssh(
                 SshLogin {
-                    target: target.clone(),
+                    last: Hop {
+                        target: target.clone(),
+                        password: password.clone(),
+                        identity: identity.clone(),
+                    },
                     files: files.clone(),
-                    password: password.as_ref().map(|password| password.0.clone()),
-                    identity: identity.as_ref().map(|identity| identity.0.clone()),
+                    via: via.clone(),
                 },
                 size,
                 term.clone(),
@@ -499,10 +580,9 @@ impl Drop for Session {
 /// then move bytes between the channel and the terminal until either side closes.
 /// What an SSH session logs in with.
 struct SshLogin {
-    target: Target,
+    last: Hop,
     files: SshFiles,
-    password: Option<Zeroizing<String>>,
-    identity: Option<Zeroizing<String>>,
+    via: Vec<Hop>,
 }
 
 fn spawn_ssh(
@@ -526,29 +606,16 @@ fn spawn_ssh(
         .name("ssh session".into())
         .spawn(move || {
             runtime.block_on(async move {
-                let SshLogin {
-                    target,
-                    files,
-                    password: saved_password,
-                    identity,
-                } = login;
                 let notifier = listener.clone();
-                let prompt = Arc::new(AskUi::new(answers, saved_password, move |event| {
-                    notifier.send(event);
-                }));
-                let identities: Vec<Zeroizing<String>> = identity.into_iter().collect();
-                let connection = match annulus_ssh::connect(
-                    &target,
-                    &files.known_hosts,
-                    files.key_dir.as_deref(),
-                    &identities,
-                    prompt,
-                )
-                .await
-                {
-                    Ok(connection) => connection,
-                    Err(error) => return listener.send(SessionEvent::Failed(error.to_string())),
-                };
+                let notify: Arc<dyn Fn(SessionEvent) + Send + Sync> =
+                    Arc::new(move |event| notifier.send(event));
+                let connection =
+                    match connect_chain(&login.via, &login.last, &login.files, &answers, notify)
+                        .await
+                    {
+                        Ok(connection) => connection,
+                        Err(message) => return listener.send(SessionEvent::Failed(message)),
+                    };
                 let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
                 let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
                 let mut shell = match connection.shell(columns, rows).await {
@@ -683,6 +750,7 @@ mod tests {
                 files,
                 password: None,
                 identity: None,
+                via: Vec::new(),
             },
             Size::new(80, 24),
             8,

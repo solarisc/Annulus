@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
-use annulus_session::{Answers, AskUi, Program, SessionEvent};
+use annulus_session::{Answers, Program, SessionEvent};
 use annulus_ssh::forward::{self, Rule};
 use annulus_ui::theme;
 use annulus_vault::forwards::{ForwardKind, PortForward};
@@ -78,6 +78,7 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
             files,
             password,
             identity,
+            via,
         },
         Some(forward_rule),
     ) = (program, engine_rule(rule))
@@ -92,10 +93,13 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
         wake();
     });
     let connect = Connect {
-        target,
+        last: annulus_session::Hop {
+            target,
+            password,
+            identity,
+        },
         files,
-        password,
-        identity,
+        via,
         answers: answers.clone(),
         notify,
     };
@@ -125,40 +129,24 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
 
 /// What a rule needs to (re)connect.
 struct Connect {
-    target: annulus_session::Target,
+    last: annulus_session::Hop,
     files: annulus_session::SshFiles,
-    password: Option<annulus_session::Password>,
-    identity: Option<annulus_session::Password>,
+    via: Vec<annulus_session::Hop>,
     answers: Answers,
     notify: Arc<dyn Fn(SessionEvent) + Send + Sync>,
 }
 
 impl Connect {
     async fn connect(&self) -> Result<Arc<annulus_ssh::Connection>, String> {
-        let notify = self.notify.clone();
-        let prompt = Arc::new(AskUi::new(
-            self.answers.clone(),
-            self.password
-                .clone()
-                .map(annulus_session::Password::into_secret),
-            move |event| notify(event),
-        ));
-        let identities: Vec<_> = self
-            .identity
-            .clone()
-            .map(annulus_session::Password::into_secret)
-            .into_iter()
-            .collect();
-        annulus_ssh::connect(
-            &self.target,
-            &self.files.known_hosts,
-            self.files.key_dir.as_deref(),
-            &identities,
-            prompt,
+        annulus_session::connect_chain(
+            &self.via,
+            &self.last,
+            &self.files,
+            &self.answers,
+            self.notify.clone(),
         )
         .await
         .map(Arc::new)
-        .map_err(|error| error.to_string())
     }
 }
 

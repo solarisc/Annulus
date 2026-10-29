@@ -252,6 +252,7 @@ impl Vault {
             tags: Vec::new(),
             password: None,
             key_id: None,
+            jump_id: None,
         }
     }
 
@@ -517,6 +518,10 @@ impl Vault {
                 key_id: host.key_id.and_then(|key| new_key_ids.get(&key).copied()),
                 ..host.clone()
             });
+        }
+        // Jump hosts point at hosts adopted in the same batch.
+        for host in next_hosts.iter_mut().rev().take(hosts.len()) {
+            host.jump_id = host.jump_id.and_then(|jump| new_ids.get(&jump).copied());
         }
         let mut rule_id = next_forwards.iter().map(|rule| rule.id).max().unwrap_or(0);
         for rule in forwards {

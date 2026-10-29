@@ -32,6 +32,9 @@ pub struct Host {
     /// The keychain key to log in with, tried before the default key files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<u64>,
+    /// The saved host to connect through (`ProxyJump`); it may have its own jump host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_id: Option<u64>,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -167,6 +170,7 @@ mod tests {
             tags: Vec::new(),
             password: None,
             key_id: None,
+            jump_id: None,
         }
     }
 

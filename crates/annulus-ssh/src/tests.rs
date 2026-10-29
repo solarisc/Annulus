@@ -480,6 +480,89 @@ async fn a_keychain_key_logs_in_without_asking_for_a_password() {
     assert!(connection.is_ok());
 }
 
+/// A server that forwards `direct-tcpip` channels to real TCP ports on this machine, like
+/// a bastion, and otherwise behaves like [`TestServer`].
+#[derive(Clone, Default)]
+struct Bastion;
+
+impl server::Handler for Bastion {
+    type Error = russh::Error;
+
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        Ok(if user == "jumper" && password == "hop" {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)] // The trait's signature.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: ServerChannel<ServerMsg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let port = u16::try_from(port_to_connect).unwrap_or(0);
+        let Ok(mut socket) = tokio::net::TcpStream::connect((host_to_connect, port)).await else {
+            return Ok(());
+        };
+        reply.accept().await;
+        tokio::spawn(async move {
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_host_behind_a_jump_host_is_reached_through_it() {
+    let inner = serve(new_key()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bastion_port = listener.local_addr().unwrap().port();
+    let config = Arc::new(server::Config {
+        keys: vec![new_key()],
+        ..server::Config::default()
+    });
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await
+            && let Ok(running) = server::run_stream(config, stream, Bastion).await
+        {
+            let _ = running.await;
+        }
+    });
+    let path = known_hosts("jump");
+    let jump = connect(
+        &target(bastion_port, "jumper"),
+        &path,
+        None,
+        &[],
+        Script::new(true, &["hop"]),
+    )
+    .await
+    .unwrap();
+    let script = Script::new(true, &["secret"]);
+    let connection = connect_via(
+        Arc::new(jump),
+        &target(inner, "alice"),
+        &path,
+        None,
+        &[],
+        script.clone(),
+    )
+    .await
+    .unwrap();
+    // The inner host's key was checked too, and the shell works through the hop.
+    assert!(script.asked_key.lock().unwrap().is_some());
+    let mut shell = connection.shell(80, 24).await.unwrap();
+    assert_eq!(shell.next().await, Output::Data(b"welcome\r\n".to_vec()));
+}
+
 #[tokio::test]
 async fn a_rejected_new_key_stops_before_any_password_is_sent() {
     let port = serve(new_key()).await;
