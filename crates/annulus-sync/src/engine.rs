@@ -38,6 +38,10 @@ pub enum SyncError {
     /// A record could not be decrypted with the account key.
     #[error("record {0} could not be decrypted")]
     Undecryptable(String),
+    /// The server's certificate is not one this device trusts for it: not from a public
+    /// authority and not pinned, or not the one pinned (ADR-0018).
+    #[error("the server's certificate is not trusted ({0})")]
+    Untrusted(String),
 }
 
 /// The plaintext inside a record's ciphertext. An empty body is a deletion.

@@ -87,7 +87,7 @@ impl AccountView {
                 let mut row = inner.take_top(CONTROL);
                 let left = row.take_left(half);
                 row.take_left(space::M);
-                ui.text_field(
+                let server = ui.text_field(
                     Id::new("account.server"),
                     left,
                     &mut sync.server,
@@ -96,6 +96,11 @@ impl AccountView {
                         ..FieldStyle::default()
                     },
                 );
+                // A trusted certificate belongs to the address it was trusted for.
+                if server.changed {
+                    sync.pin = None;
+                    sync.untrusted = None;
+                }
                 ui.text_field(
                     Id::new("account.name"),
                     row,
@@ -147,6 +152,19 @@ impl AccountView {
                     t.text2,
                     Align::Start,
                 );
+                if let Some(certificate) = sync.untrusted.clone() {
+                    inner.take_top(space::M);
+                    certificate_box(ui, &mut inner, sync, &certificate);
+                } else if sync.pin.is_some() {
+                    inner.take_top(space::S);
+                    ui.gfx.text(
+                        inner.take_top(18.0),
+                        "This server's own certificate is trusted for this account.",
+                        SMALL,
+                        t.ok,
+                        Align::Start,
+                    );
+                }
                 inner.take_top(space::M);
                 let ready = busy.is_none()
                     && !sync.server.trim().is_empty()
@@ -441,11 +459,8 @@ impl AccountView {
                         other => other.to_string(),
                     })?;
                     if let Some(account) = account {
-                        let mut http = HttpServer::new(
-                            &account.server,
-                            Some(account.token.expose().to_owned()),
-                        )
-                        .map_err(|error| error.to_string())?;
+                        let mut http =
+                            HttpServer::for_account(&account).map_err(|error| error.to_string())?;
                         account::change_password(
                             &mut http,
                             &account::default_ksf(),
@@ -490,5 +505,77 @@ impl AccountView {
         let card = Rect::new(column.x, card_top, column.w, inner.y - card_top + space::M);
         ui.gfx.stroke_rect(card, 12.0, 1.0, t.line);
         card.b() - rect.y
+    }
+}
+
+/// The certificate a server showed, by fingerprint, with a choice to trust it (ADR-0018).
+fn certificate_box(ui: &mut Ui<'_>, inner: &mut Rect, sync: &mut SyncScreen, certificate: &[u8]) {
+    let t = ui.theme;
+    let fingerprint = annulus_sync::pin::fingerprint(certificate);
+    // 32 bytes as "AB:" pairs: two lines of 16 read and compare more easily than one.
+    let (first, second) = fingerprint.split_at(fingerprint.len().min(47));
+    let lines = [
+        "Trust it only if this SHA-256 fingerprint matches what",
+        "\u{201c}annulus-server fingerprint\u{201d} prints on the server:",
+    ];
+    let height = 20.0 + 18.0 * 4.0 + space::S * 3.0 + CONTROL + space::M * 2.0;
+    let card = inner.take_top(height);
+    ui.gfx.fill_rect(card, 10.0, t.warn.alpha(0.08));
+    ui.gfx.stroke_rect(card, 10.0, 1.0, t.warn.alpha(0.5));
+    let mut column = card.inset(space::M, space::M);
+    let mut title = column.take_top(20.0);
+    let icon = title.take_left(16.0).centered(14.0, 14.0);
+    ui.gfx.icon(icons::SHIELD, icon, t.warn);
+    title.take_left(space::S);
+    ui.gfx.text(
+        title,
+        "This server uses its own certificate, not one from a public authority.",
+        BODY_STRONG,
+        t.text,
+        Align::Start,
+    );
+    column.take_top(space::S);
+    for line in lines {
+        ui.gfx
+            .text(column.take_top(18.0), line, SMALL, t.text2, Align::Start);
+    }
+    column.take_top(space::S);
+    for part in [first, second.trim_start_matches(':')] {
+        ui.gfx.text(
+            column.take_top(18.0),
+            part,
+            annulus_ui::gfx::Font::mono(12.0),
+            t.text,
+            Align::Start,
+        );
+    }
+    column.take_top(space::S);
+    let mut row = column.take_top(CONTROL);
+    if push_button(
+        ui,
+        &mut row,
+        "account.trust",
+        "Trust this certificate",
+        Kind::Primary,
+        true,
+    ) {
+        sync.pin = Some(certificate.to_vec());
+        sync.untrusted = None;
+        sync.message = Some((
+            false,
+            "Trusted for this server. Type the master password again and choose Sign in or Create account."
+                .into(),
+        ));
+    }
+    if push_button(
+        ui,
+        &mut row,
+        "account.distrust",
+        "Cancel",
+        Kind::Ghost,
+        true,
+    ) {
+        sync.untrusted = None;
+        sync.message = None;
     }
 }

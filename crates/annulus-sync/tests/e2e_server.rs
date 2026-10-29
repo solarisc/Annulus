@@ -79,6 +79,7 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
         name: name.clone(),
         device: session.device,
         token: Secret::new(session.token),
+        pin: None,
     };
     laptop
         .set_sync_account(Some(laptop_account.clone()))
@@ -93,6 +94,7 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
         name: name.clone(),
         device: session.device,
         token: Secret::new(session.token),
+        pin: None,
     };
     let mut desktop = Vault::join(
         temp("b"),
@@ -164,6 +166,7 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
     let relinked = SyncAccount {
         device: session.device,
         token: Secret::new(session.token),
+        pin: None,
         ..desktop_account
     };
     desktop

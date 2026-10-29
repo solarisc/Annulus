@@ -23,5 +23,7 @@ annulus-vault = { path = "../annulus-vault" }
 
 [dev-dependencies]
 axum.workspace = true
+axum-server.workspace = true
+rcgen.workspace = true
 tokio.workspace = true
 annulus-server = { path = "../annulus-server" }

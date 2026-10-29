@@ -8,6 +8,9 @@
 //! annulus-server delete-account <name> [--data …]  delete an account and its data
 //! annulus-server backup <file> [--data …]          consistent copy while running
 //! annulus-server invite [--expires 24h] [--data …] single-use invite code for one account
+//! annulus-server tls-init --name 10.1.1.20[,sync.lan] [--out .]
+//!                                                  a self-signed certificate for a LAN server
+//! annulus-server fingerprint [--tls-cert cert.pem] the fingerprint the app asks to compare
 //! ```
 //!
 //! Plain HTTP is allowed on loopback only; elsewhere the server needs a certificate, or
@@ -39,6 +42,8 @@ enum Command {
     DeleteAccount { data: PathBuf, name: String },
     Backup { data: PathBuf, file: PathBuf },
     Invite { data: PathBuf, expires: Duration },
+    TlsInit { out: PathBuf, names: Vec<String> },
+    Fingerprint { cert: PathBuf },
 }
 
 const DEFAULT_DATA: &str = "annulus-server.db";
@@ -84,6 +89,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     };
     let (mut cert, mut key) = (None, None);
     let mut expires = None;
+    let (mut names, mut out) = (Vec::new(), PathBuf::from("."));
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -104,13 +110,23 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             "--tls-cert" => cert = Some(PathBuf::from(value()?)),
             "--tls-key" => key = Some(PathBuf::from(value()?)),
             "--behind-proxy" => serve.behind_proxy = true,
+            "--name" => names.extend(
+                value()?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
+            ),
+            "--out" => out = PathBuf::from(value()?),
             other if !other.starts_with("--") => positional.push(other.to_owned()),
             other => return Err(format!("unknown option {other}")),
         }
     }
+    let fingerprint_of = cert.clone();
     serve.tls = match (cert, key) {
         (Some(cert), Some(key)) => Some((cert, key)),
         (None, None) => None,
+        _ if command.as_deref() == Some("fingerprint") => None,
         _ => return Err("--tls-cert and --tls-key go together".into()),
     };
     let one = |what: &str| match positional.as_slice() {
@@ -141,6 +157,13 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             data: serve.data,
             expires: expires.unwrap_or(DEFAULT_INVITE),
         }),
+        Some("tls-init") if names.is_empty() => {
+            Err("tls-init needs --name with the address the app uses, e.g. 10.1.1.20".into())
+        }
+        Some("tls-init") => Ok(Command::TlsInit { out, names }),
+        Some("fingerprint") => Ok(Command::Fingerprint {
+            cert: fingerprint_of.unwrap_or_else(|| PathBuf::from("cert.pem")),
+        }),
         Some(other) => Err(format!("unknown command {other}")),
     }
 }
@@ -170,6 +193,13 @@ fn serve(options: Serve) -> Result<(), String> {
             }
         );
         if let Some((cert, key)) = options.tls {
+            // The same line `annulus-server fingerprint` prints, for the app's question.
+            if let Ok(fingerprint) = std::fs::read_to_string(&cert)
+                .map_err(|e| e.to_string())
+                .and_then(|pem| annulus_server::tls::fingerprint_of_pem(&pem))
+            {
+                let _ = writeln!(std::io::stderr(), "certificate fingerprint {fingerprint}");
+            }
             let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
                 .await
                 .map_err(|e| format!("cannot load the certificate: {e}"))?;
@@ -215,6 +245,23 @@ fn run(command: Command) -> Result<(), String> {
         Command::Backup { data, file } => {
             open(&data)?.backup(&file).map_err(|e| e.to_string())?;
             say(&format!("backup written to {}", file.display()));
+            Ok(())
+        }
+        Command::TlsInit { out, names } => {
+            let fingerprint = annulus_server::tls::init(&out, &names)?;
+            say(&fingerprint);
+            let _ = writeln!(
+                std::io::stderr(),
+                "wrote cert.pem and key.pem in {}: serve with --tls-cert and --tls-key; the app \
+                 shows this fingerprint at sign-in for you to compare",
+                out.display()
+            );
+            Ok(())
+        }
+        Command::Fingerprint { cert } => {
+            let pem =
+                std::fs::read_to_string(&cert).map_err(|e| format!("{}: {e}", cert.display()))?;
+            say(&annulus_server::tls::fingerprint_of_pem(&pem)?);
             Ok(())
         }
         Command::Invite { data, expires } => {

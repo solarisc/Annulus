@@ -1544,6 +1544,7 @@ mod tests {
             name: "ana".into(),
             device: 1,
             token: crate::hosts::Secret::new("t"),
+            pin: None,
         };
         let joining = live.with_extension("joining.anv");
         let mut joined = Vault::join(

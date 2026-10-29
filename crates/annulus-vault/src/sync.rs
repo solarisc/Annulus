@@ -49,6 +49,10 @@ pub struct SyncAccount {
     pub device: u64,
     /// This device's token.
     pub token: Secret,
+    /// The server's own certificate (DER), pinned at sign-in when it is not from a public
+    /// authority (ADR-0018); then it is the only one trusted for this account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<Vec<u8>>,
 }
 
 /// Sync bookkeeping for one entity.

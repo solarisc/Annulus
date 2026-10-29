@@ -48,6 +48,9 @@ pub(crate) enum Done {
     Restored(Box<SyncCopy>, Result<(), SyncError>),
     /// A step failed before anything changed.
     Failed(String),
+    /// The server's certificate is not from a public authority: this one (DER) waits for
+    /// the user to compare its fingerprint and trust it (ADR-0018).
+    Untrusted(Vec<u8>),
 }
 
 /// The account part of Settings, kept while the vault is unlocked.
@@ -68,6 +71,11 @@ pub struct SyncScreen {
     pub(crate) watcher: Option<Watcher>,
     /// The last sync round failed (it retries); shown in the status pill.
     pub(crate) round_failed: bool,
+    /// The certificate the user trusted for `server` (DER), pinned to the account made or
+    /// signed in to with it.
+    pub(crate) pin: Option<Vec<u8>>,
+    /// A certificate shown by `server` that waits for a yes.
+    pub(crate) untrusted: Option<Vec<u8>>,
 }
 
 /// How sync is doing, for the pill in the tab strip (F-SYNC-004).
@@ -114,10 +122,10 @@ impl Watcher {
     fn start(pace: &dyn Pace, account: &SyncAccount, since: u64) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let news = Arc::new(AtomicBool::new(false));
-        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let watched = account.clone();
         let (thread_stop, thread_news, wake) = (stop.clone(), news.clone(), pace.waker());
         std::thread::spawn(move || {
-            let Ok(http) = HttpServer::new(&server, Some(token)) else {
+            let Ok(http) = HttpServer::for_account(&watched) else {
                 return;
             };
             let mut since = since;
@@ -161,6 +169,8 @@ impl Default for SyncScreen {
             dirty_since: None,
             watcher: None,
             round_failed: false,
+            pin: None,
+            untrusted: None,
         }
     }
 }
@@ -342,6 +352,11 @@ impl SyncScreen {
                 Err(error) => self.message = Some((true, error.to_string())),
             },
             Done::Failed(message) => self.message = Some((true, message)),
+            // The card shows the certificate and the question.
+            Done::Untrusted(certificate) => {
+                self.message = None;
+                self.untrusted = Some(certificate);
+            }
         }
         false
     }
@@ -390,10 +405,10 @@ impl SyncScreen {
 
     /// Loads the account's devices.
     pub(crate) fn load_devices(&mut self, pace: &dyn Pace, account: &SyncAccount) {
-        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let account = account.clone();
         self.start(pace, "Loading devices", move || {
             Done::Devices(
-                HttpServer::new(&server, Some(token))
+                HttpServer::for_account(&account)
                     .and_then(|http| http.devices())
                     .map(|list| list.devices),
             )
@@ -402,10 +417,10 @@ impl SyncScreen {
 
     /// Loads what was deleted on any device and can be restored.
     pub(crate) fn load_deleted(&mut self, pace: &dyn Pace, account: &SyncAccount, vault: &Vault) {
-        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let account = account.clone();
         let copy = vault.sync_copy();
         self.start(pace, "Loading deleted items", move || {
-            Done::Trash(load_trash(&server, token, &copy))
+            Done::Trash(load_trash(&account, &copy))
         });
     }
 
@@ -421,11 +436,11 @@ impl SyncScreen {
             return;
         }
         let item = self.trash.remove(index);
-        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let account = account.clone();
         let copy = vault.sync_copy();
         self.start(pace, "Restoring", move || {
             let mut replica = VaultReplica(copy);
-            let result = HttpServer::new(&server, Some(token)).and_then(|mut http| {
+            let result = HttpServer::for_account(&account).and_then(|mut http| {
                 restore_item(&mut http, &mut replica, &item.id, &item.version)
             });
             Done::Restored(Box::new(replica.0), result)
@@ -447,9 +462,9 @@ impl SyncScreen {
 
     /// Signs another device out of the account.
     pub(crate) fn revoke(&mut self, pace: &dyn Pace, account: &SyncAccount, id: u64) {
-        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let account = account.clone();
         self.start(pace, "Signing the device out", move || {
-            let http = match HttpServer::new(&server, Some(token)) {
+            let http = match HttpServer::for_account(&account) {
                 Ok(http) => http,
                 Err(error) => return Done::Devices(Err(error)),
             };
@@ -487,13 +502,15 @@ impl SyncScreen {
             invite.trim().to_owned(),
         );
         let key_file = hosts.key_file_bytes();
+        let pin = self.pin.clone();
         self.message = None;
         self.start(ctx, "Creating the account", move || {
             // The account password must be the vault's, so other devices can unwrap the key.
             if !Vault::password_opens(&key_file, &password) {
                 return Done::Failed("That is not this vault's master password.".into());
             }
-            let result = HttpServer::new(&server, None).and_then(|mut http| {
+            let connect = HttpServer::new(&server, None).map(|http| http.pinned(pin.as_deref()));
+            let result = connect.and_then(|mut http| {
                 account::register_with_invite(
                     &mut http,
                     &account::default_ksf(),
@@ -510,7 +527,9 @@ impl SyncScreen {
                     name,
                     device: session.device,
                     token: Secret::new(session.token),
+                    pin,
                 }),
+                Err(SyncError::Untrusted(_)) if pin.is_none() => untrusted(&server),
                 Err(error) => Done::Failed(format!("Could not create the account: {error}")),
             }
         });
@@ -531,9 +550,11 @@ impl SyncScreen {
         let generation = hosts.generation();
         let copy = hosts.sync_copy();
         let path = vault_path.to_path_buf();
+        let pin = self.pin.clone();
         self.message = None;
         self.start(ctx, "Signing in", move || {
-            let session = match HttpServer::new(&server, None).and_then(|mut http| {
+            let connect = HttpServer::new(&server, None).map(|http| http.pinned(pin.as_deref()));
+            let session = match connect.and_then(|mut http| {
                 account::login(
                     &mut http,
                     &account::default_ksf(),
@@ -543,6 +564,7 @@ impl SyncScreen {
                 )
             }) {
                 Ok(session) => session,
+                Err(SyncError::Untrusted(_)) if pin.is_none() => return untrusted(&server),
                 Err(error) => return Done::Failed(format!("Could not sign in: {error}")),
             };
             let account = SyncAccount {
@@ -550,6 +572,7 @@ impl SyncScreen {
                 name: name.clone(),
                 device: session.device,
                 token: Secret::new(session.token.clone()),
+                pin: pin.clone(),
             };
             // This vault already belongs to the account (signed out earlier, or signed out
             // by another device): just link it again, nothing to merge.
@@ -568,6 +591,7 @@ impl SyncScreen {
                 name,
                 device: session.device,
                 token: Secret::new(session.token),
+                pin,
             };
             // Built beside the live vault; the UI thread moves it in place.
             let joining = path.with_extension("joining.anv");
@@ -600,8 +624,8 @@ pub(crate) struct TrashItem {
 }
 
 /// The deleted items of `copy`, each with its last version from the server's history.
-fn load_trash(server: &str, token: String, copy: &SyncCopy) -> Result<Vec<TrashItem>, SyncError> {
-    let http = HttpServer::new(server, Some(token))?;
+fn load_trash(account: &SyncAccount, copy: &SyncCopy) -> Result<Vec<TrashItem>, SyncError> {
+    let http = HttpServer::for_account(account)?;
     let mut items = Vec::new();
     for (id, _) in copy.deleted() {
         let Some(version) = http
@@ -624,11 +648,22 @@ fn load_trash(server: &str, token: String, copy: &SyncCopy) -> Result<Vec<TrashI
     Ok(items)
 }
 
+/// The certificate `server` shows, for the user to compare and trust, or why it could not
+/// be read.
+fn untrusted(server: &str) -> Done {
+    match annulus_sync::pin::certificate_of(server) {
+        Ok(certificate) => Done::Untrusted(certificate),
+        Err(error) => Done::Failed(format!(
+            "The server's certificate is not trusted, and {error}"
+        )),
+    }
+}
+
 /// One sync round on a worker thread.
 fn run_round(account: &SyncAccount, copy: SyncCopy) -> Done {
     let mut replica = VaultReplica(copy);
-    let result = HttpServer::new(&account.server, Some(account.token.expose().to_owned()))
-        .and_then(|mut http| sync(&mut http, &mut replica));
+    let result =
+        HttpServer::for_account(account).and_then(|mut http| sync(&mut http, &mut replica));
     Done::Synced(Box::new(replica.0), result)
 }
 

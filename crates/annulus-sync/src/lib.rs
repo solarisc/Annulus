@@ -8,6 +8,7 @@ pub mod account;
 pub mod clock;
 pub mod engine;
 pub mod http;
+pub mod pin;
 pub mod replica;
 
 #[cfg(test)]

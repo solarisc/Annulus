@@ -125,6 +125,14 @@ fn settings_account(app: &mut NativeApp) {
     "Work laptop".clone_into(&mut app.sync.device);
 }
 
+/// A LAN server's own certificate, waiting for the user to compare its fingerprint.
+fn settings_account_certificate(app: &mut NativeApp) {
+    settings_account(app);
+    "https://10.1.1.20:8443".clone_into(&mut app.sync.server);
+    "ana".clone_into(&mut app.sync.account);
+    app.sync.untrusted = Some((0..=255).collect());
+}
+
 fn locked(app: &mut NativeApp) {
     app.vault = None;
 }
@@ -550,6 +558,15 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: settings_account,
+        acts: &[],
+    },
+    Scene {
+        name: "settings-account-certificate",
+        width: 1100,
+        height: 900,
+        scale: 1.0,
+        populated: true,
+        setup: settings_account_certificate,
         acts: &[],
     },
     Scene {
@@ -1744,6 +1761,28 @@ fn a_snippet_runs_on_the_hosts_ticked_a_tab_each() {
         4.0,
     );
     assert_eq!(titles(&app), ["Vault", "api-1", "bastion"]);
+}
+
+#[test]
+fn trusting_a_servers_certificate_pins_it_until_the_address_changes() {
+    let mut app = NativeApp::new(Some(fixture_vault("pin-certificate", true)));
+    settings_account_certificate(&mut app);
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Trust this certificate"),
+        1.0,
+    );
+    assert_eq!(app.sync.pin, Some((0..=255).collect::<Vec<u8>>()));
+    assert!(app.sync.untrusted.is_none());
+    // Another address: the certificate trusted for the old one goes.
+    let output = step(&mut app, &mut state, &[], 2.0);
+    let mut events = click_on(&output, "Server, e.g. https://sync.example.com");
+    events.push(Event::Text("1".into()));
+    step(&mut app, &mut state, &events, 3.0);
+    assert_eq!(app.sync.pin, None);
 }
 
 #[test]

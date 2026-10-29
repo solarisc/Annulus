@@ -13,6 +13,7 @@
 
 mod http;
 mod store;
+pub mod tls;
 
 pub use http::service;
 pub use store::{AccountInfo, Caller, Server, ServerError, Signups};

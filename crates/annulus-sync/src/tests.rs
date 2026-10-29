@@ -539,6 +539,71 @@ fn http_server_with(server: std::sync::Arc<Server>) -> String {
     format!("http://{address}")
 }
 
+/// Serves a fresh server over TLS with a new self-signed certificate for 127.0.0.1, on a
+/// free loopback port; returns its address and the certificate (DER).
+fn https_server() -> (String, Vec<u8>) {
+    let made = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+    let der = made.cert.der().to_vec();
+    let (cert, key) = (made.cert.pem(), made.signing_key.serialize_pem());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            listener.set_nonblocking(true).unwrap();
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem(
+                cert.into_bytes(),
+                key.into_bytes(),
+            )
+            .await
+            .unwrap();
+            let service = annulus_server::service(std::sync::Arc::new(server()), false);
+            axum_server::from_tcp_rustls(listener, config)
+                .unwrap()
+                .serve(service)
+                .await
+                .unwrap();
+        });
+    });
+    (format!("https://{address}"), der)
+}
+
+#[test]
+fn a_servers_own_certificate_is_trusted_only_once_pinned_and_only_that_one() {
+    let (base, certificate) = https_server();
+    let register = |http: &mut crate::http::HttpServer, name: &str| {
+        account::register(http, &cheap(), name, "pw", KEY_FILE.to_vec(), "laptop")
+    };
+    // Not from a public authority: refused, and said so, so the app can ask.
+    let mut public = crate::http::HttpServer::new(&base, None).unwrap();
+    assert!(
+        matches!(register(&mut public, "ana"), Err(SyncError::Untrusted(_))),
+        "a self-signed certificate is not trusted by default"
+    );
+    // What the app shows for the user to compare is that certificate's.
+    let shown = crate::pin::certificate_of(&base).unwrap();
+    assert_eq!(shown, certificate);
+    assert_eq!(
+        crate::pin::fingerprint(&shown),
+        annulus_proto::fingerprint(&certificate)
+    );
+    // Once pinned, it works.
+    let mut pinned = crate::http::HttpServer::new(&base, None)
+        .unwrap()
+        .pinned(Some(&shown));
+    let made = register(&mut pinned, "ana");
+    assert!(made.is_ok(), "{:?}", made.err());
+    // Any other certificate, even another valid one for the same address, is refused.
+    let other = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+    let mut wrong = crate::http::HttpServer::new(&base, None)
+        .unwrap()
+        .pinned(Some(other.cert.der()));
+    assert!(matches!(
+        register(&mut wrong, "bob"),
+        Err(SyncError::Untrusted(_))
+    ));
+}
+
 #[test]
 fn only_a_signed_in_push_may_be_large_and_strangers_are_refused_first() {
     let base = http_server();
@@ -743,6 +808,7 @@ mod vaults {
             name: "ana".into(),
             device,
             token: Secret::new("t"),
+            pin: None,
         }
     }
 

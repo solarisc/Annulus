@@ -310,6 +310,19 @@ pub struct Failure {
     pub message: String,
 }
 
+/// The SHA-256 fingerprint of a certificate (DER), as `openssl x509 -noout -fingerprint
+/// -sha256` writes it (`AB:CD:…`): what `annulus-server fingerprint` prints and the app asks
+/// the user to compare before trusting a server's own certificate (ADR-0018).
+#[must_use]
+pub fn fingerprint(der: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(der)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 //! The sync server over HTTPS: postcard bodies, the protocol version header and the device
 //! token. TLS is rustls on aws-lc-rs (the crypto library SSH already uses) with the Mozilla
-//! root certificates.
+//! root certificates, or only the server's own certificate once it is pinned (ADR-0018).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use ureq::Agent;
-use ureq::tls::{TlsConfig, TlsProvider};
+use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
 use annulus_proto::{
     Change, Changes, Devices, Failure, History, INVITE_HEADER, LoginFinish, LoginStart,
     LoginStartResponse, PROTOCOL_VERSION, PasswordBegin, PasswordBeginResponse, PasswordChange,
@@ -39,19 +39,33 @@ impl HttpServer {
                 "the server address must start with https://".into(),
             ));
         }
-        let tls = TlsConfig::builder()
-            .provider(TlsProvider::Rustls)
-            .unversioned_rustls_crypto_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .build();
-        let agent: Agent = Agent::config_builder()
-            .tls_config(tls)
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(40)))
-            .build()
-            .into();
-        Ok(Self { base, agent, token })
+        Ok(Self {
+            base,
+            agent: agent(None),
+            token,
+        })
+    }
+
+    /// The server of `account`, signed in as it, trusting the certificate pinned for it.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn for_account(account: &annulus_vault::sync::SyncAccount) -> Result<Self, SyncError> {
+        Ok(
+            Self::new(&account.server, Some(account.token.expose().to_owned()))?
+                .pinned(account.pin.as_deref()),
+        )
+    }
+
+    /// Trusts only `certificate` (DER) for this server instead of the public authorities: a
+    /// self-hosted server's own certificate, pinned at sign-in. rustls still checks the
+    /// chain, the name and the dates against it. `None` keeps the public roots.
+    #[must_use]
+    pub fn pinned(mut self, certificate: Option<&[u8]>) -> Self {
+        if certificate.is_some() {
+            self.agent = agent(certificate);
+        }
+        self
     }
 
     /// Signs later requests with `token`.
@@ -93,7 +107,10 @@ impl HttpServer {
             }
             request.call()
         };
-        let mut response = response.map_err(|error| SyncError::Transport(error.to_string()))?;
+        let mut response = response.map_err(|error| match certificate_problem(&error) {
+            Some(why) => SyncError::Untrusted(why),
+            None => SyncError::Transport(error.to_string()),
+        })?;
         let status = response.status().as_u16();
         let bytes = response
             .body_mut()
@@ -203,6 +220,41 @@ fn allowed(base: &str) -> bool {
                     .is_ok_and(|ip| ip.is_loopback())
         }
         _ => false,
+    }
+}
+
+/// An HTTP client trusting the public roots, or only `pinned` (a DER certificate).
+fn agent(pinned: Option<&[u8]>) -> Agent {
+    let mut tls = TlsConfig::builder()
+        .provider(TlsProvider::Rustls)
+        .unversioned_rustls_crypto_provider(
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        );
+    if let Some(der) = pinned {
+        tls = tls.root_certs(RootCerts::new_with_certs(&[
+            Certificate::from_der(der).to_owned()
+        ]));
+    }
+    Agent::config_builder()
+        .tls_config(tls.build())
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(40)))
+        .build()
+        .into()
+}
+
+/// Why the server's certificate was refused, if that is what failed.
+fn certificate_problem(error: &ureq::Error) -> Option<String> {
+    let tls = match error {
+        ureq::Error::Rustls(inner) => Some(inner),
+        ureq::Error::Io(io) => io
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+        _ => None,
+    };
+    match tls {
+        Some(rustls::Error::InvalidCertificate(why)) => Some(format!("{why:?}")),
+        _ => None,
     }
 }
 
