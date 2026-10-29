@@ -686,6 +686,66 @@ impl SftpTab {
         self.send(command);
     }
 
+    /// Made-up transfers in each state, never sent, for the scene photos: one under way, one
+    /// done into a deep folder, one skipped, one failed.
+    #[cfg(test)]
+    pub(crate) fn demo_transfers(&mut self) {
+        let downloads = std::path::PathBuf::from(r"C:\Users\ana\Downloads\reports\2026\october");
+        let made_up = [
+            (
+                "\u{2193} a_5ffc28ba1084d56be94b8ad62fbd2de-production-backup.tar.gz",
+                false,
+                (630_000_000, 1_000_000_000),
+                TransferState::Running,
+            ),
+            (
+                "\u{2193} build.log",
+                false,
+                (20_376, 20_376),
+                TransferState::Done(downloads.join("build.log").to_string_lossy().into_owned()),
+            ),
+            ("\u{2191} site.zip", true, (0, 0), TransferState::Skipped),
+            (
+                "\u{2191} photos/",
+                true,
+                (4_000_000, 9_000_000),
+                TransferState::Failed(
+                    "The connection dropped. Retry continues where it stopped.".into(),
+                ),
+            ),
+        ];
+        for (label, upload, (done, total), state) in made_up {
+            self.next_id += 1;
+            let recipe = if upload {
+                Recipe::Upload {
+                    local: downloads.join(label),
+                    dir: "/var/www/html/releases/current".into(),
+                    conflict: Conflict::KeepBoth,
+                }
+            } else {
+                Recipe::Download {
+                    remote: format!("/srv/backups/{label}"),
+                    to: downloads.clone(),
+                    conflict: Conflict::KeepBoth,
+                }
+            };
+            self.transfers.push(Transfer {
+                id: self.next_id,
+                label: label.to_owned(),
+                upload,
+                done,
+                total,
+                state,
+                cancel: Arc::new(AtomicBool::new(false)),
+                recipe,
+                // Under way for 40 s, so it shows a speed and the time left.
+                since: std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(40))
+                    .map(|at| (at, 0)),
+            });
+        }
+    }
+
     /// Sends failed transfer `id` again; it continues from what arrived before.
     pub(crate) fn retry(&mut self, id: u64) {
         let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) else {

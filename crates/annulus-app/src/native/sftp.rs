@@ -12,9 +12,10 @@ use annulus_config::tokens::space;
 use annulus_platform::window::Waker;
 use annulus_sftp::{Conflict, Entry, join, parent};
 use annulus_ui::gfx::Canvas as _;
-use annulus_ui::gfx::{Align, Font, Point, Rect};
+use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Ui};
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, button_width,
 };
@@ -70,6 +71,8 @@ pub struct SftpView {
     dropped: Option<(Dragged, Point)>,
     /// A card just opened: its first control takes the keyboard.
     focus_card: bool,
+    /// The transfers panel shows its rows, not only its header.
+    transfers_open: bool,
 }
 
 impl SftpView {
@@ -86,6 +89,7 @@ impl SftpView {
             drag: None,
             dropped: None,
             focus_card: false,
+            transfers_open: true,
         }
     }
 
@@ -139,11 +143,17 @@ impl SftpView {
                 Align::Start,
             );
         } else {
-            let transfers_h = if self.tab.transfers.is_empty() {
+            // The panel rises when the first transfer starts and folds to its header.
+            let wanted = if self.tab.transfers.is_empty() {
                 0.0
+            } else if self.transfers_open {
+                TRANSFERS_H
             } else {
-                150.0
+                TRANSFERS_HEAD + space::M + space::S
             };
+            let transfers_h = ui
+                .animate(Id::new("sftp.transfers.height"), wanted, Motion::BASE)
+                .max(0.0);
             let transfers = area.take_bottom(transfers_h);
             let half = (area.w - space::M) / 2.0;
             let local = area.take_left(half);
@@ -151,8 +161,10 @@ impl SftpView {
             self.local_pane(ui, local);
             self.remote_pane(ui, area);
             self.drag_and_drop(ui, local, area);
-            if transfers_h > 0.0 {
-                self.transfers(ui, transfers.inset(0.0, 0.0).offset(0.0, 0.0));
+            if transfers_h > 1.0 && !self.tab.transfers.is_empty() {
+                ui.push_clip(transfers);
+                self.transfers(ui, transfers);
+                ui.pop_clip();
             }
         }
         self.dialog_card(ui, rect);
@@ -409,10 +421,27 @@ impl SftpView {
             Align::Start,
         );
         head.take_left(space::S);
+        // A deep folder keeps where it starts and where it ends.
+        let shown = annulus_ui::gfx::fit_path(&mut ui.gfx, path, Font::mono(11.5), head.w);
         ui.gfx
-            .text(head, path, Font::mono(11.5), t.text2, Align::Start);
+            .text(head, &shown, Font::mono(11.5), t.text2, Align::Start);
         inner.take_top(4.0);
         inner
+    }
+
+    /// The widths of the Size and Modified columns of a listing whose rows are `width` wide
+    /// (their buttons taken off): the name keeps at least half, so in a narrow pane Modified
+    /// goes first, then Size narrows.
+    fn column_widths(width: f32) -> (f32, f32) {
+        let name = width * 0.5;
+        let (mut size, mut modified) = (80.0, 130.0);
+        if width - size - modified < name {
+            modified = 0.0;
+        }
+        if width - size - modified < name {
+            size = 64.0;
+        }
+        (size, modified)
     }
 
     /// The column titles over a listing; with `sort`, clicking one sorts by it (again: the
@@ -424,13 +453,17 @@ impl SftpView {
         let mut cells = line.inset(space::S, 0.0);
         // Where the rows' buttons are.
         cells.take_right(2.0 * 26.0 + 2.0 * space::S);
-        let modified = cells.take_right(130.0);
-        let size = cells.take_right(80.0);
+        let (size_w, modified_w) = Self::column_widths(cells.w);
+        let modified = cells.take_right(modified_w);
+        let size = cells.take_right(size_w);
         for (cell, title, align, by) in [
             (cells, "Name", Align::Start, SortBy::Name),
             (size, "Size", Align::End, SortBy::Size),
             (modified, "Modified", Align::End, SortBy::Modified),
         ] {
+            if cell.w <= 0.0 {
+                continue;
+            }
             let width = ui.gfx.measure(title, SMALL).width;
             let mut color = t.text3.mix(t.text2, 0.5);
             if let Some(sort) = sort.as_deref_mut() {
@@ -510,8 +543,9 @@ impl SftpView {
         cells.take_right(space::S);
         let button = cells.take_right(26.0).centered(26.0, 26.0);
         cells.take_right(space::S);
-        let modified_cell = cells.take_right(130.0);
-        let size_cell = cells.take_right(80.0);
+        let (size_w, modified_w) = Self::column_widths(cells.w);
+        let modified_cell = cells.take_right(modified_w);
+        let size_cell = cells.take_right(size_w);
         let icon = cells.take_left(16.0).centered(16.0, 16.0);
         ui.gfx.icon(
             if is_dir { icons::FOLDER } else { icons::FILE },
@@ -519,10 +553,14 @@ impl SftpView {
             if is_dir { t.accent } else { t.text2 },
         );
         cells.take_left(space::S);
-        ui.gfx.text(cells, name, BODY, t.text, Align::Start);
+        // A long name keeps its end: "backup-2026…tar.gz".
+        let shown = annulus_ui::gfx::fit_middle(&mut ui.gfx, name, BODY, cells.w);
+        ui.gfx.text(cells, &shown, BODY, t.text, Align::Start);
         ui.gfx.text(size_cell, size, SMALL, t.text2, Align::End);
-        ui.gfx
-            .text(modified_cell, modified, SMALL, t.text2, Align::End);
+        if modified_cell.w > 0.0 {
+            ui.gfx
+                .text(modified_cell, modified, SMALL, t.text2, Align::End);
+        }
         let mut acted = false;
         let mut chosen = None;
         if hover || selected {
@@ -947,75 +985,184 @@ impl SftpView {
         }
     }
 
+    /// The transfers along the bottom (F-SFTP-004), newest first. Each row has the file's
+    /// name and how it is doing, where it goes with the folders between shortened, and a bar
+    /// that glides with the progress; Cancel or Retry at its end. The panel folds to its
+    /// header, and Clear finished takes the done ones away.
+    #[allow(clippy::too_many_lines)] // The header, then one row after another.
     fn transfers(&mut self, ui: &mut Ui<'_>, rect: Rect) {
         let t = ui.theme;
         let mut area = rect;
         area.take_top(space::M);
-        ui.section_label(
-            area.take_top(18.0),
-            &format!("Transfers \u{b7} {}", self.tab.transfers.len()),
+        let mut head = area.take_top(TRANSFERS_HEAD);
+        let running = self
+            .tab
+            .transfers
+            .iter()
+            .filter(|transfer| matches!(transfer.state, TransferState::Running))
+            .count();
+        let finished = self.tab.transfers.iter().any(|transfer| {
+            matches!(
+                transfer.state,
+                TransferState::Done(_) | TransferState::Skipped
+            )
+        });
+        // Laid out from the right, drawn after the toggle: Tab follows the drawing order.
+        let clear_label = "Clear finished";
+        let clear = finished.then(|| head.take_right(button_width(&mut ui.gfx, clear_label, None)));
+        let summary = match running {
+            0 => format!("Transfers \u{b7} {}", self.tab.transfers.len()),
+            n => format!(
+                "Transfers \u{b7} {n} running of {}",
+                self.tab.transfers.len()
+            ),
+        };
+        let toggle_w = ui.gfx.measure(&summary, BODY_STRONG).width + 16.0 + 3.0 * space::S;
+        let toggle = head.take_left(toggle_w.min(head.w));
+        let toggle_id = Id::new("sftp.transfers.toggle");
+        let name = if self.transfers_open {
+            "Hide transfers"
+        } else {
+            "Show transfers"
+        };
+        let response = ui.zone(toggle_id, toggle, Role::Button, name);
+        if response.clicked {
+            self.transfers_open = !self.transfers_open;
+        }
+        let hover = ui.ease(
+            toggle_id.with("hover"),
+            if response.hovered { 1.0 } else { 0.0 },
         );
-        area.take_top(space::XS);
+        ui.gfx.fill_rect(toggle, 7.0, t.hover.alpha(hover));
+        if response.focus_ring {
+            ui.focus_ring(toggle, 7.0);
+        }
+        let mut inner = toggle.inset(space::S, 0.0);
+        let chevron = if self.transfers_open {
+            icons::CHEVRON_DOWN
+        } else {
+            icons::CHEVRON_RIGHT
+        };
+        ui.gfx
+            .icon(chevron, inner.take_left(16.0).centered(14.0, 14.0), t.text2);
+        inner.take_left(space::S);
+        ui.gfx
+            .text(inner, &summary, BODY_STRONG, t.text, Align::Start);
+        if let Some(clear) = clear
+            && ui
+                .button(
+                    Id::new("sftp.transfers.clear"),
+                    clear,
+                    clear_label,
+                    None,
+                    Kind::Ghost,
+                )
+                .clicked
+        {
+            self.tab.transfers.retain(|transfer| {
+                !matches!(
+                    transfer.state,
+                    TransferState::Done(_) | TransferState::Skipped
+                )
+            });
+        }
+        area.take_top(space::S);
+        if !self.transfers_open {
+            return;
+        }
+        let rows = self.tab.transfers.len();
         #[allow(clippy::cast_precision_loss)] // A few dozen transfers.
-        let offset = ui.scroll_view(
-            Id::new("sftp.transfers"),
-            area,
-            self.tab.transfers.len() as f32 * 36.0,
-        );
+        let content = rows as f32 * (TRANSFER_ROW + 6.0);
+        let offset = ui.scroll_view(Id::new("sftp.transfers"), area, content);
         ui.push_clip(area);
+        let home = directories::BaseDirs::new()
+            .map(|dirs| dirs.home_dir().display().to_string())
+            .unwrap_or_default();
         let mut retry = None;
-        for (index, transfer) in self.tab.transfers.iter().enumerate().rev() {
+        let mut moving = false;
+        for (place, transfer) in self.tab.transfers.iter().rev().enumerate() {
             #[allow(clippy::cast_precision_loss)] // As above.
-            let y = area.y - offset + (self.tab.transfers.len() - 1 - index) as f32 * 36.0;
-            let row = Rect::new(area.x, y, area.w - 10.0, 32.0);
-            ui.gfx.fill_rect(row, 8.0, t.surface);
-            let mut cells = row.inset(space::M, 0.0);
-            let button = cells.take_right(26.0).centered(26.0, 26.0);
-            cells.take_right(space::S);
-            let state_cell = cells.take_right(200.0);
-            let label_w = (cells.w * 0.4).min(320.0);
-            let label = cells.take_left(label_w);
-            ui.gfx
-                .text(label, &transfer.label, BODY, t.text, Align::Start);
-            cells.take_left(space::M);
-            #[allow(clippy::cast_precision_loss)] // A share of the file.
-            let share = if transfer.total == 0 {
-                0.0
-            } else {
-                transfer.done as f32 / transfer.total as f32
-            };
-            let track = cells.centered(cells.w, 6.0);
-            ui.gfx.fill_rect(track, 3.0, t.hover);
-            let (words, color) = match &transfer.state {
-                TransferState::Running => {
-                    let seconds = transfer
-                        .since
-                        .map_or(0.0, |(at, _)| at.elapsed().as_secs_f64());
-                    let moved = transfer
-                        .since
-                        .map_or(0, |(_, from)| transfer.done.saturating_sub(from));
-                    (
-                        pace(moved, transfer.total.saturating_sub(transfer.done), seconds),
-                        t.accent,
-                    )
-                }
-                // Where it landed: a kept-both copy gets a new name.
-                TransferState::Done(to) => (format!("Done: {to}"), t.ok),
-                TransferState::Skipped => ("Skipped: already there".to_owned(), t.text3),
-                TransferState::Failed(message) => (message.clone(), t.error),
-            };
-            let fill = if matches!(transfer.state, TransferState::Done(_)) {
-                1.0
-            } else {
-                share
-            };
-            ui.gfx.fill_rect(
-                Rect::new(track.x, track.y, track.w * fill, track.h),
-                3.0,
-                color,
-            );
-            ui.gfx.text(state_cell, &words, SMALL, t.text2, Align::End);
+            let y = area.y - offset + place as f32 * (TRANSFER_ROW + 6.0);
+            let row = Rect::new(area.x, y, area.w - 10.0, TRANSFER_ROW);
             let id = Id::new(("transfer", transfer.id));
+            // A new transfer slides down into the list.
+            let enter = ui.entrance(id.with("enter"), Motion::BASE);
+            ui.push_layer(Layer::fade(enter).shifted(0.0, -8.0 * (1.0 - enter)));
+            ui.gfx.fill_rect(row, 10.0, t.surface);
+            ui.gfx.stroke_rect(row, 10.0, 1.0, t.line);
+            let mut cells = row.inset(space::M, 0.0);
+            let (state_color, status) = transfer_status(transfer, &t);
+            // Its direction, in a tile tinted by how it is doing.
+            let tile = cells.take_left(32.0).centered(32.0, 32.0);
+            let tint = ui.animate(id.with("tint"), state_tone(transfer), Motion::SLOW);
+            let tone = t.accent.mix(t.ok, tint.clamp(0.0, 1.0));
+            let tone = match transfer.state {
+                TransferState::Failed(_) => t.error,
+                TransferState::Skipped => t.text3,
+                _ => tone,
+            };
+            ui.gfx.fill_rect(tile, 9.0, tone.alpha(0.16));
+            let glyph = match transfer.state {
+                TransferState::Done(_) => icons::CHECK,
+                TransferState::Failed(_) => icons::WARNING,
+                _ if transfer.upload => icons::UPLOAD,
+                _ => icons::DOWNLOAD,
+            };
+            ui.gfx.icon(glyph, tile.centered(16.0, 16.0), tone);
+            cells.take_left(space::M);
+            let button = cells.take_right(28.0).centered(28.0, 28.0);
+            cells.take_right(space::S);
+            let name = transfer
+                .label
+                .trim_start_matches(['\u{2191}', '\u{2193}'])
+                .trim();
+            let status_w = ui.gfx.measure(&status, SMALL).width.min(cells.w * 0.45);
+            let top = Rect::new(cells.x, row.y + 9.0, cells.w, 20.0);
+            let mut name_cell = top;
+            let status_cell = name_cell.take_right(status_w);
+            name_cell.take_right(space::M);
+            let fitted = annulus_ui::gfx::fit_middle(&mut ui.gfx, name, BODY_STRONG, name_cell.w);
+            ui.gfx
+                .text(name_cell, &fitted, BODY_STRONG, t.text, Align::Start);
+            ui.gfx
+                .text(status_cell, &status, SMALL, state_color, Align::End);
+            let second = Rect::new(cells.x, row.y + 29.0, cells.w, 16.0);
+            if let TransferState::Failed(message) = &transfer.state {
+                ui.gfx.text(second, message, SMALL, t.error, Align::Start);
+            } else {
+                let route = format!("To {}", destination(transfer, &home));
+                let fitted = annulus_ui::gfx::fit_path(&mut ui.gfx, &route, SMALL, second.w);
+                ui.gfx.text(second, &fitted, SMALL, t.text3, Align::Start);
+            }
+            // The bar along the row's foot: it glides to each new share.
+            let share = match transfer.state {
+                TransferState::Done(_) | TransferState::Skipped => 1.0,
+                _ => share_of(transfer),
+            };
+            let shown = ui.animate(
+                id.with("bar"),
+                share,
+                Motion::new(450, annulus_ui::motion::Curve::Out),
+            );
+            let track = Rect::new(cells.x, row.b() - 8.0, cells.w, 3.0);
+            ui.gfx.fill_rect(track, 1.5, t.hover);
+            let fill = Rect::new(track.x, track.y, track.w * shown.clamp(0.0, 1.0), track.h);
+            ui.gfx.fill_rect(fill, 1.5, tone);
+            if matches!(transfer.state, TransferState::Running) && fill.w > 4.0 {
+                // A soft light running along what is done, so a slow transfer still looks alive.
+                moving = true;
+                let band = 48.0;
+                #[allow(clippy::cast_possible_truncation)] // A phase for drawing.
+                let phase = (ui.time() * 0.7).fract() as f32;
+                let x = fill.x - band + phase * (fill.w + band);
+                ui.push_clip(fill);
+                ui.gfx.fill_rect(
+                    Rect::new(x, fill.y, band, fill.h),
+                    1.5,
+                    Color::WHITE.alpha(0.35),
+                );
+                ui.pop_clip();
+            }
             let running = matches!(transfer.state, TransferState::Running);
             let failed = matches!(transfer.state, TransferState::Failed(_));
             if running
@@ -1032,11 +1179,92 @@ impl SftpView {
             {
                 retry = Some(transfer.id);
             }
+            ui.pop_layer();
         }
         ui.pop_clip();
+        if moving {
+            ui.request_repaint_after(std::time::Duration::from_millis(33));
+        }
         if let Some(id) = retry {
             self.tab.retry(id);
         }
+    }
+
+    /// Transfers in each state, for the scenes.
+    #[cfg(test)]
+    pub fn demo_transfers(&mut self) {
+        self.tab.demo_transfers();
+    }
+}
+
+/// Height of the transfers panel's header.
+const TRANSFERS_HEAD: f32 = 30.0;
+/// Height of one transfer.
+const TRANSFER_ROW: f32 = 54.0;
+/// Height of the transfers panel while open: three rows.
+const TRANSFERS_H: f32 = 232.0;
+
+/// How far `transfer` is, 0.0 to 1.0.
+fn share_of(transfer: &crate::sftp_view::Transfer) -> f32 {
+    if transfer.total == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)] // A share of the file.
+    let share = transfer.done as f32 / transfer.total as f32;
+    share.clamp(0.0, 1.0)
+}
+
+/// 1.0 once a transfer is done (its tile and bar turn green), else 0.0.
+fn state_tone(transfer: &crate::sftp_view::Transfer) -> f32 {
+    if matches!(transfer.state, TransferState::Done(_)) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// What a transfer's row says about it, and in which color.
+fn transfer_status(
+    transfer: &crate::sftp_view::Transfer,
+    t: &annulus_ui::kit::Theme,
+) -> (annulus_ui::gfx::Color, String) {
+    match &transfer.state {
+        TransferState::Running if transfer.total == 0 => (t.text2, "Starting\u{2026}".into()),
+        TransferState::Running => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0 to 100.
+            let percent = (share_of(transfer) * 100.0).floor() as u32;
+            let seconds = transfer
+                .since
+                .map_or(0.0, |(at, _)| at.elapsed().as_secs_f64());
+            let moved = transfer
+                .since
+                .map_or(0, |(_, from)| transfer.done.saturating_sub(from));
+            let speed = pace(moved, transfer.total.saturating_sub(transfer.done), seconds);
+            let status = if speed.is_empty() {
+                format!("{percent}%")
+            } else {
+                format!("{percent}% \u{b7} {speed}")
+            };
+            (t.text2, status)
+        }
+        TransferState::Done(_) => (t.ok, format!("Done \u{b7} {}", human_size(transfer.total))),
+        TransferState::Skipped => (t.text3, "Skipped: already there".into()),
+        TransferState::Failed(_) => (t.error, "Failed".into()),
+    }
+}
+
+/// Where `transfer` puts its file: the path it landed at once done, else the folder it goes to,
+/// with this computer's home folder as `~`.
+fn destination(transfer: &crate::sftp_view::Transfer, home: &str) -> String {
+    use crate::sftp_view::Recipe;
+    let local = |path: &std::path::Path| tilde(&path.to_string_lossy(), home);
+    match (&transfer.state, &transfer.recipe) {
+        (TransferState::Done(to), Recipe::Download { .. } | Recipe::DownloadTree { .. }) => {
+            tilde(to, home)
+        }
+        (TransferState::Done(to), _) => to.clone(),
+        (_, Recipe::Download { to, .. } | Recipe::DownloadTree { to, .. }) => local(to),
+        (_, Recipe::Upload { dir, .. } | Recipe::UploadTree { dir, .. }) => dir.clone(),
     }
 }
 

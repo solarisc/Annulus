@@ -186,6 +186,14 @@ fn sftp_picker(app: &mut NativeApp) {
     app.active = 1;
 }
 
+/// An SFTP tab with transfers in every state: under way, done, skipped, failed.
+fn sftp_transfers(app: &mut NativeApp) {
+    sftp(app);
+    if let Some(view) = app.tabs.last_mut().and_then(|tab| tab.sftp.as_mut()) {
+        view.demo_transfers();
+    }
+}
+
 /// A recorded session on `host`: one command, its output and the next prompt.
 fn recorded(host: &str, command: &str, output: &[&str]) -> annulus_term::Emulator {
     let prompt = format!("\x1b[1;32mdeploy@{host}\x1b[0m:\x1b[1;34m~\x1b[0m$ ");
@@ -370,6 +378,34 @@ const SCENES: &[Scene] = &[
         populated: false,
         setup: |app| app.open_new_tab(),
         acts: &[],
+    },
+    // Transfers: long names keep both ends, deep folders keep their last parts.
+    Scene {
+        name: "sftp-transfers",
+        width: 1200,
+        height: 760,
+        scale: 1.0,
+        populated: true,
+        setup: sftp_transfers,
+        acts: &[],
+    },
+    Scene {
+        name: "sftp-transfers-narrow",
+        width: 860,
+        height: 640,
+        scale: 1.25,
+        populated: true,
+        setup: sftp_transfers,
+        acts: &[Act::Hover("Retry")],
+    },
+    Scene {
+        name: "sftp-transfers-folded",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp_transfers,
+        acts: &[Act::Click("Hide transfers")],
     },
     // The SFTP tab beside the vault picks a host.
     Scene {

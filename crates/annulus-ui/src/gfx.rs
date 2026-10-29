@@ -470,6 +470,81 @@ pub fn fit<C: Canvas + ?Sized>(canvas: &mut C, text: &str, font: Font, width: f3
     format!("{}{ELLIPSIS}", text[..ends[low - 1]].trim_end())
 }
 
+/// `text`, or its start and its end around an ellipsis, as much of both as fits in `width`
+/// (a long file name keeps its extension: `a_5ffc28…62fbd2de.webm`).
+pub fn fit_middle<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    text: &str,
+    font: Font,
+    width: f32,
+) -> String {
+    const ELLIPSIS: &str = "\u{2026}";
+    if canvas.measure(text, font).width <= width + 0.5 {
+        return text.to_owned();
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    // The most characters kept, split about evenly with a little more at the start.
+    let (mut low, mut high) = (0usize, chars.len());
+    let candidate = |keep: usize| {
+        let head = keep.div_ceil(2);
+        let tail = keep - head;
+        let head_end = chars.get(head).map_or(text.len(), |(at, _)| *at);
+        let tail_start = chars
+            .get(chars.len() - tail)
+            .map_or(text.len(), |(at, _)| *at);
+        format!("{}{ELLIPSIS}{}", &text[..head_end], &text[tail_start..])
+    };
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if canvas.measure(&candidate(mid), font).width <= width + 0.5 {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if low == 0 {
+        return fit(canvas, text, font, width);
+    }
+    candidate(low)
+}
+
+/// A path shortened to fit in `width`: its first part (the drive, `~` or the root), an
+/// ellipsis, then as many of its last parts as fit; the file name is never dropped, and is
+/// shortened in its middle only when nothing else is left to take out.
+/// `C:\Users\alice\Downloads\build.log` becomes `C:\…\Downloads\build.log`.
+pub fn fit_path<C: Canvas + ?Sized>(canvas: &mut C, path: &str, font: Font, width: f32) -> String {
+    const ELLIPSIS: &str = "\u{2026}";
+    if canvas.measure(path, font).width <= width + 0.5 {
+        return path.to_owned();
+    }
+    let sep = if path.contains('\\') && !path.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let parts: Vec<&str> = path.split(sep).collect();
+    if parts.len() > 2 {
+        let first = parts[0];
+        // The most last parts that fit after "first/…/".
+        for keep in (1..parts.len() - 1).rev() {
+            let tail = parts[parts.len() - keep..].join(&sep.to_string());
+            let candidate = format!("{first}{sep}{ELLIPSIS}{sep}{tail}");
+            if canvas.measure(&candidate, font).width <= width + 0.5 {
+                return candidate;
+            }
+        }
+        // Only the file name after the ellipsis.
+        let name = parts[parts.len() - 1];
+        let lead = format!("{ELLIPSIS}{sep}");
+        let room = width - canvas.measure(&lead, font).width;
+        if canvas.measure(name, font).width <= room + 0.5 {
+            return format!("{lead}{name}");
+        }
+        return fit_middle(canvas, name, font, width);
+    }
+    fit_middle(canvas, path, font, width)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -557,6 +632,53 @@ pub(crate) mod tests {
             fit(&mut canvas, "\u{e9}\u{e9}\u{e9}\u{e9}", font, 20.0),
             "\u{e9}\u{e9}\u{2026}"
         );
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_start_and_its_file_name() {
+        let mut canvas = Recorder::default();
+        let font = Font::ui(13.0);
+        let windows = r"C:\Users\alice\Downloads\build.log";
+        // 7 per character: 34 characters fit in 238.
+        assert_eq!(fit_path(&mut canvas, windows, font, 238.0), windows);
+        assert_eq!(
+            fit_path(&mut canvas, windows, font, 170.0),
+            "C:\\\u{2026}\\Downloads\\build.log"
+        );
+        assert_eq!(
+            fit_path(&mut canvas, windows, font, 110.0),
+            "C:\\\u{2026}\\build.log"
+        );
+        assert_eq!(
+            fit_path(
+                &mut canvas,
+                "/home/alex/projects/annulus/target/release",
+                font,
+                150.0
+            ),
+            "/\u{2026}/target/release"
+        );
+        // Nothing left to take out: the name itself is shortened in its middle.
+        let tight = fit_path(&mut canvas, windows, font, 60.0);
+        assert!(
+            tight.contains('\u{2026}') && tight.ends_with("og"),
+            "{tight}"
+        );
+        assert!(canvas.measure(&tight, font).width <= 60.5);
+    }
+
+    #[test]
+    fn a_long_name_keeps_both_ends() {
+        let mut canvas = Recorder::default();
+        let font = Font::ui(13.0);
+        let name = "a_5ffc28ba1084d56be94b8ad62fbd2de.webm";
+        let fitted = fit_middle(&mut canvas, name, font, 110.0);
+        assert!(
+            fitted.starts_with("a_5ffc") && fitted.ends_with("de.webm"),
+            "{fitted}"
+        );
+        assert!(canvas.measure(&fitted, font).width <= 110.5);
+        assert_eq!(fit_middle(&mut canvas, "short", font, 100.0), "short");
     }
 
     #[test]
