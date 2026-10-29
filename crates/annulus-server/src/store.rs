@@ -459,12 +459,10 @@ impl Server {
                     },
                 )
                 .optional()?;
-            if current.as_ref().map_or(0, |record| record.seq) != change.base {
-                if let Some(record) = current {
-                    result.conflicts.push(record);
-                }
-                // A "new" record whose id exists is a conflict; one based on a version
-                // the server never had is dropped as malformed.
+            // A change based on a version the server no longer has (it was restored from a
+            // backup) overwrites nothing, so it is accepted like a new record.
+            if let Some(record) = current.as_ref().filter(|record| record.seq != change.base) {
+                result.conflicts.push(record.clone());
                 continue;
             }
             last += 1;

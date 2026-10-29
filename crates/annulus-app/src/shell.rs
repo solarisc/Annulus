@@ -209,9 +209,13 @@ impl Shell {
         self.auto_lock(ui.ctx());
         egui::Panel::top("tabs").show(ui, |ui| self.tab_strip(ui));
         let palette = self.palette();
+        let vault_path = self.data_dir.join(VAULT_FILE);
         if let Some(hosts) = &mut self.hosts {
+            if self.sync.tick(ui.ctx(), hosts, &vault_path) {
+                // Signing in renumbered hosts and rules; running rules would no longer match.
+                self.forwards = ForwardsScreen::default();
+            }
             self.forwards.auto_start(ui.ctx(), hosts);
-            self.sync.tick(ui.ctx(), hosts);
         }
         self.forwards.prompts(ui.ctx());
         if matches!(self.tabs.get(self.active_tab), Some(Tab::Vault)) {

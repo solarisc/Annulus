@@ -354,6 +354,28 @@ impl Vault {
         Ok(())
     }
 
+    /// Counts saved changes; equal values mean nothing changed in between.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Where the vault file is.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Moves the vault file to `path`, replacing what is there.
+    ///
+    /// # Errors
+    /// The file system refused; the vault stays where it was.
+    pub fn move_to(&mut self, path: &Path) -> Result<(), VaultError> {
+        std::fs::rename(&self.path, path)?;
+        self.path = path.to_path_buf();
+        Ok(())
+    }
+
     /// The sync bookkeeping.
     #[must_use]
     pub fn sync_state(&self) -> &SyncState {
@@ -402,12 +424,7 @@ impl Vault {
             != account.as_ref().map(|a| (&a.server, &a.name));
         if switching {
             // Another account: everything local is new there.
-            sync.cursor = 0;
-            sync.entries.retain(|_, entry| !entry.deleted);
-            for entry in sync.entries.values_mut() {
-                entry.base = 0;
-                entry.dirty = true;
-            }
+            sync.restart();
         }
         sync.account = account;
         self.save(&self.hosts, &self.forwards, &sync)?;
@@ -626,6 +643,45 @@ mod tests {
         assert_eq!(adopted.id, 2, "a fresh id, not the colliding 1");
         assert_eq!(reopened.forwards()[0].host_id, adopted.id);
         assert_eq!(reopened.sync_state().pending_count(), 3);
+    }
+
+    #[test]
+    fn a_joined_vault_moves_over_the_old_file_and_opens_with_the_account_password() {
+        let live = temp("move-live");
+        let (old, _) = Vault::create(&live, "local pw", KdfParams::TEST).unwrap();
+        let (account_vault, _) =
+            Vault::create(temp("move-account"), "account pw", KdfParams::TEST).unwrap();
+        let account = crate::sync::SyncAccount {
+            server: "https://sync.example.com".into(),
+            name: "ana".into(),
+            device: 1,
+            token: crate::hosts::Secret::new("t"),
+        };
+        let joining = live.with_extension("joining.anv");
+        let mut joined = Vault::join(
+            &joining,
+            &account_vault.key_file_bytes(),
+            "account pw",
+            account,
+        )
+        .unwrap();
+        assert!(matches!(
+            Vault::join(
+                temp("move-wrong"),
+                &account_vault.key_file_bytes(),
+                "local pw",
+                joined.sync_state().account.clone().unwrap()
+            ),
+            Err(VaultError::WrongPassword)
+        ));
+        drop(old);
+        joined.move_to(&live).unwrap();
+        assert!(!joining.exists());
+        assert!(Vault::unlock(&live, "account pw").is_ok());
+        assert!(matches!(
+            Vault::unlock(&live, "local pw"),
+            Err(VaultError::WrongPassword)
+        ));
     }
 
     #[test]

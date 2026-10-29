@@ -155,6 +155,18 @@ impl SyncState {
         Ok(())
     }
 
+    /// Makes everything held pending again with no server version, for a new account or
+    /// a server that lost changes. Deletions never pushed are forgotten.
+    pub(crate) fn restart(&mut self) {
+        self.cursor = 0;
+        self.entries
+            .retain(|_, entry| !(entry.deleted && entry.base == 0));
+        for entry in self.entries.values_mut() {
+            entry.base = 0;
+            entry.dirty = true;
+        }
+    }
+
     /// Changes not pushed yet.
     #[must_use]
     pub fn pending_count(&self) -> usize {
@@ -312,6 +324,17 @@ impl SyncCopy {
             entry.base = seq;
             entry.dirty = false;
         }
+    }
+
+    /// Whether clock time `hlc` was made on this device.
+    #[must_use]
+    pub fn own_time(&self, hlc: u64) -> bool {
+        hlc & 0xFFFF == u64::from(self.state.node)
+    }
+
+    /// Starts over against a server that lost changes.
+    pub fn restart(&mut self) {
+        self.state.restart();
     }
 
     /// Keeps the pending change of `id`, rebased on server version `seq`.

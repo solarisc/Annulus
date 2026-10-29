@@ -92,6 +92,11 @@ pub trait Replica {
     fn apply(&mut self, id: &str, seq: u64, item: Option<Item>);
     /// Keeps the pending local change of `id` but makes it build on server version `seq`.
     fn rebase(&mut self, id: &str, seq: u64);
+    /// Whether clock time `hlc` was made on this device (an edit of ours coming back).
+    fn own_time(&self, hlc: u64) -> bool;
+    /// Starts over against a server that lost changes (restored from a backup): the cursor
+    /// goes to 0 and everything held is pending again, so it is pushed or reconciled.
+    fn restart(&mut self);
 }
 
 /// What a round did.
@@ -140,7 +145,12 @@ fn pull(
     replica: &mut impl Replica,
     report: &mut Report,
 ) -> Result<Vec<Preserve>, SyncError> {
-    let changes = transport.pull(replica.cursor())?;
+    let mut changes = transport.pull(replica.cursor())?;
+    if changes.latest < replica.cursor() {
+        // The server is behind what this device saw: it was restored from a backup.
+        replica.restart();
+        changes = transport.pull(0)?;
+    }
     let pending = replica.pending();
     let mut preserve = Vec::new();
     for record in changes.records {
@@ -161,8 +171,13 @@ fn pull(
             (Some(_), None) => replica.apply(&record.id, record.seq, None),
             (Some(local), Some(remote)) => match &local.item {
                 None => replica.apply(&record.id, record.seq, Some(remote)),
+                // The same edit: ours, pushed in a round whose result was not kept.
+                Some(_) if local.hlc == remote.hlc => replica.pushed(&record.id, record.seq),
                 Some(_) if local.hlc > remote.hlc => {
-                    report.conflicts.push(record.id.clone());
+                    // An older edit of our own is not a conflict.
+                    if !replica.own_time(remote.hlc) {
+                        report.conflicts.push(record.id.clone());
+                    }
                     replica.rebase(&record.id, record.seq);
                 }
                 Some(loser) => {

@@ -83,8 +83,10 @@ impl Auth for Direct<'_> {
 
 /// A device's records in memory. "Encryption" is a plain layout; the vault does the real
 /// sealing.
+/// Clock times in these tests end in the device's number: 1001 is device 1's.
 #[derive(Default)]
 struct Device {
+    node: u64,
     cursor: u64,
     records: HashMap<String, (u64, Option<Item>)>,
     pending: HashMap<String, Outgoing>,
@@ -187,9 +189,28 @@ impl Replica for Device {
             change.base = seq;
         }
     }
+
+    fn own_time(&self, hlc: u64) -> bool {
+        hlc % 1000 == self.node
+    }
+
+    fn restart(&mut self) {
+        self.cursor = 0;
+        for (id, (seq, item)) in &mut self.records {
+            *seq = 0;
+            let pending = self.pending.entry(id.clone()).or_insert_with(|| Outgoing {
+                id: id.clone(),
+                base: 0,
+                item: item.clone(),
+                hlc: item.as_ref().map_or(0, |item| item.hlc),
+            });
+            pending.base = 0;
+        }
+    }
 }
 
-fn account(server: &Server) -> (Caller, Caller) {
+/// Registers "ana" on one device and signs in a second; returns both device tokens.
+fn tokens(server: &Server) -> (String, String) {
     let mut direct = Direct {
         server,
         caller: None,
@@ -198,9 +219,14 @@ fn account(server: &Server) -> (Caller, Caller) {
         account::register(&mut direct, &cheap(), "ana", "pw", b"keys".to_vec(), "a").unwrap();
     let second = account::login(&mut direct, &cheap(), "ana", "pw", "b").unwrap();
     assert_eq!(second.wrapped_keys, b"keys");
+    (first.token, second.token)
+}
+
+fn account(server: &Server) -> (Caller, Caller) {
+    let (first, second) = tokens(server);
     (
-        server.authenticate(&first.token).unwrap(),
-        server.authenticate(&second.token).unwrap(),
+        server.authenticate(&first).unwrap(),
+        server.authenticate(&second).unwrap(),
     )
 }
 
@@ -496,4 +522,62 @@ mod vaults {
         assert!(!vault.commit_sync(copy).unwrap());
         assert_eq!(vault.hosts().len(), 1, "the local edit stays");
     }
+}
+
+#[test]
+fn a_round_whose_result_was_dropped_is_not_a_conflict_next_time() {
+    let server = server();
+    let (a_id, _) = account(&server);
+    let mut a = Device {
+        node: 1,
+        ..Device::default()
+    };
+    a.edit("r1", "v1", 1001);
+    // The round pushes, but its result is thrown away (the vault was edited meanwhile).
+    let mut dropped = Device {
+        node: 1,
+        ..Device::default()
+    };
+    dropped.edit("r1", "v1", 1001);
+    run(&server, a_id, &mut dropped);
+
+    let report = run(&server, a_id, &mut a);
+    assert_eq!(report.conflicts, Vec::<String>::new());
+    assert_eq!(server.history(a_id, "r1").unwrap(), []);
+    assert_eq!(a.pending.len(), 0);
+}
+
+#[test]
+fn devices_recover_from_a_server_restored_from_an_older_backup() {
+    let first = server();
+    let (a_token, b_token) = tokens(&first);
+    let (a_id, b_id) = (
+        first.authenticate(&a_token).unwrap(),
+        first.authenticate(&b_token).unwrap(),
+    );
+    let (mut a, mut b) = (Device::default(), Device::default());
+    a.edit("r1", "kept", 10);
+    run(&first, a_id, &mut a);
+    let backup =
+        std::env::temp_dir().join(format!("annulus-sync-restore-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&backup);
+    first.backup(&backup).unwrap();
+    a.edit("r2", "lost by the restore", 20);
+    run(&first, a_id, &mut a);
+    run(&first, b_id, &mut b);
+
+    // The server comes back from the backup: it never saw r2.
+    let restored = Server::open(&backup, Signups::Closed).unwrap();
+    let a_restored = restored.authenticate(&a_token).unwrap();
+    let b_restored = restored.authenticate(&b_token).unwrap();
+    run(&restored, a_restored, &mut a);
+    run(&restored, b_restored, &mut b);
+    b.edit("r3", "new after the restore", 30);
+    run(&restored, b_restored, &mut b);
+    run(&restored, a_restored, &mut a);
+    for device in [&a, &b] {
+        assert_eq!(device.body("r2").as_deref(), Some("lost by the restore"));
+    }
+    assert_eq!(a.body("r3").as_deref(), Some("new after the restore"));
+    assert_eq!(restored.pull(b_restored, 0).unwrap().records.len(), 3);
 }

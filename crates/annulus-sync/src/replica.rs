@@ -64,4 +64,12 @@ impl Replica for VaultReplica {
     fn rebase(&mut self, id: &str, seq: u64) {
         self.0.rebase(id, seq);
     }
+
+    fn own_time(&self, hlc: u64) -> bool {
+        self.0.own_time(hlc)
+    }
+
+    fn restart(&mut self) {
+        self.0.restart();
+    }
 }

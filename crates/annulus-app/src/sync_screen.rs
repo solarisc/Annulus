@@ -3,7 +3,7 @@
 //! out of the account. Network work and Argon2id run on worker threads; the vault is only
 //! touched on the UI thread.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,7 +34,9 @@ enum Done {
     /// An account was created; the vault signs in to it.
     Registered(SyncAccount),
     /// Signed in; the new vault replaces the local one (whose records it adopted).
-    Joined(Box<Vault>, PathBuf),
+    /// The joined vault (written next to the live one), the backup, and the generation of
+    /// the local vault it merged.
+    Joined(Box<Vault>, PathBuf, u64),
     /// A sync round finished.
     Synced(Box<SyncCopy>, Result<Report, SyncError>),
     /// The device list.
@@ -111,16 +113,24 @@ impl SyncScreen {
     }
 
     /// Runs background syncs and applies finished work; call every frame while unlocked.
-    pub fn tick(&mut self, ctx: &egui::Context, hosts: &mut HostsScreen) {
+    /// Returns true when the vault was replaced (after signing in), so running port
+    /// forwards, whose ids changed, are stopped.
+    pub fn tick(
+        &mut self,
+        ctx: &egui::Context,
+        hosts: &mut HostsScreen,
+        vault_path: &Path,
+    ) -> bool {
+        let mut replaced = false;
         if let Some((_, rx)) = &self.work
             && let Ok(done) = rx.try_recv()
         {
             self.work = None;
-            self.finish(done, hosts);
+            replaced = self.finish(done, hosts, vault_path);
         }
         let state = hosts.vault().sync_state();
         let Some(signed_in) = state.account.clone() else {
-            return;
+            return replaced;
         };
         let now = ctx.input(|input| input.time);
         if state.pending_count() == 0 {
@@ -143,9 +153,11 @@ impl SyncScreen {
             (since + AFTER_EDIT).min(self.last_round + PERIOD)
         });
         ctx.request_repaint_after(Duration::from_secs_f64((next - now).clamp(0.1, PERIOD)));
+        replaced
     }
 
-    fn finish(&mut self, done: Done, hosts: &mut HostsScreen) {
+    /// Applies finished work; true when the vault was replaced.
+    fn finish(&mut self, done: Done, hosts: &mut HostsScreen, vault_path: &Path) -> bool {
         match done {
             Done::Registered(account) => {
                 self.message = Some(match hosts.vault_mut().set_sync_account(Some(account)) {
@@ -154,16 +166,35 @@ impl SyncScreen {
                 });
                 self.last_round = f64::NEG_INFINITY;
             }
-            Done::Joined(vault, backup) => {
-                hosts.replace_vault(*vault);
+            Done::Joined(vault, backup, generation) => {
+                let mut vault = *vault;
+                if hosts.vault().generation() != generation {
+                    // Edited while signing in: the merge would miss that edit.
+                    let _ = std::fs::remove_file(vault.path());
+                    self.message = Some((
+                        true,
+                        "Hosts changed while signing in, so nothing was replaced. Sign in again."
+                            .into(),
+                    ));
+                    return false;
+                }
+                if let Err(error) = vault.move_to(vault_path) {
+                    self.message = Some((
+                        true,
+                        format!("Could not put the account's vault in place: {error}"),
+                    ));
+                    return false;
+                }
+                hosts.replace_vault(vault);
                 self.message = Some((
                     false,
                     format!(
-                        "Signed in. What was on this device is merged into the account; the old vault file is kept at {}.",
+                        "Signed in, and this device's hosts are merged into the account. From now on the vault opens with the account's master password and recovery key. The old vault file is kept at {}.",
                         backup.display()
                     ),
                 ));
                 self.last_round = f64::NEG_INFINITY;
+                return true;
             }
             Done::Synced(copy, result) => match result {
                 Ok(report) => {
@@ -202,6 +233,7 @@ impl SyncScreen {
             },
             Done::Failed(message) => self.message = Some((true, message)),
         }
+        false
     }
 
     /// Draws the section.
@@ -210,7 +242,7 @@ impl SyncScreen {
         ui: &mut Ui,
         palette: &Palette,
         hosts: &mut HostsScreen,
-        vault_path: &std::path::Path,
+        vault_path: &Path,
     ) {
         ui.heading("Sync");
         ui.add_space(space::S);
@@ -248,7 +280,7 @@ impl SyncScreen {
         ui: &mut Ui,
         palette: &Palette,
         hosts: &mut HostsScreen,
-        vault_path: &std::path::Path,
+        vault_path: &Path,
     ) {
         ui.label(
             RichText::new("Keep hosts and rules in sync through a server you run yourself. Everything is encrypted on this device with your master password; the server cannot read it.")
@@ -353,7 +385,7 @@ impl SyncScreen {
         });
     }
 
-    fn join(&mut self, ctx: &egui::Context, hosts: &HostsScreen, vault_path: &std::path::Path) {
+    fn join(&mut self, ctx: &egui::Context, hosts: &HostsScreen, vault_path: &Path) {
         let password = self.take_password();
         let (server, name, device) = (
             self.server.trim().to_owned(),
@@ -362,6 +394,7 @@ impl SyncScreen {
         );
         let local_hosts = hosts.vault().hosts().to_vec();
         let local_forwards = hosts.vault().forwards().to_vec();
+        let generation = hosts.vault().generation();
         let path = vault_path.to_path_buf();
         self.message = None;
         self.start(ctx, "Signing in", move || {
@@ -390,18 +423,19 @@ impl SyncScreen {
                 device: session.device,
                 token: Secret::new(session.token),
             };
-            let mut vault = match Vault::join(&path, &session.wrapped_keys, &password, account) {
+            // Built beside the live vault; the UI thread moves it in place.
+            let joining = path.with_extension("joining.anv");
+            let mut vault = match Vault::join(&joining, &session.wrapped_keys, &password, account) {
                 Ok(vault) => vault,
                 Err(error) => {
-                    let _ = std::fs::copy(&backup, &path);
                     return Done::Failed(format!("Could not open the account's vault: {error}"));
                 }
             };
             if let Err(error) = vault.adopt(&local_hosts, &local_forwards) {
-                let _ = std::fs::copy(&backup, &path);
+                let _ = std::fs::remove_file(&joining);
                 return Done::Failed(format!("Could not merge this device's hosts: {error}"));
             }
-            Done::Joined(Box::new(vault), backup)
+            Done::Joined(Box::new(vault), backup, generation)
         });
     }
 
