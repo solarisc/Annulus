@@ -1222,6 +1222,151 @@ fn render(
     (png.unwrap(), faults)
 }
 
+/// The events of `act` on the frame whose zones are `zones`.
+fn events_for(act: &Act, zones: &[Zone]) -> Vec<Event> {
+    match act {
+        Act::Hover(name) => vec![Event::PointerMoved(zone_center(zones, name))],
+        Act::Click(name) => vec![
+            Event::PointerMoved(zone_center(zones, name)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ],
+        Act::Type(text) => vec![Event::Text((*text).to_owned())],
+        Act::Press(key, modifiers) => vec![Event::Key(*key, *modifiers)],
+        Act::Hold(name) => vec![
+            Event::PointerMoved(zone_center(zones, name)),
+            Event::PointerDown(Button::Primary),
+        ],
+        Act::RightClick(name) => vec![
+            Event::PointerMoved(zone_center(zones, name)),
+            Event::PointerDown(Button::Secondary),
+            Event::PointerUp(Button::Secondary),
+        ],
+    }
+}
+
+/// Transitions to photograph mid-flight: the last act of each starts the motion.
+const FILMS: &[Scene] = &[
+    Scene {
+        name: "motion-section",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Click("Keychain")],
+    },
+    Scene {
+        name: "motion-menu",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Click("More ways to add hosts")],
+    },
+    Scene {
+        name: "motion-new-tab",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: with_tabs,
+        acts: &[Act::Click("New tab")],
+    },
+    Scene {
+        name: "motion-editor",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Hover("prod-db"), Act::Click("Edit")],
+    },
+    Scene {
+        name: "motion-settings",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Click("Terminal")],
+    },
+];
+
+/// How long after the input each frame of a filmstrip is taken, in seconds.
+const FILM_AT: [f64; 4] = [0.03, 0.07, 0.12, 0.3];
+
+/// Frames of `film` as its last act's motion plays, taken [`FILM_AT`] after the input.
+fn filmstrip(film: &Scene, renderer: &mut dyn Renderer) -> Vec<Vec<u8>> {
+    let vault = fixture_vault(
+        &format!("film-{}{}", film.name, renderer.suffix()),
+        film.populated,
+    );
+    let mut app = NativeApp::new(Some(vault));
+    (film.setup)(&mut app);
+    let theme = Theme::new(Appearance::Dark);
+    let mut state = UiState::default();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )] // Scene sizes.
+    let size = (
+        (film.width as f32 * film.scale).round() as u32,
+        (film.height as f32 * film.scale).round() as u32,
+        film.scale,
+    );
+    #[allow(clippy::cast_precision_loss)] // Scene sizes.
+    let viewport = Rect::new(0.0, 0.0, film.width as f32, film.height as f32);
+    let mut frame = |events: &[Event], time: f64, keep: bool| {
+        let mut output = FrameOutput::default();
+        let png = renderer.frame(size, keep, &mut |canvas| {
+            state.begin_frame(events, time);
+            let mut ui = Ui::new(canvas, theme, &mut state, viewport);
+            app.frame(&mut ui);
+            output = state.end_frame();
+        });
+        (output, png)
+    };
+    let mut time = 0.0;
+    let (mut output, _) = frame(&[], time, false);
+    let mut frames = Vec::new();
+    for (index, act) in film.acts.iter().enumerate() {
+        time += 1.0;
+        let events = events_for(act, &output.zones);
+        (output, _) = frame(&events, time, false);
+        if index + 1 == film.acts.len() {
+            for at in FILM_AT {
+                let (_, png) = frame(&[], time + at, true);
+                frames.push(png.unwrap());
+            }
+        } else {
+            (output, _) = frame(&[], time + 0.5, false);
+        }
+    }
+    frames
+}
+
+#[test]
+fn transitions_move_through_frames_and_are_photographed_mid_flight() {
+    let dir = out_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut renderer = Cpu(None);
+    let mut still = Vec::new();
+    for film in FILMS {
+        let frames = filmstrip(film, &mut renderer);
+        for (index, png) in frames.iter().enumerate() {
+            std::fs::write(dir.join(format!("{}-{index}.png", film.name)), png).unwrap();
+        }
+        // Moving: the first frames differ from each other, and the last is where it settles.
+        if frames[0] == frames[1] || frames[1] == frames[2] {
+            still.push(film.name);
+        }
+    }
+    assert!(still.is_empty(), "these did not move: {still:?}");
+}
+
 #[test]
 fn every_scene_renders_without_layout_faults() {
     let dir = out_dir();

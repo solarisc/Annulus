@@ -49,8 +49,8 @@ impl Ask {
 pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answers) -> bool {
     let t = ui.theme;
     let card = rect.centered(rect.w.min(460.0), 236.0);
-    ui.gfx.fill_rect(rect, 0.0, t.scrim);
     ui.zone(id.with("ask.backdrop"), rect, Role::Backdrop, "");
+    super::pages::card_in(ui, id.with("ask"), rect, card);
     ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
     ui.gfx.fill_rect(card, 14.0, t.raised);
     ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
@@ -197,5 +197,6 @@ pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answer
             }
         }
     }
+    super::pages::card_done(ui);
     answered
 }

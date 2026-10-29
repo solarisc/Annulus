@@ -33,6 +33,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM, Kind, SMALL};
 use annulus_vault::vault::Vault;
 
@@ -1208,6 +1209,9 @@ impl NativeApp {
         let Some(vault) = self.vault.as_mut() else {
             return;
         };
+        // Each section fades and rises a little into place when chosen.
+        let shown = ui.entrance(Id::new(("section", self.section.title())), Motion::BASE);
+        ui.push_layer(Layer::fade(shown).shifted(0.0, 8.0 * (1.0 - shown)));
         let action = match self.section {
             Section::Hosts => {
                 if let Some(action) = self.hosts.draw(ui, content, Some(vault)) {
@@ -1262,6 +1266,7 @@ impl NativeApp {
                 None
             }
         };
+        ui.pop_layer();
         if let Some(action) = action {
             self.screen_action(action);
         }
@@ -1270,18 +1275,28 @@ impl NativeApp {
     fn navigation(&mut self, ui: &mut Ui<'_>, rect: Rect, compact: bool) {
         let mut column = rect.inset(space::S + 2.0, 0.0);
         column.take_top(space::S);
-        for section in Section::MAIN {
-            let row = column.take_top(36.0);
-            self.nav_item(ui, row.inset(0.0, 1.0), section, compact);
-        }
+        let mut rows: Vec<(Section, Rect)> = Section::MAIN
+            .iter()
+            .map(|section| (*section, column.take_top(36.0).inset(0.0, 1.0)))
+            .collect();
         let mut footer = column;
         let settings = footer.take_bottom(space::M + 36.0);
-        self.nav_item(
-            ui,
-            Rect::new(settings.x, settings.y, settings.w, 36.0).inset(0.0, 1.0),
+        rows.push((
             Section::Settings,
-            compact,
-        );
+            Rect::new(settings.x, settings.y, settings.w, 36.0).inset(0.0, 1.0),
+        ));
+        // The selection: one pill that glides to the section chosen, even down to Settings.
+        if let Some((_, target)) = rows.iter().find(|(section, _)| *section == self.section) {
+            let t = ui.theme;
+            let y = ui.spring(Id::new("nav.pill"), target.y);
+            let pill = Rect::new(target.x, y, target.w, target.h);
+            ui.gfx.fill_rect(pill, 7.0, t.selected);
+            let bar = Rect::new(pill.x, pill.y + 9.0, 3.0, pill.h - 18.0);
+            ui.gfx.fill_rect(bar, 1.5, t.accent);
+        }
+        for (section, row) in rows {
+            self.nav_item(ui, row, section, compact);
+        }
         if !compact {
             let status = footer.take_bottom(52.0).inset(0.0, space::XS);
             let badge = self.sync_badge();
@@ -1298,15 +1313,8 @@ impl NativeApp {
         }
         let t = ui.theme;
         let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-        let fill = if selected {
-            t.selected
-        } else {
-            t.hover.alpha(hover * 0.8)
-        };
-        ui.gfx.fill_rect(rect, 7.0, fill);
-        if selected {
-            let bar = Rect::new(rect.x, rect.y + 9.0, 3.0, rect.h - 18.0);
-            ui.gfx.fill_rect(bar, 1.5, t.accent);
+        if !selected {
+            ui.gfx.fill_rect(rect, 7.0, t.hover.alpha(hover * 0.8));
         }
         if response.focus_ring {
             ui.focus_ring(rect, 7.0);

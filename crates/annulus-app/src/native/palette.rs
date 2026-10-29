@@ -35,13 +35,24 @@ impl PaletteView {
     /// Draws the palette over the window; returns how it ended, once it has.
     #[allow(clippy::too_many_lines)] // Field, keys and results, top to bottom.
     pub fn draw(&mut self, ui: &mut Ui<'_>, items: &[Item]) -> Option<Outcome> {
-        let t = ui.theme;
         let window = ui.viewport;
-        ui.gfx.fill_rect(window, 0.0, t.scrim);
         let backdrop = ui.zone(Id::new("palette.backdrop"), window, Role::Backdrop, "");
         if backdrop.clicked {
             return Some(Outcome::Close);
         }
+        // The palette drops in from the top of the window over a fading scrim.
+        let card_at = Rect::new(window.center().x, window.y, 1.0, 1.0);
+        super::pages::card_in(ui, Id::new("palette"), window, card_at);
+        let outcome = self.list(ui, items);
+        super::pages::card_done(ui);
+        outcome
+    }
+
+    /// The field and the results, inside the card's motion.
+    #[allow(clippy::too_many_lines)] // Field, keys and results, top to bottom.
+    fn list(&mut self, ui: &mut Ui<'_>, items: &[Item]) -> Option<Outcome> {
+        let t = ui.theme;
+        let window = ui.viewport;
         let mut results: Vec<Item> = Vec::new();
         if let Some(target) = typed_target(&self.query) {
             results.push(Item {
@@ -112,6 +123,12 @@ impl PaletteView {
             return None;
         }
         let mut chosen = None;
+        // The selection glides from row to row as the arrows move it.
+        #[allow(clippy::cast_precision_loss)] // At most eight rows.
+        let target = inner.y + self.selected as f32 * ROW;
+        let glide = ui.spring(Id::new("palette.glide"), target);
+        ui.gfx
+            .fill_rect(Rect::new(inner.x, glide, inner.w, ROW), 8.0, t.selected);
         for (index, item) in results.iter().enumerate() {
             let row = inner.take_top(ROW);
             let id = Id::new(("palette.item", index));
@@ -119,16 +136,8 @@ impl PaletteView {
             if response.hovered && ui.pointer().is_some() {
                 ui.set_cursor(Cursor::Pointer);
             }
-            if index == self.selected || response.hovered {
-                ui.gfx.fill_rect(
-                    row,
-                    8.0,
-                    if index == self.selected {
-                        t.selected
-                    } else {
-                        t.hover
-                    },
-                );
+            if response.hovered && index != self.selected {
+                ui.gfx.fill_rect(row, 8.0, t.hover);
             }
             let mut line = row.inset(space::M, 0.0);
             let icon = match item.action {

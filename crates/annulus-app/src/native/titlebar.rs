@@ -131,7 +131,14 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     }
     if !locked {
         let slot = Rect::new(x + space::XS, row.center().y - 15.0, 30.0, 30.0);
-        let at = ui.spring(Id::new("tab.new").with("x"), slot.x);
+        // It glides left as a tab closes; when one opens it is at once out of the new tab's
+        // way, which grows where it was.
+        let place = Id::new("tab.new").with("x");
+        let mut at = ui.spring(place, slot.x);
+        if at < slot.x - 0.5 {
+            ui.spring_set(place, slot.x);
+            at = slot.x;
+        }
         let id = Id::new("tab.new");
         let response = ui.zone(id, slot, Role::Button, "New tab");
         ui.tooltip(id, slot, "New tab (Ctrl+Shift+T)");

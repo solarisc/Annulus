@@ -373,11 +373,15 @@ impl HostsView {
             }
         }
         if let Some(panel) = panel {
+            // The panel slides in from the right edge and fades up as it opens.
+            let shown = ui.entrance(Id::new("editor.open"), Motion::BASE);
+            ui.push_layer(Layer::fade(shown).shifted(32.0 * (1.0 - shown), 0.0));
             if self.group_editor.is_some() {
                 self.group_panel(ui, panel, vault);
             } else {
                 self.editor_panel(ui, panel, vault);
             }
+            ui.pop_layer();
         }
         self.import_card(ui, rect, vault);
         action

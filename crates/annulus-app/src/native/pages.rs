@@ -7,6 +7,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::IconId;
 use annulus_ui::kit::{Cursor, Id, Response, Role, Ui};
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_STRONG, CONTROL, HEADING, Kind, SMALL, TITLE, button_width};
 
 /// Side padding of a page.
@@ -139,6 +140,21 @@ pub fn setting(ui: &mut Ui<'_>, row: Rect, title: &str, detail: &str, control_w:
     row.take_right(space::L);
     two_lines(ui, row, title, detail, false);
     control.centered(control.w, CONTROL)
+}
+
+/// A card coming in over `area`: the scrim fades in and the card at `card` grows into place,
+/// passing its size a touch. Draw the card after this, then call [`card_done`].
+pub fn card_in(ui: &mut Ui<'_>, id: Id, area: Rect, card: Rect) {
+    let t = ui.theme;
+    let open = ui.entrance(id.with("card.open"), Motion::POP);
+    ui.gfx
+        .fill_rect(area, 0.0, t.scrim.alpha(open.clamp(0.0, 1.0)));
+    ui.push_layer(Layer::appear(open, card.center(), 0.94, 8.0));
+}
+
+/// Ends what [`card_in`] began.
+pub fn card_done(ui: &mut Ui<'_>) {
+    ui.pop_layer();
 }
 
 /// A hairline between settings rows.

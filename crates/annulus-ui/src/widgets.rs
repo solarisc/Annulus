@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 use crate::gfx::{Align, Canvas, Color, Font, Point, Rect, Weight};
 use crate::icons::{self, IconId};
 use crate::kit::{Cursor, Id, Key, Modifiers, Response, Role, Typed, Ui};
+use crate::motion::{Layer, Motion};
 use annulus_config::tokens::{metrics, radius, space, text};
 
 /// Body text.
@@ -912,7 +913,6 @@ impl Ui<'_> {
             self.state.popup = None;
             return;
         }
-        let t = self.theme;
         // Clicking anywhere outside the menu closes it.
         let backdrop = self.zone(
             popup.owner.with("backdrop"),
@@ -946,6 +946,26 @@ impl Ui<'_> {
             .min(self.viewport.r() - popup.width - 8.0)
             .max(8.0);
         let menu = Rect::new(x, y, popup.width, height);
+        // It grows out of the widget that opened it, from the edge nearest to it.
+        let open = self.entrance(popup.owner.with("menu.open"), Motion::FAST);
+        let below = y >= popup.anchor.y;
+        let origin = Point::new(
+            popup.anchor.center().x.clamp(menu.x, menu.r()),
+            if below { menu.y } else { menu.b() },
+        );
+        self.push_layer(Layer::appear(
+            open,
+            origin,
+            0.94,
+            if below { -4.0 } else { 4.0 },
+        ));
+        self.draw_menu(&popup, menu, content, height);
+        self.pop_layer();
+    }
+
+    /// The open menu `popup`'s surface and items in `menu`.
+    fn draw_menu(&mut self, popup: &Popup, menu: Rect, content: f32, height: f32) {
+        let t = self.theme;
         self.gfx.shadow(menu, radius::MEDIUM, 16.0, 6.0, t.shadow);
         self.gfx.fill_rect(menu, radius::MEDIUM, t.raised);
         self.gfx.stroke_rect(menu, radius::MEDIUM, 1.0, t.line);
@@ -1019,10 +1039,15 @@ impl Ui<'_> {
             .min(self.viewport.r() - width - 4.0)
             .max(self.viewport.x + 4.0);
         let tip = Rect::new(left, top, width, height);
+        // It fades in, rising a touch toward its control.
+        let shown = self.entrance(crate::kit::Id::new(("tooltip", &text)), Motion::FAST);
+        let toward = if top > anchor.y { 3.0 } else { -3.0 };
+        self.push_layer(Layer::appear(shown, tip.center(), 0.97, toward));
         self.gfx.shadow(tip, radius::SMALL, 10.0, 3.0, t.shadow);
         self.gfx.fill_rect(tip, radius::SMALL, t.raised);
         self.gfx.stroke_rect(tip, radius::SMALL, 1.0, t.line_strong);
         self.gfx.text(tip, &text, SMALL, t.text, Align::Center);
+        self.pop_layer();
     }
 
     /// A small uppercase label above a group of rows.
