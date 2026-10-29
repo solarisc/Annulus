@@ -424,7 +424,7 @@ impl Ui<'_> {
         &mut self,
         id: Id,
         rect: Rect,
-        buffer: &mut String,
+        buffer: &mut dyn TextBuffer,
         style: FieldStyle<'_>,
     ) -> FieldResponse {
         let response = self.zone(id, rect, Role::TextInput, style.placeholder);
@@ -479,13 +479,13 @@ impl Ui<'_> {
                     }
                     Typed::Key(key @ (Key::Up | Key::Down), modifiers) => {
                         let up = key == Key::Up;
-                        state.cursor = line_step(buffer, state.cursor, up);
+                        state.cursor = line_step(buffer.as_str(), state.cursor, up);
                         if !modifiers.shift {
                             state.anchor = state.cursor;
                         }
                     }
                     Typed::Key(key @ (Key::Home | Key::End), modifiers) if !modifiers.ctrl => {
-                        let (start, end) = line_bounds(buffer, state.cursor);
+                        let (start, end) = line_bounds(buffer.as_str(), state.cursor);
                         state.cursor = if key == Key::Home { start } else { end };
                         if !modifiers.shift {
                             state.anchor = state.cursor;
@@ -503,10 +503,12 @@ impl Ui<'_> {
             }
             self.state.return_keys(leftover);
         }
-        state.cursor = state.cursor.min(buffer.len());
-        state.anchor = state.anchor.min(buffer.len());
+        let secret = buffer.is_secret();
+        let text = buffer.as_str();
+        state.cursor = state.cursor.min(text.len());
+        state.anchor = state.anchor.min(text.len());
         // The caret's line stays in view.
-        let caret_row = buffer[..state.cursor].matches('\n').count();
+        let caret_row = text[..state.cursor].matches('\n').count();
         #[allow(clippy::cast_precision_loss)] // Scripts are short.
         let caret_y = caret_row as f32 * line_h;
         if caret_y - state.scroll > inner.h - line_h {
@@ -516,7 +518,7 @@ impl Ui<'_> {
             state.scroll = caret_y;
         }
         #[allow(clippy::cast_precision_loss)] // Scripts are short.
-        let content = (buffer.matches('\n').count() + 1) as f32 * line_h;
+        let content = (text.matches('\n').count() + 1) as f32 * line_h;
         state.scroll -= self.take_wheel(inner);
         state.scroll = state.scroll.clamp(0.0, (content - inner.h).max(0.0));
         if (response.pressed || response.clicked)
@@ -525,22 +527,25 @@ impl Ui<'_> {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // On screen.
             let row = ((pointer.y - inner.y + state.scroll) / line_h).max(0.0) as usize;
             let mut start = 0;
-            for (index, line) in buffer.split('\n').enumerate() {
+            for (index, line) in text.split('\n').enumerate() {
                 if index == row {
                     break;
                 }
                 start += line.len() + 1;
             }
-            let start = start.min(buffer.len());
-            let line_end = buffer[start..]
-                .find('\n')
-                .map_or(buffer.len(), |at| start + at);
+            let start = start.min(text.len());
+            let line_end = text[start..].find('\n').map_or(text.len(), |at| start + at);
+            let line = &text[start..line_end];
+            let shown = if secret {
+                "\u{2022}".repeat(line.chars().count())
+            } else {
+                line.to_owned()
+            };
             let at = start
-                + offset_at(
-                    self.gfx,
-                    &buffer[start..line_end],
-                    font,
-                    pointer.x - inner.x,
+                + from_shown(
+                    line,
+                    secret,
+                    offset_at(self.gfx, &shown, font, pointer.x - inner.x),
                 );
             state.cursor = at;
             if !state.dragging {
@@ -552,7 +557,7 @@ impl Ui<'_> {
         }
 
         self.push_clip(inner);
-        if buffer.is_empty() {
+        if text.is_empty() {
             self.gfx.draw_text(
                 Point::new(inner.x, inner.y),
                 style.placeholder,
@@ -562,16 +567,30 @@ impl Ui<'_> {
         }
         let (from, to) = state.range();
         let mut start = 0;
-        for (row, line) in buffer.split('\n').enumerate() {
+        for (row, line) in text.split('\n').enumerate() {
             #[allow(clippy::cast_precision_loss)] // Scripts are short.
             let y = inner.y + row as f32 * line_h - state.scroll;
             let end = start + line.len();
+            // A secret is drawn as one dot per character; byte offsets map by count.
+            let masked = if secret {
+                "\u{2022}".repeat(line.chars().count())
+            } else {
+                String::new()
+            };
+            let to_shown = |offset: usize| {
+                if secret {
+                    line[..offset].chars().count() * '\u{2022}'.len_utf8()
+                } else {
+                    offset
+                }
+            };
+            let line_shown: &str = if secret { &masked } else { line };
             if y + line_h >= inner.y && y <= inner.b() {
                 if response.focused && from < to && from <= end && to >= start {
                     let a = from.max(start) - start;
                     let b = to.min(end) - start;
-                    let x0 = self.gfx.measure(&line[..a], font).width;
-                    let mut x1 = self.gfx.measure(&line[..b], font).width;
+                    let x0 = self.gfx.measure(&line_shown[..to_shown(a)], font).width;
+                    let mut x1 = self.gfx.measure(&line_shown[..to_shown(b)], font).width;
                     if to > end {
                         x1 += 6.0;
                     }
@@ -582,12 +601,15 @@ impl Ui<'_> {
                     );
                 }
                 self.gfx
-                    .draw_text(Point::new(inner.x, y), line, font, t.text);
+                    .draw_text(Point::new(inner.x, y), line_shown, font, t.text);
                 if response.focused
                     && (start..=end).contains(&state.cursor)
                     && state.cursor >= start
                 {
-                    let x = self.gfx.measure(&line[..state.cursor - start], font).width;
+                    let x = self
+                        .gfx
+                        .measure(&line_shown[..to_shown(state.cursor - start)], font)
+                        .width;
                     if row == caret_row {
                         self.gfx.fill_rect(
                             Rect::new(inner.x + x, y + 1.0, 1.5, line_h - 2.0),
@@ -1252,6 +1274,40 @@ mod tests {
             },
         );
         assert_eq!(script, "echo a\n# echo b\necho c");
+    }
+
+    #[test]
+    fn a_secret_text_area_takes_a_pasted_key_and_draws_only_dots() {
+        let mut state = UiState::default();
+        let id = Id::new("key");
+        let mut key_text = Zeroizing::new(String::new());
+        frame(&mut state, &[], |ui| {
+            ui.text_area(id, FIELD, &mut key_text, FieldStyle::default());
+        });
+        state.set_focus(Some(id), true);
+        let paste = [Event::Paste("BEGIN KEY\r\nb3BlbnNzaA\r\nEND KEY".into())];
+        let mut canvas = Recorder::default();
+        state.begin_frame(&paste, 0.0);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            &mut state,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        ui.text_area(id, FIELD, &mut key_text, FieldStyle::default());
+        assert_eq!(key_text.as_str(), "BEGIN KEY\nb3BlbnNzaA\nEND KEY");
+        assert!(
+            canvas
+                .texts
+                .iter()
+                .all(|(_, text)| !text.contains("KEY") && !text.contains("b3Bl"))
+        );
+        assert!(
+            canvas
+                .texts
+                .iter()
+                .any(|(_, text)| text == &"\u{2022}".repeat(10))
+        );
     }
 
     #[test]

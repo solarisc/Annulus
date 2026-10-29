@@ -7,20 +7,24 @@ use annulus_config::settings::Settings;
 use annulus_config::tokens::{ThemeMode, space};
 use annulus_platform::window::Waker;
 use annulus_session::profiles::Profile;
-use annulus_session::{Program, SessionEvent, SshFiles};
-use annulus_ssh::keys::{self, KeyKind};
+use annulus_session::{Program, SshFiles};
+use annulus_ssh::keys::{self, KeyKind, KeyPair};
 use annulus_ssh::known::{self, KnownHost};
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Ui};
-use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SMALL};
+use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SMALL, button_width};
 use annulus_vault::forwards::{ForwardKind, PortForward};
+use annulus_vault::keychain::SshKey;
 use annulus_vault::snippets::Snippet;
 use annulus_vault::vault::Vault;
+use zeroize::Zeroizing;
 
 use super::ask::{self, Ask};
 use super::pages::{self, ROW_H};
 use crate::forwards_screen::{Draft, Running, Status, start};
+use crate::job::{Job, Poll};
+use crate::ssh_task::SshTask;
 use crate::{connect, keychain_screen, logs_screen, snippets_screen};
 
 /// What a screen asks the window to do.
@@ -86,6 +90,32 @@ fn row_buttons(
     (clicked, remainder)
 }
 
+/// Cancel and a red `delete` button at the right of a row, asking once more before a
+/// delete; returns `Some(true)` to delete, `Some(false)` to keep, and the rest of the row.
+fn confirm_delete(ui: &mut Ui<'_>, row: Rect, id: Id, delete: &str) -> (Option<bool>, Rect) {
+    let mut remainder = row.inset(space::M, 0.0);
+    let delete_w = button_width(ui.gfx, delete, None);
+    let delete_rect = remainder.take_right(delete_w).centered(delete_w, 30.0);
+    remainder.take_right(space::S);
+    let cancel_w = button_width(ui.gfx, "Cancel", None);
+    let cancel = remainder.take_right(cancel_w).centered(cancel_w, 30.0);
+    let mut answer = None;
+    // Drawn left to right, so Tab follows the eye.
+    if ui
+        .button(id.with("cancel"), cancel, "Cancel", None, Kind::Ghost)
+        .clicked
+    {
+        answer = Some(false);
+    }
+    if ui
+        .button(id.with("delete"), delete_rect, delete, None, Kind::Danger)
+        .clicked
+    {
+        answer = Some(true);
+    }
+    (answer, remainder)
+}
+
 /// Segmented choice of `items`; returns the one clicked.
 fn segmented(
     ui: &mut Ui<'_>,
@@ -126,15 +156,64 @@ fn segmented(
 // ---------------------------------------------------------------------------------------
 // Keychain
 
+/// Height of the pasted private key: about six lines.
+const KEY_H: f32 = 124.0;
+
+/// What the card at the top of the Keychain is doing.
+#[derive(Default)]
+enum KeyForm {
+    #[default]
+    Closed,
+    /// Making a new key; RSA takes seconds, so it runs on another thread.
+    Generate {
+        label: String,
+        kind: KeyKind,
+        working: Option<Job<Result<KeyPair, keys::KeyError>>>,
+    },
+    /// Pasting a key in; both secrets are wiped when the form closes.
+    Import {
+        label: String,
+        private: Zeroizing<String>,
+        passphrase: Zeroizing<String>,
+    },
+}
+
+/// Installing a key's public half on a saved host (F-KEY-004).
+struct Install {
+    key_id: u64,
+    host_id: Option<u64>,
+    task: Option<SshTask>,
+    ask: Option<Ask>,
+}
+
+/// One key as the list shows it.
+struct KeyRow {
+    id: u64,
+    label: String,
+    detail: String,
+    public: String,
+}
+
 /// The Keychain screen.
 #[derive(Default)]
 pub struct KeychainView {
-    message: Option<String>,
+    form: KeyForm,
+    /// The last result, and whether it is a problem.
+    message: Option<(bool, String)>,
+    confirm_delete: Option<u64>,
+    install: Option<Install>,
 }
 
 impl KeychainView {
     /// Draws the screen.
-    pub fn draw(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) {
+    pub fn draw(
+        &mut self,
+        ui: &mut Ui<'_>,
+        rect: Rect,
+        vault: &mut Vault,
+        files: &SshFiles,
+        waker: Option<&Waker>,
+    ) {
         let mut area = pages::page(rect);
         let count = vault.ssh_keys().len();
         let mut actions = pages::header(
@@ -144,32 +223,51 @@ impl KeychainView {
             Some(count),
             "Keys sync with your vault, encrypted. Hosts without one use ~/.ssh.",
         );
-        if pages::action(
-            ui,
-            &mut actions,
-            "keys.generate",
-            "Generate key",
-            Some(icons::PLUS),
-            Kind::Primary,
-        ) {
-            self.message = Some(
-                match keys::generate(KeyKind::Ed25519, &keychain_screen::comment()) {
-                    Ok(pair) => {
-                        let label = format!("Ed25519 key {}", count + 1);
-                        let key = keychain_screen::stored(vault, &label, &pair);
-                        match vault.upsert_key(key) {
-                            Ok(()) => format!("Generated {label}."),
-                            Err(error) => format!("Could not save the key: {error}"),
-                        }
-                    }
-                    Err(error) => format!("Could not generate a key: {error}"),
-                },
-            );
+        let generate = actions.take_right(button_width(ui.gfx, "Generate key", Some(icons::PLUS)));
+        actions.take_right(space::S);
+        let import = actions.take_right(button_width(ui.gfx, "Import key", Some(icons::DOWNLOAD)));
+        // Drawn left to right, so Tab follows the eye.
+        if ui
+            .button(
+                Id::new("keys.import"),
+                import,
+                "Import key",
+                Some(icons::DOWNLOAD),
+                Kind::Secondary,
+            )
+            .clicked
+        {
+            self.form = KeyForm::Import {
+                label: String::new(),
+                private: Zeroizing::new(String::new()),
+                passphrase: Zeroizing::new(String::new()),
+            };
+            self.message = None;
         }
-        if let Some(message) = &self.message {
+        if ui
+            .button(
+                Id::new("keys.generate"),
+                generate,
+                "Generate key",
+                Some(icons::PLUS),
+                Kind::Primary,
+            )
+            .clicked
+        {
+            self.form = KeyForm::Generate {
+                label: String::new(),
+                kind: KeyKind::Ed25519,
+                working: None,
+            };
+            self.message = None;
+        }
+        self.form_card(ui, &mut area, vault, waker);
+        self.install_card(ui, &mut area, vault, files, waker);
+        if let Some((problem, message)) = &self.message {
             let t = ui.theme;
+            let color = if *problem { t.error } else { t.text2 };
             ui.gfx
-                .text(area.take_top(20.0), message, SMALL, t.text2, Align::Start);
+                .text(area.take_top(20.0), message, SMALL, color, Align::Start);
             area.take_top(space::S);
         }
         if count == 0 {
@@ -178,45 +276,398 @@ impl KeychainView {
                 area,
                 icons::KEY,
                 "No keys yet",
-                "Generate one here, or import yours from ~/.ssh.",
+                "Generate one here, or import a key you already use.",
             );
+        } else {
+            self.list(ui, area, vault);
+        }
+        // A question the install's connection asks, over the screen.
+        if let Some(install) = &mut self.install
+            && let (Some(task), Some(ask_now)) = (&install.task, &mut install.ask)
+            && ask::card(ui, rect, ask_now, task.answers())
+        {
+            install.ask = None;
+        }
+    }
+
+    /// The Generate or Import card, while one is open.
+    #[allow(clippy::too_many_lines)] // Both forms, each top to bottom.
+    fn form_card(
+        &mut self,
+        ui: &mut Ui<'_>,
+        area: &mut Rect,
+        vault: &mut Vault,
+        waker: Option<&Waker>,
+    ) {
+        let mut done: Option<Result<SshKey, keys::KeyError>> = None;
+        let mut close = false;
+        match &mut self.form {
+            KeyForm::Closed => return,
+            KeyForm::Generate {
+                label,
+                kind,
+                working,
+            } => {
+                if let Some(job) = working {
+                    match job.poll() {
+                        Poll::Running => {}
+                        Poll::Done(result) => {
+                            done = Some(
+                                result.map(|pair| keychain_screen::stored(vault, label, &pair)),
+                            );
+                        }
+                        Poll::Lost => done = Some(Err(keys::KeyError::Generate)),
+                    }
+                }
+                if done.is_some() {
+                    *working = None;
+                }
+                let busy = working.is_some();
+                let mut card = pages::card(ui, area, "New key", 2.0 * CONTROL + 5.0 * space::S);
+                card.take_top(space::S);
+                let mut line = card.take_top(CONTROL);
+                let kind_rect = line.take_right(170.0);
+                line.take_right(space::S);
+                ui.text_field(
+                    Id::new("key.label"),
+                    line,
+                    label,
+                    FieldStyle {
+                        placeholder: "Name, e.g. work laptop",
+                        ..FieldStyle::default()
+                    },
+                );
+                let names: Vec<String> = KeyKind::ALL
+                    .iter()
+                    .map(|choice| choice.name().to_owned())
+                    .collect();
+                let at = KeyKind::ALL.iter().position(|choice| choice == kind);
+                if let Some(chosen) = ui.select(Id::new("key.kind"), kind_rect, &names, at, "Type")
+                    && !busy
+                {
+                    *kind = KeyKind::ALL[chosen];
+                }
+                card.take_top(space::S);
+                let mut buttons = card.take_top(CONTROL);
+                let go_label = if busy {
+                    format!("Making a {} key\u{2026}", kind.name())
+                } else {
+                    "Generate".to_owned()
+                };
+                let go = buttons.take_right(button_width(ui.gfx, &go_label, None).max(96.0));
+                buttons.take_right(space::S);
+                let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+                close |= ui
+                    .button(Id::new("key.cancel"), cancel, "Cancel", None, Kind::Ghost)
+                    .clicked;
+                let clicked = ui
+                    .button(Id::new("key.go"), go, &go_label, None, Kind::Primary)
+                    .clicked;
+                if clicked && !busy {
+                    if label.trim().is_empty() {
+                        *label = format!("{} key {}", kind.name(), vault.ssh_keys().len() + 1);
+                    }
+                    let (kind, comment) = (*kind, keychain_screen::comment());
+                    let pace = super::FramePace::new(ui, waker.cloned());
+                    *working = Some(Job::start(&pace, move || keys::generate(kind, &comment)));
+                }
+            }
+            KeyForm::Import {
+                label,
+                private,
+                passphrase,
+            } => {
+                let mut card = pages::card(
+                    ui,
+                    area,
+                    "Import a key",
+                    2.0 * CONTROL + KEY_H + 6.0 * space::S,
+                );
+                card.take_top(space::S);
+                ui.text_field(
+                    Id::new("import.label"),
+                    card.take_top(CONTROL),
+                    label,
+                    FieldStyle {
+                        placeholder: "Name, e.g. id_ed25519",
+                        ..FieldStyle::default()
+                    },
+                );
+                card.take_top(space::S);
+                ui.text_area(
+                    Id::new("import.private"),
+                    card.take_top(KEY_H),
+                    private,
+                    FieldStyle {
+                        placeholder: "Paste the private key (-----BEGIN \u{2026} PRIVATE KEY-----)",
+                        mono: true,
+                        ..FieldStyle::default()
+                    },
+                );
+                card.take_top(space::S);
+                let mut line = card.take_top(CONTROL);
+                let go = line.take_right(button_width(ui.gfx, "Import", None).max(96.0));
+                line.take_right(space::S);
+                let cancel = line.take_right(button_width(ui.gfx, "Cancel", None));
+                line.take_right(space::M);
+                ui.text_field(
+                    Id::new("import.passphrase"),
+                    line,
+                    passphrase,
+                    FieldStyle {
+                        placeholder: "Passphrase, only if the key has one",
+                        ..FieldStyle::default()
+                    },
+                );
+                close |= ui
+                    .button(
+                        Id::new("import.cancel"),
+                        cancel,
+                        "Cancel",
+                        None,
+                        Kind::Ghost,
+                    )
+                    .clicked;
+                let clicked = ui
+                    .button(Id::new("import.go"), go, "Import", None, Kind::Primary)
+                    .clicked;
+                if clicked && !private.trim().is_empty() {
+                    done = Some(keys::import(private, Some(passphrase)).map(|pair| {
+                        let name = if label.trim().is_empty() {
+                            format!("Imported key {}", vault.ssh_keys().len() + 1)
+                        } else {
+                            label.clone()
+                        };
+                        keychain_screen::stored(vault, &name, &pair)
+                    }));
+                }
+            }
+        }
+        if close {
+            // Dropping the form wipes a pasted key and passphrase.
+            self.form = KeyForm::Closed;
+            self.message = None;
+        }
+        if let Some(result) = done {
+            match result {
+                Ok(key) => {
+                    let label = key.label.clone();
+                    self.message = Some(match vault.upsert_key(key) {
+                        Ok(()) => (
+                            false,
+                            format!(
+                                "Saved {label}. Copy its public key to a server, or install it on one."
+                            ),
+                        ),
+                        Err(error) => (true, format!("Could not save the key: {error}")),
+                    });
+                    // Dropping the form wipes the pasted key and passphrase.
+                    self.form = KeyForm::Closed;
+                }
+                Err(error) => self.message = Some((true, error.to_string())),
+            }
+        }
+    }
+
+    /// Installing a key on a host: pick the host, then connect and add the key to its
+    /// `authorized_keys`. Once it is there, the host logs in with the key.
+    fn install_card(
+        &mut self,
+        ui: &mut Ui<'_>,
+        area: &mut Rect,
+        vault: &mut Vault,
+        files: &SshFiles,
+        waker: Option<&Waker>,
+    ) {
+        let Some(install) = &mut self.install else {
+            return;
+        };
+        let Some(key) = vault
+            .ssh_keys()
+            .iter()
+            .find(|key| key.id == install.key_id)
+            .cloned()
+        else {
+            self.install = None;
+            return;
+        };
+        if let Some(task) = &mut install.task {
+            while let Some(event) = task.question() {
+                if let Some(question) = Ask::from_event(event) {
+                    install.ask = Some(question);
+                }
+            }
+            if let Some(outcome) = task.outcome() {
+                let host_id = install.host_id;
+                self.install = None;
+                self.message = Some(match keychain_screen::install_result(outcome) {
+                    Ok(()) => (false, keychain_screen::link_key(vault, host_id, &key)),
+                    Err(reason) => (true, reason),
+                });
+                return;
+            }
+        }
+        let busy = install.task.is_some();
+        let hosts: Vec<(u64, String)> = vault
+            .hosts()
+            .iter()
+            .map(|host| (host.id, host.label.clone()))
+            .collect();
+        let mut card = pages::card(
+            ui,
+            area,
+            &format!("Install {} on a host", key.label),
+            CONTROL + 4.0 * space::S,
+        );
+        card.take_top(space::S);
+        let mut line = card.take_top(CONTROL);
+        let go_label = if busy {
+            "Installing\u{2026}"
+        } else {
+            "Install"
+        };
+        let go = line.take_right(button_width(ui.gfx, "Installing\u{2026}", None));
+        line.take_right(space::S);
+        let cancel = line.take_right(button_width(ui.gfx, "Cancel", None));
+        line.take_right(space::M);
+        let names: Vec<String> = hosts.iter().map(|(_, label)| label.clone()).collect();
+        let at = install
+            .host_id
+            .and_then(|id| hosts.iter().position(|(host, _)| *host == id));
+        if let Some(chosen) = ui.select(Id::new("install.host"), line, &names, at, "Choose a host")
+            && !busy
+        {
+            install.host_id = Some(hosts[chosen].0);
+        }
+        let cancelled = ui
+            .button(
+                Id::new("install.cancel"),
+                cancel,
+                "Cancel",
+                None,
+                Kind::Ghost,
+            )
+            .clicked;
+        let start = ui
+            .button(Id::new("install.go"), go, go_label, None, Kind::Primary)
+            .clicked
+            && !busy;
+        if cancelled {
+            self.install = None;
             return;
         }
-        let list: Vec<(u64, String, String, String)> = vault
+        if !start {
+            return;
+        }
+        let host = install
+            .host_id
+            .and_then(|id| vault.hosts().iter().find(|host| host.id == id));
+        let Some(host) = host else {
+            self.message = Some((true, "Choose the host to install the key on.".into()));
+            return;
+        };
+        let waker = waker.cloned();
+        install.task = Some(SshTask::exec(
+            connect::host(vault, files, host),
+            keys::install_command(&key.public),
+            move || {
+                if let Some(waker) = &waker {
+                    waker();
+                }
+            },
+        ));
+        self.message = None;
+    }
+
+    /// The keys, each with Copy, Install and Delete; Delete asks once more.
+    fn list(&mut self, ui: &mut Ui<'_>, area: Rect, vault: &mut Vault) {
+        let list: Vec<KeyRow> = vault
             .ssh_keys()
             .iter()
             .map(|key| {
-                (
-                    key.id,
-                    key.label.clone(),
-                    key.fingerprint.clone(),
-                    key.public.clone(),
-                )
+                let users = vault
+                    .hosts()
+                    .iter()
+                    .filter(|host| host.key_id == Some(key.id))
+                    .count();
+                let algorithm = key.public.split_whitespace().next().unwrap_or_default();
+                KeyRow {
+                    id: key.id,
+                    label: key.label.clone(),
+                    detail: format!(
+                        "{algorithm}  {}  \u{b7}  used by {users} host(s)",
+                        key.fingerprint
+                    ),
+                    public: key.public.clone(),
+                }
             })
             .collect();
-        let mut remove = None;
+        let confirm = self.confirm_delete;
+        let mut confirm_next = confirm;
+        let (mut remove, mut install, mut copied) = (None, None, None);
         rows(ui, "keys.list", area, list.len(), |ui, index, row| {
-            let (id, label, fingerprint, public) = &list[index];
-            let zone = Id::new(("key", *id));
-            pages::row(ui, zone, row, label, false);
-            let (clicked, remainder) = row_buttons(
-                ui,
-                row,
-                zone,
-                &[(icons::TRASH, "Delete"), (icons::COPY, "Copy public key")],
-            );
+            let key = &list[index];
+            let zone = Id::new(("key", key.id));
+            pages::row(ui, zone, row, &key.label, false);
+            let remainder = if confirm == Some(key.id) {
+                let (answer, remainder) = confirm_delete(ui, row, zone, "Delete key");
+                match answer {
+                    Some(true) => remove = Some(key.id),
+                    Some(false) => confirm_next = None,
+                    None => {}
+                }
+                remainder
+            } else {
+                let (clicked, remainder) = row_buttons(
+                    ui,
+                    row,
+                    zone,
+                    &[
+                        (icons::TRASH, "Delete"),
+                        (icons::UPLOAD, "Install on a host"),
+                        (icons::COPY, "Copy public key"),
+                    ],
+                );
+                match clicked {
+                    Some(2) => {
+                        ui.copy(key.public.clone());
+                        copied = Some(key.label.clone());
+                    }
+                    Some(1) => install = Some(key.id),
+                    Some(0) => confirm_next = Some(key.id),
+                    _ => {}
+                }
+                remainder
+            };
             let inner = pages::row_icon(ui, remainder, icons::KEY);
-            pages::two_lines(ui, inner, label, fingerprint, true);
-            match clicked {
-                Some(1) => ui.copy(public.clone()),
-                Some(0) => remove = Some(*id),
-                _ => {}
-            }
+            pages::two_lines(ui, inner, &key.label, &key.detail, true);
         });
-        if let Some(id) = remove
-            && vault.remove_key(id).is_ok()
-        {
-            self.message = Some("Key deleted.".into());
+        self.confirm_delete = confirm_next;
+        if let Some(label) = copied {
+            self.message = Some((false, format!("Copied the public key of {label}.")));
+        }
+        if let Some(key_id) = install {
+            if vault.hosts().is_empty() {
+                self.message = Some((
+                    true,
+                    "Save a host first, then install the key on it.".into(),
+                ));
+            } else {
+                self.install = Some(Install {
+                    key_id,
+                    host_id: None,
+                    task: None,
+                    ask: None,
+                });
+                self.message = None;
+            }
+        }
+        if let Some(id) = remove {
+            self.confirm_delete = None;
+            self.message = Some(match vault.remove_key(id) {
+                Ok(()) => (false, "Key deleted.".into()),
+                Err(error) => (true, error.to_string()),
+            });
         }
     }
 }
@@ -643,21 +1094,8 @@ impl ForwardsView {
         // A rule's connection may ask about a new server key or a password.
         for (id, running) in &self.running {
             for event in running.take_events() {
-                match event {
-                    SessionEvent::HostKey(question) => {
-                        self.asks.insert(*id, Ask::HostKey(question));
-                    }
-                    SessionEvent::Password { user, host } => {
-                        self.asks.insert(
-                            *id,
-                            Ask::Password {
-                                user,
-                                host,
-                                secret: zeroize::Zeroizing::new(String::new()),
-                            },
-                        );
-                    }
-                    _ => {}
+                if let Some(question) = Ask::from_event(event) {
+                    self.asks.insert(*id, question);
                 }
             }
         }

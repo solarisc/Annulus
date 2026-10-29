@@ -6,13 +6,11 @@ use std::sync::atomic::Ordering;
 
 use annulus_config::tokens::space;
 use annulus_platform::window::Waker;
-use annulus_session::SessionEvent;
 use annulus_sftp::{Entry, join, parent};
 use annulus_ui::gfx::{Align, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Ui};
 use annulus_ui::widgets::{BODY, BODY_STRONG, CONTROL, FieldStyle, Kind, SMALL, button_width};
-use zeroize::Zeroizing;
 
 use super::ask::{self, Ask};
 use crate::local_pane::read_dir;
@@ -61,15 +59,9 @@ impl SftpView {
         });
         self.tab.drain();
         for event in std::mem::take(&mut self.tab.questions) {
-            self.ask = match event {
-                SessionEvent::HostKey(question) => Some(Ask::HostKey(question)),
-                SessionEvent::Password { user, host } => Some(Ask::Password {
-                    user,
-                    host,
-                    secret: Zeroizing::new(String::new()),
-                }),
-                _ => self.ask.take(),
-            };
+            if let Some(question) = Ask::from_event(event) {
+                self.ask = Some(question);
+            }
         }
         let t = ui.theme;
         let mut area = rect.inset(space::L, space::M);

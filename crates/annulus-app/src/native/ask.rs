@@ -2,7 +2,7 @@
 //! for the first time, and a password. Terminals and port-forwarding rules both ask them.
 
 use annulus_config::tokens::space;
-use annulus_session::{Answers, HostKeyQuestion};
+use annulus_session::{Answers, HostKeyQuestion, SessionEvent};
 use annulus_ssh::Trust;
 use annulus_ui::gfx::{Align, Font, Rect};
 use annulus_ui::icons;
@@ -23,6 +23,22 @@ pub enum Ask {
         /// What is typed, wiped when dropped.
         secret: Zeroizing<String>,
     },
+}
+
+impl Ask {
+    /// The question `event` asks, if it is one.
+    #[must_use]
+    pub fn from_event(event: SessionEvent) -> Option<Self> {
+        match event {
+            SessionEvent::HostKey(question) => Some(Ask::HostKey(question)),
+            SessionEvent::Password { user, host } => Some(Ask::Password {
+                user,
+                host,
+                secret: Zeroizing::new(String::new()),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Draws the question over `rect` and sends the answer through `answers`; returns whether it

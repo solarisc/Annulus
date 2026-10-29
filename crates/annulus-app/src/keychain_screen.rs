@@ -51,7 +51,7 @@ struct Install {
 }
 
 /// What an install's outcome means: done, or why not.
-fn install_result(outcome: Outcome) -> Result<(), String> {
+pub(crate) fn install_result(outcome: Outcome) -> Result<(), String> {
     let exec = outcome?;
     if exec.status == Some(0) {
         return Ok(());
@@ -91,7 +91,7 @@ pub(crate) fn comment() -> String {
 }
 
 /// Sets the host to log in with `key` after it was installed there; the message to show.
-fn link_key(vault: &mut Vault, host_id: Option<u64>, key: &SshKey) -> String {
+pub(crate) fn link_key(vault: &mut Vault, host_id: Option<u64>, key: &SshKey) -> String {
     let Some(mut host) =
         host_id.and_then(|id| vault.hosts().iter().find(|host| host.id == id).cloned())
     else {

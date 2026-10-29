@@ -807,7 +807,8 @@ impl NativeApp {
                 None
             }
             Section::Keychain => {
-                self.keychain.draw(ui, content, vault);
+                self.keychain
+                    .draw(ui, content, vault, &self.ssh_files, self.waker.as_ref());
                 None
             }
             Section::Snippets => self.snippets.draw(ui, content, vault),

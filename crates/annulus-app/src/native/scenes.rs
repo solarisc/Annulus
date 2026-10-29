@@ -230,6 +230,41 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
+        name: "keychain-import",
+        width: 1100,
+        height: 760,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[
+            Act::Click("Import key"),
+            Act::Click("Name, e.g. id_ed25519"),
+            Act::Type("deploy key"),
+            Act::Click("Paste the private key (-----BEGIN \u{2026} PRIVATE KEY-----)"),
+            Act::Type(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\n-----END OPENSSH PRIVATE KEY-----",
+            ),
+        ],
+    },
+    Scene {
+        name: "keychain-install",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[Act::Click("Install on a host"), Act::Click("Choose a host")],
+    },
+    Scene {
+        name: "keychain-delete",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[Act::Click("Delete")],
+    },
+    Scene {
         name: "snippets",
         width: 1100,
         height: 720,
@@ -551,8 +586,13 @@ fn render(
     // One frame to lay out, one per act (resolved against the frame before), then frames
     // until animations settle.
     loop {
-        let (output, _) = frame(&events, time, false);
+        let (mut output, _) = frame(&events, time, false);
         faults.extend(output.faults.iter().cloned());
+        // The frame after input, as the window draws it (see `UiState::begin_frame`).
+        if !events.is_empty() {
+            (output, _) = frame(&[], time + 0.5, false);
+            faults.extend(output.faults.iter().cloned());
+        }
         events.clear();
         time += 1.0;
         match acts.next() {
@@ -625,6 +665,154 @@ fn drive(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) 
         output = state.end_frame();
     });
     output
+}
+
+/// Draws a frame with `events`, then the frame after input that the window draws too.
+fn step(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) -> FrameOutput {
+    drive(app, state, events, time);
+    drive(app, state, &[], time)
+}
+
+/// A click on the zone named `name` in the last frame.
+fn click_on(output: &FrameOutput, name: &str) -> Vec<Event> {
+    vec![
+        Event::PointerMoved(zone_center(&output.zones, name)),
+        Event::PointerDown(Button::Primary),
+        Event::PointerUp(Button::Primary),
+    ]
+}
+
+#[test]
+fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
+    let mut app = NativeApp::new(Some(fixture_vault("import-key", true)));
+    app.section = super::Section::Keychain;
+    let pair = annulus_ssh::keys::generate(annulus_ssh::keys::KeyKind::Ed25519, "me@test").unwrap();
+    let before = app.vault.as_ref().unwrap().ssh_keys().len();
+    let mut state = UiState::default();
+    let mut output = drive(&mut app, &mut state, &[], 0.0);
+    output = drive(&mut app, &mut state, &click_on(&output, "Import key"), 1.0);
+    let mut events = click_on(&output, "Name, e.g. id_ed25519");
+    events.push(Event::Text("deploy".into()));
+    output = drive(&mut app, &mut state, &events, 2.0);
+    let mut events = click_on(
+        &output,
+        "Paste the private key (-----BEGIN \u{2026} PRIVATE KEY-----)",
+    );
+    events.push(Event::Paste(pair.private.to_string()));
+    output = drive(&mut app, &mut state, &events, 3.0);
+    drive(&mut app, &mut state, &click_on(&output, "Import"), 4.0);
+    let keys = app.vault.as_ref().unwrap().ssh_keys();
+    assert_eq!(keys.len(), before + 1);
+    let saved = keys.iter().find(|key| key.label == "deploy").unwrap();
+    assert_eq!(
+        (saved.label.as_str(), saved.public.as_str()),
+        ("deploy", pair.public.as_str())
+    );
+}
+
+/// End to end on test VM 1: the new Keychain installs a fresh key on a real host through
+/// the UI (Install on a host, choose it, trust its key, Install), the host is set to log in
+/// with it, and a second connection does log in with it (and takes the key off again).
+#[test]
+#[ignore = "needs the test servers"]
+fn e2e_the_new_keychain_installs_a_key_on_a_real_host() {
+    use crate::keychain_screen::stored;
+    use annulus_ssh::keys;
+
+    let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+    let mut vault = fixture_vault("e2e-install", false);
+    // The e2e key logs in the first time; the fresh key is the one installed.
+    let login = keys::import(
+        &std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap(),
+        None,
+    )
+    .unwrap();
+    let login = stored(&vault, "e2e", &login);
+    let login_id = login.id;
+    vault.upsert_key(login).unwrap();
+    let marker = format!("annulus-ui-e2e-{}", std::process::id());
+    let fresh = keys::generate(keys::KeyKind::Ed25519, &marker).unwrap();
+    let fresh = stored(&vault, "fresh", &fresh);
+    let fresh_id = fresh.id;
+    vault.upsert_key(fresh).unwrap();
+    let mut host = vault.draft_host();
+    host.label = "test-1".into();
+    host.address = var("ANNULUS_E2E_VM1");
+    host.username = var("ANNULUS_E2E_USER");
+    host.key_id = Some(login_id);
+    let host_id = host.id;
+    vault.upsert_host(host).unwrap();
+    let mut app = NativeApp::new(Some(vault));
+    app.section = super::Section::Keychain;
+    let dir = std::env::temp_dir().join(format!("annulus-e2e-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.ssh_files.known_hosts = dir.join("known_hosts");
+    let mut state = UiState::default();
+    let started = std::time::Instant::now();
+    let clock = || started.elapsed().as_secs_f64();
+    let mut output = drive(&mut app, &mut state, &[], clock());
+    // The fresh key is the last row; its Install button is the last of that name.
+    output = drive(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Install on a host"),
+        clock(),
+    );
+    output = drive(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Choose a host"),
+        clock(),
+    );
+    output = step(&mut app, &mut state, &click_on(&output, "test-1"), clock());
+    output = step(&mut app, &mut state, &click_on(&output, "Install"), clock());
+    let key_of = |app: &NativeApp| {
+        app.vault
+            .as_ref()
+            .and_then(|vault| vault.hosts().iter().find(|host| host.id == host_id))
+            .and_then(|host| host.key_id)
+    };
+    while key_of(&app) != Some(fresh_id) {
+        assert!(clock() < 60.0, "the key was not installed");
+        let trust = output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Trust and connect");
+        let events = if trust {
+            click_on(&output, "Trust and connect")
+        } else {
+            Vec::new()
+        };
+        output = drive(&mut app, &mut state, &events, clock());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Log in again, now with the fresh key, and take it off the host.
+    let vault = app.vault.as_ref().unwrap();
+    let host = vault
+        .hosts()
+        .iter()
+        .find(|host| host.id == host_id)
+        .unwrap();
+    let task = crate::ssh_task::SshTask::exec(
+        crate::connect::host(vault, &app.ssh_files, host),
+        format!("sed -i '/{marker}/d' ~/.ssh/authorized_keys && echo removed"),
+        || {},
+    );
+    let outcome = loop {
+        assert!(clock() < 90.0, "the second login never finished");
+        if let Some(outcome) = task.outcome() {
+            break outcome;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let exec = outcome.unwrap();
+    assert_eq!(
+        exec.status,
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&exec.output)
+    );
 }
 
 /// End to end through the deployed sync server: the new UI's Settings create an account

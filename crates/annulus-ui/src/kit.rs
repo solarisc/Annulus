@@ -431,7 +431,14 @@ impl UiState {
             .any(|event| !matches!(event, Event::Modifiers(_)));
         self.faults.clear();
         self.wheel = (0.0, 0.0);
-        self.repaint = false;
+        // A click, key or text may change state after part of the frame was drawn (a card
+        // opened above the list that opened it): one more frame shows it at once.
+        self.repaint = events.iter().any(|event| {
+            !matches!(
+                event,
+                Event::Modifiers(_) | Event::PointerMoved(_) | Event::PointerLeft
+            )
+        });
         self.repaint_after = None;
         self.cursor = Cursor::Default;
         for event in events {
@@ -1102,6 +1109,34 @@ mod tests {
         // Slow clicks are two single clicks.
         frame(&mut state, &click, 3.0, |ui| a = two_buttons(ui).0);
         assert!(!a.double_clicked);
+    }
+
+    #[test]
+    fn a_click_asks_for_one_more_frame_and_a_pointer_move_does_not() {
+        let mut state = UiState::default();
+        let far = [Event::PointerMoved(Point::new(300.0, 300.0))];
+        assert!(
+            !frame(&mut state, &far, 0.0, |ui| {
+                let _ = two_buttons(ui);
+            })
+            .repaint
+        );
+        let click = [
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ];
+        assert!(
+            frame(&mut state, &click, 1.0, |ui| {
+                let _ = two_buttons(ui);
+            })
+            .repaint
+        );
+        assert!(
+            !frame(&mut state, &[], 2.0, |ui| {
+                let _ = two_buttons(ui);
+            })
+            .repaint
+        );
     }
 
     #[test]

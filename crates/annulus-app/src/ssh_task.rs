@@ -99,6 +99,21 @@ impl SshTask {
         task
     }
 
+    /// The next question the connection asks, for the new UI to show.
+    pub(crate) fn question(&mut self) -> Option<annulus_session::SessionEvent> {
+        self.events.try_recv().ok()
+    }
+
+    /// The connection's answers.
+    pub(crate) fn answers(&self) -> &annulus_session::Answers {
+        &self.answers
+    }
+
+    /// The outcome, once the command finished (the new UI's poll).
+    pub(crate) fn outcome(&self) -> Option<Outcome> {
+        self.outcome.lock().ok().and_then(|mut slot| slot.take())
+    }
+
     /// Shows any question the connection asks, and returns the outcome once it is done.
     pub fn poll(&mut self, ctx: &egui::Context) -> Option<Outcome> {
         while let Ok(event) = self.events.try_recv() {
