@@ -862,6 +862,13 @@ impl<'a> Ui<'a> {
         std::mem::take(&mut self.state.typed)
     }
 
+    /// Puts back what [`Self::take_typed`] took, ahead of anything left since: a layer drawn
+    /// last (a palette over the screen) gets the keyboard before what is under it.
+    pub fn give_back_typed(&mut self, typed: Vec<Typed>) {
+        let left = std::mem::replace(&mut self.state.typed, typed);
+        self.state.typed.extend(left);
+    }
+
     /// Takes the vertical wheel movement of this frame if the pointer is over `rect`.
     pub fn take_wheel(&mut self, rect: Rect) -> f32 {
         if self.state.pointer.is_some_and(|point| rect.contains(point)) {

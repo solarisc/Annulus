@@ -799,6 +799,8 @@ impl NativeApp {
                 None => Some(palette::PaletteView::default()),
             };
         }
+        // The open palette has the keyboard: Escape closes it, not the editor under it.
+        let for_palette = self.palette.as_ref().map(|_| ui.take_typed());
         let action = titlebar::draw(self, ui, bar);
         if !locked {
             if ui.key(Key::Tab, Modifiers::CTRL) && !self.tabs.is_empty() {
@@ -886,6 +888,9 @@ impl NativeApp {
         } else {
             // A terminal tab always holds a terminal; an empty panel is never more than a frame.
             panel(ui, area);
+        }
+        if let Some(typed) = for_palette {
+            ui.give_back_typed(typed);
         }
         self.palette_frame(ui);
         ui.overlays();

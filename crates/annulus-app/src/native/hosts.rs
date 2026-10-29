@@ -156,13 +156,7 @@ impl Editor {
         if host.label.is_empty() {
             host.label.clone_from(&host.address);
         }
-        host.port = match self.port.trim() {
-            "" => None,
-            port => Some(
-                port.parse()
-                    .map_err(|_| "The port is a number from 1 to 65535".to_owned())?,
-            ),
-        };
+        host.port = port(&self.port)?;
         host.group.clone_from(&self.group);
         host.tags = self
             .tags
@@ -183,6 +177,96 @@ impl Editor {
         self.term.trim().clone_into(&mut host.term);
         host.no_reconnect = !self.reconnect;
         Ok(host)
+    }
+
+    /// The host to save: as edited, over what the vault holds now. A field edited here wins;
+    /// every other field keeps what changed meanwhile elsewhere (a move from the card's menu,
+    /// a sync), instead of the copy taken when the editor opened. A host deleted meanwhile is
+    /// not brought back.
+    fn merged(&self, current: Option<&Host>) -> Result<Host, String> {
+        let edited = self.build()?;
+        if self.is_new {
+            return Ok(edited);
+        }
+        let Some(current) = current else {
+            return Err("This host was deleted while you edited it, so it was not saved.".into());
+        };
+        let before = &self.host;
+        let mut host = current.clone();
+        // Every field by name, so a new one cannot be forgotten here.
+        let Host {
+            id: _,
+            label,
+            address,
+            port,
+            username,
+            tags,
+            password,
+            key_id,
+            jump_id,
+            proxy,
+            no_reconnect,
+            group,
+            env,
+            startup,
+            term,
+        } = edited;
+        if label != before.label {
+            host.label = label;
+        }
+        if address != before.address {
+            host.address = address;
+        }
+        if port != before.port {
+            host.port = port;
+        }
+        if username != before.username {
+            host.username = username;
+        }
+        if tags != before.tags {
+            host.tags = tags;
+        }
+        if password != before.password {
+            host.password = password;
+        }
+        if key_id != before.key_id {
+            host.key_id = key_id;
+        }
+        if jump_id != before.jump_id {
+            host.jump_id = jump_id;
+        }
+        if proxy != before.proxy {
+            host.proxy = proxy;
+        }
+        if no_reconnect != before.no_reconnect {
+            host.no_reconnect = no_reconnect;
+        }
+        if group != before.group {
+            host.group = group;
+        }
+        if env != before.env {
+            host.env = env;
+        }
+        if startup != before.startup {
+            host.startup = startup;
+        }
+        if term != before.term {
+            host.term = term;
+        }
+        Ok(host)
+    }
+}
+
+/// A port typed in an editor: empty for the default, else 1 to 65535.
+fn port(text: &str) -> Result<Option<u16>, String> {
+    match text.trim() {
+        "" => Ok(None),
+        port => port
+            .parse()
+            .ok()
+            .filter(|port| *port > 0)
+            .map(Some)
+            .ok_or_else(|| "The port is a number from 1 to 65535".to_owned()),
     }
 }
 
@@ -580,10 +664,12 @@ impl HostsView {
             // Matched against the text as it is now: what was typed this frame counts.
             let (cards, _) = self.gather(vault);
             let query = self.query.trim();
-            if let Some(first) = cards.first() {
-                action = Some(HostsAction::Connect(first.id));
-            } else if !query.is_empty() {
-                action = Some(HostsAction::QuickConnect(query.to_owned()));
+            // Enter with nothing typed connects nowhere: the first card is just the first.
+            if !query.is_empty() {
+                action = Some(match cards.first() {
+                    Some(first) => HostsAction::Connect(first.id),
+                    None => HostsAction::QuickConnect(query.to_owned()),
+                });
             }
         }
         if ui
@@ -1195,7 +1281,8 @@ impl HostsView {
             .clicked
             || ui.key(Key::Char('s'), Modifiers::CTRL)
         {
-            match editor.build() {
+            let current = vault.hosts().iter().find(|host| host.id == editor.host.id);
+            match editor.merged(current) {
                 Ok(host) => match vault.upsert_host(host.clone()) {
                     Ok(()) => {
                         self.selected = Some(host.id);
@@ -1267,13 +1354,7 @@ impl GroupEditor {
         }
         let defaults = &mut group.defaults;
         self.username.trim().clone_into(&mut defaults.username);
-        defaults.port = match self.port.trim() {
-            "" => None,
-            port => Some(
-                port.parse()
-                    .map_err(|_| "The port is a number from 1 to 65535".to_owned())?,
-            ),
-        };
+        defaults.port = port(&self.port)?;
         defaults.proxy = (!self.proxy.trim().is_empty()).then(|| Secret::new(self.proxy.trim()));
         defaults.env = groups_view::parse_env(&self.env)?;
         self.startup.trim().clone_into(&mut defaults.startup);
@@ -2348,6 +2429,46 @@ mod tests {
             "root",
             "no group"
         );
+    }
+
+    #[test]
+    fn saving_an_editor_keeps_what_changed_meanwhile_and_applies_what_was_edited() {
+        let vault = crate::native::demo::fixture_vault("stale-editor", false);
+        let mut host = vault.draft_host();
+        (host.label, host.address) = ("web".into(), "10.0.0.5".into());
+        let mut editor = Editor::new(host.clone(), false);
+        "deploy".clone_into(&mut editor.username);
+        // Moved from the card's menu while the editor was open.
+        let mut moved = host.clone();
+        moved.group = Some("group-1".into());
+        let saved = editor.merged(Some(&moved)).unwrap();
+        assert_eq!(saved.group.as_deref(), Some("group-1"), "the move stays");
+        assert_eq!(saved.username, "deploy", "the edit is saved");
+        // The group edited here wins over the move.
+        editor.group = Some("group-2".into());
+        let saved = editor.merged(Some(&moved)).unwrap();
+        assert_eq!(saved.group.as_deref(), Some("group-2"));
+    }
+
+    #[test]
+    fn a_host_deleted_while_it_was_edited_is_not_brought_back() {
+        let vault = crate::native::demo::fixture_vault("deleted-editor", false);
+        let mut host = vault.draft_host();
+        host.address = "10.0.0.5".into();
+        assert!(Editor::new(host.clone(), false).merged(None).is_err());
+        assert!(
+            Editor::new(host, true).merged(None).is_ok(),
+            "a new host is new"
+        );
+    }
+
+    #[test]
+    fn a_port_is_empty_or_from_1_to_65535() {
+        assert_eq!(port(""), Ok(None));
+        assert_eq!(port(" 2222 "), Ok(Some(2222)));
+        for wrong in ["0", "65536", "-1", "ssh"] {
+            assert!(port(wrong).is_err(), "{wrong}");
+        }
     }
 
     #[test]

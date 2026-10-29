@@ -1747,6 +1747,40 @@ fn a_snippet_runs_on_the_hosts_ticked_a_tab_each() {
 }
 
 #[test]
+fn escape_with_the_palette_open_closes_only_the_palette() {
+    let mut app = NativeApp::new(Some(fixture_vault("palette-escape", true)));
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    step(&mut app, &mut state, &click_on(&output, "New host"), 1.0);
+    assert!(app.hosts.editor.is_some());
+    let palette = [Event::Key(Key::Char('k'), Modifiers::CTRL_SHIFT)];
+    step(&mut app, &mut state, &palette, 2.0);
+    assert!(app.palette.is_some());
+    let escape = [Event::Key(Key::Escape, Modifiers::NONE)];
+    step(&mut app, &mut state, &escape, 3.0);
+    assert!(app.palette.is_none(), "the palette closed");
+    assert!(app.hosts.editor.is_some(), "the draft under it stays");
+}
+
+#[test]
+fn enter_in_an_empty_host_search_connects_nowhere() {
+    let mut app = NativeApp::new(Some(fixture_vault("empty-search", true)));
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let tabs = app.tabs.len();
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Search hosts, or type user@host:port to connect"),
+        1.0,
+    );
+    let enter = [Event::Key(Key::Enter, Modifiers::NONE)];
+    step(&mut app, &mut state, &enter, 2.0);
+    step(&mut app, &mut state, &[], 3.0);
+    assert_eq!(app.tabs.len(), tabs, "no tab opened");
+}
+
+#[test]
 fn escape_closes_the_open_card_and_keeps_what_a_delete_would_remove() {
     let escape = [Event::Key(Key::Escape, Modifiers::NONE)];
     let mut app = NativeApp::new(Some(fixture_vault("escape", true)));
