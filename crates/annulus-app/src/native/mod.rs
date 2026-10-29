@@ -857,6 +857,7 @@ impl NativeApp {
             .get_mut(self.active)
             .and_then(|tab| tab.sftp.as_mut())
         {
+            area.take_left(PANEL_GAP);
             let content = panel(ui, area);
             view.draw(ui, content, self.waker.as_ref());
         } else if let Some(tab) = self.tabs.get_mut(self.active)
@@ -872,6 +873,7 @@ impl NativeApp {
                 255,
             );
             let mut area = area;
+            area.take_left(PANEL_GAP);
             if ui.key(Key::Char('.'), Modifiers::CTRL_SHIFT) {
                 self.snippet_panel = match self.snippet_panel.take() {
                     Some(_) => None,
@@ -1128,13 +1130,23 @@ fn panel(ui: &mut Ui<'_>, rect: Rect) -> Rect {
 /// The content panel filled with `fill` (a terminal's own background).
 fn panel_filled(ui: &mut Ui<'_>, rect: Rect, fill: Color) -> Rect {
     let t = ui.theme;
-    // Only the top-left corner is rounded: the others sit on the window's edges, so the
-    // rectangle runs past them.
-    let shape = Rect::new(rect.x, rect.y, rect.w + 24.0, rect.h + 24.0);
-    ui.gfx.fill_rect(shape, 12.0, fill);
-    ui.gfx.stroke_rect(shape, 12.0, 1.0, t.line);
-    rect
+    // A rounded panel on every side, clear of the window's right and bottom edges, so the
+    // window reads as a frame holding a card rather than one flat box.
+    let shape = Rect::new(
+        rect.x,
+        rect.y,
+        (rect.w - PANEL_GAP).max(0.0),
+        (rect.h - PANEL_GAP).max(0.0),
+    );
+    ui.gfx.fill_rect(shape, PANEL_RADIUS, fill);
+    ui.gfx.stroke_rect(shape, PANEL_RADIUS, 1.0, t.line);
+    shape
 }
+
+/// The space between the content panel and the window's right and bottom edges.
+const PANEL_GAP: f32 = 8.0;
+/// The content panel's corner radius.
+const PANEL_RADIUS: f32 = 12.0;
 
 /// The lock state and sync badge above Settings.
 fn vault_status(ui: &mut Ui<'_>, rect: Rect, unlocked: bool, sync: &SyncBadge) {

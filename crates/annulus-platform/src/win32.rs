@@ -197,6 +197,10 @@ pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(),
         let value = i32::from(dark);
         // DWMWA_USE_IMMERSIVE_DARK_MODE: dark borders and system menu.
         let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), (&raw const value).cast(), 4);
+        // DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND: rounded corners on Windows 11 (Windows
+        // 10 has no such attribute and ignores it).
+        let round = 2_i32;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(33), (&raw const round).cast(), 4);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
