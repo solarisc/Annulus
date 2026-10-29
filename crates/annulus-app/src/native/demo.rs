@@ -3,6 +3,7 @@
 
 #![allow(clippy::expect_used)] // A preview that cannot write its temporary folder cannot run.
 
+use annulus_term::Emulator;
 use annulus_vault::crypto::KdfParams;
 use annulus_vault::vault::Vault;
 
@@ -118,4 +119,39 @@ pub fn fixture_vault(name: &str, populated: bool) -> Vault {
         vault.upsert_host(host).expect("a temporary vault");
     }
     vault
+}
+
+/// A terminal replaying a made-up session on a database server: a colored prompt,
+/// `systemctl`, `ls` and `git log` output.
+#[must_use]
+pub fn terminal() -> Emulator {
+    const PROMPT: &str = "\x1b[1;32mdeploy@prod-db\x1b[0m:\x1b[1;34m~/app\x1b[0m$ ";
+    let mut emulator = Emulator::new(100, 30);
+    let lines = [
+        format!("{PROMPT}systemctl status postgresql"),
+        "\x1b[1;32m\u{25cf}\x1b[0m postgresql.service - PostgreSQL RDBMS".to_owned(),
+        "     Loaded: loaded (/lib/systemd/system/postgresql.service; \x1b[1;32menabled\x1b[0m)".to_owned(),
+        "     Active: \x1b[1;32mactive (running)\x1b[0m since Tue 2026-10-27 09:12:44 UTC; 2 days ago".to_owned(),
+        "   Main PID: 812 (postgres)".to_owned(),
+        "      Tasks: 9 (limit: 4613)".to_owned(),
+        "     Memory: 61.4M".to_owned(),
+        String::new(),
+        format!("{PROMPT}ls -l"),
+        "total 24".to_owned(),
+        "drwxr-xr-x 2 deploy deploy 4096 Oct 28 17:02 \x1b[1;34mconfig\x1b[0m".to_owned(),
+        "-rwxr-xr-x 1 deploy deploy 8312 Oct 28 17:02 \x1b[1;32mdeploy.sh\x1b[0m".to_owned(),
+        "drwxr-xr-x 4 deploy deploy 4096 Oct 27 09:10 \x1b[1;34mmigrations\x1b[0m".to_owned(),
+        "-rw-r--r-- 1 deploy deploy  612 Oct 26 11:45 README.md".to_owned(),
+        String::new(),
+        format!("{PROMPT}git log --oneline -4"),
+        "\x1b[33m4f1c9e2\x1b[0m (\x1b[1;36mHEAD -> \x1b[1;32mmain\x1b[0m) Tune autovacuum for the events table".to_owned(),
+        "\x1b[33m9b07d3a\x1b[0m Add an index on sessions.expires_at".to_owned(),
+        "\x1b[33m1e5a8c4\x1b[0m Move backups to the new bucket".to_owned(),
+        "\x1b[33m72d4f10\x1b[0m Raise max_connections to 200".to_owned(),
+        String::new(),
+        PROMPT.to_owned(),
+    ];
+    let text = lines.join("\r\n");
+    emulator.advance(text.as_bytes());
+    emulator
 }

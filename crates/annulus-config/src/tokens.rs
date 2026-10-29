@@ -159,17 +159,18 @@ pub const LIGHT: Palette = Palette {
     status_ok: Rgb::new(0x24, 0x93, 0x4F),
 };
 
-/// Host tile colors: each host gets one from its label, so a list is easy to scan. Muted so
-/// white initials stay readable on every one (3:1, tested), in both themes.
+/// Host tile colors: each host gets one from its label, so a list is easy to scan. Even in
+/// lightness, so no host looks louder than another, and dark enough that white initials
+/// meet the text contrast of WCAG AA (4.5:1, tested) in both themes.
 pub const TILES: [Rgb; 8] = [
-    Rgb::new(0x1F, 0x8A, 0x7E),
-    Rgb::new(0x3B, 0x6E, 0xC4),
-    Rgb::new(0x7A, 0x5A, 0xC8),
-    Rgb::new(0xB0, 0x5E, 0x2A),
-    Rgb::new(0xB8, 0x45, 0x6A),
-    Rgb::new(0x3F, 0x8A, 0x3E),
-    Rgb::new(0x5A, 0x67, 0x78),
-    Rgb::new(0x8C, 0x6D, 0x1F),
+    Rgb::new(0x17, 0x7A, 0x70),
+    Rgb::new(0x35, 0x63, 0xC9),
+    Rgb::new(0x5B, 0x55, 0xD0),
+    Rgb::new(0x87, 0x46, 0xBE),
+    Rgb::new(0xBD, 0x3E, 0x68),
+    Rgb::new(0xB0, 0x50, 0x1C),
+    Rgb::new(0x2C, 0x7A, 0x45),
+    Rgb::new(0x4F, 0x5D, 0x70),
 ];
 
 /// Corner radii in DIPs.
@@ -273,7 +274,7 @@ mod tests {
         let white = Rgb::new(0xFF, 0xFF, 0xFF);
         for tile in TILES {
             let ratio = white.contrast(tile);
-            assert!(ratio >= NON_TEXT_AA, "{tile:?}: {ratio:.2}");
+            assert!(ratio >= TEXT_AA, "{tile:?}: {ratio:.2}");
         }
     }
 

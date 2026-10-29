@@ -7,17 +7,22 @@ pub mod demo;
 pub mod hosts;
 #[cfg(test)]
 mod scenes;
+mod terminal;
 mod titlebar;
 
 use annulus_config::tokens::{Appearance, space};
 use annulus_platform::window::{WindowApp, WindowError, WindowRequest, run};
-use annulus_ui::gfx::{Align, Rect};
+use annulus_term::Emulator;
+use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM, SMALL};
 use annulus_vault::vault::Vault;
 
 use crate::terminal_view::TabStatus;
+
+/// The terminal font size in DIPs (the setting joins with live sessions).
+const TERMINAL_FONT: f32 = 13.5;
 
 /// Height of the title bar, in DIPs.
 pub const TITLE_H: f32 = 44.0;
@@ -95,7 +100,6 @@ pub enum TabKind {
 }
 
 /// One tab of the title bar.
-#[derive(Clone, Debug, PartialEq)]
 pub struct Tab {
     /// What it holds.
     pub kind: TabKind,
@@ -103,6 +107,9 @@ pub struct Tab {
     pub title: String,
     /// Its status dot.
     pub status: Option<TabStatus>,
+    /// The terminal of a terminal tab. Live sessions join in a later step; the preview and the
+    /// scenes replay recorded output.
+    pub terminal: Option<Emulator>,
 }
 
 /// Something only the window can do.
@@ -152,6 +159,7 @@ impl NativeApp {
                 kind: TabKind::Vault,
                 title: "Vault".into(),
                 status: None,
+                terminal: None,
             }],
             active: 0,
             section: Section::Hosts,
@@ -195,6 +203,25 @@ impl NativeApp {
                 }
                 other => placeholder(ui, content, other.title()),
             }
+        } else if let Some(emulator) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|tab| tab.terminal.as_mut())
+        {
+            let font = Font::mono(TERMINAL_FONT);
+            let screen = emulator.screen();
+            let background = Color::rgba(
+                screen.background.r,
+                screen.background.g,
+                screen.background.b,
+                255,
+            );
+            let content = panel_filled(ui, area, background);
+            let inner = content.inset(space::L, space::M);
+            let (columns, rows) = terminal::grid_size(ui, inner, font);
+            emulator.resize(columns, rows);
+            let screen = emulator.screen();
+            terminal::draw(ui, inner, &screen, font, true);
         } else {
             let content = panel(ui, area);
             placeholder(ui, content, "Terminal");
@@ -273,11 +300,17 @@ impl NativeApp {
 
 /// The rounded content panel beside the navigation; returns its inside.
 fn panel(ui: &mut Ui<'_>, rect: Rect) -> Rect {
+    let fill = ui.theme.bg;
+    panel_filled(ui, rect, fill)
+}
+
+/// The content panel filled with `fill` (a terminal's own background).
+fn panel_filled(ui: &mut Ui<'_>, rect: Rect, fill: Color) -> Rect {
     let t = ui.theme;
     // Only the top-left corner is rounded: the others sit on the window's edges, so the
     // rectangle runs past them.
     let shape = Rect::new(rect.x, rect.y, rect.w + 24.0, rect.h + 24.0);
-    ui.gfx.fill_rect(shape, 12.0, t.bg);
+    ui.gfx.fill_rect(shape, 12.0, fill);
     ui.gfx.stroke_rect(shape, 12.0, 1.0, t.line);
     rect
 }
@@ -381,6 +414,7 @@ pub fn run_preview(light: bool) -> Result<(), WindowError> {
         kind: TabKind::Terminal,
         title: "prod-db".into(),
         status: None,
+        terminal: Some(demo::terminal()),
     });
     run(
         "Annulus",

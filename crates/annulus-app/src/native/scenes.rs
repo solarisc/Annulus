@@ -77,8 +77,14 @@ fn with_tabs(app: &mut NativeApp) {
             kind: TabKind::Terminal,
             title: title.into(),
             status,
+            terminal: Some(super::demo::terminal()),
         });
     }
+}
+
+fn terminal_tab(app: &mut NativeApp) {
+    with_tabs(app);
+    app.active = 1;
 }
 
 const SCENES: &[Scene] = &[
@@ -169,6 +175,24 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: nothing,
+        acts: &[],
+    },
+    Scene {
+        name: "terminal",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: terminal_tab,
+        acts: &[],
+    },
+    Scene {
+        name: "terminal-hidpi",
+        width: 1100,
+        height: 720,
+        scale: 1.5,
+        populated: true,
+        setup: terminal_tab,
         acts: &[],
     },
     Scene {
