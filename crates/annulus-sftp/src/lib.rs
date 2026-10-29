@@ -465,6 +465,69 @@ impl Sftp {
         Err(failure)
     }
 
+    /// Downloads folder `remote` into `local_dir` with everything in it, as one transfer:
+    /// each folder is made on this computer (or used as it is when there), each file comes
+    /// as [`Self::download`] brings it under `conflict`, and links are skipped, never
+    /// followed. A name this computer cannot hold safely (`..`, a separator, a device name)
+    /// stops it before anything is written. `progress` sees the bytes of all the files.
+    ///
+    /// # Errors
+    /// As [`Self::download`], or a folder cannot be listed or made; what was copied stays.
+    pub async fn download_tree(
+        &self,
+        remote: &str,
+        local_dir: &Path,
+        conflict: Conflict,
+        progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
+    ) -> Result<Outcome, SftpError> {
+        let name = file_name(remote);
+        if !is_safe_local_name(name) {
+            return Err(SftpError::UnsafeName(name.to_owned()));
+        }
+        let top = local_dir.join(name);
+        let (mut folders, mut files) = (Vec::new(), Vec::new());
+        let mut stack = vec![(remote.to_owned(), top.clone())];
+        while let Some((dir, local)) = stack.pop() {
+            for entry in self.list(&dir).await? {
+                if !is_safe_local_name(&entry.name) {
+                    return Err(SftpError::UnsafeName(entry.name));
+                }
+                match entry.kind {
+                    Kind::Dir => stack.push((join(&dir, &entry.name), local.join(&entry.name))),
+                    Kind::File => files.push((join(&dir, &entry.name), local.clone(), entry.size)),
+                    Kind::Link { .. } | Kind::Other => {}
+                }
+            }
+            folders.push(local);
+        }
+        for folder in &folders {
+            tokio::fs::create_dir_all(folder)
+                .await
+                .map_err(|source| SftpError::Local {
+                    path: folder.clone(),
+                    source,
+                })?;
+        }
+        let total: u64 = files.iter().map(|(_, _, size)| size).sum();
+        let (mut done, mut bytes) = (0_u64, 0_u64);
+        for (path, dir, size) in files {
+            let mut each = |copied: u64, _: u64| progress(done + copied, total);
+            if let Outcome::Done { bytes: copied, .. } =
+                self.download(&path, &dir, conflict, &mut each).await?
+            {
+                bytes += copied;
+            }
+            done += size;
+            if !progress(done, total) {
+                return Err(SftpError::Cancelled);
+            }
+        }
+        Ok(Outcome::Done {
+            to: top.display().to_string(),
+            bytes,
+        })
+    }
+
     /// Uploads folder `local` into `remote_dir` with everything in it, as one transfer:
     /// each folder is made (or used as it is when there), each file goes as [`Self::upload`]
     /// sends it under `conflict`, and links are skipped, never followed. `progress` sees the

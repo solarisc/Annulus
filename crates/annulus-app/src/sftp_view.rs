@@ -32,6 +32,14 @@ pub(crate) enum Command {
         conflict: Conflict,
         cancel: Arc<AtomicBool>,
     },
+    /// A folder on the host with everything in it.
+    DownloadTree {
+        id: u64,
+        remote: String,
+        to: PathBuf,
+        conflict: Conflict,
+        cancel: Arc<AtomicBool>,
+    },
     /// A folder with everything in it.
     UploadTree {
         id: u64,
@@ -200,6 +208,7 @@ fn refuse(command: Command, message: &str, send: &Send) {
             message: message.to_owned(),
         },
         Command::Download { id, .. }
+        | Command::DownloadTree { id, .. }
         | Command::Upload { id, .. }
         | Command::UploadTree { id, .. } => Reply::Finished {
             id,
@@ -226,13 +235,15 @@ async fn run(
     slots: Arc<tokio::sync::Semaphore>,
 ) {
     let _slot = match &command {
-        Command::Download { .. } | Command::Upload { .. } | Command::UploadTree { .. } => {
-            slots.acquire_owned().await.ok()
-        }
+        Command::Download { .. }
+        | Command::DownloadTree { .. }
+        | Command::Upload { .. }
+        | Command::UploadTree { .. } => slots.acquire_owned().await.ok(),
         _ => None,
     };
     // Cancelled while it waited its turn: it never opens a file.
     if let Command::Download { id, cancel, .. }
+    | Command::DownloadTree { id, cancel, .. }
     | Command::Upload { id, cancel, .. }
     | Command::UploadTree { id, cancel, .. } = &command
         && cancel.load(Ordering::Relaxed)
@@ -271,6 +282,21 @@ async fn run(
                 message: error.to_string(),
             },
         }),
+        transfer @ (Command::Download { .. }
+        | Command::DownloadTree { .. }
+        | Command::Upload { .. }
+        | Command::UploadTree { .. }) => copy(&sftp, transfer, &send).await,
+        Command::CreateDir(path) => send(changed(sftp.create_dir(&path).await)),
+        Command::Rename(from, to) => send(changed(sftp.rename(&from, &to).await)),
+        Command::Chmod(path, mode) => send(changed(sftp.set_permissions(&path, mode).await)),
+        Command::Remove(path) => send(changed(sftp.remove(&path).await)),
+    }
+}
+
+/// Runs a download or upload (of a file, or a folder with everything in it) and reports how
+/// it ended.
+async fn copy(sftp: &Sftp, command: Command, send: &Send) {
+    let (id, result) = match command {
         Command::Download {
             id,
             remote,
@@ -279,11 +305,23 @@ async fn run(
             cancel,
         } => {
             let mut progress = progress(id, cancel, send.clone());
-            let result = sftp.download(&remote, &to, conflict, &mut progress).await;
-            send(Reply::Finished {
+            (
                 id,
-                result: result.map_err(|error| error.to_string()),
-            });
+                sftp.download(&remote, &to, conflict, &mut progress).await,
+            )
+        }
+        Command::DownloadTree {
+            id,
+            remote,
+            to,
+            conflict,
+            cancel,
+        } => {
+            let mut progress = progress(id, cancel, send.clone());
+            let result = sftp
+                .download_tree(&remote, &to, conflict, &mut progress)
+                .await;
+            (id, result)
         }
         Command::Upload {
             id,
@@ -293,11 +331,7 @@ async fn run(
             cancel,
         } => {
             let mut progress = progress(id, cancel, send.clone());
-            let result = sftp.upload(&local, &dir, conflict, &mut progress).await;
-            send(Reply::Finished {
-                id,
-                result: result.map_err(|error| error.to_string()),
-            });
+            (id, sftp.upload(&local, &dir, conflict, &mut progress).await)
         }
         Command::UploadTree {
             id,
@@ -310,16 +344,14 @@ async fn run(
             let result = sftp
                 .upload_tree(&local, &dir, conflict, &mut progress)
                 .await;
-            send(Reply::Finished {
-                id,
-                result: result.map_err(|error| error.to_string()),
-            });
+            (id, result)
         }
-        Command::CreateDir(path) => send(changed(sftp.create_dir(&path).await)),
-        Command::Rename(from, to) => send(changed(sftp.rename(&from, &to).await)),
-        Command::Chmod(path, mode) => send(changed(sftp.set_permissions(&path, mode).await)),
-        Command::Remove(path) => send(changed(sftp.remove(&path).await)),
-    }
+        _ => return,
+    };
+    send(Reply::Finished {
+        id,
+        result: result.map_err(|error| error.to_string()),
+    });
 }
 
 fn progress(
@@ -367,6 +399,11 @@ pub(crate) enum Recipe {
         dir: String,
         conflict: Conflict,
     },
+    DownloadTree {
+        remote: String,
+        to: PathBuf,
+        conflict: Conflict,
+    },
 }
 
 impl Recipe {
@@ -403,6 +440,17 @@ impl Recipe {
                 id,
                 local,
                 dir,
+                conflict,
+                cancel,
+            },
+            Recipe::DownloadTree {
+                remote,
+                to,
+                conflict,
+            } => Command::DownloadTree {
+                id,
+                remote,
+                to,
                 conflict,
                 cancel,
             },
@@ -652,6 +700,15 @@ impl SftpTab {
 
     pub(crate) fn download(&mut self, entry: &Entry) {
         let Some(cwd) = self.cwd.clone() else { return };
+        if entry.is_dir() {
+            let recipe = Recipe::DownloadTree {
+                remote: join(&cwd, &entry.name),
+                to: self.local.dir.clone(),
+                conflict: self.conflict,
+            };
+            self.start_transfer(format!("\u{2193} {}/", entry.name), recipe);
+            return;
+        }
         let recipe = Recipe::Download {
             remote: join(&cwd, &entry.name),
             to: self.local.dir.clone(),

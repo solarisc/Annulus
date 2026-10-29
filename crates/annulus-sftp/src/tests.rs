@@ -548,6 +548,26 @@ async fn a_folder_uploads_with_everything_in_it() {
 }
 
 #[tokio::test]
+async fn a_folder_downloads_with_everything_in_it() {
+    let remote = temp_dir("tree-down-remote");
+    let local = temp_dir("tree-down-local");
+    fs::create_dir_all(remote.join("logs/2026/10")).unwrap();
+    fs::write(remote.join("logs/app.log"), b"started").unwrap();
+    fs::write(remote.join("logs/2026/10/29.log"), b"ok").unwrap();
+    let sftp = client(remote.clone()).await;
+    let outcome = sftp
+        .download_tree("/logs", &local, Conflict::KeepBoth, &mut no_progress())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Outcome::Done { bytes: 9, .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(fs::read(local.join("logs/app.log")).unwrap(), b"started");
+    assert_eq!(fs::read(local.join("logs/2026/10/29.log")).unwrap(), b"ok");
+}
+
+#[tokio::test]
 async fn folders_can_be_made_renamed_and_removed_with_their_contents() {
     let remote = temp_dir("ops");
     let sftp = client(remote.clone()).await;

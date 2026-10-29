@@ -883,15 +883,13 @@ impl SftpView {
             if clicked {
                 self.remote_selected = Some(entry.name.clone());
             }
-            // Files only: a folder on the host does not download as a whole yet.
+            // A file or a whole folder.
             let id = Id::new(("remote", entry.name.as_str()));
-            if !entry.is_dir() {
-                if let Some(at) = ui.drag_moved(id) {
-                    self.drag = Some((Dragged::Remote(entry.clone()), at));
-                }
-                if let Some(at) = ui.drag_released(id) {
-                    self.dropped = Some((Dragged::Remote(entry.clone()), at));
-                }
+            if let Some(at) = ui.drag_moved(id) {
+                self.drag = Some((Dragged::Remote(entry.clone()), at));
+            }
+            if let Some(at) = ui.drag_released(id) {
+                self.dropped = Some((Dragged::Remote(entry.clone()), at));
             }
             if double && entry.is_dir() {
                 open = Some(join(&cwd, &entry.name));
@@ -1117,6 +1115,9 @@ mod tests {
         // A folder from this computer goes with everything in it.
         drag(&mut view, &mut state, "notes", "README.md", 3.0);
         assert_eq!(labels(&view)[2], "\u{2191} notes/");
+        // And one from the host comes down whole.
+        drag(&mut view, &mut state, "config", "todo.txt", 4.0);
+        assert_eq!(labels(&view)[3], "\u{2193} config/");
     }
 
     #[test]

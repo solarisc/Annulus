@@ -342,6 +342,21 @@ async fn sftp_round_trip_with_conflicts() {
         .map(|e| e.name)
         .collect();
     assert_eq!(assets, ["app.css"]);
+    // And back down whole.
+    let back = local.join("back");
+    std::fs::create_dir_all(&back).unwrap();
+    sftp.download_tree(
+        &format!("{dir}/site"),
+        &back,
+        Conflict::KeepBoth,
+        &mut progress,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(back.join("site/assets/app.css")).unwrap(),
+        b"body{}"
+    );
 
     sftp.remove(&dir).await.unwrap();
     assert!(sftp.list(&dir).await.is_err());
