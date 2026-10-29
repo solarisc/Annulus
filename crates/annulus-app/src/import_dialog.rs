@@ -25,6 +25,20 @@ pub fn entities(found: &[&Found]) -> (Vec<Host>, Vec<PortForward>) {
         let first = u64::try_from(rules.len()).unwrap_or(u64::MAX) + 1;
         rules.extend(entry.to_rules(host_id, first));
     }
+    // ProxyJump a,b means a, then b, then the host: the host's own jump is the last hop,
+    // when that hop is imported too (its own ProxyJump continues the chain).
+    for (index, entry) in found.iter().enumerate() {
+        let nearest = entry
+            .proxy_jump
+            .as_deref()
+            .and_then(|jumps| jumps.rsplit(',').next())
+            .map(str::trim);
+        let jump = nearest.and_then(|alias| hosts.iter().find(|host| host.label == alias));
+        let jump_id = jump.map(|host| host.id);
+        if let Some(host) = hosts.get_mut(index) {
+            host.jump_id = jump_id;
+        }
+    }
     (hosts, rules)
 }
 
@@ -82,7 +96,7 @@ impl ImportPreview {
             .default_width(520.0)
             .show(ctx, |ui| {
                 ui.label(
-                    "Choose the hosts to add. Keys and jump hosts are listed but not imported yet.",
+                    "Choose the hosts to add. A ProxyJump becomes a jump host when that host is imported too; IdentityFile keys are not imported yet.",
                 );
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
@@ -164,5 +178,28 @@ mod tests {
         assert_eq!(hosts.len(), 2);
         let ids: Vec<(u64, u64)> = rules.iter().map(|rule| (rule.id, rule.host_id)).collect();
         assert_eq!(ids, [(1, 1), (2, 2), (3, 2)]);
+    }
+
+    #[test]
+    fn proxy_jump_links_to_an_imported_host() {
+        let text = "Host bastion
+  HostName b.example.com
+Host app
+  ProxyJump outside,bastion
+Host lone
+  ProxyJump elsewhere
+";
+        let found = ssh_config::parse(
+            text,
+            std::path::Path::new("/s"),
+            std::path::Path::new("/h"),
+            &|_| None,
+            &|_| Vec::new(),
+        );
+        let chosen: Vec<&Found> = found.iter().collect();
+        let (hosts, _) = entities(&chosen);
+        let jump_of = |label: &str| hosts.iter().find(|h| h.label == label).unwrap().jump_id;
+        assert_eq!(jump_of("app"), Some(hosts[0].id));
+        assert_eq!(jump_of("lone"), None, "not imported, so no link");
     }
 }
