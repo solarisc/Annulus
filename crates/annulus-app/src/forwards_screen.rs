@@ -77,6 +77,7 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
             target,
             files,
             password,
+            identity,
         },
         Some(forward_rule),
     ) = (program, engine_rule(rule))
@@ -94,6 +95,7 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
         target,
         files,
         password,
+        identity,
         answers: answers.clone(),
         notify,
     };
@@ -126,6 +128,7 @@ struct Connect {
     target: annulus_session::Target,
     files: annulus_session::SshFiles,
     password: Option<annulus_session::Password>,
+    identity: Option<annulus_session::Password>,
     answers: Answers,
     notify: Arc<dyn Fn(SessionEvent) + Send + Sync>,
 }
@@ -140,10 +143,17 @@ impl Connect {
                 .map(annulus_session::Password::into_secret),
             move |event| notify(event),
         ));
+        let identities: Vec<_> = self
+            .identity
+            .clone()
+            .map(annulus_session::Password::into_secret)
+            .into_iter()
+            .collect();
         annulus_ssh::connect(
             &self.target,
             &self.files.known_hosts,
             self.files.key_dir.as_deref(),
+            &identities,
             prompt,
         )
         .await

@@ -7,5 +7,6 @@
 pub mod crypto;
 pub mod forwards;
 pub mod hosts;
+pub mod keychain;
 pub mod sync;
 pub mod vault;

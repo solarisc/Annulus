@@ -61,16 +61,20 @@ impl HostsScreen {
     /// Annulus's SSH client for `target` text (`user@host:port`), or the system `ssh` if the
     /// text is not a target Annulus understands.
     fn ssh(&self, target: &str) -> Program {
-        self.ssh_with(target, None)
+        self.ssh_with(target, None, None)
     }
 
-    /// As [`Self::ssh`], trying `password` before asking.
-    fn ssh_with(&self, target: &str, password: Option<&Secret>) -> Program {
+    /// As [`Self::ssh`], logging in with keychain key `key` first and trying `password`
+    /// before asking.
+    fn ssh_with(&self, target: &str, password: Option<&Secret>, key: Option<u64>) -> Program {
         match Target::parse(target, &local_user()) {
             Some(target) => Program::Ssh {
                 target,
                 files: self.ssh_files.clone(),
                 password: password.map(|secret| Password::new(secret.expose())),
+                identity: key
+                    .and_then(|id| self.vault.ssh_key(id))
+                    .map(|key| Password::new(key.private.expose())),
             },
             None => Program::system_ssh(target),
         }
@@ -78,7 +82,7 @@ impl HostsScreen {
 
     /// The program that connects to a saved host, with its saved password.
     pub fn connect_host(&self, host: &Host) -> Program {
-        self.ssh_with(&host.target(), host.password.as_ref())
+        self.ssh_with(&host.target(), host.password.as_ref(), host.key_id)
     }
 
     /// The import and export buttons for `ssh_config` (F-IMP-001, F-IMP-003).

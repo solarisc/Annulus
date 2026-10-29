@@ -320,6 +320,7 @@ impl Found {
             username: self.user.clone().unwrap_or_default(),
             tags: vec!["ssh_config".into()],
             password: None,
+            key_id: None,
         }
     }
 
@@ -482,6 +483,7 @@ mod tests {
             username: "admin".into(),
             tags: Vec::new(),
             password: None,
+            key_id: None,
         }
     }
 }

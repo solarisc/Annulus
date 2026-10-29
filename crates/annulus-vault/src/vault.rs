@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{CryptoError, KdfParams, KeyFile, Keys, Sealed};
 use crate::forwards::PortForward;
 use crate::hosts::{DEFAULT_PORT, Host};
+use crate::keychain::SshKey;
 use crate::sync::{SyncAccount, SyncCopy, SyncState, kind};
 
 /// Record kind of a saved host.
@@ -21,6 +22,8 @@ const KIND_HOST: u8 = 1;
 const KIND_FORWARD: u8 = 2;
 /// Record kind of the sync bookkeeping (one record).
 const KIND_SYNC_STATE: u8 = 3;
+/// Record kind of a keychain key.
+const KIND_KEY: u8 = 5;
 
 /// Why the vault could not be used.
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +75,7 @@ pub struct Vault {
     keys: Keys,
     hosts: Vec<Host>,
     forwards: Vec<PortForward>,
+    ssh_keys: Vec<SshKey>,
     sync: SyncState,
     /// Counts saved changes, so a sync result made from an older snapshot is not applied.
     generation: u64,
@@ -101,6 +105,7 @@ impl Vault {
             keys,
             hosts: Vec::new(),
             forwards: Vec::new(),
+            ssh_keys: Vec::new(),
             sync: SyncState::new()?,
             generation: 0,
         };
@@ -133,6 +138,7 @@ impl Vault {
     fn open_records(path: PathBuf, file: VaultFile, keys: Keys) -> Result<Self, VaultError> {
         let mut hosts = Vec::new();
         let mut forwards = Vec::new();
+        let mut ssh_keys = Vec::new();
         let mut sync = None;
         for record in &file.records {
             let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
@@ -145,6 +151,10 @@ impl Vault {
                     let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
                     forwards
                         .push(serde_json::from_slice::<PortForward>(&plaintext).map_err(damaged)?);
+                }
+                KIND_KEY => {
+                    let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
+                    ssh_keys.push(serde_json::from_slice::<SshKey>(&plaintext).map_err(damaged)?);
                 }
                 KIND_SYNC_STATE => {
                     let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
@@ -174,12 +184,14 @@ impl Vault {
                 sync.touch(kind::FORWARD, rule.id, false)?;
             }
         }
+        ssh_keys.sort_by_key(|key: &SshKey| key.label.to_lowercase());
         Ok(Self {
             path,
             key_file: file.keys,
             keys,
             hosts,
             forwards,
+            ssh_keys,
             sync,
             generation: 0,
         })
@@ -227,6 +239,7 @@ impl Vault {
             username: String::new(),
             tags: Vec::new(),
             password: None,
+            key_id: None,
         }
     }
 
@@ -389,6 +402,7 @@ impl Vault {
             keys: self.keys.clone(),
             hosts: self.hosts.clone(),
             forwards: self.forwards.clone(),
+            ssh_keys: self.ssh_keys.clone(),
             state: self.sync.clone(),
             generation: self.generation,
         }
@@ -404,9 +418,10 @@ impl Vault {
         if copy.generation != self.generation {
             return Ok(false);
         }
-        self.save(&copy.hosts, &copy.forwards, &copy.state)?;
+        self.save_all(&copy.hosts, &copy.forwards, &copy.ssh_keys, &copy.state)?;
         self.hosts = copy.hosts;
         self.forwards = copy.forwards;
+        self.ssh_keys = copy.ssh_keys;
         self.sync = copy.state;
         self.generation += 1;
         Ok(true)
@@ -439,10 +454,27 @@ impl Vault {
     ///
     /// # Errors
     /// Writing the file; nothing is added then.
-    pub fn adopt(&mut self, hosts: &[Host], forwards: &[PortForward]) -> Result<(), VaultError> {
+    pub fn adopt(
+        &mut self,
+        hosts: &[Host],
+        forwards: &[PortForward],
+        ssh_keys: &[SshKey],
+    ) -> Result<(), VaultError> {
         let mut next_hosts = self.hosts.clone();
         let mut next_forwards = self.forwards.clone();
+        let mut next_keys = self.ssh_keys.clone();
         let mut sync = self.sync.clone();
+        let mut key_id = next_keys.iter().map(|key| key.id).max().unwrap_or(0);
+        let mut new_key_ids = std::collections::HashMap::new();
+        for key in ssh_keys {
+            key_id += 1;
+            new_key_ids.insert(key.id, key_id);
+            sync.touch(kind::KEY, key_id, false)?;
+            next_keys.push(SshKey {
+                id: key_id,
+                ..key.clone()
+            });
+        }
         let mut host_id = next_hosts.iter().map(|host| host.id).max().unwrap_or(0);
         let mut new_ids = std::collections::HashMap::new();
         for host in hosts {
@@ -451,6 +483,7 @@ impl Vault {
             sync.touch(kind::HOST, host_id, false)?;
             next_hosts.push(Host {
                 id: host_id,
+                key_id: host.key_id.and_then(|key| new_key_ids.get(&key).copied()),
                 ..host.clone()
             });
         }
@@ -466,9 +499,11 @@ impl Vault {
         }
         next_hosts.sort_by_key(|host| host.label.to_lowercase());
         next_forwards.sort_by_key(|rule| rule.label.to_lowercase());
-        self.save(&next_hosts, &next_forwards, &sync)?;
+        next_keys.sort_by_key(|key| key.label.to_lowercase());
+        self.save_all(&next_hosts, &next_forwards, &next_keys, &sync)?;
         self.hosts = next_hosts;
         self.forwards = next_forwards;
+        self.ssh_keys = next_keys;
         self.sync = sync;
         self.generation += 1;
         Ok(())
@@ -512,11 +547,77 @@ impl Vault {
             keys,
             hosts: Vec::new(),
             forwards: Vec::new(),
+            ssh_keys: Vec::new(),
             sync,
             generation: 0,
         };
         vault.save(&vault.hosts, &vault.forwards, &vault.sync)?;
         Ok(vault)
+    }
+
+    /// The keychain, sorted by label.
+    #[must_use]
+    pub fn ssh_keys(&self) -> &[SshKey] {
+        &self.ssh_keys
+    }
+
+    /// The key with local id `id`.
+    #[must_use]
+    pub fn ssh_key(&self, id: u64) -> Option<&SshKey> {
+        self.ssh_keys.iter().find(|key| key.id == id)
+    }
+
+    /// A fresh key id.
+    #[must_use]
+    pub fn next_key_id(&self) -> u64 {
+        self.ssh_keys.iter().map(|key| key.id).max().unwrap_or(0) + 1
+    }
+
+    /// Adds or replaces a key, then saves. On failure nothing changes.
+    ///
+    /// # Errors
+    /// Writing the file.
+    pub fn upsert_key(&mut self, key: SshKey) -> Result<(), VaultError> {
+        let id = key.id;
+        let mut next = self.ssh_keys.clone();
+        match next.iter_mut().find(|existing| existing.id == id) {
+            Some(existing) => *existing = key,
+            None => next.push(key),
+        }
+        next.sort_by_key(|key| key.label.to_lowercase());
+        let mut sync = self.sync.clone();
+        sync.touch(kind::KEY, id, false)?;
+        self.save_all(&self.hosts, &self.forwards, &next, &sync)?;
+        self.ssh_keys = next;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Deletes a key; hosts that used it fall back to the default keys and passwords.
+    ///
+    /// # Errors
+    /// Writing the file; nothing changes then.
+    pub fn remove_key(&mut self, id: u64) -> Result<(), VaultError> {
+        let keys: Vec<SshKey> = self
+            .ssh_keys
+            .iter()
+            .filter(|key| key.id != id)
+            .cloned()
+            .collect();
+        let mut hosts = self.hosts.clone();
+        let mut sync = self.sync.clone();
+        for host in hosts.iter_mut().filter(|host| host.key_id == Some(id)) {
+            host.key_id = None;
+            sync.touch(kind::HOST, host.id, false)?;
+        }
+        sync.touch(kind::KEY, id, true)?;
+        self.save_all(&hosts, &self.forwards, &keys, &sync)?;
+        self.hosts = hosts;
+        self.ssh_keys = keys;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
     }
 
     fn save(
@@ -525,7 +626,17 @@ impl Vault {
         forwards: &[PortForward],
         sync: &SyncState,
     ) -> Result<(), VaultError> {
-        let mut records = Vec::with_capacity(hosts.len() + forwards.len() + 1);
+        self.save_all(hosts, forwards, &self.ssh_keys, sync)
+    }
+
+    fn save_all(
+        &self,
+        hosts: &[Host],
+        forwards: &[PortForward],
+        ssh_keys: &[SshKey],
+        sync: &SyncState,
+    ) -> Result<(), VaultError> {
+        let mut records = Vec::with_capacity(hosts.len() + forwards.len() + ssh_keys.len() + 1);
         let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
         for host in hosts {
             let id = format!("host-{}", host.id);
@@ -544,6 +655,16 @@ impl Vault {
             records.push(Record {
                 id,
                 kind: KIND_FORWARD,
+                sealed,
+            });
+        }
+        for key in ssh_keys {
+            let id = format!("key-{}", key.id);
+            let plaintext = Zeroizing::new(serde_json::to_vec(key).map_err(damaged)?);
+            let sealed = self.keys.seal_record(&id, KIND_KEY, &plaintext)?;
+            records.push(Record {
+                id,
+                kind: KIND_KEY,
                 sealed,
             });
         }
@@ -632,7 +753,7 @@ mod tests {
         old.id = 1;
         let mut rule = PortForward::new(9, 1);
         rule.label = "db".into();
-        vault.adopt(&[old], &[rule]).unwrap();
+        vault.adopt(&[old], &[rule], &[]).unwrap();
 
         let reopened = Vault::unlock(&path, "pw").unwrap();
         let adopted = reopened
@@ -682,6 +803,32 @@ mod tests {
             Vault::unlock(&live, "local pw"),
             Err(VaultError::WrongPassword)
         ));
+    }
+
+    #[test]
+    fn keys_are_stored_encrypted_and_deleting_one_detaches_its_hosts() {
+        let path = temp("keys");
+        let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();
+        let key = SshKey {
+            id: vault.next_key_id(),
+            label: "work".into(),
+            private: crate::hosts::Secret::new("-----BEGIN OPENSSH PRIVATE KEY----- secret"),
+            public: "ssh-ed25519 AAAA work".into(),
+            fingerprint: "SHA256:x".into(),
+        };
+        vault.upsert_key(key.clone()).unwrap();
+        let mut host = host(&vault, "db");
+        host.key_id = Some(key.id);
+        vault.upsert_host(host).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("secret"));
+
+        let mut reopened = Vault::unlock(&path, "pw").unwrap();
+        assert_eq!(reopened.ssh_keys(), std::slice::from_ref(&key));
+        assert_eq!(reopened.hosts()[0].key_id, Some(key.id));
+        reopened.remove_key(key.id).unwrap();
+        let reopened = Vault::unlock(&path, "pw").unwrap();
+        assert_eq!(reopened.ssh_keys(), []);
+        assert_eq!(reopened.hosts()[0].key_id, None);
     }
 
     #[test]

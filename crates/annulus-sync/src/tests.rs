@@ -445,6 +445,15 @@ mod vaults {
         let mut host = laptop.draft_host();
         host.label = "bastion".into();
         host.address = "10.0.0.1".into();
+        let key = annulus_vault::keychain::SshKey {
+            id: laptop.next_key_id(),
+            label: "work key".into(),
+            private: Secret::new("private"),
+            public: "ssh-ed25519 AAAA".into(),
+            fingerprint: "SHA256:k".into(),
+        };
+        laptop.upsert_key(key.clone()).unwrap();
+        host.key_id = Some(key.id);
         laptop.upsert_host(host).unwrap();
         let host_id = laptop.hosts()[0].id;
         let mut rule = laptop.draft_forward(host_id);
@@ -492,6 +501,12 @@ mod vaults {
             synced_rule.host_id,
             desktop.hosts()[0].id,
             "the rule finds its host"
+        );
+        assert_eq!(desktop.ssh_keys()[0].label, "work key");
+        assert_eq!(
+            desktop.hosts()[0].key_id,
+            Some(desktop.ssh_keys()[0].id),
+            "the host finds its key"
         );
 
         // An edit on the desktop reaches the laptop; a deletion on the laptop reaches back.

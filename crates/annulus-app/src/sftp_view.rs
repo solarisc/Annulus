@@ -85,6 +85,7 @@ impl Worker {
         target: Target,
         files: SshFiles,
         saved_password: Option<Zeroizing<String>>,
+        identity: Option<Zeroizing<String>>,
         wake: impl Fn() + std::marker::Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
@@ -112,10 +113,12 @@ impl Worker {
                         }));
                     let failed =
                         |message: String| send(Reply::Session(SessionEvent::Failed(message)));
+                    let identities: Vec<Zeroizing<String>> = identity.into_iter().collect();
                     let connection = match annulus_ssh::connect(
                         &target,
                         &files.known_hosts,
                         files.key_dir.as_deref(),
+                        &identities,
                         prompt,
                     )
                     .await
@@ -232,11 +235,19 @@ enum Dialog {
     Delete(Entry),
 }
 
+/// Where and how a tab logs in: target, files, saved password, keychain key.
+type Login = (
+    Target,
+    SshFiles,
+    Option<Zeroizing<String>>,
+    Option<Zeroizing<String>>,
+);
+
 /// One SFTP tab.
 pub struct SftpTab {
     /// The tab's title.
     pub title: String,
-    start: Option<(Target, SshFiles, Option<Zeroizing<String>>)>,
+    start: Option<Login>,
     worker: Option<Worker>,
     dialogs: SshDialogs,
     failed: Option<String>,
@@ -268,10 +279,16 @@ impl SftpTab {
         target: Target,
         files: SshFiles,
         password: Option<Password>,
+        identity: Option<Password>,
     ) -> Self {
         Self {
             title: title.into(),
-            start: Some((target, files, password.map(Password::into_secret))),
+            start: Some((
+                target,
+                files,
+                password.map(Password::into_secret),
+                identity.map(Password::into_secret),
+            )),
             worker: None,
             dialogs: SshDialogs::default(),
             failed: None,
@@ -307,6 +324,7 @@ impl SftpTab {
                 known_hosts: PathBuf::new(),
                 key_dir: None,
             },
+            None,
             None,
         );
         tab.start = None;
@@ -457,9 +475,11 @@ impl SftpTab {
 
     /// Draws the tab.
     pub fn ui(&mut self, ui: &mut Ui, palette: &Palette) {
-        if let Some((target, files, password)) = self.start.take() {
+        if let Some((target, files, password, identity)) = self.start.take() {
             let ctx = ui.ctx().clone();
-            match Worker::start(target, files, password, move || ctx.request_repaint()) {
+            match Worker::start(target, files, password, identity, move || {
+                ctx.request_repaint();
+            }) {
                 Ok(worker) => self.worker = Some(worker),
                 Err(error) => {
                     self.failed = Some(format!("Could not start the connection: {error}"));

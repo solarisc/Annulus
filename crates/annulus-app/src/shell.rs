@@ -163,7 +163,8 @@ impl Shell {
                 target,
                 files,
                 password,
-            } => SftpTab::new(title, target, files, password),
+                identity,
+            } => SftpTab::new(title, target, files, password, identity),
             _ => SftpTab::unavailable(title, "SFTP needs a host Annulus can connect to itself."),
         };
         self.tabs.push(Tab::Sftp(Box::new(tab)));

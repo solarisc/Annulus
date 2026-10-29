@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod forward;
+pub mod keys;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -225,8 +226,28 @@ pub struct Connection {
     remote: forward::RemoteMap,
 }
 
-/// Connects to `target`, checks its key against `known_hosts`, and logs in: first trying
-/// the default key files in `key_dir` (`id_ed25519`, `id_ecdsa`, `id_rsa`, unencrypted
+/// The keys to offer, in order: keychain keys, then the default unencrypted key files.
+fn candidate_keys(
+    identities: &[Zeroizing<String>],
+    key_dir: Option<&Path>,
+) -> Vec<(String, russh::keys::PrivateKey)> {
+    let mut candidates: Vec<(String, russh::keys::PrivateKey)> = identities
+        .iter()
+        .filter_map(|identity| keys::decode(identity))
+        .map(|key| ("saved key".to_owned(), key))
+        .collect();
+    if let Some(key_dir) = key_dir {
+        for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
+            if let Ok(key) = russh::keys::load_secret_key(key_dir.join(name), None) {
+                candidates.push((format!("key {name}"), key));
+            }
+        }
+    }
+    candidates
+}
+
+/// Connects to `target`, checks its key against `known_hosts`, and logs in: first with
+/// `identities` (private keys from the keychain, OpenSSH text), then the default key files in `key_dir` (`id_ed25519`, `id_ecdsa`, `id_rsa`, unencrypted
 /// ones only), then asking for the password up to three times.
 ///
 /// # Errors
@@ -235,6 +256,7 @@ pub async fn connect(
     target: &Target,
     known_hosts: &Path,
     key_dir: Option<&Path>,
+    identities: &[Zeroizing<String>],
     prompt: Arc<dyn Prompt>,
 ) -> Result<Connection, SshError> {
     let config = Arc::new(client::Config {
@@ -274,25 +296,20 @@ pub async fn connect(
 
     let mut tried = Vec::new();
     let mut offered = String::from("unknown");
-    if let Some(key_dir) = key_dir {
-        for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
-            let Ok(key) = russh::keys::load_secret_key(key_dir.join(name), None) else {
-                continue;
-            };
-            let hash = handle
-                .best_supported_rsa_hash()
-                .await
-                .ok()
-                .flatten()
-                .flatten();
-            let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
-            tried.push(format!("key {name}"));
-            match handle.authenticate_publickey(&target.user, key).await? {
-                AuthResult::Success => return Ok(Connection { handle, remote }),
-                AuthResult::Failure {
-                    remaining_methods, ..
-                } => offered = format!("{remaining_methods:?}"),
-            }
+    for (label, key) in candidate_keys(identities, key_dir) {
+        let hash = handle
+            .best_supported_rsa_hash()
+            .await
+            .ok()
+            .flatten()
+            .flatten();
+        tried.push(label);
+        let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
+        match handle.authenticate_publickey(&target.user, key).await? {
+            AuthResult::Success => return Ok(Connection { handle, remote }),
+            AuthResult::Failure {
+                remaining_methods, ..
+            } => offered = format!("{remaining_methods:?}"),
         }
     }
     for _ in 0..3 {

@@ -29,6 +29,9 @@ pub struct Host {
     /// A saved password, tried before asking (encrypted with the rest of the vault record).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<Secret>,
+    /// The keychain key to log in with, tried before the default key files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<u64>,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -163,6 +166,7 @@ mod tests {
             username: username.into(),
             tags: Vec::new(),
             password: None,
+            key_id: None,
         }
     }
 

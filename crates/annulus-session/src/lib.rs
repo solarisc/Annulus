@@ -77,6 +77,8 @@ pub enum Program {
         files: SshFiles,
         /// A saved password, tried before asking the user.
         password: Option<Password>,
+        /// A keychain private key (OpenSSH text), tried before the default key files.
+        identity: Option<Password>,
     },
 }
 
@@ -339,10 +341,14 @@ impl Session {
                 target,
                 files,
                 password,
+                identity,
             } => Backend::Ssh(spawn_ssh(
-                target.clone(),
-                files.clone(),
-                password.as_ref().map(|password| password.0.clone()),
+                SshLogin {
+                    target: target.clone(),
+                    files: files.clone(),
+                    password: password.as_ref().map(|password| password.0.clone()),
+                    identity: identity.as_ref().map(|identity| identity.0.clone()),
+                },
                 size,
                 term.clone(),
                 listener.clone(),
@@ -491,10 +497,16 @@ impl Drop for Session {
 
 /// Runs an SSH session on its own thread: connect (asking the UI as needed), open a shell,
 /// then move bytes between the channel and the terminal until either side closes.
-fn spawn_ssh(
+/// What an SSH session logs in with.
+struct SshLogin {
     target: Target,
     files: SshFiles,
-    saved_password: Option<Zeroizing<String>>,
+    password: Option<Zeroizing<String>>,
+    identity: Option<Zeroizing<String>>,
+}
+
+fn spawn_ssh(
+    login: SshLogin,
     size: Size,
     term: Arc<FairMutex<Term<Listener>>>,
     listener: Listener,
@@ -514,14 +526,22 @@ fn spawn_ssh(
         .name("ssh session".into())
         .spawn(move || {
             runtime.block_on(async move {
+                let SshLogin {
+                    target,
+                    files,
+                    password: saved_password,
+                    identity,
+                } = login;
                 let notifier = listener.clone();
                 let prompt = Arc::new(AskUi::new(answers, saved_password, move |event| {
                     notifier.send(event);
                 }));
+                let identities: Vec<Zeroizing<String>> = identity.into_iter().collect();
                 let connection = match annulus_ssh::connect(
                     &target,
                     &files.known_hosts,
                     files.key_dir.as_deref(),
+                    &identities,
                     prompt,
                 )
                 .await
@@ -662,6 +682,7 @@ mod tests {
                 target,
                 files,
                 password: None,
+                identity: None,
             },
             Size::new(80, 24),
             8,

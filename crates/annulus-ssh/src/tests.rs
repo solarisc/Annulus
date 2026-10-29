@@ -84,6 +84,19 @@ impl russh_sftp::server::Handler for HomeOnly {
 impl server::Handler for TestServer {
     type Error = russh::Error;
 
+    /// bob logs in with any key he can sign with (russh checks the signature).
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        _key: server::VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
+        Ok(if user == "bob" {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         Ok(if user == "alice" && password == "secret" {
             Auth::Accept
@@ -296,7 +309,7 @@ async fn first_connection_asks_to_trust_the_key_then_the_shell_echoes() {
     let port = serve(new_key()).await;
     let path = known_hosts("trust");
     let script = Script::new(true, &["wrong", "secret"]);
-    let connection = connect(&target(port, "alice"), &path, None, script.clone())
+    let connection = connect(&target(port, "alice"), &path, None, &[], script.clone())
         .await
         .unwrap();
     let question = script.asked_key.lock().unwrap().clone().unwrap();
@@ -318,9 +331,15 @@ async fn first_connection_asks_to_trust_the_key_then_the_shell_echoes() {
 async fn the_sftp_subsystem_opens_on_a_connection() {
     let port = serve(new_key()).await;
     let script = Script::new(true, &["secret"]);
-    let connection = connect(&target(port, "alice"), &known_hosts("sftp"), None, script)
-        .await
-        .unwrap();
+    let connection = connect(
+        &target(port, "alice"),
+        &known_hosts("sftp"),
+        None,
+        &[],
+        script,
+    )
+    .await
+    .unwrap();
     let stream = connection.sftp_stream().await.unwrap();
     let sftp = russh_sftp::client::SftpSession::new(stream).await.unwrap();
     assert_eq!(sftp.canonicalize(".").await.unwrap(), "/home/alice");
@@ -337,6 +356,7 @@ async fn local_and_socks_forwards_carry_bytes_and_a_busy_port_is_reported() {
             &target(port, "alice"),
             &known_hosts("forward"),
             None,
+            &[],
             script,
         )
         .await
@@ -408,9 +428,15 @@ async fn a_remote_forward_reaches_a_destination_on_this_side() {
     let port = serve(new_key()).await;
     let script = Script::new(true, &["secret"]);
     let connection = Arc::new(
-        connect(&target(port, "alice"), &known_hosts("remote"), None, script)
-            .await
-            .unwrap(),
+        connect(
+            &target(port, "alice"),
+            &known_hosts("remote"),
+            None,
+            &[],
+            script,
+        )
+        .await
+        .unwrap(),
     );
     let remote = forward::start(
         connection,
@@ -438,6 +464,23 @@ async fn a_remote_forward_reaches_a_destination_on_this_side() {
 }
 
 #[tokio::test]
+async fn a_keychain_key_logs_in_without_asking_for_a_password() {
+    let port = serve(new_key()).await;
+    let key = keys::generate("bob@test").unwrap();
+    // No passwords to hand out: asking for one would fail the login.
+    let script = Script::new(true, &[]);
+    let connection = connect(
+        &target(port, "bob"),
+        &known_hosts("keychain"),
+        None,
+        &[key.private],
+        script,
+    )
+    .await;
+    assert!(connection.is_ok());
+}
+
+#[tokio::test]
 async fn a_rejected_new_key_stops_before_any_password_is_sent() {
     let port = serve(new_key()).await;
     let script = Script::new(false, &["secret"]);
@@ -445,6 +488,7 @@ async fn a_rejected_new_key_stops_before_any_password_is_sent() {
         &target(port, "alice"),
         &known_hosts("reject"),
         None,
+        &[],
         script.clone(),
     )
     .await;
@@ -468,6 +512,7 @@ async fn a_changed_host_key_is_a_hard_stop() {
         &target(port, "alice"),
         &path,
         None,
+        &[],
         Script::new(true, &["secret"]),
     )
     .await
@@ -484,7 +529,7 @@ async fn a_changed_host_key_is_a_hard_stop() {
     )
     .unwrap();
     let script = Script::new(true, &["secret"]);
-    let result = connect(&target(port2, "alice"), &path, None, script.clone()).await;
+    let result = connect(&target(port2, "alice"), &path, None, &[], script.clone()).await;
     assert!(
         matches!(result, Err(SshError::HostKeyChanged { .. })),
         "{:?}",
@@ -503,6 +548,7 @@ async fn three_wrong_passwords_fail_with_what_was_tried() {
         &target(port, "alice"),
         &known_hosts("wrong"),
         None,
+        &[],
         Script::new(true, &["a", "b", "c"]),
     )
     .await;

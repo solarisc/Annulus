@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{CryptoError, Keys, Sealed};
 use crate::forwards::PortForward;
 use crate::hosts::{Host, Secret};
+use crate::keychain::SshKey;
 
 /// Entity kinds inside synced records.
 pub mod kind {
@@ -21,6 +22,8 @@ pub mod kind {
     pub const HOST: u8 = 1;
     /// A port-forwarding rule.
     pub const FORWARD: u8 = 2;
+    /// A keychain key.
+    pub const KEY: u8 = 3;
 }
 
 /// The record kind (bound into the encryption) of envelopes sent to the server.
@@ -177,6 +180,16 @@ impl SyncState {
     }
 }
 
+/// A host as synced: it names its key by sync id, since local ids differ per device.
+/// Older clients sent the host alone, which still reads (with no key).
+#[derive(Serialize, Deserialize)]
+struct SyncedHost {
+    #[serde(flatten)]
+    host: Host,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+}
+
 /// A forward rule as synced: it names its host by sync id, since local ids differ per
 /// device.
 #[derive(Serialize, Deserialize)]
@@ -203,6 +216,7 @@ pub struct SyncCopy {
     pub(crate) keys: Keys,
     pub(crate) hosts: Vec<Host>,
     pub(crate) forwards: Vec<PortForward>,
+    pub(crate) ssh_keys: Vec<SshKey>,
     pub(crate) state: SyncState,
     pub(crate) generation: u64,
 }
@@ -246,8 +260,13 @@ impl SyncCopy {
             .iter()
             .filter(|(_, entry)| entry.dirty && !(entry.deleted && entry.base == 0))
             .collect();
-        // Hosts before rules, so other devices usually see a rule's host first.
-        dirty.sort_by_key(|(_, entry)| entry.kind);
+        // Keys, then hosts, then rules, so other devices usually see what each points at
+        // first.
+        dirty.sort_by_key(|(_, entry)| match entry.kind {
+            kind::KEY => 0,
+            kind::HOST => 1,
+            _ => 2,
+        });
         dirty
             .into_iter()
             .filter_map(|(id, entry)| {
@@ -270,7 +289,21 @@ impl SyncCopy {
         match entry.kind {
             kind::HOST => {
                 let host = self.hosts.iter().find(|host| host.id == entry.local)?;
-                serde_json::to_vec(host).ok()
+                let synced = SyncedHost {
+                    key: host
+                        .key_id
+                        .and_then(|key| self.state.id_of(kind::KEY, key))
+                        .map(str::to_owned),
+                    host: Host {
+                        key_id: None,
+                        ..host.clone()
+                    },
+                };
+                serde_json::to_vec(&synced).ok()
+            }
+            kind::KEY => {
+                let key = self.ssh_keys.iter().find(|key| key.id == entry.local)?;
+                serde_json::to_vec(key).ok()
             }
             kind::FORWARD => {
                 let rule = self.forwards.iter().find(|rule| rule.id == entry.local)?;
@@ -358,6 +391,7 @@ impl SyncCopy {
                 match entry.kind {
                     kind::HOST => self.hosts.retain(|host| host.id != entry.local),
                     kind::FORWARD => self.forwards.retain(|rule| rule.id != entry.local),
+                    kind::KEY => self.ssh_keys.retain(|key| key.id != entry.local),
                     _ => {}
                 }
                 entry.deleted = true;
@@ -371,10 +405,18 @@ impl SyncCopy {
         let mut awaits = None;
         let local = match kind {
             kind::HOST => {
-                let Ok(mut host) = serde_json::from_slice::<Host>(&body) else {
+                let Ok(synced) = serde_json::from_slice::<SyncedHost>(&body) else {
                     return;
                 };
+                let mut host = synced.host;
                 host.id = existing.unwrap_or_else(|| next_id(self.hosts.iter().map(|h| h.id)));
+                host.key_id = synced
+                    .key
+                    .as_ref()
+                    .and_then(|key| self.state.entries.get(key))
+                    .filter(|entry| entry.kind == kind::KEY && !entry.deleted)
+                    .map(|entry| entry.local);
+                awaits = synced.key.filter(|_| host.key_id.is_none());
                 let local = host.id;
                 upsert(&mut self.hosts, host, |h| h.id, |h| h.label.to_lowercase());
                 local
@@ -407,6 +449,20 @@ impl SyncCopy {
                 );
                 local
             }
+            kind::KEY => {
+                let Ok(mut key) = serde_json::from_slice::<SshKey>(&body) else {
+                    return;
+                };
+                key.id = existing.unwrap_or_else(|| next_id(self.ssh_keys.iter().map(|k| k.id)));
+                let local = key.id;
+                upsert(
+                    &mut self.ssh_keys,
+                    key,
+                    |k| k.id,
+                    |k| k.label.to_lowercase(),
+                );
+                local
+            }
             _ => return,
         };
         self.state.entries.insert(
@@ -421,19 +477,32 @@ impl SyncCopy {
                 awaits,
             },
         );
-        if kind == kind::HOST {
-            self.link_waiting_rules(id, local);
+        if kind == kind::HOST || kind == kind::KEY {
+            self.link_waiting(id, local);
         }
     }
 
-    /// Links rules that arrived before their host (sync id `host`, local id `local`).
-    fn link_waiting_rules(&mut self, host: &str, local: u64) {
+    /// Links what arrived before the entity it points at (sync id `target`, local id
+    /// `local`): rules waiting for their host, hosts waiting for their key.
+    fn link_waiting(&mut self, target: &str, local: u64) {
         for entry in self.state.entries.values_mut() {
-            if entry.awaits.as_deref() == Some(host) {
-                entry.awaits = None;
-                if let Some(rule) = self.forwards.iter_mut().find(|rule| rule.id == entry.local) {
-                    rule.host_id = local;
+            if entry.awaits.as_deref() != Some(target) {
+                continue;
+            }
+            entry.awaits = None;
+            match entry.kind {
+                kind::FORWARD => {
+                    if let Some(rule) = self.forwards.iter_mut().find(|rule| rule.id == entry.local)
+                    {
+                        rule.host_id = local;
+                    }
                 }
+                kind::HOST => {
+                    if let Some(host) = self.hosts.iter_mut().find(|host| host.id == entry.local) {
+                        host.key_id = Some(local);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -463,6 +532,7 @@ mod tests {
             keys,
             hosts: Vec::new(),
             forwards: Vec::new(),
+            ssh_keys: Vec::new(),
             state: SyncState::new().unwrap(),
             generation: 0,
         }
@@ -490,6 +560,7 @@ mod tests {
             username: String::new(),
             tags: Vec::new(),
             password: None,
+            key_id: None,
         };
         copy.apply(
             "host-sync-id",
@@ -536,6 +607,7 @@ mod tests {
             username: String::new(),
             tags: Vec::new(),
             password: None,
+            key_id: None,
         });
         // Many entries, so random ids would put some rule before some host by chance.
         for _ in 0..20 {
