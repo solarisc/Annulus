@@ -24,6 +24,8 @@ ignore = [
 
 [licenses]
 allow = [
+    # The Mozilla root certificate list in webpki-roots; a permissive data license.
+    "CDLA-Permissive-2.0",
     "MIT",
     "Apache-2.0",
     "BSD-2-Clause",

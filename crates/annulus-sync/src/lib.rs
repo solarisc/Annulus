@@ -7,6 +7,7 @@
 pub mod account;
 pub mod clock;
 pub mod engine;
+pub mod http;
 
 #[cfg(test)]
 mod tests;

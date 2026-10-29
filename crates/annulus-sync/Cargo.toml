@@ -14,8 +14,13 @@ workspace = true
 [dependencies]
 opaque-ke.workspace = true
 opaque-rand.workspace = true
+rustls.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+ureq.workspace = true
 annulus-proto = { path = "../annulus-proto" }
 
 [dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
 annulus-server = { path = "../annulus-server" }

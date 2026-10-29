@@ -317,3 +317,54 @@ fn a_wrong_password_fails_before_the_server_can_check_it() {
     };
     assert!(account::login(&mut direct, &cheap(), "ana", "wrong", "c").is_err());
 }
+
+/// Starts the real HTTP server on a free loopback port, on its own thread.
+fn http_server() -> String {
+    let server = std::sync::Arc::new(server());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, annulus_server::router(server))
+                .await
+                .unwrap();
+        });
+    });
+    format!("http://{address}")
+}
+
+#[test]
+fn a_full_round_over_http_then_a_revoked_device_is_refused() {
+    let base = http_server();
+    let mut laptop = crate::http::HttpServer::new(&base, None).unwrap();
+    let session = account::register(
+        &mut laptop,
+        &cheap(),
+        "ana",
+        "pw",
+        b"keys".to_vec(),
+        "laptop",
+    )
+    .unwrap();
+    laptop.set_token(Some(session.token.clone()));
+    let mut device = Device::default();
+    device.edit("r1", "prod-db", 10);
+    assert_eq!(sync(&mut laptop, &mut device).unwrap().pushed, 1);
+
+    let mut phone = crate::http::HttpServer::new(&base, None).unwrap();
+    let phone_session = account::login(&mut phone, &cheap(), "ana", "pw", "phone").unwrap();
+    phone.set_token(Some(phone_session.token));
+    let mut phone_copy = Device::default();
+    sync(&mut phone, &mut phone_copy).unwrap();
+    assert_eq!(phone_copy.body("r1").as_deref(), Some("prod-db"));
+    assert_eq!(laptop.devices().unwrap().devices.len(), 2);
+
+    laptop.revoke(phone_session.device).unwrap();
+    assert!(matches!(
+        sync(&mut phone, &mut phone_copy),
+        Err(SyncError::Unauthorized)
+    ));
+}
