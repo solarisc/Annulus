@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use annulus_config::tokens::Appearance;
 use annulus_platform::cpu::{CpuCanvas, TextEngine};
-use annulus_ui::gfx::{Point, Rect};
+use annulus_ui::gfx::{Canvas, Point, Rect};
 use annulus_ui::kit::{Button, Event, FrameOutput, Key, Modifiers, Role, Theme, Ui, UiState, Zone};
 
 use super::demo::fixture_vault;
@@ -191,29 +191,62 @@ const SCENES: &[Scene] = &[
     },
 ];
 
-/// Draws one frame of `app` and returns what the toolkit reported.
-fn frame(
-    app: &mut NativeApp,
-    state: &mut UiState,
-    text: TextEngine,
-    scene: &Scene,
-    theme: Theme,
-    events: &[Event],
-    time: f64,
-) -> (FrameOutput, CpuCanvas) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Scene sizes.
-    let (pw, ph) = (
-        (scene.width as f32 * scene.scale).round() as u32,
-        (scene.height as f32 * scene.scale).round() as u32,
-    );
-    let mut canvas = CpuCanvas::new(pw, ph, scene.scale, text).unwrap();
-    state.begin_frame(events, time);
-    #[allow(clippy::cast_precision_loss)] // Scene sizes.
-    let viewport = Rect::new(0.0, 0.0, scene.width as f32, scene.height as f32);
-    let mut ui = Ui::new(&mut canvas, theme, state, viewport);
-    app.frame(&mut ui);
-    let output = state.end_frame();
-    (output, canvas)
+/// A renderer the scenes are drawn with: the CPU one everywhere, Direct2D on Windows.
+trait Renderer {
+    /// Its name in file names: empty for the CPU renderer.
+    fn suffix(&self) -> &'static str;
+    /// Runs `draw` on a fresh `width` x `height` pixel frame; returns the PNG when `keep`.
+    fn frame(
+        &mut self,
+        size: (u32, u32, f32),
+        keep: bool,
+        draw: &mut dyn FnMut(&mut dyn Canvas),
+    ) -> Option<Vec<u8>>;
+}
+
+struct Cpu(Option<TextEngine>);
+
+impl Renderer for Cpu {
+    fn suffix(&self) -> &'static str {
+        ""
+    }
+
+    fn frame(
+        &mut self,
+        (width, height, scale): (u32, u32, f32),
+        keep: bool,
+        draw: &mut dyn FnMut(&mut dyn Canvas),
+    ) -> Option<Vec<u8>> {
+        let text = self.0.take().unwrap_or_default();
+        let mut canvas = CpuCanvas::new(width, height, scale, text).unwrap();
+        draw(&mut canvas);
+        let png = keep.then(|| canvas.encode_png().unwrap());
+        self.0 = Some(canvas.into_text_engine());
+        png
+    }
+}
+
+#[cfg(windows)]
+struct Direct2D(annulus_platform::d2d::D2d);
+
+#[cfg(windows)]
+impl Renderer for Direct2D {
+    fn suffix(&self) -> &'static str {
+        "-d2d"
+    }
+
+    fn frame(
+        &mut self,
+        (width, height, scale): (u32, u32, f32),
+        keep: bool,
+        draw: &mut dyn FnMut(&mut dyn Canvas),
+    ) -> Option<Vec<u8>> {
+        let png = self
+            .0
+            .render_png(width, height, scale, |canvas| draw(canvas))
+            .unwrap();
+        keep.then_some(png)
+    }
 }
 
 fn zone_center(zones: &[Zone], name: &str) -> Point {
@@ -281,14 +314,38 @@ fn out_dir() -> PathBuf {
         .join("scenes")
 }
 
-/// Renders `scene` in `appearance`: returns the PNG and every fault found.
-fn render(scene: &Scene, appearance: Appearance) -> (Vec<u8>, Vec<String>) {
-    let vault = fixture_vault(&format!("{}-{appearance:?}", scene.name), scene.populated);
+/// Renders `scene` in `appearance` with `renderer`: returns the PNG and every fault found.
+fn render(
+    scene: &Scene,
+    appearance: Appearance,
+    renderer: &mut dyn Renderer,
+) -> (Vec<u8>, Vec<String>) {
+    let vault = fixture_vault(
+        &format!("{}-{appearance:?}{}", scene.name, renderer.suffix()),
+        scene.populated,
+    );
     let mut app = NativeApp::new(Some(vault));
     (scene.setup)(&mut app);
     let theme = Theme::new(appearance);
     let mut state = UiState::default();
-    let mut text = TextEngine::new();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Scene sizes.
+    let size = (
+        (scene.width as f32 * scene.scale).round() as u32,
+        (scene.height as f32 * scene.scale).round() as u32,
+        scene.scale,
+    );
+    #[allow(clippy::cast_precision_loss)] // Scene sizes.
+    let viewport = Rect::new(0.0, 0.0, scene.width as f32, scene.height as f32);
+    let mut frame = |events: &[Event], time: f64, keep: bool| {
+        let mut output = FrameOutput::default();
+        let png = renderer.frame(size, keep, &mut |canvas| {
+            state.begin_frame(events, time);
+            let mut ui = Ui::new(canvas, theme, &mut state, viewport);
+            app.frame(&mut ui);
+            output = state.end_frame();
+        });
+        (output, png)
+    };
     let mut time = 0.0;
     let mut events: Vec<Event> = Vec::new();
     let mut acts = scene.acts.iter();
@@ -296,8 +353,7 @@ fn render(scene: &Scene, appearance: Appearance) -> (Vec<u8>, Vec<String>) {
     // One frame to lay out, one per act (resolved against the frame before), then frames
     // until animations settle.
     loop {
-        let (output, canvas) = frame(&mut app, &mut state, text, scene, theme, &events, time);
-        text = canvas.into_text_engine();
+        let (output, _) = frame(&events, time, false);
         faults.extend(output.faults.iter().cloned());
         events.clear();
         time += 1.0;
@@ -316,37 +372,46 @@ fn render(scene: &Scene, appearance: Appearance) -> (Vec<u8>, Vec<String>) {
         }
     }
     // Settle: hover fades and focus glows finish.
-    let (output, canvas) = frame(&mut app, &mut state, text, scene, theme, &[], time + 1.0);
+    let (output, png) = frame(&[], time + 1.0, true);
     faults.extend(output.faults.iter().cloned());
-    #[allow(clippy::cast_precision_loss)] // Scene sizes.
-    let viewport = Rect::new(0.0, 0.0, scene.width as f32, scene.height as f32);
     faults.extend(layout_faults(&output.zones, viewport));
-    (canvas.encode_png().unwrap(), faults)
+    (png.unwrap(), faults)
 }
 
 #[test]
 fn every_scene_renders_without_layout_faults() {
     let dir = out_dir();
     std::fs::create_dir_all(&dir).unwrap();
+    let mut renderers: Vec<Box<dyn Renderer>> = vec![Box::new(Cpu(None))];
+    #[cfg(windows)]
+    renderers.push(Box::new(Direct2D(
+        annulus_platform::d2d::D2d::new().unwrap(),
+    )));
     let mut failures = Vec::new();
-    for scene in SCENES {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let (png, faults) = render(scene, appearance);
-            let theme = match appearance {
-                Appearance::Dark => "dark",
-                Appearance::Light => "light",
-            };
-            let file = dir.join(format!("{}-{theme}.png", scene.name));
-            std::fs::write(&file, png).unwrap();
-            for fault in faults {
-                failures.push(format!("{} ({theme}): {fault}", scene.name));
+    for renderer in &mut renderers {
+        for scene in SCENES {
+            for appearance in [Appearance::Dark, Appearance::Light] {
+                let (png, faults) = render(scene, appearance, renderer.as_mut());
+                let theme = match appearance {
+                    Appearance::Dark => "dark",
+                    Appearance::Light => "light",
+                };
+                let name = format!("{}-{theme}{}", scene.name, renderer.suffix());
+                std::fs::write(dir.join(format!("{name}.png")), png).unwrap();
+                for fault in faults {
+                    failures.push(format!("{name}: {fault}"));
+                }
             }
         }
     }
     assert!(
         failures.is_empty(),
-        "layout faults:\n{}",
-        failures.join("\n")
+        "layout faults:
+{}",
+        failures.join(
+            "
+"
+        )
     );
 }
 

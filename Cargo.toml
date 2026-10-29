@@ -41,6 +41,8 @@ directories = "6.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
 egui = "0.37.0"
 winit = "0.30.13"
+windows = "0.62.2"
+windows-numerics = "0.3.1"
 parley = { version = "0.12.0", default-features = false, features = ["std"] }
 softbuffer = "0.4.8"
 swash = "0.2.10"
