@@ -19,7 +19,7 @@ use crate::sftp_view::SftpTab;
 use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::{self, Pill, SyncScreen};
 use crate::terminal_view::{FONT_SIZES, PaneRequest, TabStatus};
-use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
+use annulus_config::settings::{DEFAULT_FONT_SIZE, OpenTab, Settings};
 use annulus_session::profiles::{self, Profile};
 use annulus_term::themes;
 
@@ -160,6 +160,10 @@ pub struct Shell {
     terminal_theme: String,
     /// Save finished sessions as logs (F-LOG-001).
     record_logs: bool,
+    /// Reopen the tabs at the next launch (F-APP-008).
+    restore_tabs: bool,
+    /// Host tabs to reopen once the vault is unlocked.
+    pending_hosts: Vec<u64>,
 }
 
 /// The device settings' file name in the data folder.
@@ -198,9 +202,65 @@ impl Shell {
             default_profile: settings.default_profile.clone(),
             terminal_theme: settings.terminal_theme.clone(),
             record_logs: settings.record_logs,
-            saved: settings,
+            restore_tabs: settings.restore_tabs,
+            pending_hosts: Vec::new(),
+            saved: settings.clone(),
             profiles: profiles::detect(),
         }
+        .reopened(&settings)
+    }
+
+    /// Reopens the tabs `settings` lists when restoring is on: local ones now, host ones
+    /// once the vault is unlocked.
+    fn reopened(mut self, settings: &Settings) -> Self {
+        if !settings.restore_tabs {
+            return self;
+        }
+        for tab in &settings.open_tabs {
+            match tab {
+                OpenTab::Local(name) => {
+                    let index = self.profiles.iter().position(|p| &p.name == name);
+                    self.open_local(index);
+                }
+                OpenTab::Host(id) => self.pending_hosts.push(*id),
+            }
+        }
+        self.active_tab = 0;
+        self
+    }
+
+    /// Opens the host tabs waiting for the vault, now that it is unlocked.
+    fn reopen_hosts(&mut self) {
+        let Some(hosts) = &self.hosts else { return };
+        let mut opened = Vec::new();
+        for id in std::mem::take(&mut self.pending_hosts) {
+            if let Some(host) = hosts.vault().hosts().iter().find(|host| host.id == id) {
+                opened.push((host.label.clone(), hosts.connect_host(host), id));
+            }
+        }
+        for (title, program, id) in opened {
+            self.open_terminal(title, program);
+            self.set_origin(OpenTab::Host(id));
+        }
+        self.active_tab = 0;
+    }
+
+    /// Marks the tab in front as opened for `origin`.
+    fn set_origin(&mut self, origin: OpenTab) {
+        if let Some(Tab::Terminal(panes)) = self.tabs.get_mut(self.active_tab) {
+            panes.origin = Some(origin);
+        }
+    }
+
+    /// What the open terminal tabs were opened for, in order.
+    fn open_tabs(&self) -> Vec<OpenTab> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                Tab::Terminal(panes) => panes.origin.clone(),
+                Tab::Vault | Tab::Sftp(_) => None,
+            })
+            .collect()
     }
 
     /// The profile new local tabs use: the one chosen in Settings, else the first found.
@@ -268,9 +328,12 @@ impl Shell {
             .and_then(|index| self.profiles.get(index))
             .or_else(|| self.default_profile())
             .cloned();
-        match chosen {
-            Some(profile) => self.open_terminal(profile.name.clone(), profile.program()),
-            None => self.open_terminal("Local", Program::DefaultShell),
+        if let Some(profile) = chosen {
+            self.open_terminal(profile.name.clone(), profile.program());
+            self.set_origin(OpenTab::Local(profile.name));
+        } else {
+            self.open_terminal("Local", Program::DefaultShell);
+            self.set_origin(OpenTab::Local(String::new()));
         }
     }
 
@@ -283,6 +346,12 @@ impl Shell {
             default_profile: self.default_profile.clone(),
             terminal_theme: self.terminal_theme.clone(),
             record_logs: self.record_logs,
+            restore_tabs: self.restore_tabs,
+            open_tabs: if self.restore_tabs {
+                self.open_tabs()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -485,6 +554,7 @@ impl Shell {
         self.hosts = Some(HostsScreen::new(vault, files));
         self.forwards = ForwardsScreen::default();
         self.sync = SyncScreen::default();
+        self.reopen_hosts();
     }
 
     /// Locks the vault: its keys and decrypted hosts are dropped (F-SEC-004).
@@ -728,7 +798,13 @@ impl Shell {
                         Some(Request::Open(title, Program::DefaultShell)) if title == "Local" => {
                             self.open_local(None);
                         }
-                        Some(Request::Open(title, program)) => self.open_terminal(title, program),
+                        Some(Request::Open(title, program)) => {
+                            let host = hosts.opened_host();
+                            self.open_terminal(title, program);
+                            if let Some(id) = host {
+                                self.set_origin(OpenTab::Host(id));
+                            }
+                        }
                         Some(Request::Sftp(title, program)) => self.open_sftp(title, program),
                         Some(Request::OpenAll(tabs)) => {
                             for (title, program) in tabs {
@@ -839,6 +915,10 @@ impl Shell {
                 }
             });
         ui.add_space(space::M);
+        ui.checkbox(&mut self.restore_tabs, "Reopen my tabs when Annulus starts")
+            .on_hover_text(
+                "Local shells and saved hosts; host tabs open once the vault is unlocked",
+            );
         ui.checkbox(&mut self.record_logs, "Save session logs")
             .on_hover_text("Keeps the text of each finished session (last 5 per host), encrypted in the vault. Output can contain secrets.");
         ui.add_space(space::M);
@@ -900,6 +980,31 @@ mod tests {
 
     fn titles(shell: &Shell) -> Vec<&str> {
         shell.tabs.iter().map(Tab::title).collect()
+    }
+
+    #[test]
+    fn tabs_are_listed_for_the_next_launch_and_host_tabs_wait_for_the_vault() {
+        let dir = std::env::temp_dir().join(format!("annulus-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut shell = Shell::new(&dir);
+        shell.open_local(None);
+        shell.open_terminal("plain", Program::DefaultShell);
+        assert_eq!(shell.open_tabs().len(), 1, "only tabs with a known origin");
+        let settings = Settings {
+            restore_tabs: true,
+            open_tabs: vec![OpenTab::Local(String::new()), OpenTab::Host(42)],
+            ..Settings::default()
+        };
+        let reopened = Shell::new(&dir).reopened(&settings);
+        assert_eq!(reopened.tabs.len(), 2, "the vault tab and the local shell");
+        assert_eq!(reopened.pending_hosts, [42]);
+        assert_eq!(reopened.active_tab, 0);
+        let off = Settings {
+            restore_tabs: false,
+            ..settings
+        };
+        assert_eq!(Shell::new(&dir).reopened(&off).tabs.len(), 1);
     }
 
     #[test]

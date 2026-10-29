@@ -31,6 +31,8 @@ pub struct Panes {
     broadcast: bool,
     /// One large pane and a list of the others instead of the split (F-WS-002).
     focus_mode: bool,
+    /// What the tab was opened for, so it can be reopened at the next launch (F-APP-008).
+    pub origin: Option<annulus_config::settings::OpenTab>,
 }
 
 /// Width of the session list beside the large pane in focus mode (UI-SPEC §3).
@@ -67,6 +69,7 @@ impl Panes {
             focused: 0,
             broadcast: false,
             focus_mode: false,
+            origin: None,
         }
     }
 

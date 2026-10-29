@@ -28,6 +28,20 @@ pub struct Settings {
     /// Save each finished session's text as a log (F-LOG-001). Off by default, since output
     /// can contain secrets.
     pub record_logs: bool,
+    /// Reopen the terminal tabs that were open when the app closed (F-APP-008). Off by
+    /// default.
+    pub restore_tabs: bool,
+    /// The terminal tabs open at the last save, kept while `restore_tabs` is on.
+    pub open_tabs: Vec<OpenTab>,
+}
+
+/// A terminal tab to reopen: what it ran, never what it showed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenTab {
+    /// A local shell, by profile name (empty: the default shell).
+    Local(String),
+    /// A saved host, by its id in the vault (reopened once the vault is unlocked).
+    Host(u64),
 }
 
 impl Default for Settings {
@@ -39,6 +53,8 @@ impl Default for Settings {
             default_profile: None,
             terminal_theme: "Annulus Dark".into(),
             record_logs: false,
+            restore_tabs: false,
+            open_tabs: Vec::new(),
         }
     }
 }
@@ -86,6 +102,8 @@ mod tests {
             default_profile: Some("PowerShell 7".into()),
             terminal_theme: "Solarized Dark".into(),
             record_logs: true,
+            restore_tabs: true,
+            open_tabs: vec![OpenTab::Local("bash".into()), OpenTab::Host(7)],
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

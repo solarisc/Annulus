@@ -266,6 +266,12 @@ impl HostsScreen {
         self.opened.take()
     }
 
+    /// The saved host a terminal was just opened to, without taking it.
+    #[must_use]
+    pub fn opened_host(&self) -> Option<u64> {
+        self.opened
+    }
+
     /// The unlocked vault.
     #[must_use]
     pub fn vault(&self) -> &Vault {
