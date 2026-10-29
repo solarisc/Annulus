@@ -1065,7 +1065,11 @@ mod tests {
             // This shell brackets pastes: nothing would run, so nothing is asked.
             return;
         }
-        let paste = [Event::Paste("echo one\necho two".into())];
+        // An Enter typed in the same frame waits with the paste.
+        let paste = [
+            Event::Paste("echo one\necho two".into()),
+            Event::Key(Key::Enter, Modifiers::NONE),
+        ];
         let mut zones = frame(&mut live, &mut state, &paste, clock());
         zones = frame(&mut live, &mut state, &[], clock())
             .into_iter()
