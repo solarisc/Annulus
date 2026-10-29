@@ -1,8 +1,9 @@
 //! Table-driven layout tests: a container style, its children's styles and content sizes, a
 //! viewport, and the rectangles each child must get.
 
-// Layout results are exact sums of exact inputs, so tests compare floats exactly.
-#![allow(clippy::float_cmp)]
+// Layout results are exact sums of exact inputs, so tests compare floats exactly. The case
+// table is one long list by design.
+#![allow(clippy::float_cmp, clippy::too_many_lines)]
 
 use super::*;
 use crate::display_list::{DisplayList, Op};

@@ -207,11 +207,10 @@ impl Tree {
             non_negative(inner_main - used)
         };
         let (mut cursor, extra_gap) = match style.justify {
-            Justify::Start => (0.0, 0.0),
             Justify::Center => (leftover / 2.0, 0.0),
             Justify::End => (leftover, 0.0),
             Justify::SpaceBetween if flow.len() > 1 => (0.0, leftover / gaps(flow.len())),
-            Justify::SpaceBetween => (0.0, 0.0),
+            Justify::Start | Justify::SpaceBetween => (0.0, 0.0),
         };
 
         let scroll_offset = self.record_scroll(id, style.scroll, used, inner_main);
@@ -220,10 +219,9 @@ impl Tree {
         let mut placed = Vec::with_capacity(flow.len());
         for ((child, child_style, size), main) in measured.iter().zip(mains) {
             let cross = match cross_length(axis, child_style) {
-                Length::Fixed(_) => cross_of(axis, *size),
                 Length::Fill(_) => inner_cross,
                 Length::Fit if style.align == Align::Stretch => inner_cross,
-                Length::Fit => cross_of(axis, *size),
+                Length::Fixed(_) | Length::Fit => cross_of(axis, *size),
             };
             let cross = clamp(
                 cross,
@@ -338,9 +336,8 @@ struct Line {
 fn resolve(length: Length, natural: f32, available: f32) -> f32 {
     match length {
         Length::Fixed(value) => value,
-        Length::Fit => natural,
         Length::Fill(_) if available.is_finite() => available,
-        Length::Fill(_) => natural,
+        Length::Fit | Length::Fill(_) => natural,
     }
 }
 
