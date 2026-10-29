@@ -693,6 +693,33 @@ fn step(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) -
     drive(app, state, &[], time)
 }
 
+/// A click on the zone named `name` that lies inside the zone named `within` (a button of
+/// one list row among many with the same buttons).
+fn click_within(output: &FrameOutput, within: &str, name: &str) -> Vec<Event> {
+    let outer = output
+        .zones
+        .iter()
+        .find(|zone| zone.label == within)
+        .unwrap_or_else(|| panic!("no zone named {within:?}"))
+        .rect;
+    let inner = output
+        .zones
+        .iter()
+        .find(|zone| {
+            zone.label == name
+                && zone.rect.x >= outer.x
+                && zone.rect.y >= outer.y
+                && zone.rect.r() <= outer.r()
+                && zone.rect.b() <= outer.b()
+        })
+        .unwrap_or_else(|| panic!("no {name:?} inside {within:?}"));
+    vec![
+        Event::PointerMoved(inner.rect.center()),
+        Event::PointerDown(Button::Primary),
+        Event::PointerUp(Button::Primary),
+    ]
+}
+
 /// A click on the zone named `name` in the last frame.
 fn click_on(output: &FrameOutput, name: &str) -> Vec<Event> {
     vec![
@@ -828,15 +855,10 @@ fn e2e_the_new_keychain_installs_a_key_on_a_real_host() {
     let mut state = UiState::default();
     let started = std::time::Instant::now();
     let clock = || started.elapsed().as_secs_f64();
-    let mut output = drive(&mut app, &mut state, &[], clock());
-    // The fresh key is the last row; its Install button is the last of that name.
-    output = drive(
-        &mut app,
-        &mut state,
-        &click_on(&output, "Install on a host"),
-        clock(),
-    );
-    output = drive(
+    let mut output = step(&mut app, &mut state, &[], clock());
+    let install = click_within(&output, "fresh", "Install on a host");
+    output = step(&mut app, &mut state, &install, clock());
+    output = step(
         &mut app,
         &mut state,
         &click_on(&output, "Choose a host"),
@@ -861,7 +883,7 @@ fn e2e_the_new_keychain_installs_a_key_on_a_real_host() {
         } else {
             Vec::new()
         };
-        output = drive(&mut app, &mut state, &events, clock());
+        output = step(&mut app, &mut state, &events, clock());
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     // Log in again, now with the fresh key, and take it off the host.
