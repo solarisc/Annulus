@@ -1,21 +1,28 @@
-//! A session: a program (a local shell, or for now `ssh`) running in a PTY, feeding a
-//! terminal (ADR-0016). `alacritty_terminal`'s event loop reads the PTY on its own thread;
-//! the UI thread writes input, resizes, and takes snapshots under the terminal lock.
+//! A session: a program feeding a terminal (ADR-0016). Local programs run in a PTY read by
+//! `alacritty_terminal`'s event loop thread; SSH sessions run on a thread with a small tokio
+//! runtime driving `annulus-ssh`. Either way the UI thread writes input, resizes, answers
+//! prompts and takes snapshots under the terminal lock.
 
 #![forbid(unsafe_code)]
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
+use annulus_ssh::{Output, Prompt};
 use annulus_term::alacritty_terminal::event::{Event, EventListener, WindowSize};
 use annulus_term::alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use annulus_term::alacritty_terminal::grid::Scroll;
 use annulus_term::alacritty_terminal::sync::FairMutex;
 use annulus_term::alacritty_terminal::term::{Term, TermMode};
 use annulus_term::alacritty_terminal::tty;
+use annulus_term::alacritty_terminal::vte::ansi::Processor;
 use annulus_term::select::{self, SelectionKind};
 use annulus_term::{Palette, Screen, Size, config, snapshot};
+use zeroize::Zeroizing;
+
+pub use annulus_ssh::{HostKeyQuestion, Target};
 
 /// What a session tells the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,8 +31,28 @@ pub enum SessionEvent {
     Title(String),
     /// The program rang the bell.
     Bell,
-    /// The program exited; the tab shows its last output.
+    /// The program exited or the connection closed; the tab shows its last output.
     Exited,
+    /// SSH: the server's key is new. Answer with [`Session::answer_host_key`].
+    HostKey(HostKeyQuestion),
+    /// SSH: a password is needed for `user@host`. Answer with [`Session::answer_password`].
+    Password {
+        /// Login name.
+        user: String,
+        /// Host.
+        host: String,
+    },
+    /// The session could not start or connect; the message says why.
+    Failed(String),
+}
+
+/// Where SSH keeps its files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshFiles {
+    /// Annulus's known-hosts file.
+    pub known_hosts: PathBuf,
+    /// The folder with the user's default keys (`~/.ssh`), if any.
+    pub key_dir: Option<PathBuf>,
 }
 
 /// The program a session runs.
@@ -33,20 +60,27 @@ pub enum SessionEvent {
 pub enum Program {
     /// The user's default shell (`$SHELL`, or PowerShell/cmd on Windows).
     DefaultShell,
-    /// A specific program with arguments, e.g. `ssh user@host -p 22`.
+    /// A specific local program with arguments.
     Command {
         /// The program to run, found on `PATH`.
         program: String,
         /// Its arguments.
         args: Vec<String>,
     },
+    /// Annulus's own SSH client.
+    Ssh {
+        /// Where to connect.
+        target: Target,
+        /// Known hosts and keys.
+        files: SshFiles,
+    },
 }
 
 impl Program {
-    /// `ssh` to `target` (`user@host`, `host`, `user@host:port`), using the system OpenSSH
-    /// client until Annulus's own SSH stack lands.
+    /// The system OpenSSH client for `target` (`user@host`, `host`, `user@host:port`), for
+    /// when Annulus's own client can't be used.
     #[must_use]
-    pub fn ssh(target: &str) -> Self {
+    pub fn system_ssh(target: &str) -> Self {
         let (destination, port) = split_port(target.trim());
         let mut args = vec![destination.to_owned()];
         if let Some(port) = port {
@@ -58,6 +92,14 @@ impl Program {
             args,
         }
     }
+}
+
+/// The current OS user name, the default SSH login.
+#[must_use]
+pub fn local_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "root".into())
 }
 
 /// `host:port` splits into host and port; anything else (including IPv6 literals without
@@ -83,13 +125,22 @@ fn split_port(target: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Routes the terminal's events: replies to the PTY, the rest to the UI, and a wake-up so
-/// the UI repaints only when there is something new.
+type Reply = Box<dyn Fn(Vec<u8>) + Send>;
+
+/// Routes the terminal's events: replies to the program, the rest to the UI, and a wake-up
+/// so the UI repaints only when there is something new.
 #[derive(Clone)]
 struct Listener {
     events: Sender<SessionEvent>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    pty: Arc<Mutex<Option<EventLoopSender>>>,
+    reply: Arc<Mutex<Option<Reply>>>,
+}
+
+impl Listener {
+    fn send(&self, event: SessionEvent) {
+        let _ = self.events.send(event);
+        (self.wake)();
+    }
 }
 
 impl EventListener for Listener {
@@ -106,10 +157,10 @@ impl EventListener for Listener {
             }
             // Device status and color queries: the terminal's reply goes back to the program.
             Event::PtyWrite(reply) => {
-                if let Ok(pty) = self.pty.lock()
-                    && let Some(pty) = pty.as_ref()
+                if let Ok(sink) = self.reply.lock()
+                    && let Some(sink) = sink.as_ref()
                 {
-                    let _ = pty.send(Msg::Input(Cow::Owned(reply.into_bytes())));
+                    sink(reply.into_bytes());
                 }
             }
             // Wake-ups only need the repaint below. OSC 52 clipboard and other requests are
@@ -120,20 +171,74 @@ impl EventListener for Listener {
     }
 }
 
+/// Input for an SSH session's thread.
+enum SshInput {
+    Data(Vec<u8>),
+    Resize(Size),
+}
+
+/// How input reaches the program.
+enum Backend {
+    Pty(EventLoopSender),
+    Ssh(tokio::sync::mpsc::UnboundedSender<SshInput>),
+}
+
+/// Questions waiting for the user.
+#[derive(Default)]
+struct Pending {
+    host_key: Option<tokio::sync::oneshot::Sender<bool>>,
+    password: Option<tokio::sync::oneshot::Sender<Option<Zeroizing<String>>>>,
+}
+
+/// Asks the UI through session events and waits for its answer.
+struct UiPrompt {
+    listener: Listener,
+    pending: Arc<Mutex<Pending>>,
+}
+
+impl Prompt for UiPrompt {
+    fn trust_new_host_key(
+        &self,
+        question: HostKeyQuestion,
+    ) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.host_key = Some(tx);
+        }
+        self.listener.send(SessionEvent::HostKey(question));
+        rx
+    }
+
+    fn password(
+        &self,
+        user: String,
+        host: String,
+    ) -> tokio::sync::oneshot::Receiver<Option<Zeroizing<String>>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.password = Some(tx);
+        }
+        self.listener.send(SessionEvent::Password { user, host });
+        rx
+    }
+}
+
 /// A running session.
 pub struct Session {
     term: Arc<FairMutex<Term<Listener>>>,
-    pty: EventLoopSender,
+    backend: Backend,
     events: Receiver<SessionEvent>,
+    pending: Arc<Mutex<Pending>>,
     palette: Palette,
 }
 
 impl Session {
-    /// Starts `program` in a PTY of `size`, with cells of `cell_width` by `cell_height`
-    /// pixels. `wake` is called (from the PTY thread) whenever there is something to redraw.
+    /// Starts `program` in a terminal of `size`, with cells of `cell_width` by `cell_height`
+    /// pixels. `wake` is called (from another thread) whenever there is something to redraw.
     ///
     /// # Errors
-    /// Any OS error creating the PTY or starting the program.
+    /// Any OS error creating the PTY or starting a local program. SSH failures arrive as
+    /// [`SessionEvent::Failed`] instead, since they happen after the tab is open.
     pub fn spawn(
         program: &Program,
         size: Size,
@@ -145,46 +250,100 @@ impl Session {
         let listener = Listener {
             events: events_tx,
             wake: Arc::new(wake),
-            pty: Arc::new(Mutex::new(None)),
+            reply: Arc::new(Mutex::new(None)),
         };
         let term = Arc::new(FairMutex::new(Term::new(config(), &size, listener.clone())));
-        let shell = match program {
-            Program::DefaultShell => None,
-            Program::Command { program, args } => {
-                Some(tty::Shell::new(program.clone(), args.clone()))
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let backend = match program {
+            Program::Ssh { target, files } => Backend::Ssh(spawn_ssh(
+                target.clone(),
+                files.clone(),
+                size,
+                term.clone(),
+                listener.clone(),
+                pending.clone(),
+            )?),
+            Program::DefaultShell | Program::Command { .. } => {
+                let shell = match program {
+                    Program::Command { program, args } => {
+                        Some(tty::Shell::new(program.clone(), args.clone()))
+                    }
+                    _ => None,
+                };
+                let options = tty::Options {
+                    shell,
+                    drain_on_exit: true,
+                    ..tty::Options::default()
+                };
+                let pty = tty::new(&options, window_size(size, cell_width, cell_height), 0)?;
+                let event_loop = EventLoop::new(term.clone(), listener.clone(), pty, true, false)?;
+                let sender = event_loop.channel();
+                let replies = event_loop.channel();
+                if let Ok(mut slot) = listener.reply.lock() {
+                    *slot = Some(Box::new(move |bytes| {
+                        let _ = replies.send(Msg::Input(Cow::Owned(bytes)));
+                    }));
+                }
+                event_loop.spawn();
+                Backend::Pty(sender)
             }
         };
-        let options = tty::Options {
-            shell,
-            drain_on_exit: true,
-            ..tty::Options::default()
-        };
-        let pty = tty::new(&options, window_size(size, cell_width, cell_height), 0)?;
-        let event_loop = EventLoop::new(term.clone(), listener.clone(), pty, true, false)?;
-        let sender = event_loop.channel();
-        if let Ok(mut slot) = listener.pty.lock() {
-            *slot = Some(event_loop.channel());
-        }
-        event_loop.spawn();
         Ok(Self {
             term,
-            pty: sender,
+            backend,
             events,
+            pending,
             palette: Palette::annulus_dark(),
         })
     }
 
     /// Sends input (typed text, encoded keys, pasted text) to the program.
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
-        let _ = self.pty.send(Msg::Input(Cow::Owned(bytes.into())));
+        match &self.backend {
+            Backend::Pty(pty) => {
+                let _ = pty.send(Msg::Input(Cow::Owned(bytes.into())));
+            }
+            Backend::Ssh(input) => {
+                let _ = input.send(SshInput::Data(bytes.into()));
+            }
+        }
     }
 
-    /// Resizes the terminal and the PTY.
+    /// Resizes the terminal and tells the program.
     pub fn resize(&self, size: Size, cell_width: u16, cell_height: u16) {
         self.term.lock().resize(size);
-        let _ = self
-            .pty
-            .send(Msg::Resize(window_size(size, cell_width, cell_height)));
+        match &self.backend {
+            Backend::Pty(pty) => {
+                let _ = pty.send(Msg::Resize(window_size(size, cell_width, cell_height)));
+            }
+            Backend::Ssh(input) => {
+                let _ = input.send(SshInput::Resize(size));
+            }
+        }
+    }
+
+    /// Answers [`SessionEvent::HostKey`]: trust the new key, or stop.
+    pub fn answer_host_key(&self, trust: bool) {
+        if let Some(reply) = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.host_key.take())
+        {
+            let _ = reply.send(trust);
+        }
+    }
+
+    /// Answers [`SessionEvent::Password`]; `None` gives up.
+    pub fn answer_password(&self, password: Option<Zeroizing<String>>) {
+        if let Some(reply) = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.password.take())
+        {
+            let _ = reply.send(password);
+        }
     }
 
     /// Scrolls the view through the scrollback by `lines` (positive scrolls back in time).
@@ -239,8 +398,87 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.pty.send(Msg::Shutdown);
+        // Dropping the SSH input sender ends that session's thread; the PTY loop needs a word.
+        if let Backend::Pty(pty) = &self.backend {
+            let _ = pty.send(Msg::Shutdown);
+        }
     }
+}
+
+/// Runs an SSH session on its own thread: connect (asking the UI as needed), open a shell,
+/// then move bytes between the channel and the terminal until either side closes.
+fn spawn_ssh(
+    target: Target,
+    files: SshFiles,
+    size: Size,
+    term: Arc<FairMutex<Term<Listener>>>,
+    listener: Listener,
+    pending: Arc<Mutex<Pending>>,
+) -> std::io::Result<tokio::sync::mpsc::UnboundedSender<SshInput>> {
+    let (input_tx, mut input) = tokio::sync::mpsc::unbounded_channel();
+    let replies = input_tx.clone();
+    if let Ok(mut slot) = listener.reply.lock() {
+        *slot = Some(Box::new(move |bytes| {
+            let _ = replies.send(SshInput::Data(bytes));
+        }));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    std::thread::Builder::new()
+        .name("ssh session".into())
+        .spawn(move || {
+            runtime.block_on(async move {
+                let prompt = Arc::new(UiPrompt {
+                    listener: listener.clone(),
+                    pending,
+                });
+                let connection = match annulus_ssh::connect(
+                    &target,
+                    &files.known_hosts,
+                    files.key_dir.as_deref(),
+                    prompt,
+                )
+                .await
+                {
+                    Ok(connection) => connection,
+                    Err(error) => return listener.send(SessionEvent::Failed(error.to_string())),
+                };
+                let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
+                let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
+                let mut shell = match connection.shell(columns, rows).await {
+                    Ok(shell) => shell,
+                    Err(error) => return listener.send(SessionEvent::Failed(error.to_string())),
+                };
+                let mut parser: Processor = Processor::new();
+                loop {
+                    tokio::select! {
+                        output = shell.next() => match output {
+                            Output::Data(bytes) => {
+                                parser.advance(&mut *term.lock(), &bytes);
+                                (listener.wake)();
+                            }
+                            Output::Closed => return listener.send(SessionEvent::Exited),
+                        },
+                        message = input.recv() => match message {
+                            Some(SshInput::Data(bytes)) => {
+                                if shell.write(&bytes).await.is_err() {
+                                    return listener.send(SessionEvent::Exited);
+                                }
+                            }
+                            Some(SshInput::Resize(size)) => {
+                                let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
+                                let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
+                                let _ = shell.resize(columns, rows).await;
+                            }
+                            // The tab was closed.
+                            None => return,
+                        },
+                    }
+                }
+            });
+        })?;
+    Ok(input_tx)
 }
 
 fn window_size(size: Size, cell_width: u16, cell_height: u16) -> WindowSize {
@@ -260,20 +498,46 @@ mod tests {
     fn args(program: &Program) -> Vec<String> {
         match program {
             Program::Command { args, .. } => args.clone(),
-            Program::DefaultShell => Vec::new(),
+            _ => Vec::new(),
         }
     }
 
     #[test]
-    fn quick_connect_targets_become_ssh_arguments() {
-        assert_eq!(args(&Program::ssh("admin@prod-db")), ["admin@prod-db"]);
+    fn system_ssh_targets_become_arguments() {
         assert_eq!(
-            args(&Program::ssh(" admin@10.0.4.12:2222 ")),
+            args(&Program::system_ssh("admin@prod-db")),
+            ["admin@prod-db"]
+        );
+        assert_eq!(
+            args(&Program::system_ssh(" admin@10.0.4.12:2222 ")),
             ["admin@10.0.4.12", "-p", "2222"]
         );
-        assert_eq!(args(&Program::ssh("[fe80::1]:22")), ["fe80::1", "-p", "22"]);
-        assert_eq!(args(&Program::ssh("fe80::1")), ["fe80::1"]);
-        assert_eq!(args(&Program::ssh("host:notaport")), ["host:notaport"]);
+        assert_eq!(
+            args(&Program::system_ssh("[fe80::1]:22")),
+            ["fe80::1", "-p", "22"]
+        );
+        assert_eq!(args(&Program::system_ssh("fe80::1")), ["fe80::1"]);
+        assert_eq!(
+            args(&Program::system_ssh("host:notaport")),
+            ["host:notaport"]
+        );
+    }
+
+    fn wait_for(session: &Session, text: &str) -> bool {
+        // Waits on real process or network output; bounded so a failure ends instead of hanging.
+        for _ in 0..200 {
+            let screen = session.screen();
+            if screen.rows.iter().any(|row| {
+                row.iter()
+                    .map(|cell| cell.ch)
+                    .collect::<String>()
+                    .contains(text)
+            }) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
     }
 
     #[test]
@@ -290,21 +554,44 @@ mod tests {
             }
         };
         let session = Session::spawn(&program, Size::new(80, 24), 8, 16, || {}).unwrap();
-        let mut seen = false;
-        // Waits on real process output; bounded so a broken PTY fails instead of hanging.
+        assert!(
+            wait_for(&session, "annulus-ok"),
+            "the program's output never appeared"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_ssh_host_reports_failure_in_the_tab() {
+        let files = SshFiles {
+            known_hosts: std::env::temp_dir().join("annulus-session-kh"),
+            key_dir: None,
+        };
+        // Port 1 on localhost refuses connections.
+        let target = Target {
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "nobody".into(),
+        };
+        let session = Session::spawn(
+            &Program::Ssh { target, files },
+            Size::new(80, 24),
+            8,
+            16,
+            || {},
+        )
+        .unwrap();
+        let mut failed = false;
         for _ in 0..200 {
-            let screen = session.screen();
-            if screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.ch)
-                    .collect::<String>()
-                    .contains("annulus-ok")
-            }) {
-                seen = true;
+            if session
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, SessionEvent::Failed(_)))
+            {
+                failed = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(seen, "the program's output never appeared");
+        assert!(failed, "no failure was reported");
     }
 }

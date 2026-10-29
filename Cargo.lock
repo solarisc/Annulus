@@ -4555,6 +4555,7 @@ dependencies = [
  "annulus-term",
  "annulus-ui",
  "annulus-vault",
+ "zeroize",
 ]
 
 [[package]]
@@ -4581,7 +4582,10 @@ version = "0.0.0"
 name = "annulus-session"
 version = "0.0.0"
 dependencies = [
+ "tokio",
+ "annulus-ssh",
  "annulus-term",
+ "zeroize",
 ]
 
 [[package]]

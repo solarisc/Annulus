@@ -12,4 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tokio.workspace = true
+annulus-ssh = { path = "../annulus-ssh" }
 annulus-term = { path = "../annulus-term" }
+zeroize.workspace = true

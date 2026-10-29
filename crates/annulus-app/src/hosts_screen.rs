@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Palette, space, text};
-use annulus_session::Program;
+use annulus_session::{Program, SshFiles, Target, local_user};
 use annulus_ui::{icons, theme};
 use annulus_vault::hosts::{DEFAULT_PORT, Host, HostStore};
 
@@ -27,17 +27,31 @@ pub struct HostsScreen {
     store: Result<HostStore, String>,
     search: String,
     editor: Option<Draft>,
+    ssh_files: SshFiles,
 }
 
 impl HostsScreen {
-    /// Opens the host list kept at `path`.
+    /// Opens the host list kept at `path`; connections use `ssh_files`.
     #[must_use]
-    pub fn open(path: std::path::PathBuf) -> Self {
+    pub fn open(path: std::path::PathBuf, ssh_files: SshFiles) -> Self {
         let store = HostStore::open(path).map_err(|error| error.to_string());
         Self {
             store,
             search: String::new(),
             editor: None,
+            ssh_files,
+        }
+    }
+
+    /// Annulus's SSH client for `target` text (`user@host:port`), or the system `ssh` if the
+    /// text is not a target Annulus understands.
+    fn ssh(&self, target: &str) -> Program {
+        match Target::parse(target, &local_user()) {
+            Some(target) => Program::Ssh {
+                target,
+                files: self.ssh_files.clone(),
+            },
+            None => Program::system_ssh(target),
         }
     }
 
@@ -122,10 +136,7 @@ impl HostsScreen {
             for host in &matches {
                 match host_row(ui, host, palette) {
                     RowAction::Connect => {
-                        request = Some(Request::Open(
-                            host.label.clone(),
-                            Program::ssh(&host.target()),
-                        ));
+                        request = Some(Request::Open(host.label.clone(), self.ssh(&host.target())));
                     }
                     RowAction::Edit => {
                         self.editor = Some(Draft {
@@ -152,9 +163,9 @@ impl HostsScreen {
                 .iter()
                 .find(|host| host.label.eq_ignore_ascii_case(query))
         {
-            return Request::Open(host.label.clone(), Program::ssh(&host.target()));
+            return Request::Open(host.label.clone(), self.ssh(&host.target()));
         }
-        Request::Open(query.to_owned(), Program::ssh(query))
+        Request::Open(query.to_owned(), self.ssh(query))
     }
 
     fn editor_ui(&mut self, ui: &mut Ui) {
@@ -335,7 +346,11 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("annulus-app-test-{}-{label}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut screen = HostsScreen::open(dir.join("hosts.json"));
+        let files = SshFiles {
+            known_hosts: dir.join("known_hosts"),
+            key_dir: None,
+        };
+        let mut screen = HostsScreen::open(dir.join("hosts.json"), files);
         if let Ok(store) = &mut screen.store {
             let mut host = store.draft();
             host.label = label.into();
@@ -347,10 +362,13 @@ mod tests {
         screen
     }
 
-    fn opened(request: &Request) -> (&str, Vec<String>) {
+    fn opened(request: &Request) -> (&str, String) {
         match request {
-            Request::Open(title, Program::Command { args, .. }) => (title.as_str(), args.clone()),
-            Request::Open(title, Program::DefaultShell) => (title.as_str(), Vec::new()),
+            Request::Open(title, Program::Ssh { target, .. }) => (
+                title.as_str(),
+                format!("{}@{}:{}", target.user, target.host, target.port),
+            ),
+            Request::Open(title, _) => (title.as_str(), String::new()),
         }
     }
 
@@ -360,10 +378,7 @@ mod tests {
         let request = screen.quick_connect("PROD-DB");
         assert_eq!(
             opened(&request),
-            (
-                "prod-db",
-                vec!["admin@10.0.4.12".to_owned(), "-p".into(), "2222".into()]
-            )
+            ("prod-db", "admin@10.0.4.12:2222".to_owned())
         );
     }
 
@@ -373,10 +388,7 @@ mod tests {
         let request = screen.quick_connect("root@other:22");
         assert_eq!(
             opened(&request),
-            (
-                "root@other:22",
-                vec!["root@other".to_owned(), "-p".into(), "22".into()]
-            )
+            ("root@other:22", "root@other:22".to_owned())
         );
     }
 }

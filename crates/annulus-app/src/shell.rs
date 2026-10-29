@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Appearance, Palette, ThemeMode, space, text};
-use annulus_session::Program;
+use annulus_session::{Program, SshFiles};
 use annulus_ui::{icons, theme};
 
 use crate::hosts_screen::{HostsScreen, Request};
@@ -112,7 +112,13 @@ impl Shell {
             active_tab: 0,
             section: Section::Hosts,
             theme_mode: ThemeMode::System,
-            hosts: HostsScreen::open(data_dir.join("hosts.json")),
+            hosts: HostsScreen::open(
+                data_dir.join("hosts.json"),
+                SshFiles {
+                    known_hosts: data_dir.join("known_hosts"),
+                    key_dir: directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".ssh")),
+                },
+            ),
             font_size: DEFAULT_FONT_SIZE,
             applied: None,
         }
