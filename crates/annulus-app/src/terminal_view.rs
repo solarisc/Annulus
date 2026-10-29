@@ -18,6 +18,42 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ssh_dialogs::SshDialogs;
 
+/// What to try next after a failed connection, by what went wrong (F-APP-007).
+fn next_step(message: &str) -> Option<&'static str> {
+    let message = message.to_lowercase();
+    if message.contains("has changed") {
+        Some(
+            "If the server was reinstalled, forget its old key on the Known Hosts screen and \
+             connect again. If not, do not connect: someone may be in between.",
+        )
+    } else if message.contains("was not trusted") {
+        Some("Connect again and trust the key if its fingerprint matches the server's.")
+    } else if message.contains("authentication failed") {
+        Some(
+            "Check the username and the key or password in the host's settings; the server's \
+             accepted methods are listed above.",
+        )
+    } else if message.contains("proxy") {
+        Some("Check the proxy address and login in the host's settings.")
+    } else if message.contains("could not reach") {
+        Some(
+            "Check the address and port, and that the server is on and reachable from here \
+             (VPN, firewall).",
+        )
+    } else {
+        None
+    }
+}
+
+/// The text "Copy details" puts on the clipboard: the app version, the tab and the error.
+fn diagnostic(title: &str, message: &str) -> String {
+    format!(
+        "Annulus {} on {}\nConnecting to: {title}\nError: {message}\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS
+    )
+}
+
 /// Smallest and largest terminal font size.
 pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 
@@ -485,10 +521,23 @@ impl TerminalTab {
     fn failed_ui(&mut self, ui: &mut Ui) {
         if let Some(message) = &self.failed {
             ui.colored_label(Color32::from_rgb(0xE8, 0x64, 0x5D), message);
+            if let Some(step) = next_step(message) {
+                ui.label(step);
+            }
         }
-        if ui.button("Try again").clicked() {
-            self.restart();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Try again").clicked() {
+                self.restart();
+            }
+            if let Some(message) = &self.failed
+                && ui
+                    .button("Copy details")
+                    .on_hover_text("For a bug report; it holds no passwords or keys")
+                    .clicked()
+            {
+                ui.ctx().copy_text(diagnostic(&self.title, message));
+            }
+        });
     }
 
     /// Draws with `palette` (the terminal theme from Settings).
@@ -995,6 +1044,31 @@ mod tests {
         tab.drawn.store(false, Ordering::Relaxed);
         tab.failed = Some("refused".into());
         assert!(!tab.connecting(), "a failure shows instead");
+    }
+
+    #[test]
+    fn failures_come_with_a_next_step_and_copyable_details() {
+        let changed = "web: the host key of web has changed (SHA256:x); the connection was stopped";
+        assert!(next_step(changed).unwrap().contains("Known Hosts"));
+        assert!(
+            next_step("authentication failed (tried: password; the server accepts: publickey)")
+                .unwrap()
+                .contains("username")
+        );
+        assert!(
+            next_step("could not reach db:22: refused")
+                .unwrap()
+                .contains("port")
+        );
+        assert!(
+            next_step("could not reach the proxy: refused")
+                .unwrap()
+                .contains("proxy")
+        );
+        assert_eq!(next_step("something else"), None);
+        let details = diagnostic("db", "could not reach db:22: refused");
+        assert!(details.starts_with("Annulus "));
+        assert!(details.contains("Connecting to: db\nError: could not reach db:22: refused"));
     }
 
     #[test]
