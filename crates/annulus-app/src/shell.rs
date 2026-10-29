@@ -7,7 +7,7 @@ use annulus_session::Program;
 use annulus_ui::{icons, theme};
 
 use crate::hosts_screen::{HostsScreen, Request};
-use crate::terminal_view::TerminalTab;
+use crate::terminal_view::{DEFAULT_FONT_SIZE, FONT_SIZES, TerminalTab};
 
 /// A section of the vault's left navigation (F-APP-003).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +98,8 @@ pub struct Shell {
     pub theme_mode: ThemeMode,
     /// The Hosts screen.
     pub hosts: HostsScreen,
+    /// Terminal font size in points, shared by all terminal tabs.
+    pub font_size: f32,
     applied: Option<Appearance>,
 }
 
@@ -111,6 +113,7 @@ impl Shell {
             section: Section::Hosts,
             theme_mode: ThemeMode::System,
             hosts: HostsScreen::open(data_dir.join("hosts.json")),
+            font_size: DEFAULT_FONT_SIZE,
             applied: None,
         }
     }
@@ -156,6 +159,9 @@ impl Shell {
     /// Draws the window.
     pub fn ui(&mut self, ui: &mut Ui) {
         self.apply_theme(&ui.ctx().clone());
+        // Ctrl+Shift+/-/0 zoom the terminal, not the whole UI.
+        ui.ctx()
+            .options_mut(|options| options.zoom_with_keyboard = false);
         self.shortcuts(ui);
         egui::Panel::top("tabs").show(ui, |ui| self.tab_strip(ui));
         if matches!(self.tabs.get(self.active_tab), Some(Tab::Vault)) {
@@ -165,10 +171,11 @@ impl Shell {
                 .show(ui, |ui| self.navigation(ui));
             egui::CentralPanel::default().show(ui, |ui| self.section_screen(ui));
         } else if let Some(Tab::Terminal(terminal)) = self.tabs.get_mut(self.active_tab) {
+            let font_size = self.font_size;
             let frame = egui::Frame::NONE.inner_margin(egui::Margin::same(4));
             egui::CentralPanel::default()
                 .frame(frame)
-                .show(ui, |ui| terminal.ui(ui));
+                .show(ui, |ui| terminal.ui(ui, font_size));
         }
     }
 
@@ -191,6 +198,30 @@ impl Shell {
         if next_tab {
             self.active_tab = (self.active_tab + 1) % self.tabs.len().max(1);
         }
+        // Terminal zoom: Ctrl+Shift with + / - / 0, or Ctrl+wheel (egui reports it as zoom).
+        let (bigger, smaller, reset, wheel) = ui.input_mut(|input| {
+            (
+                input.consume_key(command, egui::Key::Plus)
+                    || input.consume_key(command, egui::Key::Equals),
+                input.consume_key(command, egui::Key::Minus),
+                input.consume_key(command, egui::Key::Num0),
+                input.zoom_delta(),
+            )
+        });
+        let mut size = self.font_size;
+        if bigger {
+            size += 1.0;
+        }
+        if smaller {
+            size -= 1.0;
+        }
+        if reset {
+            size = DEFAULT_FONT_SIZE;
+        }
+        if (wheel - 1.0).abs() > f32::EPSILON {
+            size *= wheel;
+        }
+        self.font_size = size.clamp(*FONT_SIZES.start(), *FONT_SIZES.end());
     }
 
     fn tab_strip(&mut self, ui: &mut Ui) {

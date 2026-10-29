@@ -11,8 +11,11 @@ use annulus_term::keys::{self, Key, Mods};
 use annulus_term::select::SelectionKind;
 use annulus_term::{Screen, Size};
 
-/// Font size of terminal text, in points.
-const FONT_SIZE: f32 = 14.0;
+/// Default font size of terminal text, in points.
+pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+
+/// Smallest and largest terminal font size.
+pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 
 /// One terminal tab.
 pub struct TerminalTab {
@@ -42,8 +45,8 @@ impl TerminalTab {
     }
 
     /// Draws the tab and handles its input.
-    pub fn ui(&mut self, ui: &mut Ui) {
-        let font = FontId::monospace(FONT_SIZE);
+    pub fn ui(&mut self, ui: &mut Ui, font_size: f32) {
+        let font = FontId::monospace(font_size);
         let cell = Vec2::new(
             ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M')).max(1.0),
             ui.fonts_mut(|fonts| fonts.row_height(&font)).max(1.0),
@@ -83,6 +86,13 @@ impl TerminalTab {
             match event {
                 SessionEvent::Title(title) if !title.trim().is_empty() => self.title = title,
                 SessionEvent::Exited => self.exited = true,
+                // A bell asks for attention (the taskbar flashes) instead of making a sound.
+                SessionEvent::Bell => {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Informational,
+                        ))
+                }
                 _ => {}
             }
         }
@@ -110,7 +120,8 @@ impl TerminalTab {
             });
             handle_input(ui, session);
         }
-        if response.hovered() {
+        // Ctrl+wheel zooms (handled by the shell); a plain wheel scrolls back.
+        if response.hovered() && !ui.input(|input| input.modifiers.ctrl) {
             let scroll = ui.input(|input| input.smooth_scroll_delta().y);
             if scroll.abs() > 0.0 {
                 #[allow(clippy::cast_possible_truncation)] // A few lines per wheel step.
