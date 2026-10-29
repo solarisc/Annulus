@@ -173,6 +173,53 @@ impl HostsScreen {
         }
     }
 
+    /// Acts on a host row's button or menu choice; a connect becomes a request.
+    fn row_action(&mut self, ui: &Ui, host: &Host, action: RowAction) -> Option<Request> {
+        match action {
+            RowAction::Connect => {
+                return Some(Request::Open(host.label.clone(), self.connect_host(host)));
+            }
+            RowAction::Sftp => {
+                return Some(Request::Sftp(host.label.clone(), self.connect_host(host)));
+            }
+            RowAction::CopyCommand => {
+                let jump = host
+                    .jump_id
+                    .and_then(|id| self.vault.hosts().iter().find(|h| h.id == id));
+                ui.ctx().copy_text(ssh_command(host, jump));
+                self.notice = Some(format!("Copied the ssh command for {}.", host.label));
+            }
+            RowAction::Duplicate => {
+                let mut copy = self.vault.draft_host();
+                let id = copy.id;
+                copy = Host {
+                    id,
+                    label: format!("{} copy", host.label),
+                    ..host.clone()
+                };
+                self.notice = self
+                    .vault
+                    .upsert_host(copy)
+                    .err()
+                    .map(|error| format!("Could not duplicate: {error}"));
+            }
+            RowAction::Edit => {
+                self.editor = Some(Draft {
+                    port: host.port.to_string(),
+                    tags: host.tags.join(", "),
+                    problem: None,
+                    is_new: false,
+                    password: SecretText::new(),
+                    forget_password: false,
+                    proxy: SecretText::from(host.proxy.as_ref().map_or("", |url| url.expose())),
+                    host: host.clone(),
+                });
+            }
+            RowAction::None => {}
+        }
+        None
+    }
+
     /// The unlocked vault.
     #[must_use]
     pub fn vault(&self) -> &Vault {
@@ -259,28 +306,9 @@ impl HostsScreen {
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
             for host in &matches {
-                match host_row(ui, host, palette) {
-                    RowAction::Connect => {
-                        request = Some(Request::Open(host.label.clone(), self.connect_host(host)));
-                    }
-                    RowAction::Sftp => {
-                        request = Some(Request::Sftp(host.label.clone(), self.connect_host(host)));
-                    }
-                    RowAction::Edit => {
-                        self.editor = Some(Draft {
-                            port: host.port.to_string(),
-                            tags: host.tags.join(", "),
-                            problem: None,
-                            is_new: false,
-                            password: SecretText::new(),
-                            forget_password: false,
-                            proxy: SecretText::from(
-                                host.proxy.as_ref().map_or("", |url| url.expose()),
-                            ),
-                            host: host.clone(),
-                        });
-                    }
-                    RowAction::None => {}
+                let action = host_row(ui, host, palette);
+                if let Some(chosen) = self.row_action(ui, host, action) {
+                    request = Some(chosen);
                 }
             }
         });
@@ -498,11 +526,33 @@ fn key_picker(ui: &mut Ui, key_id: &mut Option<u64>, keys: &[(u64, String)]) {
         });
 }
 
+#[derive(Clone, Copy)]
 enum RowAction {
     None,
     Connect,
     Sftp,
     Edit,
+    CopyCommand,
+    Duplicate,
+}
+
+/// An OpenSSH command line that reaches `host` (through `jump`, if it has one), for pasting
+/// into another terminal (F-HOST-010). Saved passwords are never part of it.
+fn ssh_command(host: &Host, jump: Option<&Host>) -> String {
+    let mut parts = vec!["ssh".to_owned()];
+    if host.port != DEFAULT_PORT {
+        parts.push(format!("-p {}", host.port));
+    }
+    if let Some(jump) = jump {
+        parts.push(format!("-J {}", jump.target()));
+    }
+    let (user, address) = (host.username.trim(), host.address.trim());
+    parts.push(if user.is_empty() {
+        address.to_owned()
+    } else {
+        format!("{user}@{address}")
+    });
+    parts.join(" ")
 }
 
 fn host_row(ui: &mut Ui, host: &Host, palette: &Palette) -> RowAction {
@@ -559,6 +609,26 @@ fn host_row(ui: &mut Ui, host: &Host, palette: &Palette) -> RowAction {
     {
         return RowAction::Sftp;
     }
+    let more_rect = egui::Rect::from_min_size(
+        sftp_rect.min - egui::vec2(36.0, 0.0),
+        egui::vec2(28.0, 28.0),
+    );
+    let mut chosen = RowAction::None;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(more_rect), |ui| {
+        ui.menu_button("\u{22ef}", |ui| {
+            if ui.button("Copy ssh command").clicked() {
+                chosen = RowAction::CopyCommand;
+                ui.close();
+            }
+            if ui.button("Duplicate").clicked() {
+                chosen = RowAction::Duplicate;
+                ui.close();
+            }
+        });
+    });
+    if !matches!(chosen, RowAction::None) {
+        return chosen;
+    }
     if response.clicked()
         || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
     {
@@ -609,6 +679,24 @@ mod tests {
                 key_dir: None,
             },
         )
+    }
+
+    #[test]
+    fn the_ssh_command_has_port_jump_and_user_but_never_a_password() {
+        let mut host = screen_with("cmd").vault.hosts()[0].clone();
+        host.password = Some(Secret::new("hunter2"));
+        let mut jump = host.clone();
+        jump.address = "bastion.example.com".into();
+        jump.port = 22;
+        let command = ssh_command(&host, Some(&jump));
+        assert_eq!(
+            command,
+            "ssh -p 2222 -J admin@bastion.example.com admin@10.0.4.12"
+        );
+        assert!(!command.contains("hunter2"));
+        host.username.clear();
+        host.port = 22;
+        assert_eq!(ssh_command(&host, None), "ssh 10.0.4.12");
     }
 
     #[test]
