@@ -34,6 +34,20 @@ fn round(url: &str, account: &SyncAccount, vault: &mut Vault) {
     assert!(vault.commit_sync(replica.0).unwrap());
 }
 
+/// Host "db" in group "databases", which gives it user postgres and port 5422.
+fn add_grouped_host(vault: &mut Vault) {
+    let mut group = vault.draft_group(None).unwrap();
+    group.name = "databases".into();
+    group.defaults.username = "postgres".into();
+    group.defaults.port = Some(5422);
+    vault.upsert_group(group.clone()).unwrap();
+    let mut host = vault.draft_host();
+    host.label = "db".into();
+    host.address = "10.0.0.5".into();
+    host.group = Some(group.uid);
+    vault.upsert_host(host).unwrap();
+}
+
 #[test]
 #[ignore = "needs a deployed annulus-server"]
 fn two_devices_sync_restore_and_change_password_through_a_real_server() {
@@ -43,16 +57,7 @@ fn two_devices_sync_restore_and_change_password_through_a_real_server() {
 
     // Device A creates the account from its vault.
     let (mut laptop, _) = Vault::create(temp("a"), "first password!", CHEAP).unwrap();
-    let mut group = laptop.draft_group(None).unwrap();
-    group.name = "databases".into();
-    group.defaults.username = "postgres".into();
-    group.defaults.port = Some(5422);
-    laptop.upsert_group(group.clone()).unwrap();
-    let mut host = laptop.draft_host();
-    host.label = "db".into();
-    host.address = "10.0.0.5".into();
-    host.group = Some(group.uid.clone());
-    laptop.upsert_host(host).unwrap();
+    add_grouped_host(&mut laptop);
     let mut http = HttpServer::new(&url, None).unwrap();
     let session = account::register(
         &mut http,
