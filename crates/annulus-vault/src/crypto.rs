@@ -96,13 +96,52 @@ impl std::fmt::Debug for Key {
     }
 }
 
-/// Ciphertext with its nonce.
+/// Ciphertext with its nonce. Written with its bytes as base64; files and records from
+/// earlier builds, with bytes as number arrays (about four times larger), still read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sealed {
     /// The 192-bit random nonce.
+    #[serde(with = "compact")]
     pub nonce: Vec<u8>,
     /// Ciphertext and tag.
+    #[serde(with = "compact")]
     pub ciphertext: Vec<u8>,
+}
+
+/// Bytes as a base64 string, read back from that or from the older array of numbers.
+mod compact {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct Either;
+        impl<'de> Visitor<'de> for Either {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("base64 text or an array of bytes")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<Vec<u8>, E> {
+                STANDARD.decode(text).map_err(E::custom)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
+        }
+        deserializer.deserialize_any(Either)
+    }
 }
 
 fn seal(key: &Key, plaintext: &[u8], aad: &[u8]) -> Result<Sealed, CryptoError> {
@@ -351,6 +390,21 @@ mod tests {
 
     fn vault() -> (Keys, KeyFile, Zeroizing<String>) {
         Keys::create("correct horse", KdfParams::TEST).unwrap()
+    }
+
+    #[test]
+    fn sealed_bytes_are_written_as_base64_and_old_arrays_still_read() {
+        let sealed = Sealed {
+            nonce: vec![1, 2, 3],
+            ciphertext: vec![255, 0, 7],
+        };
+        let json = serde_json::to_string(&sealed).unwrap();
+        assert_eq!(json, r#"{"nonce":"AQID","ciphertext":"/wAH"}"#);
+        assert_eq!(serde_json::from_str::<Sealed>(&json).unwrap(), sealed);
+        let old: Sealed =
+            serde_json::from_str(r#"{"nonce":[1,2,3],"ciphertext":[255,0,7]}"#).unwrap();
+        assert_eq!(old, sealed);
+        assert!(serde_json::from_str::<Sealed>(r#"{"nonce":"!!","ciphertext":""}"#).is_err());
     }
 
     #[test]

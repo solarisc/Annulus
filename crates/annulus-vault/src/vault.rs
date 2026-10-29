@@ -1507,11 +1507,11 @@ mod tests {
         let web = host(&vault, "web");
         vault.upsert_host(web).unwrap();
         let mut text = std::fs::read_to_string(&path).unwrap();
-        // Flip one digit of the last ciphertext: the host record, not the wrapped key (that
+        // Change one character of the last ciphertext: a record, not the wrapped key (that
         // would read as a wrong password, since the key can no longer be unwrapped).
-        let at = text.rfind("\"ciphertext\":[").unwrap() + 14;
-        let digit = text.as_bytes()[at];
-        text.replace_range(at..=at, if digit == b'1' { "2" } else { "1" });
+        let at = text.rfind("\"ciphertext\":\"").unwrap() + 14;
+        let first = text.as_bytes()[at];
+        text.replace_range(at..=at, if first == b'A' { "B" } else { "A" });
         std::fs::write(&path, &text).unwrap();
         assert!(matches!(
             Vault::unlock(&path, "pw"),
