@@ -4,6 +4,10 @@
 
 #![forbid(unsafe_code)]
 
+mod text;
+
+pub use text::{TEST_FONT, TEST_FONT_FAMILY, TextEngine};
+
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Stroke, Transform};
 use annulus_ui::{Color, DisplayList, Op, Rect};
 
@@ -32,6 +36,8 @@ pub struct Canvas {
     clips: Vec<Option<Mask>>,
     /// DIPs to device pixels.
     scale: f32,
+    /// Draws text runs; without one they are skipped.
+    text: Option<TextEngine>,
 }
 
 impl Canvas {
@@ -51,7 +57,13 @@ impl Canvas {
             layers: vec![(pixmap, 1.0)],
             clips: Vec::new(),
             scale,
+            text: None,
         })
+    }
+
+    /// Uses `engine` to draw text runs.
+    pub fn set_text_engine(&mut self, engine: TextEngine) {
+        self.text = Some(engine);
     }
 
     /// Fills the whole canvas with `color`.
@@ -130,10 +142,15 @@ impl Canvas {
             } => {
                 self.shadow(*rect, *radius, offset.x, offset.y, *blur, *color);
             }
-            // TODO: text runs need the text service (bundled font, swash, parley).
+            Op::TextRun {
+                origin,
+                text,
+                size,
+                color,
+            } => self.text_run(*origin, text, *size, *color),
             // TODO: icons need the icon set.
             // TODO: images need an image store; none are used before the host grid.
-            Op::TextRun { .. } | Op::Icon { .. } | Op::Image { .. } => {}
+            Op::Icon { .. } | Op::Image { .. } => {}
             Op::PushClip(rect) => self.push_clip(*rect),
             Op::PopClip => {
                 self.clips.pop();
@@ -155,6 +172,19 @@ impl Canvas {
         if let Some((target, _)) = self.layers.last_mut() {
             target.fill_path(&path, &paint, FillRule::Winding, transform, mask);
         }
+    }
+
+    fn text_run(&mut self, origin: annulus_ui::Point, text: &str, size: f32, color: Color) {
+        let scale = self.scale;
+        let (Some(engine), Some((target, _))) = (self.text.as_mut(), self.layers.last_mut()) else {
+            return;
+        };
+        if !(size.is_finite() && size > 0.0 && origin.x.is_finite() && origin.y.is_finite()) {
+            return;
+        }
+        let mask = self.clips.last().and_then(Option::as_ref);
+        let baseline = annulus_ui::Point::new(origin.x * scale, origin.y * scale);
+        engine.draw(target, baseline, text, size * scale, color, mask);
     }
 
     fn border(&mut self, rect: Rect, radius: f32, width: f32, color: Color) {

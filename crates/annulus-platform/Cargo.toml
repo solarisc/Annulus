@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+parley.workspace = true
+swash.workspace = true
 tiny-skia.workspace = true
 annulus-ui = { path = "../annulus-ui" }
 
