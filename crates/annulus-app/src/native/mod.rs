@@ -383,8 +383,8 @@ impl NativeApp {
             .push((title.clone(), program, Some(OpenTab::Local(title))));
     }
 
-    /// Split, close, broadcast and move between panes of the terminal tab in front
-    /// (UI-SPEC §7). Taken before the terminal sees the keys.
+    /// Split, close, broadcast, focus mode and moving between panes of the terminal tab in
+    /// front (UI-SPEC §7). Taken before the terminal sees the keys.
     fn pane_shortcuts(&mut self, ui: &mut Ui<'_>) {
         let close = ui.key(Key::Char('w'), Modifiers::CTRL_SHIFT);
         let Some(tab) = self.tabs.get_mut(self.active) else {
@@ -415,7 +415,10 @@ impl NativeApp {
             panes.split(false);
         }
         if ui.key(Key::Char('b'), Modifiers::CTRL_SHIFT) {
-            panes.broadcast = !panes.broadcast;
+            panes.toggle_broadcast();
+        }
+        if ui.key(Key::Char('m'), Modifiers::CTRL_SHIFT) {
+            panes.toggle_focus_mode();
         }
         let alt = Modifiers {
             alt: true,
@@ -787,7 +790,7 @@ impl NativeApp {
                     .map(|vault| vault.snippets().to_vec())
                     .unwrap_or_default();
                 if let Some(bytes) = screens::snippet_panel(ui, side, search, &snippets) {
-                    panes.write_focused(&bytes);
+                    panes.write_snippet(&bytes);
                 }
             }
             match view {
