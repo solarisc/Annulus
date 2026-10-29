@@ -1992,10 +1992,16 @@ fn a_second_window_cannot_open_the_same_data_folder() {
         "a second one is refused"
     );
     drop(first);
-    assert!(
-        super::instance_lock(&dir).is_some(),
-        "free again once the first closes"
-    );
+    // Other tests start shells meanwhile: a child forked while the lock was open shares it
+    // until it starts its program (the file closes on exec), so allow it a moment.
+    let started = std::time::Instant::now();
+    while super::instance_lock(&dir).is_none() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "free again once the first closes"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[test]
