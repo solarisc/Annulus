@@ -18,7 +18,7 @@ use crate::password_screen::PasswordScreen;
 use crate::sftp_view::SftpTab;
 use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::SyncScreen;
-use crate::terminal_view::FONT_SIZES;
+use crate::terminal_view::{FONT_SIZES, PaneRequest};
 use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
 use annulus_session::profiles::{self, Profile};
 use annulus_term::themes;
@@ -208,6 +208,7 @@ impl Shell {
         let Some(Tab::Terminal(panes)) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let request = panes.take_request();
         let command = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
         let several = panes.len() > 1;
         if ui.input_mut(|input| input.consume_key(command, egui::Key::B)) {
@@ -224,13 +225,22 @@ impl Shell {
                 forward,
             )
         });
+        let right = right || request == Some(PaneRequest::SplitRight);
+        let down = down || request == Some(PaneRequest::SplitDown);
         if let Some((title, program)) = panes.focused_program() {
+            if request == Some(PaneRequest::OpenSftp) {
+                self.open_sftp(title.clone(), program.clone());
+                return;
+            }
             if right {
                 panes.split(PaneLayout::Row, title.clone(), program.clone());
             }
             if down {
                 panes.split(PaneLayout::Column, title, program);
             }
+        }
+        if request == Some(PaneRequest::Snippets) && self.snippet_panel.is_none() {
+            self.snippet_panel = Some(String::new());
         }
         if back {
             panes.move_focus(-1);

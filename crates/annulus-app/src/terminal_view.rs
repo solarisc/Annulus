@@ -18,6 +18,19 @@ use crate::ssh_dialogs::SshDialogs;
 /// Smallest and largest terminal font size.
 pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 
+/// Something a pane's context menu asks the tab or the window to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneRequest {
+    /// Split this pane to the right.
+    SplitRight,
+    /// Split this pane downwards.
+    SplitDown,
+    /// Open an SFTP tab for this pane's host.
+    OpenSftp,
+    /// Show the snippet panel.
+    Snippets,
+}
+
 /// One terminal tab.
 pub struct TerminalTab {
     /// The tab's title: the target, until the program sets its own.
@@ -34,6 +47,8 @@ pub struct TerminalTab {
     finished: Option<String>,
     /// What the keyboard sent this frame, for broadcast to other panes.
     sent: Vec<Vec<u8>>,
+    /// A context-menu choice for the tab or window to act on.
+    request: Option<PaneRequest>,
 }
 
 impl TerminalTab {
@@ -52,6 +67,7 @@ impl TerminalTab {
             find: None,
             finished: None,
             sent: Vec::new(),
+            request: None,
         }
     }
 
@@ -151,6 +167,17 @@ impl TerminalTab {
         let id = ui.scope_id().with("terminal");
         let response = ui.interact(area, id, Sense::click_and_drag());
         handle_mouse(&response, session, area.min, cell);
+        let (request, open_find) = context_menu(
+            &response,
+            session,
+            matches!(self.program, Program::Ssh { .. }),
+        );
+        if request.is_some() {
+            self.request = request;
+        }
+        if open_find {
+            self.find.get_or_insert_with(FindBar::default).focus = true;
+        }
         // A new tab takes the keyboard, so typing works without a click first.
         if response.clicked() || !self.focused_once {
             response.request_focus();
@@ -165,18 +192,7 @@ impl TerminalTab {
             return;
         }
         if response.has_focus() {
-            // Tab, arrows and Escape belong to the program, not to egui's focus navigation.
-            ui.memory_mut(|memory| {
-                memory.set_focus_lock_filter(
-                    id,
-                    EventFilter {
-                        tab: true,
-                        horizontal_arrows: true,
-                        vertical_arrows: true,
-                        escape: true,
-                    },
-                );
-            });
+            keep_keys(ui, id);
             if !prompting {
                 self.sent = handle_input(ui, session);
             }
@@ -213,6 +229,11 @@ impl TerminalTab {
             .as_ref()
             .map(Session::transcript)
             .filter(|text| !text.trim().is_empty())
+    }
+
+    /// The context-menu choice made this frame (taken once).
+    pub fn take_request(&mut self) -> Option<PaneRequest> {
+        self.request.take()
     }
 
     /// What the keyboard sent this frame (taken once).
@@ -403,6 +424,69 @@ fn paint_ended(ui: &Ui, origin: Pos2, cell: Vec2, rows: usize, font: FontId) {
         font,
         Color32::GRAY,
     );
+}
+
+/// The right-click menu of a terminal (UI-SPEC: Copy, Paste, Find, Split, Snippets, Open
+/// SFTP here). Returns a choice for the tab or window, and whether Find was chosen.
+fn context_menu(
+    response: &egui::Response,
+    session: &Session,
+    is_ssh: bool,
+) -> (Option<PaneRequest>, bool) {
+    let mut chosen = None;
+    let mut open_find = false;
+    response.context_menu(|ui| {
+        let selection = session.selection_text();
+        if ui
+            .add_enabled(selection.is_some(), egui::Button::new("Copy"))
+            .clicked()
+        {
+            if let Some(text) = selection {
+                ui.ctx().copy_text(text);
+            }
+            ui.close();
+        }
+        if ui.button("Paste").clicked() {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            ui.close();
+        }
+        if ui.button("Find\u{2026}").clicked() {
+            open_find = true;
+            ui.close();
+        }
+        ui.separator();
+        for (label, request) in [
+            ("Split right", PaneRequest::SplitRight),
+            ("Split down", PaneRequest::SplitDown),
+            ("Snippets", PaneRequest::Snippets),
+        ] {
+            if ui.button(label).clicked() {
+                chosen = Some(request);
+                ui.close();
+            }
+        }
+        if is_ssh && ui.button("Open SFTP here").clicked() {
+            chosen = Some(PaneRequest::OpenSftp);
+            ui.close();
+        }
+    });
+    (chosen, open_find)
+}
+
+/// Tab, arrows and Escape belong to the program, not to egui's focus navigation.
+fn keep_keys(ui: &Ui, id: egui::Id) {
+    ui.memory_mut(|memory| {
+        memory.set_focus_lock_filter(
+            id,
+            EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: true,
+            },
+        );
+    });
 }
 
 fn color(rgb: Rgb) -> Color32 {

@@ -106,6 +106,17 @@ impl Panes {
         self.broadcast && self.list.len() > 1
     }
 
+    /// A context-menu choice from any pane, with the pane focused (taken once).
+    pub fn take_request(&mut self) -> Option<crate::terminal_view::PaneRequest> {
+        for (index, pane) in self.list.iter_mut().enumerate() {
+            if let Some(request) = pane.take_request() {
+                self.focused = index;
+                return Some(request);
+            }
+        }
+        None
+    }
+
     /// How many panes there are.
     #[must_use]
     pub fn len(&self) -> usize {
