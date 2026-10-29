@@ -26,6 +26,8 @@ pub enum Request {
     Open(String, Program),
     /// Open an SFTP tab titled `.0` for the SSH connection in `.1`.
     Sftp(String, Program),
+    /// Open a terminal tab for each `(title, program)` (a group's Connect all).
+    OpenAll(Vec<(String, Program)>),
 }
 
 /// The editor's working copy; fields are text until saved.
@@ -451,6 +453,7 @@ impl HostsScreen {
                 );
                 match groups_view::row(ui, group, &holds, palette) {
                     GroupAction::Open => self.group = Some(group.uid.clone()),
+                    GroupAction::ConnectAll => request = Some(self.connect_all(&group.uid)),
                     GroupAction::Edit => {
                         self.editor = None;
                         self.group_editor = Some(GroupDraft::new(group.clone(), false));
@@ -467,6 +470,18 @@ impl HostsScreen {
             }
         });
         request
+    }
+
+    /// A tab for every host directly in group `uid` (F-HOST-003 "Connect all").
+    fn connect_all(&self, uid: &str) -> Request {
+        Request::OpenAll(
+            self.vault
+                .hosts()
+                .iter()
+                .filter(|host| host.group.as_deref() == Some(uid))
+                .map(|host| (host.label.clone(), self.connect_host(host)))
+                .collect(),
+        )
     }
 
     /// A query that names a saved host (by label, case-insensitively) connects to it;
@@ -1094,6 +1109,25 @@ mod tests {
     }
 
     #[test]
+    fn connect_all_opens_every_host_directly_in_the_group() {
+        let mut screen = screen_with("all");
+        let mut group = screen.vault.draft_group(None).unwrap();
+        group.name = "web".into();
+        screen.vault.upsert_group(group.clone()).unwrap();
+        for label in ["web1", "web2"] {
+            let mut host = screen.vault.draft_host();
+            (host.label, host.address) = (label.into(), format!("{label}.lan"));
+            host.group = Some(group.uid.clone());
+            screen.vault.upsert_host(host).unwrap();
+        }
+        let Request::OpenAll(tabs) = screen.connect_all(&group.uid) else {
+            panic!("one request for all");
+        };
+        let titles: Vec<&str> = tabs.iter().map(|(title, _)| title.as_str()).collect();
+        assert_eq!(titles, ["web1", "web2"], "not the host outside the group");
+    }
+
+    #[test]
     fn a_host_can_turn_off_reconnecting() {
         let mut screen = screen_with("rc");
         let mut host = screen.vault.hosts()[0].clone();
@@ -1195,6 +1229,7 @@ mod tests {
                 format!("{}@{}:{}", target.user, target.host, target.port),
             ),
             Request::Open(title, _) | Request::Sftp(title, _) => (title.as_str(), String::new()),
+            Request::OpenAll(_) => ("", String::new()),
         }
     }
 
@@ -1215,7 +1250,7 @@ mod tests {
         screen.vault.upsert_host(host).unwrap();
         let password_of = |request: Request| match request {
             Request::Open(_, Program::Ssh { password, .. }) => password,
-            Request::Open(..) | Request::Sftp(..) => None,
+            Request::Open(..) | Request::Sftp(..) | Request::OpenAll(_) => None,
         };
         assert_eq!(
             password_of(screen.quick_connect("db-pw")),

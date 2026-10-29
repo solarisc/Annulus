@@ -689,6 +689,11 @@ impl Shell {
                         }
                         Some(Request::Open(title, program)) => self.open_terminal(title, program),
                         Some(Request::Sftp(title, program)) => self.open_sftp(title, program),
+                        Some(Request::OpenAll(tabs)) => {
+                            for (title, program) in tabs {
+                                self.open_terminal(title, program);
+                            }
+                        }
                         None => {}
                     }
                 } else if let Some(vault) =

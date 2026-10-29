@@ -96,6 +96,8 @@ pub enum GroupAction {
     Open,
     /// Edit the group.
     Edit,
+    /// Open a terminal for each host in it.
+    ConnectAll,
 }
 
 /// One group in the list: icon, name and what it holds; click or Enter opens it.
@@ -132,7 +134,7 @@ pub fn row(ui: &mut Ui, group: &Group, holds: &str, palette: &Palette) -> GroupA
         theme::color(palette.text_primary),
     );
     painter.text(
-        egui::pos2(rect.max.x - 90.0, rect.center().y),
+        egui::pos2(rect.max.x - 190.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
         holds,
         egui::FontId::proportional(text::SECONDARY),
@@ -144,6 +146,14 @@ pub fn row(ui: &mut Ui, group: &Group, holds: &str, palette: &Palette) -> GroupA
     );
     if ui.put(edit, Button::new("Edit")).clicked() {
         return GroupAction::Edit;
+    }
+    let all = egui::Rect::from_min_size(edit.min - egui::vec2(104.0, 0.0), egui::vec2(96.0, 28.0));
+    if ui
+        .put(all, Button::new("Connect all"))
+        .on_hover_text("Open a terminal for each host in this group")
+        .clicked()
+    {
+        return GroupAction::ConnectAll;
     }
     if response.clicked()
         || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
