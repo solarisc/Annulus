@@ -9,6 +9,7 @@ use std::ops::{BitOr, BitOrAssign};
 
 use crate::display_list::DisplayList;
 use crate::geometry::Rect;
+use crate::style::{Position, Style};
 use crate::widget::Widget;
 
 /// A handle to a node. It stays valid until the node is removed, and never refers to another
@@ -70,12 +71,17 @@ pub enum TreeError {
     RemoveRoot,
 }
 
-struct Node {
-    widget: Box<dyn Widget>,
-    parent: Option<NodeId>,
-    children: Vec<NodeId>,
-    bounds: Rect,
-    dirty: Dirty,
+pub(crate) struct Node {
+    pub(crate) widget: Box<dyn Widget>,
+    pub(crate) parent: Option<NodeId>,
+    pub(crate) children: Vec<NodeId>,
+    pub(crate) bounds: Rect,
+    pub(crate) dirty: Dirty,
+    pub(crate) style: Style,
+    /// How far the content is scrolled along the node's axis, in DIPs.
+    pub(crate) scroll_offset: f32,
+    /// How far scrolling can go, from the last layout.
+    pub(crate) scroll_max: f32,
 }
 
 struct Slot {
@@ -243,6 +249,47 @@ impl Tree {
         Ok(())
     }
 
+    /// The layout style of `id`.
+    #[must_use]
+    pub fn style(&self, id: NodeId) -> Option<&Style> {
+        self.node(id).map(|node| &node.style)
+    }
+
+    /// Replaces the layout style of `id` with [`Style::sanitized`]; it needs layout and paint
+    /// again.
+    ///
+    /// # Errors
+    /// [`TreeError::StaleNode`] if `id` was removed.
+    pub fn set_style(&mut self, id: NodeId, style: Style) -> Result<(), TreeError> {
+        self.node_mut(id).ok_or(TreeError::StaleNode)?.style = style.sanitized();
+        self.mark_dirty(id, Dirty::LAYOUT | Dirty::PAINT)
+    }
+
+    /// How far `id`'s content is scrolled.
+    #[must_use]
+    pub fn scroll_offset(&self, id: NodeId) -> Option<f32> {
+        self.node(id).map(|node| node.scroll_offset)
+    }
+
+    /// Scrolls `id` by `delta` DIPs along its axis, clamped to the content, and returns the
+    /// new offset. A non-finite delta is ignored.
+    ///
+    /// # Errors
+    /// [`TreeError::StaleNode`] if `id` was removed.
+    pub fn scroll_by(&mut self, id: NodeId, delta: f32) -> Result<f32, TreeError> {
+        let node = self.node_mut(id).ok_or(TreeError::StaleNode)?;
+        let old = node.scroll_offset;
+        if delta.is_finite() {
+            node.scroll_offset = (old + delta).clamp(0.0, node.scroll_max);
+        }
+        let new = node.scroll_offset;
+        #[allow(clippy::float_cmp)] // Exact on purpose: did clamping change the offset at all?
+        if new != old {
+            self.mark_dirty(id, Dirty::LAYOUT | Dirty::PAINT)?;
+        }
+        Ok(new)
+    }
+
     /// The area to repaint since the last [`Self::paint`]. Empty when nothing changed.
     #[must_use]
     pub fn damage(&self) -> Rect {
@@ -251,19 +298,45 @@ impl Tree {
 
     /// Paints the whole tree, parents before children, and clears every paint bit and the
     /// damage. Backends redraw only [`Self::damage`] from the result.
+    ///
+    /// Flow children paint in order, then overlay children above them. A scrolling node clips
+    /// its children to its bounds.
     pub fn paint(&mut self) -> DisplayList {
         let mut list = DisplayList::new();
-        let mut pending = vec![self.root];
-        while let Some(id) = pending.pop() {
-            let Some(node) = self.node_mut(id) else {
-                continue;
-            };
-            node.dirty = Dirty(node.dirty.0 & !Dirty::PAINT.0);
-            node.widget.paint(node.bounds, &mut list);
-            pending.extend(node.children.iter().rev());
-        }
+        self.paint_node(self.root, &mut list);
         self.damage = Rect::default();
         list
+    }
+
+    fn paint_node(&mut self, id: NodeId, list: &mut DisplayList) {
+        let Some(node) = self.node_mut(id) else {
+            return;
+        };
+        node.dirty = Dirty(node.dirty.0 & !Dirty::PAINT.0);
+        node.widget.paint(node.bounds, list);
+        let (bounds, clips) = (node.bounds, node.style.scroll);
+        let children = node.children.clone();
+        let is_overlay = |tree: &Self, child: NodeId| {
+            tree.node(child)
+                .is_some_and(|child| matches!(child.style.position, Position::Overlay { .. }))
+        };
+        let (overlays, flow): (Vec<NodeId>, Vec<NodeId>) = children
+            .into_iter()
+            .partition(|child| is_overlay(self, *child));
+        if clips {
+            list.clip(bounds, |list| {
+                for child in flow {
+                    self.paint_node(child, list);
+                }
+            });
+        } else {
+            for child in flow {
+                self.paint_node(child, list);
+            }
+        }
+        for child in overlays {
+            self.paint_node(child, list);
+        }
     }
 
     fn allocate(&mut self, widget: Box<dyn Widget>, parent: Option<NodeId>) -> NodeId {
@@ -273,6 +346,9 @@ impl Tree {
             children: Vec::new(),
             bounds: Rect::default(),
             dirty: Dirty::LAYOUT | Dirty::PAINT,
+            style: Style::default(),
+            scroll_offset: 0.0,
+            scroll_max: 0.0,
         };
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
@@ -306,7 +382,7 @@ impl Tree {
         Some(node)
     }
 
-    fn node(&self, id: NodeId) -> Option<&Node> {
+    pub(crate) fn node(&self, id: NodeId) -> Option<&Node> {
         let slot = self.slots.get(id.index as usize)?;
         if slot.generation == id.generation {
             slot.node.as_ref()
@@ -315,7 +391,7 @@ impl Tree {
         }
     }
 
-    fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+    pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         let slot = self.slots.get_mut(id.index as usize)?;
         if slot.generation == id.generation {
             slot.node.as_mut()
