@@ -143,8 +143,43 @@ impl TerminalTab {
     }
 
     /// Takes in the session's news while the tab is not shown, so its dot stays current.
+    /// A dropped connection reconnects here too, at the size it last had, so a tab in the
+    /// background is back by the time it is shown.
     pub fn poll(&mut self, ctx: &egui::Context) {
         self.drain_events(ctx);
+        let Some(at) = self.lost else { return };
+        let now = ctx.input(|input| input.time);
+        if now < at {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(at - now));
+            return;
+        }
+        let size = self.size;
+        self.restart();
+        if let Some(size) = size {
+            self.spawn(ctx, size);
+        }
+    }
+
+    /// Starts the session in a terminal of `size` (cells, and cell width and height in
+    /// pixels), showing any output carried over from before a reconnect.
+    fn spawn(&mut self, ctx: &egui::Context, size: (Size, u16, u16)) {
+        let (cells, cell_w, cell_h) = size;
+        let wake_ctx = ctx.clone();
+        let unread = self.unread.clone();
+        match Session::spawn(&self.program, cells, cell_w, cell_h, move || {
+            unread.store(true, Ordering::Relaxed);
+            wake_ctx.request_repaint();
+        }) {
+            Ok(session) => {
+                if let Some(text) = self.carry.take() {
+                    session.show(&text);
+                }
+                self.session = Some(session);
+                self.size = Some(size);
+                self.started = ctx.input(|input| input.time);
+            }
+            Err(error) => self.failed = Some(format!("Could not start the session: {error}")),
+        }
     }
 
     /// The connection dropped (or a reconnect failed): schedules the next try, or gives up
@@ -253,22 +288,7 @@ impl TerminalTab {
         // Shown now, so nothing here is unread.
         self.unread.store(false, Ordering::Relaxed);
         if self.session.is_none() && self.failed.is_none() {
-            let ctx = ui.ctx().clone();
-            let unread = self.unread.clone();
-            match Session::spawn(&self.program, size, cell_w, cell_h, move || {
-                unread.store(true, Ordering::Relaxed);
-                ctx.request_repaint();
-            }) {
-                Ok(session) => {
-                    if let Some(text) = self.carry.take() {
-                        session.show(&text);
-                    }
-                    self.session = Some(session);
-                    self.size = Some((size, cell_w, cell_h));
-                    self.started = ui.input(|input| input.time);
-                }
-                Err(error) => self.failed = Some(format!("Could not start the session: {error}")),
-            }
+            self.spawn(ui.ctx(), (size, cell_w, cell_h));
         }
         if self.failed.is_some() {
             self.failed_ui(ui);
@@ -889,6 +909,35 @@ mod tests {
         tab.lost = Some(1.0);
         assert_eq!(tab.status(), Some(TabStatus::Error));
         assert!(TabStatus::Error > TabStatus::Input && TabStatus::Input > TabStatus::Unread);
+    }
+
+    #[test]
+    fn a_background_tab_reconnects_when_its_time_comes() {
+        let mut tab = TerminalTab::new(
+            "gone",
+            Program::Command {
+                program: "annulus-test-no-such-program".into(),
+                args: Vec::new(),
+            },
+        );
+        tab.size = Some((Size::new(80, 24), 8, 16));
+        tab.started = -100.0;
+        tab.schedule_reconnect(0.0, None);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| tab.poll(ui.ctx()));
+        output.textures_delta.clear();
+        assert!(tab.lost.is_some(), "not yet: the first try waits a second");
+        let later = egui::RawInput {
+            time: Some(5.0),
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(later, |ui| tab.poll(ui.ctx()));
+        output.textures_delta.clear();
+        assert_eq!(tab.lost, None);
+        assert!(
+            tab.session.is_some() || tab.failed.is_some(),
+            "it tried again without being shown"
+        );
     }
 
     #[test]
