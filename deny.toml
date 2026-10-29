@@ -7,6 +7,13 @@ all-features = true
 # RustSec advisories, including unmaintained and yanked crates, fail the check.
 yanked = "deny"
 unmaintained = "all"
+ignore = [
+    # zbus_names, zvariant and zvariant_derive were merged into zbus, not abandoned; they come
+    # in through AccessKit's Linux adapter and go away when it moves to the merged zbus.
+    { id = "RUSTSEC-2026-0370", reason = "merged into zbus; via accesskit_unix" },
+    { id = "RUSTSEC-2026-0371", reason = "merged into zbus; via accesskit_unix" },
+    { id = "RUSTSEC-2026-0372", reason = "merged into zbus; via accesskit_unix" },
+]
 
 [licenses]
 allow = [
@@ -14,6 +21,7 @@ allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "Zlib",
     "MPL-2.0",
@@ -26,6 +34,11 @@ confidence-threshold = 0.93
 unused-allowed-license = "allow"
 
 # The sync server's own license (ADR-0009). Its dependencies stay on the allow-list above.
+# egui's bundled default fonts (Ubuntu-Light among them): a font license, like OFL-1.1.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["Ubuntu-font-1.0"]
+
 [[licenses.exceptions]]
 crate = "annulus-server"
 allow = ["AGPL-3.0-or-later"]
