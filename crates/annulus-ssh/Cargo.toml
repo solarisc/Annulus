@@ -8,5 +8,20 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[package.metadata.cargo-machete]
+# Present only to enable its prebuilt-nasm feature for russh's crypto backend.
+ignored = ["aws-lc-rs"]
+
 [lints]
 workspace = true
+
+[dependencies]
+aws-lc-rs.workspace = true
+russh.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+tokio.workspace = true

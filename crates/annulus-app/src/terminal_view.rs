@@ -91,9 +91,9 @@ impl TerminalTab {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                             egui::UserAttentionType::Informational,
-                        ))
+                        ));
                 }
-                _ => {}
+                SessionEvent::Title(_) => {}
             }
         }
 
