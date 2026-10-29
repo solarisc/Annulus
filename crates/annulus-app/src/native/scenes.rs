@@ -238,7 +238,15 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: snippets,
-        acts: &[Act::Click("New snippet")],
+        acts: &[
+            Act::Click("New snippet"),
+            Act::Click("sudo systemctl restart nginx"),
+            Act::Type("cd /srv/app"),
+            Act::Press(Key::Enter, Modifiers::NONE),
+            Act::Type("git pull --ff-only"),
+            Act::Press(Key::Enter, Modifiers::NONE),
+            Act::Type("sudo systemctl restart app"),
+        ],
     },
     Scene {
         name: "forwards",
@@ -284,6 +292,18 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: settings,
         acts: &[],
+    },
+    Scene {
+        name: "command-palette",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: with_tabs,
+        acts: &[
+            Act::Press(Key::Char('k'), Modifiers::CTRL_SHIFT),
+            Act::Type("db"),
+        ],
     },
     Scene {
         name: "lock",

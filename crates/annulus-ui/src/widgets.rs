@@ -417,6 +417,197 @@ impl Ui<'_> {
         }
     }
 
+    /// A multi-line text field (scripts): Enter starts a new line, Up and Down move between
+    /// lines, Home and End go to the ends of the line, and a paste keeps its line breaks.
+    #[allow(clippy::too_many_lines)] // Input, scrolling and drawing of one area, in order.
+    pub fn text_area(
+        &mut self,
+        id: Id,
+        rect: Rect,
+        buffer: &mut String,
+        style: FieldStyle<'_>,
+    ) -> FieldResponse {
+        let response = self.zone(id, rect, Role::TextInput, style.placeholder);
+        let t = self.theme;
+        let font = if style.mono {
+            Font::mono(text::BODY)
+        } else {
+            BODY
+        };
+        let focus = self.ease(id.with("focus"), if response.focused { 1.0 } else { 0.0 });
+        if focus > 0.0 {
+            self.gfx.fill_rect(
+                rect.outset(3.0),
+                radius::SMALL + 5.0,
+                t.accent.alpha(0.22 * focus),
+            );
+        }
+        self.gfx.fill_rect(rect, radius::SMALL + 2.0, t.field);
+        let border = t.line_strong.mix(t.accent, focus);
+        self.gfx.stroke_rect(rect, radius::SMALL + 2.0, 1.0, border);
+        if response.hovered {
+            self.set_cursor(Cursor::Text);
+        }
+        let inner = rect.inset(space::M - 2.0, space::S);
+        let line_h = self.gfx.measure("Ag", font).height;
+        let mut state = self.state.edit(id);
+        let mut changed = false;
+        if response.focused {
+            let mut leftover = Vec::new();
+            for typed in self.take_typed() {
+                match typed {
+                    Typed::Text(text) | Typed::Paste(text) => {
+                        let text: String = text
+                            .replace("\r\n", "\n")
+                            .chars()
+                            .filter(|c| *c == '\n' || !c.is_control())
+                            .collect();
+                        if !text.is_empty() {
+                            let (from, to) = state.range();
+                            buffer.replace_range(from..to, &text);
+                            state.cursor = from + text.len();
+                            state.anchor = state.cursor;
+                            changed = true;
+                        }
+                    }
+                    Typed::Key(Key::Enter, Modifiers::NONE) => {
+                        let (from, to) = state.range();
+                        buffer.replace_range(from..to, "\n");
+                        state.cursor = from + 1;
+                        state.anchor = state.cursor;
+                        changed = true;
+                    }
+                    Typed::Key(key @ (Key::Up | Key::Down), modifiers) => {
+                        let up = key == Key::Up;
+                        state.cursor = line_step(buffer, state.cursor, up);
+                        if !modifiers.shift {
+                            state.anchor = state.cursor;
+                        }
+                    }
+                    Typed::Key(key @ (Key::Home | Key::End), modifiers) if !modifiers.ctrl => {
+                        let (start, end) = line_bounds(buffer, state.cursor);
+                        state.cursor = if key == Key::Home { start } else { end };
+                        if !modifiers.shift {
+                            state.anchor = state.cursor;
+                        }
+                    }
+                    Typed::Key(key, modifiers) => {
+                        match edit_key(buffer, &mut state, key, modifiers) {
+                            KeyOutcome::Changed => changed = true,
+                            KeyOutcome::Copy(text) => self.state.clipboard_out = Some(text),
+                            KeyOutcome::Ignored => leftover.push((key, modifiers)),
+                            KeyOutcome::Moved | KeyOutcome::Submit => {}
+                        }
+                    }
+                }
+            }
+            self.state.return_keys(leftover);
+        }
+        state.cursor = state.cursor.min(buffer.len());
+        state.anchor = state.anchor.min(buffer.len());
+        // The caret's line stays in view.
+        let caret_row = buffer[..state.cursor].matches('\n').count();
+        #[allow(clippy::cast_precision_loss)] // Scripts are short.
+        let caret_y = caret_row as f32 * line_h;
+        if caret_y - state.scroll > inner.h - line_h {
+            state.scroll = caret_y - inner.h + line_h;
+        }
+        if caret_y < state.scroll {
+            state.scroll = caret_y;
+        }
+        #[allow(clippy::cast_precision_loss)] // Scripts are short.
+        let content = (buffer.matches('\n').count() + 1) as f32 * line_h;
+        state.scroll -= self.take_wheel(inner);
+        state.scroll = state.scroll.clamp(0.0, (content - inner.h).max(0.0));
+        if (response.pressed || response.clicked)
+            && let Some(pointer) = self.pointer()
+        {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // On screen.
+            let row = ((pointer.y - inner.y + state.scroll) / line_h).max(0.0) as usize;
+            let mut start = 0;
+            for (index, line) in buffer.split('\n').enumerate() {
+                if index == row {
+                    break;
+                }
+                start += line.len() + 1;
+            }
+            let start = start.min(buffer.len());
+            let line_end = buffer[start..]
+                .find('\n')
+                .map_or(buffer.len(), |at| start + at);
+            let at = start
+                + offset_at(
+                    self.gfx,
+                    &buffer[start..line_end],
+                    font,
+                    pointer.x - inner.x,
+                );
+            state.cursor = at;
+            if !state.dragging {
+                state.anchor = at;
+            }
+            state.dragging = response.pressed;
+        } else {
+            state.dragging = false;
+        }
+
+        self.push_clip(inner);
+        if buffer.is_empty() {
+            self.gfx.draw_text(
+                Point::new(inner.x, inner.y),
+                style.placeholder,
+                font,
+                t.text3,
+            );
+        }
+        let (from, to) = state.range();
+        let mut start = 0;
+        for (row, line) in buffer.split('\n').enumerate() {
+            #[allow(clippy::cast_precision_loss)] // Scripts are short.
+            let y = inner.y + row as f32 * line_h - state.scroll;
+            let end = start + line.len();
+            if y + line_h >= inner.y && y <= inner.b() {
+                if response.focused && from < to && from <= end && to >= start {
+                    let a = from.max(start) - start;
+                    let b = to.min(end) - start;
+                    let x0 = self.gfx.measure(&line[..a], font).width;
+                    let mut x1 = self.gfx.measure(&line[..b], font).width;
+                    if to > end {
+                        x1 += 6.0;
+                    }
+                    self.gfx.fill_rect(
+                        Rect::new(inner.x + x0, y, x1 - x0, line_h),
+                        2.0,
+                        t.accent.alpha(0.35),
+                    );
+                }
+                self.gfx
+                    .draw_text(Point::new(inner.x, y), line, font, t.text);
+                if response.focused
+                    && (start..=end).contains(&state.cursor)
+                    && state.cursor >= start
+                {
+                    let x = self.gfx.measure(&line[..state.cursor - start], font).width;
+                    if row == caret_row {
+                        self.gfx.fill_rect(
+                            Rect::new(inner.x + x, y + 1.0, 1.5, line_h - 2.0),
+                            0.0,
+                            t.text,
+                        );
+                    }
+                }
+            }
+            start = end + 1;
+        }
+        self.pop_clip();
+        self.state.set_edit(id, state);
+        FieldResponse {
+            response,
+            changed,
+            submitted: false,
+        }
+    }
+
     /// A check box with `label` to its right; the whole row toggles it.
     pub fn checkbox(&mut self, id: Id, rect: Rect, value: &mut bool, label: &str) -> Response {
         let response = self.zone(id, rect, Role::CheckBox, label);
@@ -772,6 +963,35 @@ fn edit_key(
     }
 }
 
+/// The byte range of the line holding `at` (without its line break).
+fn line_bounds(text: &str, at: usize) -> (usize, usize) {
+    let start = text[..at].rfind('\n').map_or(0, |found| found + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |found| at + found);
+    (start, end)
+}
+
+/// The offset one line up or down from `at`, keeping the column (in characters) where the
+/// line is long enough; the ends of the text on the first and last line.
+fn line_step(text: &str, at: usize, up: bool) -> usize {
+    let (start, end) = line_bounds(text, at);
+    let column = text[start..at].chars().count();
+    let (line_start, line_end) = if up {
+        if start == 0 {
+            return 0;
+        }
+        line_bounds(text, start - 1)
+    } else {
+        if end == text.len() {
+            return text.len();
+        }
+        line_bounds(text, end + 1)
+    };
+    text[line_start..line_end]
+        .char_indices()
+        .nth(column)
+        .map_or(line_end, |(offset, _)| line_start + offset)
+}
+
 fn prev_char(text: &str, at: usize) -> usize {
     text[..at].char_indices().next_back().map_or(0, |(i, _)| i)
 }
@@ -994,6 +1214,44 @@ mod tests {
                 .iter()
                 .any(|(_, text)| text == &"\u{2022}".repeat(7))
         );
+    }
+
+    #[test]
+    fn up_and_down_keep_the_column_and_stop_at_the_ends() {
+        let text = "cd /srv\nls\nsudo systemctl restart app";
+        // From "ls" column 1 up to "cd /srv" column 1.
+        assert_eq!(line_step(text, 9, true), 1);
+        // From "cd /srv" column 5 down to "ls", which is shorter: its end.
+        assert_eq!(line_step(text, 5, false), 10);
+        assert_eq!(line_step(text, 3, true), 0);
+        assert_eq!(line_step(text, text.len() - 2, false), text.len());
+        assert_eq!(line_bounds(text, 9), (8, 10));
+    }
+
+    #[test]
+    fn a_text_area_keeps_line_breaks_from_enter_and_paste() {
+        let mut state = UiState::default();
+        let id = Id::new("script");
+        let mut script = String::from("echo a");
+        frame(&mut state, &[], |ui| {
+            ui.text_area(id, FIELD, &mut script, FieldStyle::default());
+        });
+        state.set_focus(Some(id), true);
+        frame(
+            &mut state,
+            &[
+                key(Key::End, Modifiers::NONE),
+                key(Key::Enter, Modifiers::NONE),
+                Event::Paste("echo b\r\necho c".into()),
+                key(Key::Up, Modifiers::NONE),
+                key(Key::Home, Modifiers::NONE),
+                Event::Text("# ".into()),
+            ],
+            |ui| {
+                ui.text_area(id, FIELD, &mut script, FieldStyle::default());
+            },
+        );
+        assert_eq!(script, "echo a\n# echo b\necho c");
     }
 
     #[test]

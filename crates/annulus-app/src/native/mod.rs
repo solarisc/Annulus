@@ -3,11 +3,13 @@
 //!
 //! [ADR-0017]: ../../../docs/adr/0017-native-ui.md
 
+mod ask;
 pub mod demo;
 pub mod hosts;
 mod live;
 pub mod lock;
 mod pages;
+mod palette;
 mod panes;
 #[cfg(test)]
 mod scenes;
@@ -183,6 +185,8 @@ pub struct NativeApp {
     forwards: screens::ForwardsView,
     known: screens::KnownView,
     logs: screens::LogsView,
+    /// The command palette, while open (Ctrl+Shift+K).
+    palette: Option<palette::PaletteView>,
     next_uid: u64,
 }
 
@@ -219,6 +223,7 @@ impl NativeApp {
             forwards: screens::ForwardsView::default(),
             known: screens::KnownView::default(),
             logs: screens::LogsView::default(),
+            palette: None,
             next_uid: 1,
         }
     }
@@ -311,6 +316,89 @@ impl NativeApp {
         }
     }
 
+    /// Everything the palette can find.
+    fn palette_items(&self) -> Vec<crate::command_palette::Item> {
+        use crate::command_palette::{Action, Item};
+        let mut items: Vec<Item> = Vec::new();
+        for (index, tab) in self.tabs.iter().enumerate().skip(1) {
+            items.push(Item {
+                label: tab.title.clone(),
+                kind: "Tab",
+                action: Action::Tab(index),
+            });
+        }
+        if let Some(vault) = &self.vault {
+            for host in vault.hosts() {
+                items.push(Item {
+                    label: host.label.clone(),
+                    kind: "Host",
+                    action: Action::Connect(host.id),
+                });
+            }
+            for snippet in vault.snippets() {
+                items.push(Item {
+                    label: snippet.label.clone(),
+                    kind: "Snippet",
+                    action: Action::Snippet(snippet.id),
+                });
+            }
+        }
+        for (label, action) in [
+            ("New local terminal", Action::NewLocal),
+            ("Settings", Action::Settings),
+            ("Lock the vault", Action::Lock),
+        ] {
+            items.push(Item {
+                label: label.into(),
+                kind: "Command",
+                action,
+            });
+        }
+        items
+    }
+
+    fn palette_frame(&mut self, ui: &mut Ui<'_>) {
+        use crate::command_palette::Action;
+        if self.palette.is_none() {
+            return;
+        }
+        let items = self.palette_items();
+        let Some(outcome) = self.palette.as_mut().and_then(|view| view.draw(ui, &items)) else {
+            return;
+        };
+        self.palette = None;
+        let palette::Outcome::Run(action) = outcome else {
+            return;
+        };
+        match action {
+            Action::QuickConnect(target) => self.act(hosts::HostsAction::QuickConnect(target)),
+            Action::Connect(id) => self.act(hosts::HostsAction::Connect(id)),
+            Action::Tab(index) => self.active = index.min(self.tabs.len().saturating_sub(1)),
+            Action::Snippet(id) => {
+                if let Some(snippet) = self
+                    .vault
+                    .as_ref()
+                    .and_then(|vault| vault.snippets().iter().find(|s| s.id == id))
+                {
+                    let program =
+                        crate::snippets_screen::with_script(Program::DefaultShell, &snippet.script);
+                    let title = snippet.label.clone();
+                    self.open(title, program);
+                }
+            }
+            Action::NewLocal => self.open_local(),
+            Action::Lock => {
+                self.vault = None;
+                self.lock = lock::LockView::new(lock::Mode::Unlock);
+                self.active = 0;
+            }
+            Action::Settings => {
+                self.section = Section::Settings;
+                self.active = 0;
+            }
+        }
+    }
+
     /// What another screen asked for.
     fn screen_action(&mut self, action: screens::ScreenAction) {
         match action {
@@ -394,6 +482,12 @@ impl NativeApp {
         let mut area = ui.viewport;
         ui.gfx.fill_rect(area, 0.0, t.chrome);
         let bar = area.take_top(TITLE_H);
+        if ui.key(Key::Char('k'), Modifiers::CTRL_SHIFT) {
+            self.palette = match self.palette.take() {
+                Some(_) => None,
+                None => Some(palette::PaletteView::default()),
+            };
+        }
         let action = titlebar::draw(self, ui, bar);
         if ui.key(Key::Tab, Modifiers::CTRL) && !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
@@ -450,6 +544,7 @@ impl NativeApp {
             // A terminal tab always holds a terminal; an empty panel is never more than a frame.
             panel(ui, area);
         }
+        self.palette_frame(ui);
         ui.overlays();
         for tab in &mut self.tabs {
             if let Some(TermView::Live(panes)) = &tab.terminal {

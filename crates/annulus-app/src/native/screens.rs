@@ -18,6 +18,7 @@ use annulus_vault::forwards::{ForwardKind, PortForward};
 use annulus_vault::snippets::Snippet;
 use annulus_vault::vault::Vault;
 
+use super::ask::{self, Ask};
 use super::pages::{self, ROW_H};
 use crate::forwards_screen::{Draft, Running, Status, start};
 use crate::{connect, keychain_screen, logs_screen, snippets_screen};
@@ -31,6 +32,8 @@ pub enum ScreenAction {
 }
 
 const GAP: f32 = 8.0;
+/// Height of the script editor: about five lines.
+const SCRIPT_H: f32 = 104.0;
 
 /// Draws `count` rows of `ROW_H` in a scroll view filling `rect`.
 fn rows(
@@ -255,7 +258,7 @@ impl SnippetsView {
                 ui,
                 &mut area,
                 "New snippet",
-                2.0 * CONTROL + 3.0 * space::M + 4.0,
+                2.0 * CONTROL + SCRIPT_H + 4.0 * space::M,
             );
             card.take_top(space::S);
             ui.text_field(
@@ -268,14 +271,9 @@ impl SnippetsView {
                 },
             );
             card.take_top(space::S);
-            let mut line = card.take_top(CONTROL);
-            let save = line.take_right(88.0);
-            line.take_right(space::S);
-            let cancel = line.take_right(80.0);
-            line.take_right(space::S);
-            let field = ui.text_field(
+            ui.text_area(
                 Id::new("snippet.script"),
-                line,
+                card.take_top(SCRIPT_H),
                 script,
                 FieldStyle {
                     placeholder: "sudo systemctl restart nginx",
@@ -283,6 +281,11 @@ impl SnippetsView {
                     ..FieldStyle::default()
                 },
             );
+            card.take_top(space::S);
+            let mut line = card.take_top(CONTROL);
+            let save = line.take_right(88.0);
+            line.take_right(space::S);
+            let cancel = line.take_right(80.0);
             let cancelled = ui
                 .button(
                     Id::new("snippet.cancel"),
@@ -294,8 +297,7 @@ impl SnippetsView {
                 .clicked;
             let saved = ui
                 .button(Id::new("snippet.save"), save, "Save", None, Kind::Primary)
-                .clicked
-                || field.submitted;
+                .clicked;
             if saved && !script.trim().is_empty() {
                 let mut snippet = snippet.clone();
                 snippet.label = if label.trim().is_empty() {
@@ -545,6 +547,8 @@ impl KnownView {
 pub struct ForwardsView {
     running: HashMap<u64, Running>,
     draft: Option<Draft>,
+    /// Questions rules' connections are waiting on, by rule.
+    asks: HashMap<u64, Ask>,
 }
 
 const KINDS: [(&str, ForwardKind); 3] = [
@@ -579,16 +583,28 @@ impl ForwardsView {
         files: &SshFiles,
         waker: Option<&Waker>,
     ) {
-        // Running rules report questions they cannot ask here; they fail with a hint.
-        for running in self.running.values() {
+        // A rule's connection may ask about a new server key or a password.
+        for (id, running) in &self.running {
             for event in running.take_events() {
                 match event {
-                    SessionEvent::HostKey(_) => running.answers().host_key(false),
-                    SessionEvent::Password { .. } => running.answers().password(None),
+                    SessionEvent::HostKey(question) => {
+                        self.asks.insert(*id, Ask::HostKey(question));
+                    }
+                    SessionEvent::Password { user, host } => {
+                        self.asks.insert(
+                            *id,
+                            Ask::Password {
+                                user,
+                                host,
+                                secret: zeroize::Zeroizing::new(String::new()),
+                            },
+                        );
+                    }
                     _ => {}
                 }
             }
         }
+        self.asks.retain(|id, _| self.running.contains_key(id));
         let mut area = pages::page(rect);
         let count = vault.forwards().len();
         let mut actions = pages::header(
@@ -839,6 +855,12 @@ impl ForwardsView {
         if let Some(id) = remove {
             self.running.remove(&id);
             let _ = vault.remove_forward(id);
+        }
+        if let Some((&id, ask)) = self.asks.iter_mut().next()
+            && let Some(running) = self.running.get(&id)
+            && ask::card(ui, rect, ask, running.answers())
+        {
+            self.asks.remove(&id);
         }
     }
 }
