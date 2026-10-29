@@ -74,12 +74,17 @@ impl Settings {
     /// # Errors
     /// The file system refused.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write as _;
         let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let temporary = path.with_extension("tmp");
-        std::fs::write(&temporary, bytes)?;
+        // On disk before it takes the name, so a power cut leaves the old file, not an empty one.
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&temporary, path)
     }
 }

@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod crypto;
+pub mod files;
 pub mod forwards;
 pub mod groups;
 pub mod hosts;

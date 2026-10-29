@@ -79,8 +79,25 @@ pub fn forget(path: &Path, line: usize) -> std::io::Result<()> {
     if !out.is_empty() {
         out.push('\n');
     }
+    replace(path, out.as_bytes())
+}
+
+/// Replaces `path` with `bytes`: written to a temporary file (owner-only on Unix: the file says
+/// which servers this user reaches), flushed to disk, then renamed over it.
+fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, out)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&temporary, path)
 }
 
@@ -149,9 +166,7 @@ pub fn import(into: &Path, from: &Path) -> std::io::Result<Imported> {
         result.added += 1;
     }
     if result.added > 0 {
-        let temporary = into.with_extension("tmp");
-        std::fs::write(&temporary, text)?;
-        std::fs::rename(&temporary, into)?;
+        replace(into, text.as_bytes())?;
     }
     Ok(result)
 }

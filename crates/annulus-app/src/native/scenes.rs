@@ -1935,6 +1935,24 @@ fn the_palette_cannot_lock_while_the_recovery_key_is_shown() {
 }
 
 #[test]
+fn a_second_window_cannot_open_the_same_data_folder() {
+    let dir = std::env::temp_dir().join(format!("annulus-instance-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = super::instance_lock(&dir);
+    assert!(first.is_some(), "the first window takes the folder");
+    assert!(
+        super::instance_lock(&dir).is_none(),
+        "a second one is refused"
+    );
+    drop(first);
+    assert!(
+        super::instance_lock(&dir).is_some(),
+        "free again once the first closes"
+    );
+}
+
+#[test]
 fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
     let mut app = NativeApp::new(Some(fixture_vault("import-key", true)));
     app.section = super::Section::Keychain;

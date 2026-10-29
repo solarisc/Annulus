@@ -1332,12 +1332,8 @@ impl Vault {
         };
         let bytes =
             serde_json::to_vec(&file).map_err(|error| VaultError::Damaged(error.to_string()))?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temporary = self.path.with_extension("tmp");
-        std::fs::write(&temporary, bytes)?;
-        std::fs::rename(&temporary, &self.path)?;
+        // Flushed, owner-only, the previous version kept beside it.
+        crate::files::write_private(&self.path, &bytes, true)?;
         Ok(())
     }
 }

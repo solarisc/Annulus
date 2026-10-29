@@ -185,6 +185,11 @@ pub struct NativeApp {
     pub waker: Option<Waker>,
     /// Terminal tabs to open after this frame: title, program and where it came from.
     opens: Vec<(String, Program, Option<OpenTab>)>,
+    /// Another Annulus window has this data folder open: the vault stays closed here, since
+    /// two windows saving one vault would lose each other's changes.
+    pub blocked: Option<String>,
+    /// The lock on the data folder, held while the window is open.
+    instance: Option<std::fs::File>,
     /// Host tabs to reopen once the vault is unlocked.
     pending_hosts: Vec<u64>,
     /// The snippet panel beside terminals (Ctrl+Shift+.), and its search.
@@ -237,6 +242,8 @@ impl NativeApp {
             },
             waker: None,
             opens: Vec::new(),
+            blocked: None,
+            instance: None,
             pending_hosts: Vec::new(),
             snippet_panel: None,
             settings: Settings::default(),
@@ -611,6 +618,10 @@ impl NativeApp {
     /// Creates or unlocks the vault as the lock screen asked, on another thread (Argon2id is
     /// slow on purpose).
     fn open_vault(&mut self, ui: &Ui<'_>, action: lock::LockAction) {
+        if let Some(why) = &self.blocked {
+            self.lock.error = Some(why.clone());
+            return;
+        }
         let Some(path) = self.vault_path.clone() else {
             self.lock.error = Some("This preview has no vault file.".into());
             return;
@@ -1164,6 +1175,19 @@ impl WindowApp for Preview {
 ///
 /// # Errors
 /// When the OS refuses a window.
+/// The data folder's lock, or `None` when another Annulus window holds it. The OS frees it
+/// when the window's process ends, even after a crash.
+fn instance_lock(data_dir: &std::path::Path) -> Option<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(data_dir.join("annulus.lock"))
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
 pub fn run_native(light: bool, data_dir: &std::path::Path) -> Result<(), WindowError> {
     let mut app = NativeApp::new(None);
     let vault_path = data_dir.join("vault.anv");
@@ -1177,8 +1201,16 @@ pub fn run_native(light: bool, data_dir: &std::path::Path) -> Result<(), WindowE
     let settings_path = data_dir.join("settings.json");
     app.settings = Settings::load(&settings_path);
     app.settings_path = Some(settings_path);
-    app.restore();
     let _ = std::fs::create_dir_all(data_dir);
+    app.instance = instance_lock(data_dir);
+    if app.instance.is_some() {
+        app.restore();
+    } else {
+        let why = "Annulus is already open in another window. Use that window, or close it                    and open Annulus again.";
+        app.blocked = Some(why.to_owned());
+        app.lock.error = Some(why.to_owned());
+    }
+
     run(
         "Annulus",
         (1100.0, 720.0),
