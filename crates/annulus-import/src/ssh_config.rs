@@ -316,7 +316,7 @@ impl Found {
             id,
             label: self.alias.clone(),
             address: self.address.clone(),
-            port: self.port,
+            port: Some(self.port),
             username: self.user.clone().unwrap_or_default(),
             tags: vec!["ssh_config".into()],
             password: None,
@@ -324,6 +324,7 @@ impl Found {
             jump_id: None,
             proxy: None,
             no_reconnect: false,
+            group: None,
         }
     }
 
@@ -362,8 +363,8 @@ pub fn export(hosts: &[Host]) -> String {
             "\nHost {alias}\n    HostName {}\n",
             host.address.trim()
         );
-        if host.port != DEFAULT_PORT {
-            let _ = writeln!(out, "    Port {}", host.port);
+        if host.port() != DEFAULT_PORT {
+            let _ = writeln!(out, "    Port {}", host.port());
         }
         if !host.username.trim().is_empty() {
             let _ = writeln!(out, "    User {}", host.username.trim());
@@ -482,7 +483,7 @@ mod tests {
             id: 1,
             label: "prod-db".into(),
             address: "10.0.4.12".into(),
-            port: 2222,
+            port: Some(2222),
             username: "admin".into(),
             tags: Vec::new(),
             password: None,
@@ -490,6 +491,7 @@ mod tests {
             jump_id: None,
             proxy: None,
             no_reconnect: false,
+            group: None,
         }
     }
 }

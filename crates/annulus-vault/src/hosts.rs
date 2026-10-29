@@ -17,10 +17,10 @@ pub struct Host {
     pub label: String,
     /// Hostname or IP address.
     pub address: String,
-    /// SSH port.
-    #[serde(default = "default_port")]
-    pub port: u16,
-    /// Login name; empty means the SSH client's default.
+    /// SSH port; `None` inherits from the group, else 22 (F-HOST-003).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Login name; empty inherits from the group, else the SSH client's default.
     #[serde(default)]
     pub username: String,
     /// Free-form tags for filtering.
@@ -42,6 +42,9 @@ pub struct Host {
     /// Never reconnect on its own when the connection drops (F-SSH-009).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_reconnect: bool,
+    /// The group it is in ([`crate::groups::Group::uid`]); `None` is the top level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -69,11 +72,13 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-fn default_port() -> u16 {
-    DEFAULT_PORT
-}
-
 impl Host {
+    /// The port to connect to: its own, else 22.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port.unwrap_or(DEFAULT_PORT)
+    }
+
     /// The `ssh` destination: `user@address:port`, leaving out a default port and an empty
     /// user. IPv6 addresses are bracketed when a port follows.
     #[must_use]
@@ -84,12 +89,13 @@ impl Host {
             format!("{}@", self.username.trim())
         };
         let address = self.address.trim();
-        if self.port == DEFAULT_PORT {
+        let port = self.port();
+        if port == DEFAULT_PORT {
             format!("{user}{address}")
         } else if address.contains(':') {
-            format!("{user}[{address}]:{}", self.port)
+            format!("{user}[{address}]:{port}")
         } else {
-            format!("{user}{address}:{}", self.port)
+            format!("{user}{address}:{port}")
         }
     }
 
@@ -118,7 +124,7 @@ impl Host {
             Some("Enter a hostname or IP address.")
         } else if address.chars().any(char::is_whitespace) {
             Some("The address can't contain spaces.")
-        } else if self.port == 0 {
+        } else if self.port == Some(0) {
             Some("The port must be between 1 and 65535.")
         } else if self
             .username
@@ -172,7 +178,7 @@ mod tests {
             id,
             label: label.into(),
             address: address.into(),
-            port,
+            port: Some(port),
             username: username.into(),
             tags: Vec::new(),
             password: None,
@@ -180,7 +186,18 @@ mod tests {
             jump_id: None,
             proxy: None,
             no_reconnect: false,
+            group: None,
         }
+    }
+
+    #[test]
+    fn an_older_record_keeps_its_port_and_a_missing_port_is_unset() {
+        let old: Host =
+            serde_json::from_str(r#"{"id":1,"label":"a","address":"x","port":22}"#).unwrap();
+        assert_eq!(old.port, Some(22), "an explicit 22 does not inherit");
+        let new: Host = serde_json::from_str(r#"{"id":1,"label":"a","address":"x"}"#).unwrap();
+        assert_eq!((new.port, new.port()), (None, 22));
+        assert!(!serde_json::to_string(&new).unwrap().contains("port"));
     }
 
     #[test]

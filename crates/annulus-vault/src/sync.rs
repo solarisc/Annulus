@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{CryptoError, Keys, Sealed};
 use crate::forwards::PortForward;
+use crate::groups::Group;
 use crate::hosts::{Host, Secret};
 use crate::keychain::SshKey;
 use crate::logs::SessionLog;
@@ -30,6 +31,8 @@ pub mod kind {
     pub const SNIPPET: u8 = 4;
     /// A session log.
     pub const LOG: u8 = 5;
+    /// A host group.
+    pub const GROUP: u8 = 6;
 }
 
 /// The record kind (bound into the encryption) of envelopes sent to the server.
@@ -202,6 +205,15 @@ struct SyncedHost {
     jump: Option<String>,
 }
 
+/// A group as synced: its default key named by sync id (local ids differ per device).
+#[derive(Serialize, Deserialize)]
+struct SyncedGroup {
+    #[serde(flatten)]
+    group: Group,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+}
+
 /// A forward rule as synced: it names its host by sync id, since local ids differ per
 /// device.
 #[derive(Serialize, Deserialize)]
@@ -231,6 +243,7 @@ pub struct SyncCopy {
     pub(crate) ssh_keys: Vec<SshKey>,
     pub(crate) snippets: Vec<Snippet>,
     pub(crate) logs: Vec<SessionLog>,
+    pub(crate) groups: Vec<Group>,
     pub(crate) state: SyncState,
     pub(crate) generation: u64,
 }
@@ -332,6 +345,20 @@ impl SyncCopy {
                 let log = self.logs.iter().find(|log| log.id == entry.local)?;
                 serde_json::to_vec(log).ok()
             }
+            kind::GROUP => {
+                let group = self.groups.iter().find(|group| group.id == entry.local)?;
+                let mut plain = group.clone();
+                plain.defaults.key_id = None;
+                let synced = SyncedGroup {
+                    key: group
+                        .defaults
+                        .key_id
+                        .and_then(|key| self.state.id_of(kind::KEY, key))
+                        .map(str::to_owned),
+                    group: plain,
+                };
+                serde_json::to_vec(&synced).ok()
+            }
             kind::FORWARD => {
                 let rule = self.forwards.iter().find(|rule| rule.id == entry.local)?;
                 let synced = SyncedForward {
@@ -421,10 +448,16 @@ impl SyncCopy {
             #[serde(default)]
             label: String,
             #[serde(default)]
+            name: String,
+            #[serde(default)]
             rule: Option<PortForward>,
         }
         let name = serde_json::from_slice::<Labelled>(body)
-            .map(|labelled| labelled.rule.map_or(labelled.label, |rule| rule.label))
+            .map(|labelled| match labelled.rule {
+                Some(rule) => rule.label,
+                None if labelled.label.is_empty() => labelled.name,
+                None => labelled.label,
+            })
             .unwrap_or_default();
         let what = match kind {
             kind::HOST => "Host",
@@ -432,6 +465,7 @@ impl SyncCopy {
             kind::KEY => "Key",
             kind::SNIPPET => "Snippet",
             kind::LOG => "Session log",
+            kind::GROUP => "Group",
             _ => "Item",
         };
         format!("{what} {name}")
@@ -520,6 +554,23 @@ impl SyncCopy {
                 );
                 local
             }
+            kind::GROUP => {
+                let Ok(synced) = serde_json::from_slice::<SyncedGroup>(&body) else {
+                    return;
+                };
+                let mut group = synced.group;
+                group.id = existing.unwrap_or_else(|| next_id(self.groups.iter().map(|g| g.id)));
+                group.defaults.key_id = synced
+                    .key
+                    .as_ref()
+                    .and_then(|key| self.state.entries.get(key))
+                    .filter(|entry| entry.kind == kind::KEY && !entry.deleted)
+                    .map(|entry| entry.local);
+                awaits = synced.key.filter(|_| group.defaults.key_id.is_none());
+                let local = group.id;
+                upsert(&mut self.groups, group, |g| g.id, |g| g.name.to_lowercase());
+                local
+            }
             kind::KEY | kind::SNIPPET | kind::LOG => match self.take_plain(kind, existing, &body) {
                 Some(local) => local,
                 None => return,
@@ -553,6 +604,7 @@ impl SyncCopy {
                 kind::KEY => self.ssh_keys.retain(|key| key.id != entry.local),
                 kind::SNIPPET => self.snippets.retain(|s| s.id != entry.local),
                 kind::LOG => self.logs.retain(|log| log.id != entry.local),
+                kind::GROUP => self.groups.retain(|group| group.id != entry.local),
                 _ => {}
             }
             entry.deleted = true;
@@ -632,6 +684,13 @@ impl SyncCopy {
                         host.key_id = Some(local);
                     }
                 }
+                kind::GROUP => {
+                    if let Some(group) =
+                        self.groups.iter_mut().find(|group| group.id == entry.local)
+                    {
+                        group.defaults.key_id = Some(local);
+                    }
+                }
                 _ => {}
             }
         }
@@ -665,6 +724,7 @@ mod tests {
             ssh_keys: Vec::new(),
             snippets: Vec::new(),
             logs: Vec::new(),
+            groups: Vec::new(),
             state: SyncState::new().unwrap(),
             generation: 0,
         }
@@ -688,7 +748,7 @@ mod tests {
             id: 42,
             label: "bastion".into(),
             address: "10.0.0.1".into(),
-            port: 22,
+            port: Some(22),
             username: String::new(),
             tags: Vec::new(),
             password: None,
@@ -696,6 +756,7 @@ mod tests {
             jump_id: None,
             proxy: None,
             no_reconnect: false,
+            group: None,
         };
         copy.apply(
             "host-sync-id",
@@ -738,7 +799,7 @@ mod tests {
             id: 1,
             label: "h".into(),
             address: "h".into(),
-            port: 22,
+            port: Some(22),
             username: String::new(),
             tags: Vec::new(),
             password: None,
@@ -746,6 +807,7 @@ mod tests {
             jump_id: None,
             proxy: None,
             no_reconnect: false,
+            group: None,
         });
         // Many entries, so random ids would put some rule before some host by chance.
         for _ in 0..20 {

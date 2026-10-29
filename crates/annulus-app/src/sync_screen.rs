@@ -521,6 +521,7 @@ impl SyncScreen {
         let local_forwards = hosts.vault().forwards().to_vec();
         let local_keys = hosts.vault().ssh_keys().to_vec();
         let local_snippets = hosts.vault().snippets().to_vec();
+        let local_groups = hosts.vault().groups().to_vec();
         let generation = hosts.vault().generation();
         let copy = hosts.vault().sync_copy();
         let path = vault_path.to_path_buf();
@@ -570,9 +571,13 @@ impl SyncScreen {
                     return Done::Failed(format!("Could not open the account's vault: {error}"));
                 }
             };
-            if let Err(error) =
-                vault.adopt(&local_hosts, &local_forwards, &local_keys, &local_snippets)
-            {
+            if let Err(error) = vault.adopt(
+                &local_hosts,
+                &local_forwards,
+                &local_keys,
+                &local_snippets,
+                &local_groups,
+            ) {
                 let _ = std::fs::remove_file(&joining);
                 return Done::Failed(format!("Could not merge this device's hosts: {error}"));
             }

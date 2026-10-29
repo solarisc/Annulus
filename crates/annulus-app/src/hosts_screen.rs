@@ -207,7 +207,7 @@ impl HostsScreen {
             }
             RowAction::Edit => {
                 self.editor = Some(Draft {
-                    port: host.port.to_string(),
+                    port: host.port.map(|port| port.to_string()).unwrap_or_default(),
                     tags: host.tags.join(", "),
                     problem: None,
                     is_new: false,
@@ -272,7 +272,7 @@ impl HostsScreen {
                 if ui.button("New host").clicked() {
                     let host = self.vault.draft_host();
                     self.editor = Some(Draft {
-                        port: host.port.to_string(),
+                        port: host.port.map(|port| port.to_string()).unwrap_or_default(),
                         tags: String::new(),
                         problem: None,
                         is_new: true,
@@ -456,10 +456,11 @@ impl HostsScreen {
             return;
         };
         let port = draft.port.trim();
+        // Empty inherits the group's port (or 22).
         draft.host.port = if port.is_empty() {
-            DEFAULT_PORT
+            None
         } else {
-            port.parse().unwrap_or(0)
+            Some(port.parse().unwrap_or(0))
         };
         if draft.forget_password {
             draft.host.password = None;
@@ -552,8 +553,8 @@ fn reconnect_row(ui: &mut Ui, host: &mut Host) {
 /// into another terminal (F-HOST-010). Saved passwords are never part of it.
 fn ssh_command(host: &Host, jump: Option<&Host>) -> String {
     let mut parts = vec!["ssh".to_owned()];
-    if host.port != DEFAULT_PORT {
-        parts.push(format!("-p {}", host.port));
+    if host.port() != DEFAULT_PORT {
+        parts.push(format!("-p {}", host.port()));
     }
     if let Some(jump) = jump {
         parts.push(format!("-J {}", jump.target()));
@@ -682,7 +683,7 @@ mod tests {
         host.label = label.into();
         host.address = "10.0.4.12".into();
         host.username = "admin".into();
-        host.port = 2222;
+        host.port = Some(2222);
         vault.upsert_host(host).unwrap();
         HostsScreen::new(
             vault,
@@ -718,7 +719,7 @@ mod tests {
         host.password = Some(Secret::new("hunter2"));
         let mut jump = host.clone();
         jump.address = "bastion.example.com".into();
-        jump.port = 22;
+        jump.port = Some(22);
         let command = ssh_command(&host, Some(&jump));
         assert_eq!(
             command,
@@ -726,7 +727,7 @@ mod tests {
         );
         assert!(!command.contains("hunter2"));
         host.username.clear();
-        host.port = 22;
+        host.port = Some(22);
         assert_eq!(ssh_command(&host, None), "ssh 10.0.4.12");
     }
 

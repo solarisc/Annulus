@@ -589,6 +589,80 @@ mod vaults {
     }
 
     #[test]
+    fn groups_and_what_hosts_inherit_reach_another_device() {
+        let server = server();
+        let (a_token, b_token) = tokens(&server);
+        let (a_id, b_id) = (
+            server.authenticate(&a_token).unwrap(),
+            server.authenticate(&b_token).unwrap(),
+        );
+        let (mut laptop, _) = Vault::create(temp("groups-a"), "pw", CHEAP_KDF).unwrap();
+        let key = annulus_vault::keychain::SshKey {
+            id: laptop.next_key_id(),
+            label: "prod key".into(),
+            private: Secret::new("private"),
+            public: "ssh-ed25519 AAAA".into(),
+            fingerprint: "SHA256:k".into(),
+        };
+        laptop.upsert_key(key.clone()).unwrap();
+        let mut prod = laptop.draft_group(None).unwrap();
+        prod.name = "prod".into();
+        prod.defaults.username = "admin".into();
+        prod.defaults.port = Some(2222);
+        prod.defaults.key_id = Some(key.id);
+        laptop.upsert_group(prod.clone()).unwrap();
+        let mut db = laptop.draft_group(Some(prod.uid.clone())).unwrap();
+        db.name = "db".into();
+        db.defaults.username = "postgres".into();
+        laptop.upsert_group(db.clone()).unwrap();
+        let mut host = laptop.draft_host();
+        host.label = "pg1".into();
+        host.address = "10.0.0.5".into();
+        host.group = Some(db.uid.clone());
+        laptop.upsert_host(host).unwrap();
+        round(&server, a_id, &mut laptop);
+
+        let mut desktop =
+            Vault::join(temp("groups-b"), &laptop.key_file_bytes(), "pw", account(2)).unwrap();
+        round(&server, b_id, &mut desktop);
+        let (resolved, sources) = desktop.resolve(&desktop.hosts()[0]);
+        assert_eq!(resolved.username, "postgres");
+        assert_eq!(resolved.port, Some(2222));
+        assert_eq!(
+            resolved.key_id,
+            Some(desktop.ssh_keys()[0].id),
+            "the group's key, by this device's id"
+        );
+        assert_eq!(sources.port.as_deref(), Some("prod"));
+
+        // Deleting "prod" on the desktop moves "db" to the top level everywhere; the host
+        // stays in "db" and no longer gets the port.
+        let prod_id = desktop
+            .groups()
+            .iter()
+            .find(|g| g.name == "prod")
+            .unwrap()
+            .id;
+        desktop.remove_group(prod_id).unwrap();
+        round(&server, b_id, &mut desktop);
+        round(&server, a_id, &mut laptop);
+        assert_eq!(laptop.groups().len(), 1);
+        assert_eq!(laptop.groups()[0].parent, None);
+        let (resolved, _) = laptop.resolve(&laptop.hosts()[0]);
+        assert_eq!(
+            (resolved.username.as_str(), resolved.port),
+            ("postgres", None)
+        );
+        assert_eq!(
+            annulus_vault::sync::SyncCopy::describe(
+                annulus_vault::sync::kind::GROUP,
+                br#"{"id":1,"uid":"x","name":"prod"}"#
+            ),
+            "Group prod"
+        );
+    }
+
+    #[test]
     fn a_deleted_host_comes_back_from_the_trash_on_every_device() {
         let server = server();
         let (a_token, b_token) = tokens(&server);

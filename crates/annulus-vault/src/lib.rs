@@ -6,6 +6,7 @@
 
 pub mod crypto;
 pub mod forwards;
+pub mod groups;
 pub mod hosts;
 pub mod keychain;
 pub mod logs;

@@ -138,7 +138,7 @@ impl ImportPreview {
                         .clicked()
                     {
                         let (hosts, rules) = entities(&chosen);
-                        result = Some(match vault.adopt(&hosts, &rules, &[], &[]) {
+                        result = Some(match vault.adopt(&hosts, &rules, &[], &[], &[]) {
                             Ok(()) => format!(
                                 "Imported {} host(s) and {} forward(s).",
                                 hosts.len(),

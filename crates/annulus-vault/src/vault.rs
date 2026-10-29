@@ -12,7 +12,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{CryptoError, KdfParams, KeyFile, Keys, Sealed};
 use crate::forwards::PortForward;
-use crate::hosts::{DEFAULT_PORT, Host};
+use crate::groups::{self, Group, Sources};
+use crate::hosts::Host;
 use crate::keychain::SshKey;
 use crate::logs::SessionLog;
 use crate::snippets::Snippet;
@@ -30,6 +31,8 @@ const KIND_KEY: u8 = 5;
 const KIND_SNIPPET: u8 = 6;
 /// Record kind of a session log.
 const KIND_LOG: u8 = 7;
+/// Record kind of a host group.
+const KIND_GROUP: u8 = 8;
 
 /// Why the vault could not be used.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +49,9 @@ pub enum VaultError {
     /// The OS could not supply randomness.
     #[error("no secure randomness available")]
     Randomness,
+    /// The change is not allowed; nothing was saved.
+    #[error("{0}")]
+    Refused(&'static str),
 }
 
 impl From<CryptoError> for VaultError {
@@ -96,6 +102,18 @@ impl PasswordKit {
     }
 }
 
+/// Everything the vault file holds, borrowed: what `save_all` writes.
+#[derive(Clone, Copy)]
+struct Parts<'a> {
+    hosts: &'a [Host],
+    forwards: &'a [PortForward],
+    ssh_keys: &'a [SshKey],
+    snippets: &'a [Snippet],
+    logs: &'a [SessionLog],
+    groups: &'a [Group],
+    sync: &'a SyncState,
+}
+
 /// An unlocked vault.
 pub struct Vault {
     path: PathBuf,
@@ -106,6 +124,7 @@ pub struct Vault {
     ssh_keys: Vec<SshKey>,
     snippets: Vec<Snippet>,
     logs: Vec<SessionLog>,
+    groups: Vec<Group>,
     sync: SyncState,
     /// Counts saved changes, so a sync result made from an older snapshot is not applied.
     generation: u64,
@@ -138,10 +157,11 @@ impl Vault {
             ssh_keys: Vec::new(),
             snippets: Vec::new(),
             logs: Vec::new(),
+            groups: Vec::new(),
             sync: SyncState::new()?,
             generation: 0,
         };
-        vault.save(&vault.hosts, &vault.forwards, &vault.sync)?;
+        vault.save_all(&vault.parts())?;
         Ok((vault, recovery))
     }
 
@@ -173,6 +193,7 @@ impl Vault {
         let mut ssh_keys = Vec::new();
         let mut snippets = Vec::new();
         let mut logs = Vec::new();
+        let mut groups = Vec::new();
         let mut sync = None;
         for record in &file.records {
             let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
@@ -197,6 +218,10 @@ impl Vault {
                 KIND_LOG => {
                     let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
                     logs.push(serde_json::from_slice::<SessionLog>(&plaintext).map_err(damaged)?);
+                }
+                KIND_GROUP => {
+                    let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
+                    groups.push(serde_json::from_slice::<Group>(&plaintext).map_err(damaged)?);
                 }
                 KIND_SYNC_STATE => {
                     let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
@@ -228,6 +253,7 @@ impl Vault {
         }
         ssh_keys.sort_by_key(|key: &SshKey| key.label.to_lowercase());
         snippets.sort_by_key(|snippet: &Snippet| snippet.label.to_lowercase());
+        groups.sort_by_key(|group: &Group| group.name.to_lowercase());
         Ok(Self {
             path,
             key_file: file.keys,
@@ -237,6 +263,7 @@ impl Vault {
             ssh_keys,
             snippets,
             logs,
+            groups,
             sync,
             generation: 0,
         })
@@ -249,7 +276,7 @@ impl Vault {
     pub fn change_password(&mut self, password: &str) -> Result<(), VaultError> {
         let key_file = self.keys.change_password(&self.key_file, password)?;
         let previous = std::mem::replace(&mut self.key_file, key_file);
-        if let Err(error) = self.save(&self.hosts, &self.forwards, &self.sync) {
+        if let Err(error) = self.save_all(&self.parts()) {
             self.key_file = previous;
             return Err(error);
         }
@@ -273,7 +300,7 @@ impl Vault {
         let file: KeyFile = serde_json::from_slice(key_file)
             .map_err(|error| VaultError::Damaged(error.to_string()))?;
         let previous = std::mem::replace(&mut self.key_file, file);
-        if let Err(error) = self.save(&self.hosts, &self.forwards, &self.sync) {
+        if let Err(error) = self.save_all(&self.parts()) {
             self.key_file = previous;
             return Err(error);
         }
@@ -304,7 +331,7 @@ impl Vault {
             id,
             label: String::new(),
             address: String::new(),
-            port: DEFAULT_PORT,
+            port: None,
             username: String::new(),
             tags: Vec::new(),
             password: None,
@@ -312,6 +339,7 @@ impl Vault {
             jump_id: None,
             proxy: None,
             no_reconnect: false,
+            group: None,
         }
     }
 
@@ -329,7 +357,11 @@ impl Vault {
         next.sort_by_key(|host| host.label.to_lowercase());
         let mut sync = self.sync.clone();
         sync.touch(kind::HOST, id, false)?;
-        self.save(&next, &self.forwards, &sync)?;
+        self.save_all(&Parts {
+            hosts: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.hosts = next;
         self.sync = sync;
         self.generation += 1;
@@ -349,7 +381,11 @@ impl Vault {
             .collect();
         let mut sync = self.sync.clone();
         sync.touch(kind::HOST, id, true)?;
-        self.save(&next, &self.forwards, &sync)?;
+        self.save_all(&Parts {
+            hosts: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.hosts = next;
         self.sync = sync;
         self.generation += 1;
@@ -377,7 +413,11 @@ impl Vault {
             next.push(host);
         }
         next.sort_by_key(|host| host.label.to_lowercase());
-        self.save(&next, &self.forwards, &sync)?;
+        self.save_all(&Parts {
+            hosts: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.hosts = next;
         self.sync = sync;
         self.generation += 1;
@@ -412,7 +452,11 @@ impl Vault {
         next.sort_by_key(|rule| rule.label.to_lowercase());
         let mut sync = self.sync.clone();
         sync.touch(kind::FORWARD, id, false)?;
-        self.save(&self.hosts, &next, &sync)?;
+        self.save_all(&Parts {
+            forwards: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.forwards = next;
         self.sync = sync;
         self.generation += 1;
@@ -432,7 +476,11 @@ impl Vault {
             .collect();
         let mut sync = self.sync.clone();
         sync.touch(kind::FORWARD, id, true)?;
-        self.save(&self.hosts, &next, &sync)?;
+        self.save_all(&Parts {
+            forwards: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.forwards = next;
         self.sync = sync;
         self.generation += 1;
@@ -477,6 +525,7 @@ impl Vault {
             ssh_keys: self.ssh_keys.clone(),
             snippets: self.snippets.clone(),
             logs: self.logs.clone(),
+            groups: self.groups.clone(),
             state: self.sync.clone(),
             generation: self.generation,
         }
@@ -492,19 +541,21 @@ impl Vault {
         if copy.generation != self.generation {
             return Ok(false);
         }
-        self.save_all(
-            &copy.hosts,
-            &copy.forwards,
-            &copy.ssh_keys,
-            &copy.snippets,
-            &copy.logs,
-            &copy.state,
-        )?;
+        self.save_all(&Parts {
+            hosts: &copy.hosts,
+            forwards: &copy.forwards,
+            ssh_keys: &copy.ssh_keys,
+            snippets: &copy.snippets,
+            logs: &copy.logs,
+            groups: &copy.groups,
+            sync: &copy.state,
+        })?;
         self.hosts = copy.hosts;
         self.forwards = copy.forwards;
         self.ssh_keys = copy.ssh_keys;
         self.snippets = copy.snippets;
         self.logs = copy.logs;
+        self.groups = copy.groups;
         self.sync = copy.state;
         self.generation += 1;
         Ok(true)
@@ -525,15 +576,19 @@ impl Vault {
             sync.restart();
         }
         sync.account = account;
-        self.save(&self.hosts, &self.forwards, &sync)?;
+        self.save_all(&Parts {
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.sync = sync;
         self.generation += 1;
         Ok(())
     }
 
-    /// Adds `hosts` and `forwards` from another vault as new entities (fresh local ids,
-    /// rules relinked to their hosts' new ids), so joining an account keeps what was on this
-    /// device (ADR-0008 data-loss rule 4). They are pushed at the next sync.
+    /// Adds `hosts`, `forwards`, keys, snippets and groups from another vault as new
+    /// entities (fresh local ids, links remapped to them), so joining an account keeps what
+    /// was on this device (ADR-0008 data-loss rule 4). They are pushed at the next sync.
+    /// Groups keep their uids, which are unique everywhere.
     ///
     /// # Errors
     /// Writing the file; nothing is added then.
@@ -543,6 +598,7 @@ impl Vault {
         forwards: &[PortForward],
         ssh_keys: &[SshKey],
         snippets: &[Snippet],
+        groups: &[Group],
     ) -> Result<(), VaultError> {
         let mut next_snippets = self.snippets.clone();
         let mut snippet_id = next_snippets.iter().map(|s| s.id).max().unwrap_or(0);
@@ -569,6 +625,20 @@ impl Vault {
                 ..key.clone()
             });
         }
+        let mut next_groups = self.groups.clone();
+        let mut group_id = next_groups.iter().map(|group| group.id).max().unwrap_or(0);
+        for group in groups {
+            group_id += 1;
+            sync.touch(kind::GROUP, group_id, false)?;
+            let mut adopted = group.clone();
+            adopted.id = group_id;
+            adopted.defaults.key_id = group
+                .defaults
+                .key_id
+                .and_then(|key| new_key_ids.get(&key).copied());
+            next_groups.push(adopted);
+        }
+        next_groups.sort_by_key(|group| group.name.to_lowercase());
         let mut host_id = next_hosts.iter().map(|host| host.id).max().unwrap_or(0);
         let mut new_ids = std::collections::HashMap::new();
         for host in hosts {
@@ -599,18 +669,20 @@ impl Vault {
         next_forwards.sort_by_key(|rule| rule.label.to_lowercase());
         next_keys.sort_by_key(|key| key.label.to_lowercase());
         next_snippets.sort_by_key(|snippet| snippet.label.to_lowercase());
-        self.save_all(
-            &next_hosts,
-            &next_forwards,
-            &next_keys,
-            &next_snippets,
-            &self.logs,
-            &sync,
-        )?;
+        self.save_all(&Parts {
+            hosts: &next_hosts,
+            forwards: &next_forwards,
+            ssh_keys: &next_keys,
+            snippets: &next_snippets,
+            groups: &next_groups,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.hosts = next_hosts;
         self.forwards = next_forwards;
         self.ssh_keys = next_keys;
         self.snippets = next_snippets;
+        self.groups = next_groups;
         self.sync = sync;
         self.generation += 1;
         Ok(())
@@ -628,7 +700,10 @@ impl Vault {
         let previous = std::mem::replace(&mut self.key_file, file);
         let mut sync = self.sync.clone();
         sync.account = Some(account);
-        if let Err(error) = self.save(&self.hosts, &self.forwards, &sync) {
+        if let Err(error) = self.save_all(&Parts {
+            sync: &sync,
+            ..self.parts()
+        }) {
             self.key_file = previous;
             return Err(error);
         }
@@ -678,11 +753,118 @@ impl Vault {
             ssh_keys: Vec::new(),
             snippets: Vec::new(),
             logs: Vec::new(),
+            groups: Vec::new(),
             sync,
             generation: 0,
         };
-        vault.save(&vault.hosts, &vault.forwards, &vault.sync)?;
+        vault.save_all(&vault.parts())?;
         Ok(vault)
+    }
+
+    /// The host groups, sorted by name (F-HOST-003).
+    #[must_use]
+    pub fn groups(&self) -> &[Group] {
+        &self.groups
+    }
+
+    /// A new, unsaved group inside `parent` (a group uid, or `None` for the top level).
+    ///
+    /// # Errors
+    /// No randomness for its uid.
+    pub fn draft_group(&self, parent: Option<String>) -> Result<Group, VaultError> {
+        Ok(Group {
+            id: self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1,
+            uid: groups::new_uid()?,
+            name: String::new(),
+            parent,
+            defaults: groups::Defaults::default(),
+        })
+    }
+
+    /// Adds or replaces a group, then saves. On failure nothing changes.
+    ///
+    /// # Errors
+    /// [`VaultError::Refused`] for an empty name or a parent inside the group itself;
+    /// writing the file.
+    pub fn upsert_group(&mut self, group: Group) -> Result<(), VaultError> {
+        if group.name.trim().is_empty() {
+            return Err(VaultError::Refused("Give the group a name."));
+        }
+        if let Some(parent) = &group.parent
+            && groups::is_within(&self.groups, parent, &group.uid)
+        {
+            return Err(VaultError::Refused("A group can't go inside itself."));
+        }
+        let id = group.id;
+        let mut next = self.groups.clone();
+        match next.iter_mut().find(|existing| existing.id == id) {
+            Some(existing) => *existing = group,
+            None => next.push(group),
+        }
+        next.sort_by_key(|group| group.name.to_lowercase());
+        let mut sync = self.sync.clone();
+        sync.touch(kind::GROUP, id, false)?;
+        self.save_all(&Parts {
+            groups: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
+        self.groups = next;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Deletes a group; its hosts and subgroups move up into its parent, so nothing else is
+    /// lost.
+    ///
+    /// # Errors
+    /// Writing the file; nothing changes then.
+    pub fn remove_group(&mut self, id: u64) -> Result<(), VaultError> {
+        let Some(gone) = self.groups.iter().find(|group| group.id == id).cloned() else {
+            return Ok(());
+        };
+        let mut sync = self.sync.clone();
+        let mut groups: Vec<Group> = self
+            .groups
+            .iter()
+            .filter(|group| group.id != id)
+            .cloned()
+            .collect();
+        for group in groups
+            .iter_mut()
+            .filter(|group| group.parent.as_deref() == Some(gone.uid.as_str()))
+        {
+            group.parent.clone_from(&gone.parent);
+            sync.touch(kind::GROUP, group.id, false)?;
+        }
+        let mut hosts = self.hosts.clone();
+        for host in hosts
+            .iter_mut()
+            .filter(|host| host.group.as_deref() == Some(gone.uid.as_str()))
+        {
+            host.group.clone_from(&gone.parent);
+            sync.touch(kind::HOST, host.id, false)?;
+        }
+        sync.touch(kind::GROUP, id, true)?;
+        self.save_all(&Parts {
+            hosts: &hosts,
+            groups: &groups,
+            sync: &sync,
+            ..self.parts()
+        })?;
+        self.hosts = hosts;
+        self.groups = groups;
+        self.sync = sync;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// `host` with what it inherits from its groups filled in, and where each inherited
+    /// value came from. Connect with the resolved host.
+    #[must_use]
+    pub fn resolve(&self, host: &Host) -> (Host, Sources) {
+        groups::resolve(host, &self.groups)
     }
 
     /// The keychain, sorted by label.
@@ -717,14 +899,11 @@ impl Vault {
         next.sort_by_key(|key| key.label.to_lowercase());
         let mut sync = self.sync.clone();
         sync.touch(kind::KEY, id, false)?;
-        self.save_all(
-            &self.hosts,
-            &self.forwards,
-            &next,
-            &self.snippets,
-            &self.logs,
-            &sync,
-        )?;
+        self.save_all(&Parts {
+            ssh_keys: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.ssh_keys = next;
         self.sync = sync;
         self.generation += 1;
@@ -748,36 +927,28 @@ impl Vault {
             host.key_id = None;
             sync.touch(kind::HOST, host.id, false)?;
         }
+        let mut groups = self.groups.clone();
+        for group in groups
+            .iter_mut()
+            .filter(|group| group.defaults.key_id == Some(id))
+        {
+            group.defaults.key_id = None;
+            sync.touch(kind::GROUP, group.id, false)?;
+        }
         sync.touch(kind::KEY, id, true)?;
-        self.save_all(
-            &hosts,
-            &self.forwards,
-            &keys,
-            &self.snippets,
-            &self.logs,
-            &sync,
-        )?;
+        self.save_all(&Parts {
+            hosts: &hosts,
+            ssh_keys: &keys,
+            groups: &groups,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.hosts = hosts;
         self.ssh_keys = keys;
+        self.groups = groups;
         self.sync = sync;
         self.generation += 1;
         Ok(())
-    }
-
-    fn save(
-        &self,
-        hosts: &[Host],
-        forwards: &[PortForward],
-        sync: &SyncState,
-    ) -> Result<(), VaultError> {
-        self.save_all(
-            hosts,
-            forwards,
-            &self.ssh_keys,
-            &self.snippets,
-            &self.logs,
-            sync,
-        )
     }
 
     /// The session logs, newest first.
@@ -807,14 +978,11 @@ impl Vault {
             next.retain(|log| log.id != old);
         }
         next.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then(b.id.cmp(&a.id)));
-        self.save_all(
-            &self.hosts,
-            &self.forwards,
-            &self.ssh_keys,
-            &self.snippets,
-            &next,
-            &sync,
-        )?;
+        self.save_all(&Parts {
+            logs: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.logs = next;
         self.sync = sync;
         self.generation += 1;
@@ -834,14 +1002,11 @@ impl Vault {
             .collect();
         let mut sync = self.sync.clone();
         sync.touch(kind::LOG, id, true)?;
-        self.save_all(
-            &self.hosts,
-            &self.forwards,
-            &self.ssh_keys,
-            &self.snippets,
-            &next,
-            &sync,
-        )?;
+        self.save_all(&Parts {
+            logs: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.logs = next;
         self.sync = sync;
         self.generation += 1;
@@ -879,14 +1044,11 @@ impl Vault {
         next.sort_by_key(|snippet| snippet.label.to_lowercase());
         let mut sync = self.sync.clone();
         sync.touch(kind::SNIPPET, id, false)?;
-        self.save_all(
-            &self.hosts,
-            &self.forwards,
-            &self.ssh_keys,
-            &next,
-            &self.logs,
-            &sync,
-        )?;
+        self.save_all(&Parts {
+            snippets: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.snippets = next;
         self.sync = sync;
         self.generation += 1;
@@ -906,31 +1068,48 @@ impl Vault {
             .collect();
         let mut sync = self.sync.clone();
         sync.touch(kind::SNIPPET, id, true)?;
-        self.save_all(
-            &self.hosts,
-            &self.forwards,
-            &self.ssh_keys,
-            &next,
-            &self.logs,
-            &sync,
-        )?;
+        self.save_all(&Parts {
+            snippets: &next,
+            sync: &sync,
+            ..self.parts()
+        })?;
         self.snippets = next;
         self.sync = sync;
         self.generation += 1;
         Ok(())
     }
 
-    fn save_all(
-        &self,
-        hosts: &[Host],
-        forwards: &[PortForward],
-        ssh_keys: &[SshKey],
-        snippets: &[Snippet],
-        logs: &[SessionLog],
-        sync: &SyncState,
-    ) -> Result<(), VaultError> {
+    /// Everything the file holds, as it is now; change a field to save something new.
+    fn parts(&self) -> Parts<'_> {
+        Parts {
+            hosts: &self.hosts,
+            forwards: &self.forwards,
+            ssh_keys: &self.ssh_keys,
+            snippets: &self.snippets,
+            logs: &self.logs,
+            groups: &self.groups,
+            sync: &self.sync,
+        }
+    }
+
+    fn save_all(&self, parts: &Parts<'_>) -> Result<(), VaultError> {
+        let Parts {
+            hosts,
+            forwards,
+            ssh_keys,
+            snippets,
+            logs,
+            groups,
+            sync,
+        } = *parts;
         let mut records = Vec::with_capacity(
-            hosts.len() + forwards.len() + ssh_keys.len() + snippets.len() + logs.len() + 1,
+            hosts.len()
+                + forwards.len()
+                + ssh_keys.len()
+                + snippets.len()
+                + logs.len()
+                + groups.len()
+                + 1,
         );
         let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
         for host in hosts {
@@ -970,6 +1149,16 @@ impl Vault {
             records.push(Record {
                 id,
                 kind: KIND_SNIPPET,
+                sealed,
+            });
+        }
+        for group in groups {
+            let id = format!("group-{}", group.id);
+            let plaintext = Zeroizing::new(serde_json::to_vec(group).map_err(damaged)?);
+            let sealed = self.keys.seal_record(&id, KIND_GROUP, &plaintext)?;
+            records.push(Record {
+                id,
+                kind: KIND_GROUP,
                 sealed,
             });
         }
@@ -1030,6 +1219,43 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_group_moves_its_hosts_and_subgroups_up_and_loops_are_refused() {
+        let path = temp("groups");
+        let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();
+        let mut top = vault.draft_group(None).unwrap();
+        top.name = "top".into();
+        vault.upsert_group(top.clone()).unwrap();
+        let mut mid = vault.draft_group(Some(top.uid.clone())).unwrap();
+        mid.name = "mid".into();
+        vault.upsert_group(mid.clone()).unwrap();
+        let mut leaf = vault.draft_group(Some(mid.uid.clone())).unwrap();
+        leaf.name = "leaf".into();
+        vault.upsert_group(leaf.clone()).unwrap();
+        let mut host = vault.draft_host();
+        host.label = "h".into();
+        host.address = "x".into();
+        host.group = Some(mid.uid.clone());
+        vault.upsert_host(host).unwrap();
+
+        let mut looped = top.clone();
+        looped.parent = Some(leaf.uid.clone());
+        assert!(matches!(
+            vault.upsert_group(looped),
+            Err(VaultError::Refused(_))
+        ));
+        let mut unnamed = vault.draft_group(None).unwrap();
+        unnamed.name = " ".into();
+        assert!(vault.upsert_group(unnamed).is_err());
+
+        vault.remove_group(mid.id).unwrap();
+        let leaf_now = vault.groups().iter().find(|g| g.uid == leaf.uid).unwrap();
+        assert_eq!(leaf_now.parent.as_deref(), Some(top.uid.as_str()));
+        assert_eq!(vault.hosts()[0].group.as_deref(), Some(top.uid.as_str()));
+        let reopened = Vault::unlock(&path, "pw").unwrap();
+        assert_eq!(reopened.groups().len(), 2);
+    }
+
+    #[test]
     fn forwarding_rules_survive_lock_and_unlock_beside_the_hosts() {
         let path = temp("forwards");
         let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();
@@ -1068,7 +1294,7 @@ mod tests {
         old.id = 1;
         let mut rule = PortForward::new(9, 1);
         rule.label = "db".into();
-        vault.adopt(&[old], &[rule], &[], &[]).unwrap();
+        vault.adopt(&[old], &[rule], &[], &[], &[]).unwrap();
 
         let reopened = Vault::unlock(&path, "pw").unwrap();
         let adopted = reopened
