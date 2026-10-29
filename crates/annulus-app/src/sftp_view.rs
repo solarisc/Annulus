@@ -523,6 +523,8 @@ pub struct SftpTab {
     pub(crate) local: LocalPane,
     /// Questions the connection asked (a new host key, a password), for the tab to show.
     pub(crate) questions: Vec<SessionEvent>,
+    /// Transfers that finished since the tab last looked, by label, for a toast.
+    pub(crate) finished: Vec<String>,
 }
 
 impl SftpTab {
@@ -552,6 +554,7 @@ impl SftpTab {
             dialog: None,
             local: LocalPane::new(downloads_dir()),
             questions: Vec::new(),
+            finished: Vec::new(),
         }
     }
 
@@ -652,6 +655,9 @@ impl SftpTab {
                             Err(message) => TransferState::Failed(message),
                         };
                         upload = Some(transfer.upload);
+                        if done {
+                            self.finished.push(transfer.label.clone());
+                        }
                     }
                     // A finished transfer shows up in the listing on its receiving side.
                     match upload {

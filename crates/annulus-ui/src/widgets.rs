@@ -196,6 +196,29 @@ pub struct FieldStyle<'a> {
     pub error: bool,
 }
 
+/// What a toast is about, for its color and mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// Something happened.
+    Info,
+    /// Something finished well.
+    Done,
+    /// Something went wrong.
+    Problem,
+}
+
+/// How long a toast stays, in seconds, coming and going included.
+pub const TOAST_LIFE: f64 = 4.0;
+
+/// One toast on screen.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Toast {
+    text: String,
+    tone: Tone,
+    /// When it was shown, on the window's clock.
+    at: f64,
+}
+
 /// A popup menu open below a widget.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Popup {
@@ -905,6 +928,7 @@ impl Ui<'_> {
 
     /// Draws what floats above the frame: the open menu. Call after everything else.
     pub fn overlays(&mut self) {
+        self.draw_toasts();
         let Some(popup) = self.state.popup.clone() else {
             self.draw_tooltip();
             return;
@@ -1018,6 +1042,80 @@ impl Ui<'_> {
             }
         }
         self.pop_clip();
+    }
+
+    /// Shows `text` in a toast at the window's bottom right for a few seconds (something done
+    /// that needs no answer: copied, saved, moved).
+    pub fn toast(&mut self, text: impl Into<String>, tone: Tone) {
+        // A frame in already, so the frame that shows it is not blank.
+        let at = self.time() - crate::motion::FRAME;
+        self.state.toasts.push(Toast {
+            text: text.into(),
+            tone,
+            at,
+        });
+        // A few at most: the oldest go first.
+        let extra = self.state.toasts.len().saturating_sub(3);
+        self.state.toasts.drain(..extra);
+    }
+
+    /// The toasts, newest at the bottom: each slides in from the right, stays, then slides
+    /// out; frames are asked for only while one moves.
+    fn draw_toasts(&mut self) {
+        const IN: f64 = 0.22;
+        let now = self.time();
+        self.state
+            .toasts
+            .retain(|toast| now - toast.at < TOAST_LIFE);
+        if self.state.toasts.is_empty() {
+            return;
+        }
+        let t = self.theme;
+        let toasts = self.state.toasts.clone();
+        let mut bottom = self.viewport.b() - 20.0;
+        let mut wake: f64 = f64::MAX;
+        for toast in toasts.iter().rev() {
+            let age = now - toast.at;
+            let coming = (age / IN).clamp(0.0, 1.0);
+            let going = ((TOAST_LIFE - age) / IN).clamp(0.0, 1.0);
+            #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+            let shown = crate::motion::Curve::Out.at(coming.min(going) as f32);
+            // The next moment it moves: now while it slides, else when it starts to leave.
+            wake = wake.min(if coming < 1.0 || going < 1.0 {
+                0.016
+            } else {
+                TOAST_LIFE - IN - age
+            });
+            let width = (self.gfx.measure(&toast.text, BODY).width + 64.0)
+                .min(self.viewport.w - 40.0)
+                .max(200.0);
+            let rect = Rect::new(self.viewport.r() - 20.0 - width, bottom - 44.0, width, 44.0);
+            bottom -= 52.0 * shown;
+            self.push_layer(Layer::fade(shown).shifted(28.0 * (1.0 - shown), 0.0));
+            self.gfx.shadow(rect, 12.0, 20.0, 6.0, t.shadow);
+            self.gfx.fill_rect(rect, 12.0, t.raised);
+            self.gfx.stroke_rect(rect, 12.0, 1.0, t.line_strong);
+            let color = match toast.tone {
+                Tone::Info => t.accent,
+                Tone::Done => t.ok,
+                Tone::Problem => t.error,
+            };
+            let mut inner = rect.inset(space::M, 0.0);
+            let mark = inner.take_left(20.0).centered(20.0, 20.0);
+            self.gfx.fill_circle(mark.center(), 10.0, color.alpha(0.18));
+            let glyph = match toast.tone {
+                Tone::Problem => icons::WARNING,
+                _ => icons::CHECK,
+            };
+            self.gfx.icon(glyph, mark.centered(13.0, 13.0), color);
+            inner.take_left(space::S + 2.0);
+            self.gfx
+                .text(inner, &toast.text, BODY, t.text, Align::Start);
+            self.pop_layer();
+        }
+        if wake < f64::MAX {
+            self.request_repaint_after(std::time::Duration::from_secs_f64(wake.max(0.016)));
+        }
     }
 
     /// The tooltip asked for this frame: under its control, or above it at the window's
@@ -1660,6 +1758,43 @@ mod tests {
         );
         state.set_focus(Some(id), true);
         assert!(drawn(&mut state, &[], 2.1), "on keyboard focus at once");
+    }
+
+    #[test]
+    fn a_toast_slides_in_stays_without_asking_for_frames_then_goes() {
+        let mut state = UiState::default();
+        let at = |state: &mut UiState, time: f64, show: bool| {
+            let mut canvas = Recorder::default();
+            state.begin_frame(&[], time);
+            let mut ui = Ui::new(
+                &mut canvas,
+                Theme::new(Appearance::Dark),
+                state,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+            );
+            if show {
+                ui.toast("Copied the ssh command", Tone::Done);
+            }
+            ui.overlays();
+            let output = state.end_frame();
+            let drawn = canvas.texts.iter().any(|(_, text)| text.contains("Copied"));
+            (drawn, output.repaint_after)
+        };
+        let (drawn, next) = at(&mut state, 1.0, true);
+        assert!(drawn);
+        assert!(
+            next.is_some_and(|after| after.as_secs_f64() < 0.05),
+            "sliding in"
+        );
+        // Resting: the next frame it needs is when it starts to leave.
+        let (drawn, next) = at(&mut state, 2.0, false);
+        assert!(drawn);
+        assert!(
+            next.is_some_and(|after| after.as_secs_f64() > 1.0),
+            "{next:?}"
+        );
+        let (drawn, next) = at(&mut state, 1.0 + TOAST_LIFE + 0.1, false);
+        assert!(!drawn && next.is_none(), "gone, and nothing more to draw");
     }
 
     #[test]

@@ -113,6 +113,15 @@ impl SftpView {
             }
         });
         self.tab.drain();
+        for label in std::mem::take(&mut self.tab.finished) {
+            let name = label.trim_start_matches(['\u{2191}', '\u{2193}']).trim();
+            let what = if label.starts_with('\u{2191}') {
+                "Uploaded"
+            } else {
+                "Downloaded"
+            };
+            ui.toast(format!("{what} {name}"), annulus_ui::widgets::Tone::Done);
+        }
         for event in std::mem::take(&mut self.tab.questions) {
             if let Some(question) = Ask::from_event(event) {
                 self.ask = Some(question);

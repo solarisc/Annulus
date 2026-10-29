@@ -9,7 +9,8 @@ use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, TITLE, button_width,
+    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, TITLE, Tone,
+    button_width,
 };
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
@@ -441,11 +442,14 @@ impl HostsView {
             self.notice = Some(untag_everywhere(vault, &tag));
             self.tags.retain(|chosen| *chosen != tag);
         }
-        if let Some(notice) = &self.notice {
-            let t = ui.theme;
-            ui.gfx
-                .text(main.take_top(20.0), notice, SMALL, t.text2, Align::Start);
-            main.take_top(space::S);
+        // What was just done, in a toast that leaves by itself.
+        if let Some(notice) = self.notice.take() {
+            let tone = if notice.starts_with("Could not") || notice.starts_with("This host") {
+                Tone::Problem
+            } else {
+                Tone::Done
+            };
+            ui.toast(notice, tone);
         }
         if self.group.is_some() && !self.filtering() {
             if let Some(all) = self.breadcrumb(ui, main.take_top(CONTROL), vault) {

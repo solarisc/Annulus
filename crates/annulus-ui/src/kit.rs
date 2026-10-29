@@ -443,6 +443,8 @@ pub struct UiState {
     pub(crate) tooltip: Option<(String, Rect)>,
     edits: HashMap<Id, EditState>,
     pub(crate) popup: Option<Popup>,
+    /// Toasts on screen, oldest first.
+    pub(crate) toasts: Vec<crate::widgets::Toast>,
     /// Text to put on the clipboard, and whether it is a secret.
     pub(crate) clipboard_out: Option<(String, bool)>,
     faults: Vec<String>,
