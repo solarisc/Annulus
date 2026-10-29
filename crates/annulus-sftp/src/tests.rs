@@ -496,6 +496,58 @@ async fn an_upload_lands_under_its_local_name_and_respects_conflicts() {
 }
 
 #[tokio::test]
+async fn a_folder_uploads_with_everything_in_it() {
+    let remote = temp_dir("tree-remote");
+    let local = temp_dir("tree-local");
+    fs::create_dir_all(local.join("site/assets/img")).unwrap();
+    fs::write(local.join("site/index.html"), b"<html>").unwrap();
+    fs::write(local.join("site/assets/app.css"), b"body{}").unwrap();
+    fs::write(local.join("site/assets/img/logo.svg"), b"<svg/>").unwrap();
+    fs::create_dir(remote.join("www")).unwrap();
+    let sftp = client(remote.clone()).await;
+    let mut seen = (0, 0);
+    let mut progress = |done, total| {
+        seen = (done, total);
+        true
+    };
+    let outcome = sftp
+        .upload_tree(
+            &local.join("site"),
+            "/www",
+            Conflict::KeepBoth,
+            &mut progress,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        Outcome::Done {
+            to: "/www/site".into(),
+            bytes: 18
+        }
+    );
+    assert_eq!(seen, (18, 18), "progress counts every file");
+    assert_eq!(
+        fs::read(remote.join("www/site/index.html")).unwrap(),
+        b"<html>"
+    );
+    assert_eq!(
+        fs::read(remote.join("www/site/assets/img/logo.svg")).unwrap(),
+        b"<svg/>"
+    );
+    // Again into the same folder: the folders are reused, the files follow the conflict rule.
+    sftp.upload_tree(
+        &local.join("site"),
+        "/www",
+        Conflict::Skip,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(names(&remote.join("www/site")), ["assets", "index.html"]);
+}
+
+#[tokio::test]
 async fn folders_can_be_made_renamed_and_removed_with_their_contents() {
     let remote = temp_dir("ops");
     let sftp = client(remote.clone()).await;

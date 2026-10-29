@@ -326,6 +326,23 @@ async fn sftp_round_trip_with_conflicts() {
     )
     .await
     .unwrap();
+
+    // A folder dropped on the host goes with everything in it.
+    std::fs::create_dir_all(local.join("site/assets")).unwrap();
+    std::fs::write(local.join("site/index.html"), b"<html>").unwrap();
+    std::fs::write(local.join("site/assets/app.css"), b"body{}").unwrap();
+    sftp.upload_tree(&local.join("site"), &dir, Conflict::KeepBoth, &mut progress)
+        .await
+        .unwrap();
+    let assets: Vec<String> = sftp
+        .list(&format!("{dir}/site/assets"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(assets, ["app.css"]);
+
     sftp.remove(&dir).await.unwrap();
     assert!(sftp.list(&dir).await.is_err());
 }

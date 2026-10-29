@@ -465,6 +465,73 @@ impl Sftp {
         Err(failure)
     }
 
+    /// Uploads folder `local` into `remote_dir` with everything in it, as one transfer:
+    /// each folder is made (or used as it is when there), each file goes as [`Self::upload`]
+    /// sends it under `conflict`, and links are skipped, never followed. `progress` sees the
+    /// bytes of all the files together.
+    ///
+    /// # Errors
+    /// As [`Self::upload`], or a folder cannot be read or made; what was copied stays.
+    pub async fn upload_tree(
+        &self,
+        local: &Path,
+        remote_dir: &str,
+        conflict: Conflict,
+        progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
+    ) -> Result<Outcome, SftpError> {
+        let name = local
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| SftpError::UnsafeName(local.display().to_string()))?;
+        let top = join(remote_dir, name);
+        // Everything is found first, so progress has a total; folders come before what is
+        // in them.
+        let (mut folders, mut files) = (Vec::new(), Vec::new());
+        let mut stack = vec![(local.to_path_buf(), top.clone())];
+        while let Some((dir, remote)) = stack.pop() {
+            let read_error = |source| SftpError::Local {
+                path: dir.clone(),
+                source,
+            };
+            for entry in std::fs::read_dir(&dir).map_err(read_error)? {
+                let entry = entry.map_err(read_error)?;
+                let kind = entry.file_type().map_err(read_error)?;
+                // A name that is not UTF-8 cannot be named on the host the same way.
+                let Some(child) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if kind.is_dir() {
+                    stack.push((entry.path(), join(&remote, &child)));
+                } else if kind.is_file() {
+                    let size = entry.metadata().map_err(read_error)?.len();
+                    files.push((entry.path(), remote.clone(), size));
+                }
+            }
+            folders.push(remote);
+        }
+        folders.sort_by_key(|folder| folder.matches('/').count());
+        for folder in &folders {
+            if !self.session.try_exists(folder.as_str()).await? {
+                self.session.create_dir(folder.as_str()).await?;
+            }
+        }
+        let total: u64 = files.iter().map(|(_, _, size)| size).sum();
+        let (mut done, mut bytes) = (0_u64, 0_u64);
+        for (path, dir, size) in files {
+            let mut each = |copied: u64, _: u64| progress(done + copied, total);
+            if let Outcome::Done { bytes: copied, .. } =
+                self.upload(&path, &dir, conflict, &mut each).await?
+            {
+                bytes += copied;
+            }
+            done += size;
+            if !progress(done, total) {
+                return Err(SftpError::Cancelled);
+            }
+        }
+        Ok(Outcome::Done { to: top, bytes })
+    }
+
     /// The remote part file for an upload of `name` into `dir` (`stamp` is the local size
     /// and time): a kept one to continue, else a new one. Returns it open for writing at
     /// the end of what it holds, where to start, and the claim on it.

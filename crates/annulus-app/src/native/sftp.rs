@@ -3,7 +3,7 @@
 //! by its column headers, and each entry's More menu downloads, renames, sets permissions,
 //! shows properties or deletes it (after a yes: it cannot be undone). A file dragged from one
 //! pane onto the other uploads or downloads it, and files dropped from the OS (Explorer,
-//! Finder, a file manager) upload to the host's folder shown. The connection, listings and
+//! Finder, a file manager) upload to the host's folder shown, folders with everything in them. The connection, listings and
 //! resumable transfers are `sftp_view::SftpTab`'s; this draws them.
 
 use std::sync::atomic::Ordering;
@@ -612,15 +612,14 @@ impl SftpView {
             if clicked {
                 self.local_selected = Some(entry.name.clone());
             }
+            // A file or a whole folder.
             let id = Id::new(("local", entry.name.as_str()));
-            if !entry.is_dir {
-                let path = self.tab.local.dir.join(&entry.name);
-                if let Some(at) = ui.drag_moved(id) {
-                    self.drag = Some((Dragged::Local(path.clone()), at));
-                }
-                if let Some(at) = ui.drag_released(id) {
-                    self.dropped = Some((Dragged::Local(path), at));
-                }
+            let path = self.tab.local.dir.join(&entry.name);
+            if let Some(at) = ui.drag_moved(id) {
+                self.drag = Some((Dragged::Local(path.clone()), at));
+            }
+            if let Some(at) = ui.drag_released(id) {
+                self.dropped = Some((Dragged::Local(path), at));
             }
             if double && entry.is_dir {
                 open = Some(entry.name.clone());
@@ -884,6 +883,7 @@ impl SftpView {
             if clicked {
                 self.remote_selected = Some(entry.name.clone());
             }
+            // Files only: a folder on the host does not download as a whole yet.
             let id = Id::new(("remote", entry.name.as_str()));
             if !entry.is_dir() {
                 if let Some(at) = ui.drag_moved(id) {
@@ -1114,6 +1114,9 @@ mod tests {
         // Let go over its own pane, nothing moves.
         drag(&mut view, &mut state, "app.log", "README.md", 2.0);
         assert_eq!(view.tab.transfers.len(), 2);
+        // A folder from this computer goes with everything in it.
+        drag(&mut view, &mut state, "notes", "README.md", 3.0);
+        assert_eq!(labels(&view)[2], "\u{2191} notes/");
     }
 
     #[test]

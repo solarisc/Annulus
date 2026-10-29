@@ -32,6 +32,14 @@ pub(crate) enum Command {
         conflict: Conflict,
         cancel: Arc<AtomicBool>,
     },
+    /// A folder with everything in it.
+    UploadTree {
+        id: u64,
+        local: PathBuf,
+        dir: String,
+        conflict: Conflict,
+        cancel: Arc<AtomicBool>,
+    },
     CreateDir(String),
     Rename(String, String),
     Remove(String),
@@ -191,7 +199,9 @@ fn refuse(command: Command, message: &str, send: &Send) {
             request,
             message: message.to_owned(),
         },
-        Command::Download { id, .. } | Command::Upload { id, .. } => Reply::Finished {
+        Command::Download { id, .. }
+        | Command::Upload { id, .. }
+        | Command::UploadTree { id, .. } => Reply::Finished {
             id,
             result: Err(message.to_owned()),
         },
@@ -216,11 +226,15 @@ async fn run(
     slots: Arc<tokio::sync::Semaphore>,
 ) {
     let _slot = match &command {
-        Command::Download { .. } | Command::Upload { .. } => slots.acquire_owned().await.ok(),
+        Command::Download { .. } | Command::Upload { .. } | Command::UploadTree { .. } => {
+            slots.acquire_owned().await.ok()
+        }
         _ => None,
     };
     // Cancelled while it waited its turn: it never opens a file.
-    if let Command::Download { id, cancel, .. } | Command::Upload { id, cancel, .. } = &command
+    if let Command::Download { id, cancel, .. }
+    | Command::Upload { id, cancel, .. }
+    | Command::UploadTree { id, cancel, .. } = &command
         && cancel.load(Ordering::Relaxed)
     {
         return send(Reply::Finished {
@@ -285,6 +299,22 @@ async fn run(
                 result: result.map_err(|error| error.to_string()),
             });
         }
+        Command::UploadTree {
+            id,
+            local,
+            dir,
+            conflict,
+            cancel,
+        } => {
+            let mut progress = progress(id, cancel, send.clone());
+            let result = sftp
+                .upload_tree(&local, &dir, conflict, &mut progress)
+                .await;
+            send(Reply::Finished {
+                id,
+                result: result.map_err(|error| error.to_string()),
+            });
+        }
         Command::CreateDir(path) => send(changed(sftp.create_dir(&path).await)),
         Command::Rename(from, to) => send(changed(sftp.rename(&from, &to).await)),
         Command::Chmod(path, mode) => send(changed(sftp.set_permissions(&path, mode).await)),
@@ -332,6 +362,11 @@ pub(crate) enum Recipe {
         dir: String,
         conflict: Conflict,
     },
+    UploadTree {
+        local: PathBuf,
+        dir: String,
+        conflict: Conflict,
+    },
 }
 
 impl Recipe {
@@ -354,6 +389,17 @@ impl Recipe {
                 dir,
                 conflict,
             } => Command::Upload {
+                id,
+                local,
+                dir,
+                conflict,
+                cancel,
+            },
+            Recipe::UploadTree {
+                local,
+                dir,
+                conflict,
+            } => Command::UploadTree {
                 id,
                 local,
                 dir,
@@ -581,7 +627,7 @@ impl SftpTab {
         self.transfers.push(Transfer {
             id: self.next_id,
             label,
-            upload: matches!(recipe, Recipe::Upload { .. }),
+            upload: matches!(recipe, Recipe::Upload { .. } | Recipe::UploadTree { .. }),
             done: 0,
             total: 0,
             state: TransferState::Running,
@@ -621,9 +667,12 @@ impl SftpTab {
             |name| name.to_string_lossy().into_owned(),
         );
         if local.is_dir() {
-            self.notice = Some(format!(
-                "{name} is a folder; uploading folders is not supported yet."
-            ));
+            let recipe = Recipe::UploadTree {
+                local,
+                dir,
+                conflict: self.conflict,
+            };
+            self.start_transfer(format!("\u{2191} {name}/"), recipe);
             return;
         }
         let recipe = Recipe::Upload {
