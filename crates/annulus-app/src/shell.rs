@@ -7,6 +7,7 @@ use annulus_session::{Program, SshFiles};
 use annulus_ui::{icons, theme};
 use annulus_vault::vault::Vault;
 
+use crate::forwards_screen::ForwardsScreen;
 use crate::hosts_screen::{HostsScreen, Request};
 use crate::lock_screen::LockScreen;
 use crate::sftp_view::SftpTab;
@@ -104,6 +105,8 @@ pub struct Shell {
     pub theme_mode: ThemeMode,
     /// The Hosts screen, while the vault is unlocked.
     pub hosts: Option<HostsScreen>,
+    /// Port-forwarding rules and the running ones, while the vault is unlocked.
+    forwards: ForwardsScreen,
     /// Setup or unlock, while the vault is locked.
     lock: LockScreen,
     data_dir: std::path::PathBuf,
@@ -129,6 +132,7 @@ impl Shell {
             section: Section::Hosts,
             theme_mode: ThemeMode::System,
             hosts: None,
+            forwards: ForwardsScreen::default(),
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
             data_dir: data_dir.to_path_buf(),
             font_size: DEFAULT_FONT_SIZE,
@@ -201,6 +205,10 @@ impl Shell {
         self.auto_lock(ui.ctx());
         egui::Panel::top("tabs").show(ui, |ui| self.tab_strip(ui));
         let palette = self.palette();
+        if let Some(hosts) = &self.hosts {
+            self.forwards.auto_start(ui.ctx(), hosts);
+        }
+        self.forwards.prompts(ui.ctx());
         if matches!(self.tabs.get(self.active_tab), Some(Tab::Vault)) {
             egui::Panel::left("vault-nav")
                 .resizable(false)
@@ -228,11 +236,14 @@ impl Shell {
             key_dir: directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".ssh")),
         };
         self.hosts = Some(HostsScreen::new(vault, files));
+        self.forwards = ForwardsScreen::default();
     }
 
     /// Locks the vault: its keys and decrypted hosts are dropped (F-SEC-004).
     pub fn lock_vault(&mut self) {
         self.hosts = None;
+        // Running rules stop with the lock: their connections used the vault's secrets.
+        self.forwards = ForwardsScreen::default();
         self.lock = LockScreen::new(&self.data_dir.join(VAULT_FILE));
     }
 
@@ -390,6 +401,14 @@ impl Shell {
                     self.lock.ui(ui, &self.data_dir.join(VAULT_FILE), &palette)
                 {
                     self.unlocked(vault);
+                }
+            }
+            Section::PortForwarding => {
+                let palette = self.palette();
+                if let Some(hosts) = &mut self.hosts {
+                    self.forwards.ui(ui, &palette, hosts);
+                } else {
+                    self.section = Section::Hosts;
                 }
             }
             Section::Settings => self.settings(ui),

@@ -70,8 +70,19 @@ impl HostsScreen {
     }
 
     /// The program that connects to a saved host, with its saved password.
-    fn connect_host(&self, host: &Host) -> Program {
+    pub fn connect_host(&self, host: &Host) -> Program {
         self.ssh_with(&host.target(), host.password.as_ref())
+    }
+
+    /// The unlocked vault.
+    #[must_use]
+    pub fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
+    /// The unlocked vault, for screens that save other records in it.
+    pub fn vault_mut(&mut self) -> &mut Vault {
+        &mut self.vault
     }
 
     /// Draws the screen; returns what the shell should do.

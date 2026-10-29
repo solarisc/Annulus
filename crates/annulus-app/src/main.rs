@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod forwards_screen;
 mod hosts_screen;
 mod lock_screen;
 mod sftp_view;
