@@ -570,6 +570,38 @@ fn zone_center(zones: &[Zone], name: &str) -> Point {
         )
 }
 
+/// Places where Tab goes backwards in reading order: to a zone above and to the left
+/// of the one before, or to its left on the same row. Moving up into a new column to the right
+/// is fine (the content beside the navigation), and a backdrop starts a new layer (a menu).
+fn tab_order_faults(zones: &[Zone]) -> Vec<String> {
+    let mut faults = Vec::new();
+    let mut last: Option<&Zone> = None;
+    for zone in zones {
+        if zone.role == Role::Backdrop {
+            last = None;
+            continue;
+        }
+        if !zone.role.focusable() {
+            continue;
+        }
+        if let Some(before) = last {
+            let (a, b) = (before.rect, zone.rect);
+            let overlap = a.b().min(b.b()) - a.y.max(b.y);
+            let same_row = overlap > 0.5 * a.h.min(b.h);
+            let left = b.r() <= a.x + 0.5 || (same_row && b.center().x < a.center().x);
+            let above = b.b() <= a.y + 0.5;
+            if (same_row && left) || (above && b.x < a.x - 0.5) {
+                faults.push(format!(
+                    "Tab goes backwards from {:?} {:?} to {:?} {:?}",
+                    before.label, a, zone.label, b
+                ));
+            }
+        }
+        last = Some(zone);
+    }
+    faults
+}
+
 /// Partial overlaps between interactive zones (one fully inside another is fine: a button
 /// on a card), and controls outside the window. A zone drawn after a backdrop that covers it
 /// (an open menu) sits above everything drawn before that backdrop, so those never clash.
@@ -693,6 +725,7 @@ fn render(
     let (output, png) = frame(&[], time + 1.0, true);
     faults.extend(output.faults.iter().cloned());
     faults.extend(layout_faults(&output.zones, viewport));
+    faults.extend(tab_order_faults(&output.zones));
     // Two zones with one id would take each other's input and screen-reader node.
     let mut ids = std::collections::HashSet::new();
     for zone in &output.zones {
@@ -1254,6 +1287,30 @@ fn the_lint_catches_partial_overlaps_but_not_nesting() {
     };
     assert_eq!(
         layout_faults(&[card, backdrop, across], viewport),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn the_tab_order_lint_catches_a_mirrored_row_but_not_a_new_column() {
+    let zone = |label: &str, rect: Rect| {
+        Zone::new(annulus_ui::kit::Id::new(label), rect, Role::Button, label)
+    };
+    let nav = zone("nav", Rect::new(0.0, 500.0, 100.0, 30.0));
+    let content = zone("content", Rect::new(200.0, 50.0, 100.0, 30.0));
+    assert_eq!(
+        tab_order_faults(&[nav, content.clone()]),
+        Vec::<String>::new()
+    );
+    let right = zone("right", Rect::new(400.0, 50.0, 80.0, 30.0));
+    let left = zone("left", Rect::new(300.0, 50.0, 80.0, 30.0));
+    assert_eq!(tab_order_faults(&[right.clone(), left.clone()]).len(), 1);
+    let backdrop = Zone {
+        role: Role::Backdrop,
+        ..zone("backdrop", Rect::new(0.0, 0.0, 800.0, 600.0))
+    };
+    assert_eq!(
+        tab_order_faults(&[right, backdrop, left]),
         Vec::<String>::new()
     );
 }
