@@ -1,9 +1,6 @@
 //! Import from `~/.ssh/config` with a preview (F-IMP-001): every host found is listed, those
 //! whose name is already saved start unticked, and nothing is saved until Import.
 
-use std::fmt::Write as _;
-
-use eframe::egui::{self, Key, RichText, Vec2};
 use annulus_import::ssh_config::{self, Found};
 use annulus_vault::forwards::PortForward;
 use annulus_vault::hosts::Host;
@@ -85,76 +82,6 @@ impl ImportPreview {
             })
             .collect();
         Ok(Self { rows, existing })
-    }
-
-    /// Draws the window; returns a message once it closes (imported or cancelled).
-    pub fn ui(&mut self, ctx: &egui::Context, vault: &mut Vault) -> Option<String> {
-        let mut result = None;
-        egui::Window::new("Import from OpenSSH config")
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .default_width(520.0)
-            .show(ctx, |ui| {
-                ui.label(
-                    "Choose the hosts to add. A ProxyJump becomes a jump host when that host is imported too; IdentityFile keys are not imported yet.",
-                );
-                ui.add_space(6.0);
-                egui::ScrollArea::vertical()
-                    .max_height(320.0)
-                    .show(ui, |ui| {
-                        for (entry, selected) in &mut self.rows {
-                            let mut detail = format!("{}:{}", entry.address, entry.port);
-                            if let Some(user) = &entry.user {
-                                detail = format!("{user}@{detail}");
-                            }
-                            if let Some(jump) = &entry.proxy_jump {
-                                let _ = write!(detail, "  via {jump}");
-                            }
-                            if !entry.forwards.is_empty() {
-                                let _ = write!(detail, "  {} forward(s)", entry.forwards.len());
-                            }
-                            ui.horizontal(|ui| {
-                                ui.checkbox(selected, &entry.alias);
-                                ui.label(RichText::new(detail).weak());
-                                if self.existing.contains(&entry.alias.to_lowercase()) {
-                                    ui.label(RichText::new("already saved").italics());
-                                }
-                            });
-                        }
-                    });
-                ui.add_space(8.0);
-                let chosen: Vec<&Found> = self
-                    .rows
-                    .iter()
-                    .filter(|(_, on)| *on)
-                    .map(|(entry, _)| entry)
-                    .collect();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !chosen.is_empty(),
-                            egui::Button::new(format!("Import {}", chosen.len())),
-                        )
-                        .clicked()
-                    {
-                        let (hosts, rules) = entities(&chosen);
-                        result = Some(match vault.adopt(&hosts, &rules, &[], &[], &[]) {
-                            Ok(()) => format!(
-                                "Imported {} host(s) and {} forward(s).",
-                                hosts.len(),
-                                rules.len()
-                            ),
-                            Err(error) => format!("Nothing was imported: {error}"),
-                        });
-                    }
-                    if ui.button("Cancel").clicked()
-                        || ui.input(|input| input.key_pressed(Key::Escape))
-                    {
-                        result = Some(String::new());
-                    }
-                });
-            });
-        result
     }
 }
 

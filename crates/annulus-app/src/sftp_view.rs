@@ -9,14 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
-use eframe::egui::{self, Key, RichText, Ui};
-use annulus_config::tokens::{Palette, space, text};
 use annulus_session::{Answers, Hop, SessionEvent, SshFiles, Target};
-use annulus_sftp::{Conflict, Entry, Kind, Outcome, Sftp, join, parent};
-use annulus_ui::{icons, theme};
+use annulus_sftp::{Conflict, Entry, Kind, Outcome, Sftp, join};
 
-use crate::local_pane::{LocalAction, LocalPane};
-use crate::ssh_dialogs::SshDialogs;
+use crate::local_pane::LocalPane;
 
 /// What the tab asks the connection thread to do.
 pub(crate) enum Command {
@@ -361,26 +357,19 @@ pub(crate) enum TransferState {
     Failed(String),
 }
 
-/// A dialog waiting for the user.
+/// A card waiting for the user (new folders and renames are typed inline instead).
 pub(crate) enum Dialog {
-    NewFolder(String),
-    Rename {
-        from: String,
-        to: String,
-    },
+    /// Delete this entry from the server? It cannot be undone.
     Delete(Entry),
     /// Permission bits of `name`, typed in octal.
-    Permissions {
-        name: String,
-        mode: String,
-    },
+    Permissions { name: String, mode: String },
     /// What is known about an entry.
     Properties(Entry),
 }
 
 impl Dialog {
     /// The Permissions dialog for `entry`, filled with its current bits.
-    fn permissions(entry: &Entry) -> Self {
+    pub(crate) fn permissions(entry: &Entry) -> Self {
         Dialog::Permissions {
             name: entry.name.clone(),
             mode: entry
@@ -400,7 +389,6 @@ pub struct SftpTab {
     pub title: String,
     pub(crate) start: Option<Login>,
     pub(crate) worker: Option<Worker>,
-    pub(crate) dialogs: SshDialogs,
     pub(crate) failed: Option<String>,
     /// The folder shown; `None` until connected.
     pub(crate) cwd: Option<String>,
@@ -423,10 +411,7 @@ pub struct SftpTab {
     pub(crate) dialog: Option<Dialog>,
     /// The local folder beside the remote one; downloads land in it.
     pub(crate) local: LocalPane,
-    /// Drawn by the new UI: questions are collected in `questions` instead of shown as egui
-    /// dialogs.
-    pub(crate) native: bool,
-    /// Questions the connection asked, for the new UI to answer.
+    /// Questions the connection asked (a new host key, a password), for the tab to show.
     pub(crate) questions: Vec<SessionEvent>,
 }
 
@@ -438,7 +423,6 @@ impl SftpTab {
             title: title.into(),
             start: Some((via, last, files)),
             worker: None,
-            dialogs: SshDialogs::default(),
             failed: None,
             cwd: None,
             home: "/".to_owned(),
@@ -456,7 +440,6 @@ impl SftpTab {
             next_id: 0,
             dialog: None,
             local: LocalPane::new(downloads_dir()),
-            native: false,
             questions: Vec::new(),
         }
     }
@@ -514,13 +497,7 @@ impl SftpTab {
         for reply in replies {
             match reply {
                 Reply::Session(SessionEvent::Failed(message)) => self.failed = Some(message),
-                Reply::Session(event) => {
-                    if self.native {
-                        self.questions.push(event);
-                    } else {
-                        self.dialogs.take(event);
-                    }
-                }
+                Reply::Session(event) => self.questions.push(event),
                 Reply::Ready { home } => {
                     // Shown even if listing it fails, so the error has somewhere to appear.
                     self.cwd = Some(home.clone());
@@ -656,449 +633,13 @@ impl SftpTab {
     pub(crate) fn answers(&self) -> Option<&Answers> {
         self.worker.as_ref().map(|worker| &worker.answers)
     }
-
-    /// Draws the tab.
-    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette) {
-        if let Some(login) = self.start.take() {
-            let ctx = ui.ctx().clone();
-            match Worker::start(login, move || {
-                ctx.request_repaint();
-            }) {
-                Ok(worker) => self.worker = Some(worker),
-                Err(error) => {
-                    self.failed = Some(format!("Could not start the connection: {error}"));
-                }
-            }
-        }
-        self.drain();
-        if let Some(worker) = &self.worker {
-            self.dialogs.show(ui.ctx(), &worker.answers);
-        }
-        if let Some(message) = &self.failed {
-            ui.colored_label(theme::color(palette.status_error), message);
-            return;
-        }
-        if self.cwd.is_none() {
-            ui.label(format!("Connecting to {}\u{2026}", self.title));
-            return;
-        }
-        self.uploads_from_drop(ui);
-        egui::Panel::top("sftp-toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("sftp-transfers")
-            .resizable(true)
-            .default_size(140.0)
-            .show(ui, |ui| self.transfers_ui(ui, palette));
-        let hidden = self.show_hidden;
-        let action = egui::Panel::left("sftp-local")
-            .resizable(true)
-            .default_size(ui.available_width() / 2.0)
-            .show(ui, |ui| self.local.ui(ui, palette, hidden))
-            .inner;
-        if let Some(LocalAction::Upload(path)) = action {
-            self.upload(path);
-        }
-        egui::CentralPanel::default().show(ui, |ui| self.listing(ui, palette));
-        self.dialog_ui(ui.ctx());
-    }
-
-    fn uploads_from_drop(&mut self, ui: &Ui) {
-        let dropped: Vec<PathBuf> = ui.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .iter()
-                .map(|file| file.path().to_path_buf())
-                .collect()
-        });
-        for path in dropped {
-            self.upload(path);
-        }
-    }
-
-    fn toolbar(&mut self, ui: &mut Ui) {
-        ui.add_space(space::XS);
-        ui.horizontal(|ui| {
-            let cwd = self.cwd.clone().unwrap_or_default();
-            if ui.button("Up").on_hover_text("Parent folder").clicked() {
-                self.navigate(parent(&cwd));
-            }
-            if ui.button("Home").clicked() {
-                self.navigate(self.home.clone());
-            }
-            if ui.button("Refresh").clicked() {
-                self.reload();
-            }
-            let path = ui.add(
-                egui::TextEdit::singleline(&mut self.path_field)
-                    .desired_width(320.0)
-                    .hint_text("Path"),
-            );
-            if path.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
-                let target = self.path_field.trim().to_owned();
-                if !target.is_empty() {
-                    self.navigate(target);
-                }
-            }
-            if ui.button("New folder").clicked() {
-                self.dialog = Some(Dialog::NewFolder(String::new()));
-            }
-            ui.checkbox(&mut self.show_hidden, "Hidden files");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .desired_width(140.0)
-                    .hint_text("Filter"),
-            );
-            egui::ComboBox::from_label("if a file exists")
-                .selected_text(conflict_name(self.conflict))
-                .show_ui(ui, |ui| {
-                    for choice in [Conflict::KeepBoth, Conflict::Overwrite, Conflict::Skip] {
-                        ui.selectable_value(&mut self.conflict, choice, conflict_name(choice));
-                    }
-                });
-        });
-        let selected = self
-            .selected
-            .as_ref()
-            .and_then(|name| self.entries.iter().find(|entry| &entry.name == name))
-            .cloned();
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(selected.is_some(), |ui| {
-                if ui.button("Download").clicked()
-                    && let Some(entry) = &selected
-                    && !entry.is_dir()
-                {
-                    self.download(entry);
-                }
-                if ui.button("Rename").clicked()
-                    && let Some(entry) = &selected
-                {
-                    self.dialog = Some(Dialog::Rename {
-                        from: entry.name.clone(),
-                        to: entry.name.clone(),
-                    });
-                }
-                if ui.button("Delete").clicked()
-                    && let Some(entry) = &selected
-                {
-                    self.dialog = Some(Dialog::Delete(entry.clone()));
-                }
-            });
-            ui.label(
-                RichText::new("Drop files on the window to upload them here.")
-                    .size(text::SECONDARY),
-            );
-        });
-        ui.add_space(space::XS);
-    }
-
-    /// "Sort by" buttons over the listing; clicking the current one flips the order.
-    fn sort_header(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Sort by");
-            for (by, name) in [
-                (SortBy::Name, "Name"),
-                (SortBy::Size, "Size"),
-                (SortBy::Modified, "Modified"),
-            ] {
-                let current = self.sort.0 == by;
-                let arrow = match (current, self.sort.1) {
-                    (false, _) => "",
-                    (true, true) => " \u{25b2}",
-                    (true, false) => " \u{25bc}",
-                };
-                if ui
-                    .selectable_label(current, format!("{name}{arrow}"))
-                    .clicked()
-                {
-                    self.sort = (by, !current || !self.sort.1);
-                }
-            }
-        });
-    }
-
-    /// A listing entry's right-click menu; true when Download was chosen.
-    fn entry_menu(&mut self, ui: &mut Ui, entry: &Entry) -> bool {
-        let download = !entry.is_dir() && ui.button("Download").clicked();
-        if ui.button("Rename").clicked() {
-            self.dialog = Some(Dialog::Rename {
-                from: entry.name.clone(),
-                to: entry.name.clone(),
-            });
-        }
-        if ui.button("Delete").clicked() {
-            self.dialog = Some(Dialog::Delete(entry.clone()));
-        }
-        if ui.button("Permissions\u{2026}").clicked() {
-            self.dialog = Some(Dialog::permissions(entry));
-        }
-        if ui.button("Properties").clicked() {
-            self.dialog = Some(Dialog::Properties(entry.clone()));
-        }
-        download
-    }
-
-    fn listing(&mut self, ui: &mut Ui, palette: &Palette) {
-        if let Some(error) = &self.list_error {
-            ui.colored_label(theme::color(palette.status_error), error);
-        }
-        if let Some(notice) = &self.notice {
-            ui.colored_label(theme::color(palette.status_error), notice);
-        }
-        let filter = self.filter.to_lowercase();
-        let mut visible: Vec<Entry> = self
-            .entries
-            .iter()
-            .filter(|entry| self.show_hidden || !entry.name.starts_with('.'))
-            .filter(|entry| filter.is_empty() || entry.name.to_lowercase().contains(&filter))
-            .cloned()
-            .collect();
-        sort_entries(&mut visible, self.sort.0, self.sort.1);
-        self.sort_header(ui);
-        if visible.is_empty() {
-            ui.label(
-                RichText::new("This folder is empty.").color(theme::color(palette.text_secondary)),
-            );
-            return;
-        }
-        let mut open = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("sftp-listing")
-                .num_columns(3)
-                .striped(true)
-                .spacing([space::L, space::XS])
-                .show(ui, |ui| {
-                    for entry in &visible {
-                        let selected = self.selected.as_deref() == Some(entry.name.as_str());
-                        let row = ui.horizontal(|ui| {
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                            let icon = if entry.is_dir() {
-                                icons::FOLDER
-                            } else {
-                                icons::FILE
-                            };
-                            icons::paint(
-                                ui.painter(),
-                                icon,
-                                rect,
-                                theme::color(palette.text_secondary),
-                            );
-                            let mut label = entry.name.clone();
-                            if matches!(entry.kind, Kind::Link { .. }) {
-                                label.push_str(" \u{2192}");
-                            }
-                            ui.selectable_label(selected, label)
-                        });
-                        let response = row.inner;
-                        if response.clicked() {
-                            self.selected = Some(entry.name.clone());
-                        }
-                        let activated = response.double_clicked()
-                            || (response.has_focus()
-                                && ui.input(|input| input.key_pressed(Key::Enter)));
-                        if activated {
-                            open = Some(entry.clone());
-                        }
-                        response.context_menu(|ui| {
-                            if self.entry_menu(ui, entry) {
-                                open = Some(entry.clone());
-                            }
-                        });
-                        ui.label(if entry.is_dir() {
-                            String::new()
-                        } else {
-                            human_size(entry.size)
-                        });
-                        ui.label(entry.modified.map(format_time).unwrap_or_default());
-                        ui.end_row();
-                    }
-                });
-        });
-        if let Some(entry) = open {
-            if entry.is_dir() {
-                if let Some(cwd) = &self.cwd {
-                    let dir = join(cwd, &entry.name);
-                    self.navigate(dir);
-                }
-            } else {
-                self.download(&entry);
-            }
-        }
-    }
-
-    fn transfers_ui(&mut self, ui: &mut Ui, palette: &Palette) {
-        ui.add_space(space::XS);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Transfers").strong());
-            ui.label(
-                RichText::new(format!("Downloads go to {}", self.local.dir.display()))
-                    .size(text::SECONDARY)
-                    .color(theme::color(palette.text_secondary)),
-            );
-            if ui.button("Clear finished").clicked() {
-                self.transfers
-                    .retain(|transfer| matches!(transfer.state, TransferState::Running));
-            }
-        });
-        let mut retry = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for transfer in self.transfers.iter().rev() {
-                ui.horizontal(|ui| {
-                    ui.label(&transfer.label);
-                    match &transfer.state {
-                        TransferState::Running => {
-                            #[allow(clippy::cast_precision_loss)] // A ratio for a progress bar.
-                            let fraction = if transfer.total == 0 {
-                                0.0
-                            } else {
-                                transfer.done as f32 / transfer.total as f32
-                            };
-                            ui.add(egui::ProgressBar::new(fraction).desired_width(220.0).text(
-                                format!(
-                                    "{} of {}",
-                                    human_size(transfer.done),
-                                    human_size(transfer.total)
-                                ),
-                            ));
-                            if transfer.since.is_none() {
-                                ui.label(RichText::new("waiting").size(text::SECONDARY))
-                                    .on_hover_text(format!(
-                                        "Up to {TRANSFER_SLOTS} transfers run at once"
-                                    ));
-                            }
-                            if let Some((at, from)) = transfer.since {
-                                let rate = pace(
-                                    transfer.done.saturating_sub(from),
-                                    transfer.total.saturating_sub(transfer.done),
-                                    at.elapsed().as_secs_f64(),
-                                );
-                                ui.label(RichText::new(rate).size(text::SECONDARY));
-                            }
-                            if ui.button("Cancel").clicked() {
-                                transfer.cancel.store(true, Ordering::Relaxed);
-                            }
-                        }
-                        TransferState::Done(to) => {
-                            ui.label(format!("done \u{2192} {to}"));
-                        }
-                        TransferState::Skipped => {
-                            ui.label("skipped: a file with that name exists");
-                        }
-                        TransferState::Failed(message) => {
-                            ui.colored_label(theme::color(palette.status_error), message);
-                            if ui
-                                .button("Retry")
-                                .on_hover_text("Continue from where it stopped")
-                                .clicked()
-                            {
-                                retry = Some(transfer.id);
-                            }
-                        }
-                    }
-                });
-            }
-        });
-        if let Some(id) = retry {
-            self.retry(id);
-        }
-    }
-
-    fn dialog_ui(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = &mut self.dialog else {
-            return;
-        };
-        let cwd = self.cwd.clone().unwrap_or_default();
-        let mut close = false;
-        let mut command = None;
-        let window = |title: &str| {
-            egui::Window::new(title.to_owned())
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        };
-        match dialog {
-            Dialog::NewFolder(name) => {
-                window("New folder").show(ctx, |ui| {
-                    let field = ui.add(egui::TextEdit::singleline(name).hint_text("Folder name"));
-                    field.request_focus();
-                    let enter =
-                        field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-                    ui.horizontal(|ui| {
-                        if (ui.button("Create").clicked() || enter) && valid_name(name) {
-                            command = Some(Command::CreateDir(join(&cwd, name.trim())));
-                        }
-                        close |= ui.button("Cancel").clicked();
-                    });
-                });
-            }
-            Dialog::Rename { from, to } => {
-                window("Rename").show(ctx, |ui| {
-                    let field = ui.add(egui::TextEdit::singleline(to));
-                    field.request_focus();
-                    let enter =
-                        field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-                    ui.horizontal(|ui| {
-                        if (ui.button("Rename").clicked() || enter)
-                            && valid_name(to)
-                            && to.trim() != from
-                        {
-                            command =
-                                Some(Command::Rename(join(&cwd, from), join(&cwd, to.trim())));
-                        }
-                        close |= ui.button("Cancel").clicked();
-                    });
-                });
-            }
-            Dialog::Permissions { name, mode } => {
-                command = permissions_dialog(ctx, &cwd, name, mode, &mut close);
-            }
-            Dialog::Properties(entry) => {
-                egui::Window::new("Properties")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ctx, |ui| {
-                        for (name, value) in properties(&cwd, entry) {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(name).strong());
-                                ui.label(value);
-                            });
-                        }
-                        close |= ui.button("Close").clicked();
-                    });
-            }
-            Dialog::Delete(entry) => {
-                window("Delete").show(ctx, |ui| {
-                    ui.label(format!("Delete {} from the server?", entry.name));
-                    if entry.kind == Kind::Dir {
-                        ui.label("The folder is deleted with everything in it.");
-                    }
-                    ui.label("This cannot be undone.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Delete").clicked() {
-                            command = Some(Command::Remove(join(&cwd, &entry.name)));
-                        }
-                        close |= ui.button("Cancel").clicked();
-                    });
-                });
-            }
-        }
-        close |= ctx.input(|input| input.key_pressed(Key::Escape));
-        if let Some(command) = command {
-            self.send(command);
-            close = true;
-        }
-        if close {
-            self.dialog = None;
-        }
-    }
 }
 
-fn conflict_name(conflict: Conflict) -> &'static str {
+pub(crate) fn conflict_name(conflict: Conflict) -> &'static str {
     match conflict {
-        Conflict::KeepBoth => "Keep both",
-        Conflict::Overwrite => "Overwrite",
-        Conflict::Skip => "Skip",
+        Conflict::KeepBoth => "Existing files: keep both",
+        Conflict::Overwrite => "Existing files: overwrite",
+        Conflict::Skip => "Existing files: skip",
     }
 }
 
@@ -1143,40 +684,6 @@ pub(crate) fn pace(moved: u64, left: u64, seconds: f64) -> String {
     format!("{}/s \u{b7} {eta} left", human_size(rate))
 }
 
-/// The Permissions dialog for `name` in `cwd`; returns the command once the mode is set.
-fn permissions_dialog(
-    ctx: &egui::Context,
-    cwd: &str,
-    name: &str,
-    mode: &mut String,
-    close: &mut bool,
-) -> Option<Command> {
-    let mut command = None;
-    egui::Window::new("Permissions")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.label(format!("Permissions of {name}, in octal (for example 644)"));
-            let field = ui.add(egui::TextEdit::singleline(mode).desired_width(80.0));
-            field.request_focus();
-            let enter = field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-            let parsed = parse_mode(mode);
-            if parsed.is_none() && !mode.trim().is_empty() {
-                ui.label("Three or four octal digits, 0 to 7.");
-            }
-            ui.horizontal(|ui| {
-                if let Some(bits) = parsed
-                    && (ui.button("Set").clicked() || enter)
-                {
-                    command = Some(Command::Chmod(join(cwd, name), bits));
-                }
-                *close |= ui.button("Cancel").clicked();
-            });
-        });
-    command
-}
-
 /// What the SFTP listing can be sorted by (F-SFTP-001).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SortBy {
@@ -1200,7 +707,7 @@ pub(crate) fn sort_entries(entries: &mut [Entry], by: SortBy, ascending: bool) {
 }
 
 /// The Properties dialog's lines for `entry` in folder `cwd`.
-fn properties(cwd: &str, entry: &Entry) -> Vec<(&'static str, String)> {
+pub(crate) fn properties(cwd: &str, entry: &Entry) -> Vec<(&'static str, String)> {
     let kind = match entry.kind {
         Kind::Dir => "Folder".to_owned(),
         Kind::File => "File".to_owned(),
@@ -1247,7 +754,7 @@ fn mode_text(bits: u32) -> String {
 }
 
 /// Permission bits typed in octal: three or four digits, `644` or `0755`.
-fn parse_mode(text: &str) -> Option<u32> {
+pub(crate) fn parse_mode(text: &str) -> Option<u32> {
     let text = text.trim();
     if !(3..=4).contains(&text.len()) || !text.chars().all(|c| ('0'..='7').contains(&c)) {
         return None;

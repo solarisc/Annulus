@@ -1,5 +1,6 @@
-//! The egui look of Annulus: the theme from our design tokens, our own icons, and password
-//! fields kept in zeroizing memory ([ADR-0015](../../docs/adr/0015-egui-instead-of-hand-built-ui.md)).
+//! Annulus's own UI toolkit ([ADR-0017](../../docs/adr/0017-native-ui.md)): the
+//! drawing interface the renderers implement, the immediate-mode kit of zones, focus, input and
+//! animation, the widgets, our icons, and the accessibility tree built from the zones.
 
 #![forbid(unsafe_code)]
 
@@ -7,6 +8,4 @@ pub mod access;
 pub mod gfx;
 pub mod icons;
 pub mod kit;
-pub mod secret;
-pub mod theme;
 pub mod widgets;

@@ -31,6 +31,8 @@ use crate::{connect, keychain_screen, logs_screen, snippets_screen};
 pub enum ScreenAction {
     /// Open a terminal tab running a program.
     Terminal(String, Box<Program>),
+    /// Open a terminal tab for each (a snippet run on several hosts).
+    Terminals(snippets_screen::Panes),
     /// Open a log, read-only, in a tab.
     Log(String, String),
 }
@@ -155,6 +157,9 @@ fn segmented(
 
 // ---------------------------------------------------------------------------------------
 // Keychain
+
+/// Height of a host line in the snippet's Run on hosts card.
+const LINE: f32 = 30.0;
 
 /// Height of the pasted private key: about six lines.
 const KEY_H: f32 = 124.0;
@@ -679,12 +684,145 @@ impl KeychainView {
 #[derive(Default)]
 pub struct SnippetsView {
     draft: Option<(Snippet, String, String)>,
+    /// The snippet whose Delete asks once more.
+    confirm: Option<u64>,
+    /// Running a snippet on hosts: the snippet, and the hosts ticked.
+    targets: Option<(u64, Vec<u64>)>,
 }
 
 impl SnippetsView {
-    /// Draws the screen; running a snippet opens a terminal.
+    /// The hosts to run a snippet on (F-SNIP-004): tick up to [`snippets_screen::MAX_TARGETS`],
+    /// then each gets a terminal that runs it after the host's own startup command.
+    #[allow(clippy::too_many_lines)] // The list, then its buttons.
+    fn targets_card(
+        &mut self,
+        ui: &mut Ui<'_>,
+        area: &mut Rect,
+        vault: &Vault,
+        files: &SshFiles,
+    ) -> Option<ScreenAction> {
+        let (snippet_id, ticked) = self.targets.as_mut()?;
+        let Some(snippet) = vault
+            .snippets()
+            .iter()
+            .find(|s| s.id == *snippet_id)
+            .cloned()
+        else {
+            self.targets = None;
+            return None;
+        };
+        let hosts: Vec<(u64, String)> = vault
+            .hosts()
+            .iter()
+            .map(|host| (host.id, host.label.clone()))
+            .collect();
+        #[allow(clippy::cast_precision_loss)] // Lists are short.
+        let list_h = (hosts.len() as f32 * LINE).min(5.0 * LINE);
+        let mut card = pages::card(
+            ui,
+            area,
+            &format!("Run {} on hosts", snippet.label),
+            list_h + CONTROL + 4.0 * space::S,
+        );
+        card.take_top(space::S);
+        let list = card.take_top(list_h);
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let offset = ui.scroll_view(Id::new("snippet.targets"), list, hosts.len() as f32 * LINE);
+        ui.push_clip(list);
+        let full = ticked.len() >= snippets_screen::MAX_TARGETS;
+        for (index, (id, label)) in hosts.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // As above.
+            let y = list.y - offset + index as f32 * LINE;
+            if y + LINE < list.y || y > list.b() {
+                continue;
+            }
+            let mut on = ticked.contains(id);
+            let before = on;
+            ui.checkbox(
+                Id::new(("snippet.target", *id)),
+                Rect::new(list.x, y, list.w - 10.0, LINE - 2.0),
+                &mut on,
+                label,
+            );
+            if on && !before && !full {
+                ticked.push(*id);
+            } else if !on && before {
+                ticked.retain(|known| known != id);
+            }
+        }
+        ui.pop_clip();
+        card.take_top(space::S);
+        let mut line = card.take_top(CONTROL);
+        let go_label = match ticked.len() {
+            1 => "Run on 1 host".to_owned(),
+            n => format!("Run on {n} hosts"),
+        };
+        let go = line.take_right(button_width(ui.gfx, &go_label, Some(icons::PLAY)));
+        line.take_right(space::S);
+        let cancel = line.take_right(button_width(ui.gfx, "Cancel", None));
+        line.take_right(space::M);
+        let t = ui.theme;
+        if full {
+            ui.gfx.text(
+                line,
+                &format!("At most {} at once.", snippets_screen::MAX_TARGETS),
+                SMALL,
+                t.text2,
+                Align::Start,
+            );
+        }
+        let cancelled = ui
+            .button(
+                Id::new("snippet.targets.cancel"),
+                cancel,
+                "Cancel",
+                None,
+                Kind::Ghost,
+            )
+            .clicked;
+        let run = ui
+            .button(
+                Id::new("snippet.targets.go"),
+                go,
+                &go_label,
+                Some(icons::PLAY),
+                Kind::Primary,
+            )
+            .clicked
+            && !ticked.is_empty();
+        if cancelled {
+            self.targets = None;
+            return None;
+        }
+        if !run {
+            return None;
+        }
+        let tabs: snippets_screen::Panes = ticked
+            .iter()
+            .filter_map(|id| vault.hosts().iter().find(|host| host.id == *id))
+            .map(|host| {
+                (
+                    host.label.clone(),
+                    snippets_screen::with_script(
+                        connect::host(vault, files, host),
+                        &snippet.script,
+                    ),
+                )
+            })
+            .collect();
+        self.targets = None;
+        Some(ScreenAction::Terminals(tabs))
+    }
+
+    /// Draws the screen; running a snippet opens a terminal, or one per host.
     #[allow(clippy::too_many_lines)] // Header, editor and list, top to bottom.
-    pub fn draw(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) -> Option<ScreenAction> {
+    pub fn draw(
+        &mut self,
+        ui: &mut Ui<'_>,
+        rect: Rect,
+        vault: &mut Vault,
+        files: &SshFiles,
+    ) -> Option<ScreenAction> {
         let mut area = pages::page(rect);
         let count = vault.snippets().len();
         let mut actions = pages::header(
@@ -763,6 +901,7 @@ impl SnippetsView {
                 self.draft = None;
             }
         }
+        let mut action = self.targets_card(ui, &mut area, vault, files);
         if count == 0 {
             pages::empty(
                 ui,
@@ -771,29 +910,43 @@ impl SnippetsView {
                 "No snippets yet",
                 "Save a command once, run it anywhere.",
             );
-            return None;
+            return action;
         }
         let list: Vec<Snippet> = vault.snippets().to_vec();
-        let mut action = None;
         let mut remove = None;
+        let mut pick = None;
+        let confirm = self.confirm;
+        let mut confirm_next = confirm;
         rows(ui, "snippets.list", area, list.len(), |ui, index, row| {
             let snippet = &list[index];
             let zone = Id::new(("snippet", snippet.id));
             pages::row(ui, zone, row, &snippet.label, false);
-            let (clicked, remainder) = row_buttons(
-                ui,
-                row,
-                zone,
-                &[
-                    (icons::TRASH, "Delete"),
-                    (icons::PLAY, "Run in a local terminal"),
-                ],
-            );
+            let (clicked, remainder) = if confirm == Some(snippet.id) {
+                let (answer, remainder) = confirm_delete(ui, row, zone, "Delete snippet");
+                match answer {
+                    Some(true) => remove = Some(snippet.id),
+                    Some(false) => confirm_next = None,
+                    None => {}
+                }
+                (None, remainder)
+            } else {
+                row_buttons(
+                    ui,
+                    row,
+                    zone,
+                    &[
+                        (icons::TRASH, "Delete"),
+                        (icons::SERVER, "Run on hosts"),
+                        (icons::PLAY, "Run in a local terminal"),
+                    ],
+                )
+            };
             let inner = pages::row_icon(ui, remainder, icons::CODE);
             let first = snippet.script.lines().next().unwrap_or_default();
             pages::two_lines(ui, inner, &snippet.label, first, true);
             match clicked {
-                Some(1) => {
+                Some(1) => pick = Some(snippet.id),
+                Some(2) => {
                     action = Some(ScreenAction::Terminal(
                         snippet.label.clone(),
                         Box::new(snippets_screen::with_script(
@@ -802,11 +955,16 @@ impl SnippetsView {
                         )),
                     ));
                 }
-                Some(0) => remove = Some(snippet.id),
+                Some(0) => confirm_next = Some(snippet.id),
                 _ => {}
             }
         });
+        self.confirm = confirm_next;
+        if let Some(id) = pick {
+            self.targets = Some((id, Vec::new()));
+        }
         if let Some(id) = remove {
+            self.confirm = None;
             let _ = vault.remove_snippet(id);
         }
         action
@@ -1002,6 +1160,8 @@ pub struct ForwardsView {
     asks: HashMap<u64, Ask>,
     /// The rules marked to start with the vault were started.
     auto_started: bool,
+    /// The rule whose Delete asks once more.
+    confirm: Option<u64>,
 }
 
 const KINDS: [(&str, ForwardKind); 3] = [
@@ -1072,7 +1232,8 @@ impl ForwardsView {
             .forwards()
             .iter()
             .filter(|rule| {
-                rule.with_host && rule.host_id == host_id && !self.running.contains_key(&rule.id)
+                crate::forwards_screen::starts_with(rule, host_id)
+                    && !self.running.contains_key(&rule.id)
             })
             .map(|rule| rule.id)
             .collect();
@@ -1131,7 +1292,11 @@ impl ForwardsView {
             let mut card = pages::card(
                 ui,
                 &mut area,
-                "New rule",
+                if draft.is_new {
+                    "New rule"
+                } else {
+                    "Edit rule"
+                },
                 4.0 * CONTROL + 5.0 * space::M + 4.0,
             );
             card.take_top(space::S);
@@ -1237,8 +1402,14 @@ impl ForwardsView {
             {
                 match draft.finish() {
                     Ok(rule) => {
+                        // A running rule starts again with what was changed.
+                        let id = rule.id;
+                        let was_running = self.running.remove(&id).is_some();
                         let _ = vault.upsert_forward(rule);
                         self.draft = None;
+                        if was_running {
+                            self.start_rule(id, vault, files, waker);
+                        }
                     }
                     Err(problem) => draft.problem = Some(problem),
                 }
@@ -1263,6 +1434,9 @@ impl ForwardsView {
             .collect();
         let mut toggles = Vec::new();
         let mut remove = None;
+        let mut edit = None;
+        let confirm = self.confirm;
+        let mut confirm_next = confirm;
         let statuses: HashMap<u64, Status> = self
             .running
             .iter()
@@ -1278,11 +1452,26 @@ impl ForwardsView {
                 rule.label.clone()
             };
             pages::row(ui, zone, row, &title, false);
+            let confirming = confirm == Some(rule.id);
             let mut remainder = row.inset(space::M, 0.0);
-            let delete = remainder.take_right(30.0).centered(30.0, 30.0);
-            remainder.take_right(space::S);
-            let switch = remainder.take_right(40.0);
-            remainder.take_right(space::S);
+            let mut slots = None;
+            if confirming {
+                let (answer, left) = confirm_delete(ui, row, zone, "Delete rule");
+                match answer {
+                    Some(true) => remove = Some(rule.id),
+                    Some(false) => confirm_next = None,
+                    None => {}
+                }
+                remainder = left;
+            } else {
+                let delete = remainder.take_right(30.0).centered(30.0, 30.0);
+                remainder.take_right(4.0);
+                let change = remainder.take_right(30.0).centered(30.0, 30.0);
+                remainder.take_right(space::S);
+                let switch = remainder.take_right(40.0);
+                remainder.take_right(space::S);
+                slots = Some((switch, change, delete));
+            }
             let status = statuses.get(&rule.id);
             let t = ui.theme;
             let (words, color) = match status {
@@ -1322,12 +1511,21 @@ impl ForwardsView {
                 },
                 false,
             );
+            let Some((switch, change, delete)) = slots else {
+                return;
+            };
             let mut on = status.is_some();
             if ui
                 .switch(zone.with("switch"), switch, &mut on, "Run this rule")
                 .clicked
             {
                 toggles.push((rule.id, on));
+            }
+            if ui
+                .icon_button(zone.with("edit"), change, icons::EDIT, "Edit rule", false)
+                .clicked
+            {
+                edit = Some(rule.clone());
             }
             if ui
                 .icon_button(
@@ -1339,9 +1537,13 @@ impl ForwardsView {
                 )
                 .clicked
             {
-                remove = Some(rule.id);
+                confirm_next = Some(rule.id);
             }
         });
+        self.confirm = confirm_next;
+        if let Some(rule) = edit {
+            self.draft = Some(Draft::new(rule, false));
+        }
         for (id, on) in toggles {
             if on {
                 self.start_rule(id, vault, files, waker);
@@ -1350,6 +1552,7 @@ impl ForwardsView {
             }
         }
         if let Some(id) = remove {
+            self.confirm = None;
             self.running.remove(&id);
             let _ = vault.remove_forward(id);
         }

@@ -2,20 +2,13 @@
 //! stopped on its own. A running rule keeps its own SSH connection on a background thread,
 //! so it needs no terminal tab.
 
-use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use eframe::egui::{self, RichText, Ui};
-use annulus_config::tokens::{Palette, space, text};
 use annulus_session::{Answers, Program, SessionEvent};
 use annulus_ssh::forward::{self, Rule};
-use annulus_ui::theme;
 use annulus_vault::forwards::{ForwardKind, PortForward};
-
-use crate::hosts_screen::HostsScreen;
-use crate::ssh_dialogs::SshDialogs;
 
 /// Where a running rule is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +25,6 @@ pub(crate) struct Running {
     status: Arc<Mutex<Status>>,
     events: Receiver<SessionEvent>,
     answers: Answers,
-    dialogs: SshDialogs,
     /// Dropping it stops the rule and closes its connection.
     _stop: tokio::sync::oneshot::Sender<()>,
 }
@@ -83,7 +75,6 @@ pub(crate) fn start(
         status,
         events,
         answers: answers.clone(),
-        dialogs: SshDialogs::default(),
         _stop: stop,
     };
     let (
@@ -223,7 +214,7 @@ async fn run_rule(
 }
 
 /// Whether `rule` starts when a terminal to `host_id` opens.
-fn starts_with(rule: &PortForward, host_id: u64) -> bool {
+pub(crate) fn starts_with(rule: &PortForward, host_id: u64) -> bool {
     rule.with_host && rule.host_id == host_id
 }
 
@@ -288,344 +279,6 @@ impl Draft {
             None => Ok(rule),
         }
     }
-}
-
-/// The Port Forwarding screen's state while the vault is unlocked.
-#[derive(Default)]
-pub struct ForwardsScreen {
-    running: HashMap<u64, Running>,
-    editor: Option<Draft>,
-    confirm_delete: Option<u64>,
-    error: Option<String>,
-    auto_started: bool,
-}
-
-impl ForwardsScreen {
-    fn start_rule(&mut self, ctx: &egui::Context, rule: &PortForward, hosts: &HostsScreen) {
-        let Some(host) = hosts
-            .vault()
-            .hosts()
-            .iter()
-            .find(|host| host.id == rule.host_id)
-        else {
-            self.error = Some(format!(
-                "{}: its host was deleted. Edit the rule to pick another.",
-                rule.label
-            ));
-            return;
-        };
-        let ctx = ctx.clone();
-        let running = start(rule, hosts.connect_host(host), move || {
-            ctx.request_repaint();
-        });
-        self.running.insert(rule.id, running);
-    }
-
-    /// Starts the rules marked to start with the vault (F-FWD-004), once.
-    pub fn auto_start(&mut self, ctx: &egui::Context, hosts: &HostsScreen) {
-        if std::mem::replace(&mut self.auto_started, true) {
-            return;
-        }
-        let rules: Vec<PortForward> = hosts
-            .vault()
-            .forwards()
-            .iter()
-            .filter(|rule| rule.auto_start)
-            .cloned()
-            .collect();
-        for rule in &rules {
-            self.start_rule(ctx, rule, hosts);
-        }
-    }
-
-    /// Starts the rules marked to start with `host_id`'s terminal (F-FWD-004) that are not
-    /// running yet.
-    pub fn host_opened(&mut self, ctx: &egui::Context, host_id: u64, hosts: &HostsScreen) {
-        let rules: Vec<PortForward> = hosts
-            .vault()
-            .forwards()
-            .iter()
-            .filter(|rule| starts_with(rule, host_id) && !self.running.contains_key(&rule.id))
-            .cloned()
-            .collect();
-        for rule in &rules {
-            self.start_rule(ctx, rule, hosts);
-        }
-    }
-
-    /// Shows SSH questions from running rules; they can arrive on any screen.
-    pub fn prompts(&mut self, ctx: &egui::Context) {
-        for running in self.running.values_mut() {
-            for event in running.events.try_iter().collect::<Vec<_>>() {
-                running.dialogs.take(event);
-            }
-            if running.dialogs.show(ctx, &running.answers) {
-                // One dialog at a time.
-                break;
-            }
-        }
-    }
-
-    /// Draws the screen.
-    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut HostsScreen) {
-        if self.editor.is_some() {
-            egui::Panel::right("forward-editor")
-                .resizable(false)
-                .exact_size(360.0)
-                .show(ui, |ui| self.editor_ui(ui, palette, hosts));
-        }
-        ui.add_space(space::S);
-        ui.horizontal(|ui| {
-            let first_host = hosts.vault().hosts().first().map(|host| host.id);
-            let new = ui.add_enabled(first_host.is_some(), egui::Button::new("New rule"));
-            if let Some(host_id) = first_host
-                && new.clicked()
-            {
-                self.editor = Some(Draft::new(hosts.vault().draft_forward(host_id), true));
-            }
-            if first_host.is_none() {
-                ui.label("Save a host first; rules forward through a saved host.");
-            }
-        });
-        if let Some(error) = &self.error {
-            ui.colored_label(theme::color(palette.status_error), error);
-        }
-        ui.add_space(space::S);
-        let rules = hosts.vault().forwards().to_vec();
-        if rules.is_empty() {
-            ui.label(
-                RichText::new("No rules yet. A local rule makes a remote port reachable on this computer; a SOCKS rule routes any program that supports a SOCKS proxy through the host.")
-                    .color(theme::color(palette.text_secondary)),
-            );
-            return;
-        }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for rule in &rules {
-                self.row(ui, palette, rule, hosts);
-                ui.separator();
-            }
-        });
-    }
-
-    fn row(&mut self, ui: &mut Ui, palette: &Palette, rule: &PortForward, hosts: &mut HostsScreen) {
-        let host_label = hosts
-            .vault()
-            .hosts()
-            .iter()
-            .find(|host| host.id == rule.host_id)
-            .map_or_else(|| "(host deleted)".to_owned(), |host| host.label.clone());
-        let status = self.running.get(&rule.id).map(Running::status);
-        let running = matches!(
-            status,
-            Some(Status::Starting | Status::Active(_) | Status::Reconnecting(_))
-        );
-        let mut toggle = false;
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                let name = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(&rule.label).size(text::BODY + 1.0).strong(),
-                        )
-                        .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text("Double-click to start or stop");
-                toggle = name.double_clicked();
-                ui.label(
-                    RichText::new(format!("{}  \u{b7}  via {host_label}", rule.summary()))
-                        .size(text::SECONDARY)
-                        .color(theme::color(palette.text_secondary)),
-                );
-                if rule.is_exposed() {
-                    ui.colored_label(
-                        theme::color(palette.status_warn),
-                        "Listens beyond this computer: other devices on the network can use it.",
-                    );
-                }
-                match &status {
-                    None => ui.label("Stopped"),
-                    Some(Status::Starting) => ui.label("Starting\u{2026}"),
-                    Some(Status::Reconnecting(reason)) => ui.colored_label(
-                        theme::color(palette.status_warn),
-                        format!("Reconnecting\u{2026} ({reason})"),
-                    ),
-                    Some(Status::Active(1)) => {
-                        ui.colored_label(theme::color(palette.status_ok), "Active, 1 connection")
-                    }
-                    Some(Status::Active(n)) => ui.colored_label(
-                        theme::color(palette.status_ok),
-                        format!("Active, {n} connections"),
-                    ),
-                    Some(Status::Failed(reason)) => {
-                        ui.colored_label(theme::color(palette.status_error), reason)
-                    }
-                };
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.confirm_delete == Some(rule.id) {
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_delete = None;
-                    }
-                    if ui.button("Delete rule").clicked() {
-                        self.running.remove(&rule.id);
-                        self.confirm_delete = None;
-                        self.error = hosts
-                            .vault_mut()
-                            .remove_forward(rule.id)
-                            .err()
-                            .map(|error| error.to_string());
-                    }
-                    return;
-                }
-                if ui.button("Delete").clicked() {
-                    self.confirm_delete = Some(rule.id);
-                }
-                if ui.button("Duplicate").clicked() {
-                    let mut copy = hosts.vault().draft_forward(rule.host_id);
-                    let id = copy.id;
-                    copy = PortForward {
-                        id,
-                        label: format!("{} copy", rule.label),
-                        ..rule.clone()
-                    };
-                    self.editor = Some(Draft::new(copy, true));
-                }
-                if ui.button("Edit").clicked() {
-                    self.editor = Some(Draft::new(rule.clone(), false));
-                }
-                let label = if running { "Stop" } else { "Start" };
-                toggle |= ui.button(label).clicked();
-            });
-        });
-        if toggle && running {
-            self.running.remove(&rule.id);
-        } else if toggle {
-            self.error = None;
-            self.start_rule(ui.ctx(), rule, hosts);
-        }
-    }
-
-    fn editor_ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut HostsScreen) {
-        let Some(draft) = &mut self.editor else {
-            return;
-        };
-        ui.add_space(space::M);
-        ui.heading(if draft.is_new {
-            "New rule"
-        } else {
-            "Edit rule"
-        });
-        ui.add_space(space::M);
-        let host_names: Vec<(u64, String)> = hosts
-            .vault()
-            .hosts()
-            .iter()
-            .map(|host| (host.id, host.label.clone()))
-            .collect();
-        fields(ui, draft, &host_names);
-        ui.label(
-            RichText::new("Keep 127.0.0.1 unless other devices should use the forward.")
-                .size(text::SECONDARY)
-                .color(theme::color(palette.text_secondary)),
-        );
-        if let Some(problem) = &draft.problem {
-            ui.colored_label(theme::color(palette.status_error), problem);
-        }
-        ui.add_space(space::M);
-        let mut close = false;
-        ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
-                match draft.finish() {
-                    Ok(rule) => match hosts.vault_mut().upsert_forward(rule) {
-                        Ok(()) => close = true,
-                        Err(error) => draft.problem = Some(format!("Could not save: {error}")),
-                    },
-                    Err(problem) => draft.problem = Some(problem),
-                }
-            }
-            if ui.button("Cancel").clicked()
-                || ui.input(|input| input.key_pressed(egui::Key::Escape))
-            {
-                close = true;
-            }
-        });
-        if close {
-            self.editor = None;
-        }
-    }
-}
-
-/// The rule editor's fields.
-fn fields(ui: &mut Ui, draft: &mut Draft, host_names: &[(u64, String)]) {
-    egui::Grid::new("forward-fields")
-        .num_columns(2)
-        .spacing([space::M, space::S])
-        .show(ui, |ui| {
-            ui.label("Name");
-            ui.add(egui::TextEdit::singleline(&mut draft.rule.label).hint_text("postgres"));
-            ui.end_row();
-            ui.label("Type");
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut draft.rule.kind, ForwardKind::Local, "Local");
-                ui.radio_value(&mut draft.rule.kind, ForwardKind::Dynamic, "SOCKS");
-                ui.radio_value(&mut draft.rule.kind, ForwardKind::Remote, "Remote");
-            });
-            ui.end_row();
-            ui.label("Through host");
-            let selected = host_names
-                .iter()
-                .find(|(id, _)| *id == draft.rule.host_id)
-                .map_or("(pick a host)", |(_, label)| label.as_str());
-            egui::ComboBox::from_id_salt("forward-host")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    for (id, label) in host_names {
-                        ui.selectable_value(&mut draft.rule.host_id, *id, label);
-                    }
-                });
-            ui.end_row();
-            ui.label(if draft.rule.kind == ForwardKind::Remote {
-                "Server listens on"
-            } else {
-                "Listen on"
-            });
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.rule.bind_address).desired_width(110.0),
-                );
-                ui.label(":");
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.bind_port)
-                        .desired_width(60.0)
-                        .hint_text("8080"),
-                );
-            });
-            ui.end_row();
-            if draft.rule.has_destination() {
-                ui.label("Destination");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut draft.rule.destination_host)
-                            .desired_width(110.0)
-                            .hint_text("localhost"),
-                    );
-                    ui.label(":");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut draft.destination_port)
-                            .desired_width(60.0)
-                            .hint_text("5432"),
-                    );
-                });
-                ui.end_row();
-            }
-            ui.label("");
-            ui.checkbox(&mut draft.rule.auto_start, "Start when the vault unlocks");
-            ui.checkbox(
-                &mut draft.rule.with_host,
-                "Start when I open a terminal to its host",
-            );
-            ui.end_row();
-        });
 }
 
 #[cfg(test)]

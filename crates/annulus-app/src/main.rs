@@ -1,8 +1,7 @@
 //! Annulus desktop binary: app state, view models, command registry, window, tab and pane management.
 //!
 //! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4. The UI is our own toolkit
-//! in our own window ([ADR-0017](../../docs/adr/0017-native-ui.md)); the egui UI
-//! it replaces still runs with `--egui` until it is removed.
+//! in our own window ([ADR-0017](../../docs/adr/0017-native-ui.md)).
 
 #![forbid(unsafe_code)]
 // A release build is a window app: no console window next to it on Windows.
@@ -12,39 +11,20 @@ mod command_palette;
 mod connect;
 mod forwards_screen;
 mod groups_view;
-mod hosts_screen;
 mod import_dialog;
 mod job;
 mod keychain_screen;
-mod known_hosts_screen;
 mod local_pane;
-mod lock_screen;
 mod logs_screen;
 mod native;
-mod panes;
 mod password_screen;
 mod sftp_view;
-mod shell;
 mod snippets_screen;
-mod ssh_dialogs;
 mod ssh_task;
 mod sync_screen;
 mod terminal_view;
 
 use std::process::ExitCode;
-
-use eframe::egui;
-
-/// The eframe app: the window's shell.
-struct AnnulusApp {
-    shell: shell::Shell,
-}
-
-impl eframe::App for AnnulusApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.shell.ui(ui);
-    }
-}
 
 /// Where saved data lives: the OS's per-user data folder (ADR-0007 §Data locations), or the
 /// working directory if the OS reports none.
@@ -60,38 +40,10 @@ fn main() -> ExitCode {
     let light = args.iter().any(|arg| arg == "--light");
     let ran = if args.iter().any(|arg| arg == "--preview") {
         native::run_preview(light)
-    } else if args.iter().any(|arg| arg == "--egui") {
-        return run_egui();
     } else {
         native::run_native(light, &data_dir())
     };
     if ran.is_ok() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
-}
-
-/// The egui UI the new one replaces.
-fn run_egui() -> ExitCode {
-    let data_dir = data_dir();
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Annulus")
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([640.0, 400.0]),
-        ..eframe::NativeOptions::default()
-    };
-    let started = eframe::run_native(
-        "Annulus",
-        options,
-        Box::new(|_| {
-            Ok(Box::new(AnnulusApp {
-                shell: shell::Shell::new(&data_dir),
-            }))
-        }),
-    );
-    if started.is_ok() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

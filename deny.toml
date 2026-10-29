@@ -43,11 +43,6 @@ confidence-threshold = 0.93
 unused-allowed-license = "allow"
 
 # The sync server's own license (ADR-0009). Its dependencies stay on the allow-list above.
-# egui's bundled default fonts (Ubuntu-Light among them): a font license, like OFL-1.1.
-[[licenses.exceptions]]
-crate = "epaint_default_fonts"
-allow = ["Ubuntu-font-1.0"]
-
 [[licenses.exceptions]]
 crate = "annulus-server"
 allow = ["AGPL-3.0-or-later"]

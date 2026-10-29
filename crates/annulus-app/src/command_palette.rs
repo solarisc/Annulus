@@ -2,8 +2,6 @@
 //! open tabs, snippets and commands. Typing narrows the list with a fuzzy match; the
 //! arrows choose and Enter runs, so it never needs the mouse.
 
-use eframe::egui::{self, Key, RichText, Ui};
-
 /// What choosing an item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -87,106 +85,6 @@ pub fn rank<'a>(query: &str, items: &'a [Item]) -> Vec<&'a Item> {
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, _, item)| item).collect()
-}
-
-/// The palette while open.
-#[derive(Default)]
-pub struct CommandPalette {
-    query: String,
-    selected: usize,
-}
-
-/// What the palette did this frame.
-pub enum Outcome {
-    /// Still open.
-    Open,
-    /// Closed without choosing.
-    Closed,
-    /// This was chosen (and the palette closed).
-    Chosen(Action),
-}
-
-impl CommandPalette {
-    /// Draws the palette over the window.
-    pub fn ui(&mut self, ctx: &egui::Context, items: &[Item]) -> Outcome {
-        let typed = typed_target(&self.query).map(|target| Item {
-            label: format!("Connect to {target}"),
-            kind: "Quick connect",
-            action: Action::QuickConnect(target.to_owned()),
-        });
-        let mut ranked = rank(&self.query, items);
-        if let Some(item) = &typed {
-            ranked.insert(0, item);
-        }
-        let (up, down, enter, escape) = ctx.input_mut(|input| {
-            (
-                input.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
-                input.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
-                input.consume_key(egui::Modifiers::NONE, Key::Enter),
-                input.consume_key(egui::Modifiers::NONE, Key::Escape),
-            )
-        });
-        if escape {
-            return Outcome::Closed;
-        }
-        if down {
-            self.selected = (self.selected + 1).min(ranked.len().saturating_sub(1));
-        }
-        if up {
-            self.selected = self.selected.saturating_sub(1);
-        }
-        self.selected = self.selected.min(ranked.len().saturating_sub(1));
-        let mut chosen = None;
-        egui::Window::new("Go to")
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
-            .fixed_size(egui::vec2(480.0, 0.0))
-            .show(ctx, |ui| {
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Hosts, tabs, snippets, commands")
-                        .desired_width(f32::INFINITY),
-                );
-                field.request_focus();
-                if field.changed() {
-                    self.selected = 0;
-                }
-                ui.separator();
-                chosen = self.list(ui, &ranked);
-            });
-        if enter {
-            chosen = ranked.get(self.selected).map(|item| item.action.clone());
-        }
-        chosen.map_or(Outcome::Open, Outcome::Chosen)
-    }
-
-    fn list(&mut self, ui: &mut Ui, ranked: &[&Item]) -> Option<Action> {
-        if ranked.is_empty() {
-            ui.label("Nothing matches.");
-            return None;
-        }
-        let mut chosen = None;
-        egui::ScrollArea::vertical()
-            .max_height(360.0)
-            .show(ui, |ui| {
-                for (index, item) in ranked.iter().enumerate().take(50) {
-                    let selected = index == self.selected;
-                    let row = ui.selectable_label(
-                        selected,
-                        RichText::new(format!("{}    {}", item.label, item.kind)),
-                    );
-                    if selected {
-                        row.scroll_to_me(None);
-                    }
-                    if row.clicked() {
-                        chosen = Some(item.action.clone());
-                    }
-                }
-            });
-        chosen
-    }
 }
 
 #[cfg(test)]

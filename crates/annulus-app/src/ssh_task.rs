@@ -1,15 +1,12 @@
-//! A one-off command on a saved host, run in the background: connect (asking for a host
-//! key or password through the usual dialogs), run it, and hand back how it ended. Used for
-//! actions the user starts, such as installing a key (F-KEY-004).
+//! A one-off command on a saved host, run in the background: connect (the screen shows the
+//! host-key and password questions the connection asks), run it, and hand back how it ended.
+//! Used for actions the user starts, such as installing a key (F-KEY-004).
 
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
-use eframe::egui;
 use annulus_session::{Answers, Hop, Program, SessionEvent};
 use annulus_ssh::Exec;
-
-use crate::ssh_dialogs::SshDialogs;
 
 /// How the command ended: its exit status and output, or why it could not run.
 pub type Outcome = Result<Exec, String>;
@@ -18,7 +15,6 @@ pub type Outcome = Result<Exec, String>;
 pub struct SshTask {
     events: Receiver<SessionEvent>,
     answers: Answers,
-    dialogs: SshDialogs,
     outcome: Arc<Mutex<Option<Outcome>>>,
 }
 
@@ -47,7 +43,6 @@ impl SshTask {
         let task = Self {
             events,
             answers: answers.clone(),
-            dialogs: SshDialogs::default(),
             outcome,
         };
         let Program::Ssh {
@@ -99,27 +94,19 @@ impl SshTask {
         task
     }
 
-    /// The next question the connection asks, for the new UI to show.
-    pub(crate) fn question(&mut self) -> Option<annulus_session::SessionEvent> {
+    /// The next question the connection asks (a new host key, a password), for the screen
+    /// to show.
+    pub fn question(&mut self) -> Option<SessionEvent> {
         self.events.try_recv().ok()
     }
 
-    /// The connection's answers.
-    pub(crate) fn answers(&self) -> &annulus_session::Answers {
+    /// Where the screen sends the answers to those questions.
+    pub fn answers(&self) -> &Answers {
         &self.answers
     }
 
-    /// The outcome, once the command finished (the new UI's poll).
-    pub(crate) fn outcome(&self) -> Option<Outcome> {
-        self.outcome.lock().ok().and_then(|mut slot| slot.take())
-    }
-
-    /// Shows any question the connection asks, and returns the outcome once it is done.
-    pub fn poll(&mut self, ctx: &egui::Context) -> Option<Outcome> {
-        while let Ok(event) = self.events.try_recv() {
-            self.dialogs.take(event);
-        }
-        self.dialogs.show(ctx, &self.answers);
+    /// How the command ended, once it has (taken once).
+    pub fn outcome(&self) -> Option<Outcome> {
         self.outcome.lock().ok().and_then(|mut slot| slot.take())
     }
 }
@@ -130,15 +117,9 @@ mod tests {
 
     /// Polls `task` until it is done (at most 20 s).
     fn finish(task: &mut SshTask) -> Outcome {
-        let ctx = egui::Context::default();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            let mut found = None;
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                found = task.poll(ui.ctx());
-            });
-            output.textures_delta.clear();
-            if let Some(outcome) = found {
+            if let Some(outcome) = task.outcome() {
                 return outcome;
             }
             assert!(

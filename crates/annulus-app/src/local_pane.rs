@@ -4,10 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{self, RichText, Ui};
-use annulus_config::tokens::{Palette, space, text};
-use annulus_ui::{icons, theme};
-
 /// One entry of a local folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalEntry {
@@ -44,18 +40,11 @@ pub fn read_dir(dir: &Path, hidden: bool) -> std::io::Result<Vec<LocalEntry>> {
     Ok(entries)
 }
 
-/// What the local pane asks the tab to do.
-pub enum LocalAction {
-    /// Upload this file to the remote folder shown.
-    Upload(PathBuf),
-}
-
 /// The local pane's state.
 pub struct LocalPane {
     /// The folder shown.
     pub dir: PathBuf,
     pub(crate) entries: Vec<LocalEntry>,
-    pub(crate) selected: Option<String>,
     pub(crate) error: Option<String>,
     pub(crate) path_field: String,
 }
@@ -68,7 +57,6 @@ impl LocalPane {
             path_field: dir.display().to_string(),
             dir,
             entries: Vec::new(),
-            selected: None,
             error: None,
         };
         pane.refresh(false);
@@ -85,109 +73,6 @@ impl LocalPane {
             Err(error) => self.error = Some(format!("Cannot read {}: {error}", self.dir.display())),
         }
         self.path_field = self.dir.display().to_string();
-    }
-
-    fn go(&mut self, dir: PathBuf, hidden: bool) {
-        if dir.is_dir() {
-            self.dir = dir;
-            self.selected = None;
-        }
-        self.refresh(hidden);
-    }
-
-    /// Draws the pane; returns an action for the tab.
-    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, hidden: bool) -> Option<LocalAction> {
-        let mut action = None;
-        ui.add_space(space::XS);
-        ui.label(RichText::new("This computer").strong());
-        ui.horizontal(|ui| {
-            if ui.button("Up").clicked()
-                && let Some(parent) = self.dir.parent().map(Path::to_path_buf)
-            {
-                self.go(parent, hidden);
-            }
-            if ui.button("Refresh").clicked() {
-                self.refresh(hidden);
-            }
-            let field = ui
-                .add(egui::TextEdit::singleline(&mut self.path_field).desired_width(f32::INFINITY));
-            if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                let target = PathBuf::from(self.path_field.trim());
-                self.go(target, hidden);
-            }
-        });
-        let selected_file = self
-            .selected
-            .as_ref()
-            .filter(|name| {
-                self.entries
-                    .iter()
-                    .any(|entry| &entry.name == *name && !entry.is_dir)
-            })
-            .map(|name| self.dir.join(name));
-        if ui
-            .add_enabled(
-                selected_file.is_some(),
-                egui::Button::new("Upload \u{2192}"),
-            )
-            .on_hover_text("Upload the selected file to the remote folder")
-            .clicked()
-            && let Some(path) = selected_file
-        {
-            action = Some(LocalAction::Upload(path));
-        }
-        if let Some(error) = &self.error {
-            ui.colored_label(theme::color(palette.status_error), error);
-        }
-        let mut open = None;
-        egui::ScrollArea::vertical()
-            .id_salt("local-entries")
-            .show(ui, |ui| {
-                for entry in &self.entries {
-                    let selected = self.selected.as_deref() == Some(entry.name.as_str());
-                    let row = ui.horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                        let icon = if entry.is_dir {
-                            icons::FOLDER
-                        } else {
-                            icons::FILE
-                        };
-                        icons::paint(
-                            ui.painter(),
-                            icon,
-                            rect,
-                            theme::color(palette.text_secondary),
-                        );
-                        ui.selectable_label(selected, &entry.name)
-                    });
-                    let response = row.inner;
-                    if response.clicked() {
-                        self.selected = Some(entry.name.clone());
-                    }
-                    if response.double_clicked()
-                        || (response.has_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-                    {
-                        open = Some(entry.clone());
-                    }
-                    if !entry.is_dir {
-                        ui.label(
-                            RichText::new(crate::sftp_view::human_size(entry.size))
-                                .size(text::SECONDARY),
-                        );
-                    }
-                }
-            });
-        if let Some(entry) = open {
-            if entry.is_dir {
-                let dir = self.dir.join(&entry.name);
-                self.go(dir, hidden);
-            } else {
-                action = Some(LocalAction::Upload(self.dir.join(&entry.name)));
-            }
-        }
-        action
     }
 }
 

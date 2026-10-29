@@ -5,8 +5,6 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
-use eframe::egui;
-
 /// Wakes the window from another thread.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
@@ -19,21 +17,6 @@ pub trait Pace {
     fn waker(&self) -> Wake;
     /// Asks for a frame after `after`, with no input.
     fn later(&self, after: Duration);
-}
-
-impl Pace for egui::Context {
-    fn now(&self) -> f64 {
-        self.input(|input| input.time)
-    }
-
-    fn waker(&self) -> Wake {
-        let ctx = self.clone();
-        Arc::new(move || ctx.request_repaint())
-    }
-
-    fn later(&self, after: Duration) {
-        self.request_repaint_after(after);
-    }
 }
 
 /// Work running on another thread; its result is taken once.

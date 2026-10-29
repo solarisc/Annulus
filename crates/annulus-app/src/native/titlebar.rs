@@ -237,7 +237,12 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
     let tab = &app.tabs[index];
     let id = Id::new(("tab", tab.uid));
     let active = app.active == index;
-    let response = ui.zone(id, rect, Role::Tab, &tab.title);
+    // A screen reader hears the dot too: "web-1, New output".
+    let name = match tab.status {
+        Some(status) => format!("{}, {}", tab.title, status.describe()),
+        None => tab.title.clone(),
+    };
+    let response = ui.zone(id, rect, Role::Tab, &name);
     let t = ui.theme;
     // Still hovered on its close button.
     let hovered = ui.hover_within(rect);

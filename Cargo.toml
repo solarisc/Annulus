@@ -40,8 +40,6 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 ureq = { version = "3.5.0", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 directories = "6.0.0"
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
-egui = "0.37.0"
 # The accessibility tree and its platform adapters (ADR-0017).
 accesskit = "0.25.2"
 accesskit_windows = "0.35.2"

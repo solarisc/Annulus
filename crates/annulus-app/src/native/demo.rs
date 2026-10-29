@@ -185,6 +185,48 @@ pub fn known_hosts(name: &str) -> std::path::PathBuf {
     path
 }
 
+/// An SFTP tab that never connects, showing a made-up folder on a server beside a temporary
+/// local folder with two files (the scenes and the preview).
+///
+/// # Panics
+/// When the temporary folder cannot be written.
+#[must_use]
+pub fn sftp_tab(name: &str) -> crate::sftp_view::SftpTab {
+    use annulus_sftp::{Entry, Kind};
+    let mut tab = crate::sftp_view::SftpTab::unavailable("web-1 files", "");
+    tab.failed = None;
+    tab.cwd = Some("/srv/app".into());
+    let entry = |name: &str, kind: Kind, size: u64, modified: u32, permissions: u32| Entry {
+        name: name.into(),
+        kind,
+        size,
+        modified: Some(modified),
+        permissions: Some(permissions),
+    };
+    tab.entries = vec![
+        entry("config", Kind::Dir, 0, 1_761_662_520, 0o755),
+        entry("releases", Kind::Dir, 0, 1_761_489_000, 0o755),
+        entry(
+            "current",
+            Kind::Link { to_dir: true },
+            0,
+            1_761_662_000,
+            0o777,
+        ),
+        entry("deploy.sh", Kind::File, 8312, 1_761_670_920, 0o755),
+        entry("app.log", Kind::File, 2_411_520, 1_761_741_600, 0o640),
+        entry("README.md", Kind::File, 612, 1_761_478_000, 0o644),
+        entry(".env", Kind::File, 214, 1_761_400_000, 0o600),
+    ];
+    let local = std::env::temp_dir().join(format!("annulus-sftp-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&local);
+    std::fs::create_dir_all(local.join("notes")).expect("a temporary folder");
+    std::fs::write(local.join("backup.tar.gz"), vec![0; 4096]).expect("a temporary file");
+    std::fs::write(local.join("todo.txt"), "ship it\n").expect("a temporary file");
+    tab.local.dir = local;
+    tab
+}
+
 /// A terminal replaying a made-up session on a database server: a colored prompt,
 /// `systemctl`, `ls` and `git log` output.
 #[must_use]

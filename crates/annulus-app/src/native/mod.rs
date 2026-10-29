@@ -271,6 +271,21 @@ impl NativeApp {
         self.active = self.tabs.len() - 1;
     }
 
+    /// Adds an SFTP tab in front.
+    pub fn push_sftp(&mut self, tab: crate::sftp_view::SftpTab) {
+        self.tabs.push(Tab {
+            uid: self.next_uid,
+            kind: TabKind::Sftp,
+            title: tab.title.clone(),
+            status: None,
+            terminal: None,
+            sftp: Some(Box::new(sftp::SftpView::new(tab))),
+            origin: None,
+        });
+        self.next_uid += 1;
+        self.active = self.tabs.len() - 1;
+    }
+
     /// Opens a live terminal tab running `program` after this frame.
     pub fn open(&mut self, title: impl Into<String>, program: Program) {
         self.opens.push((title.into(), program, None));
@@ -510,6 +525,11 @@ impl NativeApp {
     fn screen_action(&mut self, action: screens::ScreenAction) {
         match action {
             screens::ScreenAction::Terminal(title, program) => self.open(title, *program),
+            screens::ScreenAction::Terminals(tabs) => {
+                for (title, program) in tabs {
+                    self.open(title, program);
+                }
+            }
             screens::ScreenAction::Log(title, text) => {
                 let mut emulator = Emulator::new(120, 40);
                 emulator.advance(text.replace('\n', "\r\n").as_bytes());
@@ -545,28 +565,19 @@ impl NativeApp {
                 let Some(host) = vault.hosts().iter().find(|host| host.id == id) else {
                     return;
                 };
-                let Some((last, via)) = connect::login(vault, host) else {
-                    return;
+                let title = format!("{} files", host.label);
+                let tab = match connect::login(vault, host) {
+                    Some((last, via)) => {
+                        crate::sftp_view::SftpTab::new(title, last, self.ssh_files.clone(), via)
+                    }
+                    None => crate::sftp_view::SftpTab::unavailable(
+                        title,
+                        "Annulus cannot reach this host itself: check its address and port.",
+                    ),
                 };
-                let tab = crate::sftp_view::SftpTab::new(
-                    format!("{} files", host.label),
-                    last,
-                    self.ssh_files.clone(),
-                    via,
-                );
-                self.tabs.push(Tab {
-                    uid: self.next_uid,
-                    kind: TabKind::Sftp,
-                    title: tab.title.clone(),
-                    status: None,
-                    terminal: None,
-                    sftp: Some(Box::new(sftp::SftpView::new(tab))),
-                    origin: None,
-                });
-                self.next_uid += 1;
-                self.active = self.tabs.len() - 1;
+                self.push_sftp(tab);
             }
-            // TODO: the ssh_config import preview in the new UI.
+            // The Hosts screen opens its import card itself.
             hosts::HostsAction::ImportSshConfig => {}
         }
     }
@@ -840,7 +851,7 @@ impl NativeApp {
                     .draw(ui, content, vault, &self.ssh_files, self.waker.as_ref());
                 None
             }
-            Section::Snippets => self.snippets.draw(ui, content, vault),
+            Section::Snippets => self.snippets.draw(ui, content, vault, &self.ssh_files),
             Section::PortForwarding => {
                 self.forwards
                     .draw(ui, content, vault, &self.ssh_files, self.waker.as_ref());
@@ -1131,6 +1142,7 @@ pub fn run_preview(light: bool) -> Result<(), WindowError> {
     let mut app = NativeApp::new(Some(demo::fixture_vault("preview", true)));
     app.ssh_files.known_hosts = demo::known_hosts("preview");
     app.push_terminal("prod-db", TermView::Replay(Box::new(demo::terminal())));
+    app.push_sftp(demo::sftp_tab("preview"));
     app.active = 0;
     run(
         "Annulus",

@@ -9,15 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use eframe::egui::{self, RichText, Ui};
-use annulus_config::tokens::{Palette, space, text};
 use annulus_proto::Device;
 use annulus_sync::account;
 use annulus_sync::engine::{Report, SyncError, restore as restore_item, sync};
 use annulus_sync::http::HttpServer;
 use annulus_sync::replica::VaultReplica;
-use annulus_ui::secret::{SecretText, secret_field};
-use annulus_ui::theme;
 use annulus_vault::hosts::Secret;
 use annulus_vault::sync::{SyncAccount, SyncCopy};
 use annulus_vault::vault::Vault;
@@ -59,7 +55,7 @@ pub struct SyncScreen {
     pub(crate) server: String,
     pub(crate) account: String,
     pub(crate) device: String,
-    pub(crate) password: SecretText,
+    pub(crate) password: Zeroizing<String>,
     pub(crate) work: Option<(String, Receiver<Done>)>,
     pub(crate) message: Option<(bool, String)>,
     pub(crate) devices: Vec<Device>,
@@ -156,7 +152,7 @@ impl Default for SyncScreen {
             server: String::new(),
             account: String::new(),
             device,
-            password: SecretText::new(),
+            password: Zeroizing::new(String::new()),
             work: None,
             message: None,
             devices: Vec::new(),
@@ -387,101 +383,6 @@ impl SyncScreen {
         true
     }
 
-    /// Draws the section.
-    pub fn ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut Vault, vault_path: &Path) {
-        ui.heading("Sync");
-        ui.add_space(space::S);
-        let state = hosts.sync_state().clone();
-        if let Some(account) = &state.account {
-            self.signed_in_ui(
-                ui,
-                palette,
-                hosts,
-                account,
-                state.last_synced,
-                state.pending_count(),
-            );
-        } else {
-            self.sign_in_ui(ui, palette, hosts, vault_path);
-        }
-        if let Some((label, _)) = &self.work {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(format!("{label}\u{2026}"));
-            });
-        }
-        if let Some((error, message)) = &self.message {
-            let color = if *error {
-                palette.status_error
-            } else {
-                palette.text_secondary
-            };
-            ui.colored_label(theme::color(color), message);
-        }
-    }
-
-    fn sign_in_ui(&mut self, ui: &mut Ui, palette: &Palette, hosts: &mut Vault, vault_path: &Path) {
-        ui.label(
-            RichText::new("Keep hosts and rules in sync through a server you run yourself. Everything is encrypted on this device with your master password; the server cannot read it.")
-                .size(text::SECONDARY)
-                .color(theme::color(palette.text_secondary)),
-        );
-        ui.add_space(space::S);
-        egui::Grid::new("sync-fields")
-            .num_columns(2)
-            .spacing([space::M, space::S])
-            .show(ui, |ui| {
-                ui.label("Server");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.server)
-                        .hint_text("https://sync.example.com")
-                        .desired_width(280.0),
-                );
-                ui.end_row();
-                ui.label("Account");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.account)
-                        .hint_text("you@example.com")
-                        .desired_width(280.0),
-                );
-                ui.end_row();
-                ui.label("This device");
-                ui.add(egui::TextEdit::singleline(&mut self.device).desired_width(280.0));
-                ui.end_row();
-                ui.label("Master password");
-                secret_field(
-                    ui,
-                    &mut self.password,
-                    "The password that unlocks this vault",
-                );
-                ui.end_row();
-            });
-        ui.add_space(space::S);
-        let ready = self.work.is_none()
-            && !self.server.trim().is_empty()
-            && !self.account.trim().is_empty()
-            && !self.password.expose().is_empty();
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ready, egui::Button::new("Create account"))
-                .clicked()
-            {
-                self.create(ui.ctx(), hosts);
-            }
-            if ui
-                .add_enabled(ready, egui::Button::new("Sign in"))
-                .clicked()
-            {
-                self.join(ui.ctx(), hosts, vault_path);
-            }
-        });
-        ui.label(
-            RichText::new("Signing in on a device that already has hosts merges them into the account; the old vault file is kept as a backup.")
-                .size(text::SECONDARY)
-                .color(theme::color(palette.text_secondary)),
-        );
-    }
-
     /// Starts a sync round at the next tick.
     pub(crate) fn sync_now(&mut self) {
         self.last_round = f64::NEG_INFINITY;
@@ -565,15 +466,14 @@ impl SyncScreen {
         self.trash.get(index).map(|item| item.name.as_str())
     }
 
+    /// The typed master password, taken once (the field empties).
     pub(crate) fn take_password(&mut self) -> Zeroizing<String> {
-        let password = Zeroizing::new(self.password.expose().to_owned());
-        egui::TextBuffer::clear(&mut self.password);
-        password
+        std::mem::replace(&mut self.password, Zeroizing::new(String::new()))
     }
 
     /// Sets the master password typed in the new UI's field, for `create` and `join`.
     pub(crate) fn set_password(&mut self, password: &str) {
-        self.password = SecretText::from(password);
+        self.password = Zeroizing::new(password.to_owned());
     }
 
     pub(crate) fn create(&mut self, ctx: &dyn Pace, hosts: &Vault) {
@@ -685,133 +585,6 @@ impl SyncScreen {
             }
             Done::Joined(Box::new(vault), backup, generation)
         });
-    }
-
-    /// The deleted items with their Restore buttons.
-    fn trash_ui(&mut self, ui: &mut Ui, account: &SyncAccount, hosts: &Vault) {
-        let mut restore = None;
-        for (index, item) in self.trash.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(&item.name);
-                if ui.small_button("Restore").clicked() {
-                    restore = Some(index);
-                }
-            });
-        }
-        if let Some(index) = restore {
-            let item = self.trash.remove(index);
-            let (server, token) = (account.server.clone(), account.token.expose().to_owned());
-            let copy = hosts.sync_copy();
-            self.start(ui.ctx(), "Restoring", move || {
-                let mut replica = VaultReplica(copy);
-                let result = HttpServer::new(&server, Some(token)).and_then(|mut http| {
-                    restore_item(&mut http, &mut replica, &item.id, &item.version)
-                });
-                Done::Restored(Box::new(replica.0), result)
-            });
-        }
-    }
-
-    fn signed_in_ui(
-        &mut self,
-        ui: &mut Ui,
-        palette: &Palette,
-        hosts: &mut Vault,
-        account: &SyncAccount,
-        last_synced: u64,
-        pending: usize,
-    ) {
-        ui.label(format!(
-            "Signed in as {} on {}",
-            account.name, account.server
-        ));
-        let status = match (last_synced, pending) {
-            (0, _) => "Not synced yet".to_owned(),
-            (then, 0) => format!("Up to date, synced {}", ago(then, now_secs())),
-            (then, n) => format!(
-                "{n} change(s) waiting, last synced {}",
-                ago(then, now_secs())
-            ),
-        };
-        ui.label(RichText::new(status).color(theme::color(palette.text_secondary)));
-        ui.add_space(space::S);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(self.work.is_none(), egui::Button::new("Sync now"))
-                .clicked()
-            {
-                self.last_round = f64::NEG_INFINITY;
-            }
-            if ui
-                .add_enabled(self.work.is_none(), egui::Button::new("Show devices"))
-                .clicked()
-            {
-                let (server, token) = (account.server.clone(), account.token.expose().to_owned());
-                self.start(ui.ctx(), "Loading devices", move || {
-                    Done::Devices(
-                        HttpServer::new(&server, Some(token))
-                            .and_then(|http| http.devices())
-                            .map(|list| list.devices),
-                    )
-                });
-            }
-            if ui
-                .add_enabled(self.work.is_none(), egui::Button::new("Deleted items"))
-                .on_hover_text("Restore hosts, keys, rules and snippets deleted on any device")
-                .clicked()
-            {
-                let (server, token) = (account.server.clone(), account.token.expose().to_owned());
-                let copy = hosts.sync_copy();
-                self.start(ui.ctx(), "Loading deleted items", move || {
-                    Done::Trash(load_trash(&server, token, &copy))
-                });
-            }
-            if ui.button("Sign out").clicked() {
-                self.devices.clear();
-                self.trash.clear();
-                self.message = Some(match hosts.set_sync_account(None) {
-                    Ok(()) => (
-                        false,
-                        "Signed out. Everything on this device is kept.".into(),
-                    ),
-                    Err(error) => (true, error.to_string()),
-                });
-            }
-        });
-        self.trash_ui(ui, account, hosts);
-        let mut revoke = None;
-        for device in &self.devices {
-            ui.horizontal(|ui| {
-                let label = if device.current {
-                    format!("{} (this device)", device.name)
-                } else {
-                    device.name.clone()
-                };
-                ui.label(label);
-                ui.label(
-                    RichText::new(format!("seen {}", ago(device.last_seen, now_secs())))
-                        .size(text::SECONDARY)
-                        .color(theme::color(palette.text_secondary)),
-                );
-                if !device.current && ui.small_button("Sign out").clicked() {
-                    revoke = Some(device.id);
-                }
-            });
-        }
-        if let Some(id) = revoke {
-            let (server, token) = (account.server.clone(), account.token.expose().to_owned());
-            self.start(ui.ctx(), "Signing the device out", move || {
-                let http = match HttpServer::new(&server, Some(token)) {
-                    Ok(http) => http,
-                    Err(error) => return Done::Devices(Err(error)),
-                };
-                Done::Devices(
-                    http.revoke(id)
-                        .and_then(|()| http.devices())
-                        .map(|list| list.devices),
-                )
-            });
-        }
     }
 }
 

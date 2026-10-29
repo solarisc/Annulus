@@ -107,6 +107,10 @@ fn logs(app: &mut NativeApp) {
     section(app, super::Section::Logs);
 }
 
+fn sftp(app: &mut NativeApp) {
+    app.push_sftp(super::demo::sftp_tab("scenes"));
+}
+
 fn settings(app: &mut NativeApp) {
     section(app, super::Section::Settings);
 }
@@ -345,6 +349,62 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: logs,
         acts: &[],
+    },
+    Scene {
+        name: "sftp",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::Hover("deploy.sh")],
+    },
+    Scene {
+        name: "sftp-menu",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::Click("deploy.sh"), Act::Click("more")],
+    },
+    Scene {
+        name: "sftp-delete",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[
+            Act::Click("deploy.sh"),
+            Act::Press(Key::Delete, Modifiers::NONE),
+        ],
+    },
+    Scene {
+        name: "sftp-permissions",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[
+            Act::Click("deploy.sh"),
+            Act::Click("more"),
+            Act::Click("Permissions\u{2026}"),
+        ],
+    },
+    Scene {
+        name: "sftp-properties",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[
+            Act::Click("app.log"),
+            Act::Click("more"),
+            Act::Click("Properties"),
+        ],
     },
     Scene {
         name: "settings",
@@ -827,6 +887,81 @@ fn the_lock_screens_tree_names_the_password_fields_but_never_their_text() {
             .all(|(_, node)| node.value().is_none_or(|value| !value.contains("horse"))),
         "the password reached the tree"
     );
+}
+
+#[test]
+fn the_hosts_listing_sorts_by_its_headers_and_filters_by_name() {
+    let mut app = NativeApp::new(Some(fixture_vault("sftp-sort", false)));
+    app.push_sftp(super::demo::sftp_tab("sort"));
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let y = |output: &FrameOutput, name: &str| zone_center(&output.zones, name).y;
+    // Folders first, then by name.
+    assert!(y(&output, "config") < y(&output, "app.log"));
+    assert!(y(&output, "app.log") < y(&output, "deploy.sh"));
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Sort by size"),
+        1.0,
+    );
+    assert!(y(&output, "README.md") < y(&output, "deploy.sh"));
+    assert!(y(&output, "deploy.sh") < y(&output, "app.log"));
+    assert!(
+        y(&output, "config") < y(&output, "README.md"),
+        "folders stay first"
+    );
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Sort by size"),
+        2.0,
+    );
+    assert!(
+        y(&output, "app.log") < y(&output, "deploy.sh"),
+        "again: largest first"
+    );
+    let mut events = click_on(&output, "Filter this folder");
+    events.push(Event::Text("DEPLOY".into()));
+    output = step(&mut app, &mut state, &events, 3.0);
+    let names: Vec<&str> = output
+        .zones
+        .iter()
+        .map(|zone| zone.label.as_str())
+        .collect();
+    assert!(
+        names.contains(&"deploy.sh") && !names.contains(&"app.log"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn deleting_on_the_host_asks_first() {
+    let mut app = NativeApp::new(Some(fixture_vault("sftp-delete", false)));
+    app.push_sftp(super::demo::sftp_tab("delete"));
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let card_up = |output: &FrameOutput| output.zones.iter().any(|zone| zone.label == "Delete");
+    output = step(&mut app, &mut state, &click_on(&output, "deploy.sh"), 1.0);
+    assert!(!card_up(&output));
+    let delete = [Event::Key(Key::Delete, Modifiers::NONE)];
+    output = step(&mut app, &mut state, &delete, 2.0);
+    assert!(card_up(&output), "the Delete key asks");
+    output = step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Escape, Modifiers::NONE)],
+        3.0,
+    );
+    assert!(!card_up(&output), "Escape keeps the file");
+    assert!(output.zones.iter().any(|zone| zone.label == "deploy.sh"));
+    // The More menu's Delete asks the same.
+    output = step(&mut app, &mut state, &click_on(&output, "deploy.sh"), 4.0);
+    output = step(&mut app, &mut state, &click_on(&output, "more"), 5.0);
+    output = step(&mut app, &mut state, &click_on(&output, "Delete"), 6.0);
+    assert!(card_up(&output), "the menu asks too");
+    output = step(&mut app, &mut state, &click_on(&output, "Cancel"), 7.0);
+    assert!(!card_up(&output));
 }
 
 #[test]
