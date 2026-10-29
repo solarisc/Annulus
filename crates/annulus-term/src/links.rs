@@ -58,16 +58,16 @@ pub fn link_at<T>(term: &Term<T>, row: usize, column: usize) -> Option<Link> {
         });
     }
     let mut regex = RegexSearch::new(URL).ok()?;
-    let line = point.line;
-    let start = Point::new(line, Column(0));
-    let end = Point::new(line, Column(term.columns() - 1));
+    // The whole logical line: a long URL soft-wrapped over several rows is one link.
+    let start = term.line_search_left(Point::new(point.line, Column(0)));
+    let end = term.line_search_right(Point::new(point.line, Column(term.columns() - 1)));
     let found = RegexIter::new(start, end, Direction::Right, term, &mut regex)
         .find(|found| found.contains(&point))?;
     let text = term.bounds_to_string(*found.start(), *found.end());
     let url = trim_trailing(text.trim_end());
     // The click must land on the URL, not on punctuation trimmed from its end.
-    let end_column = found.start().column.0 + url.chars().count();
-    (point.column.0 < end_column).then(|| Link {
+    let before = term.bounds_to_string(*found.start(), point).chars().count();
+    (before <= url.chars().count()).then(|| Link {
         url: url.to_owned(),
         explicit: false,
     })
@@ -94,6 +94,27 @@ mod tests {
         assert_eq!(link_at(term, 0, 0), None, "plain words are not links");
         assert_eq!(
             link_at(term, 0, 30),
+            None,
+            "the trimmed period is not part of it"
+        );
+    }
+
+    #[test]
+    fn a_url_wrapped_over_two_rows_is_one_link_from_either_row() {
+        let url = "https://example.com/a/rather/long/path/that/wraps/over/the/edge";
+        let mut emulator = emulator_with(&format!("see {url}. next"));
+        let term = emulator.term_mut();
+        assert_eq!(
+            link_at(term, 0, 10).map(|link| link.url).as_deref(),
+            Some(url)
+        );
+        assert_eq!(
+            link_at(term, 1, 2).map(|link| link.url).as_deref(),
+            Some(url)
+        );
+        let after = 4 + url.len() - 60;
+        assert_eq!(
+            link_at(term, 1, after),
             None,
             "the trimmed period is not part of it"
         );
