@@ -395,7 +395,21 @@ fn a_full_round_over_http_then_a_revoked_device_is_refused() {
         "the first version is in history"
     );
 
-    laptop.revoke(phone_session.device).unwrap();
+    // A password change re-registers the account and signs the other devices out; the
+    // new password then signs in and the old one does not.
+    account::change_password(&mut laptop, &cheap(), "new pw", b"new keys".to_vec()).unwrap();
+    assert!(matches!(
+        sync(&mut phone, &mut phone_copy),
+        Err(SyncError::Unauthorized)
+    ));
+    let mut tablet = crate::http::HttpServer::new(&base, None).unwrap();
+    assert!(account::login(&mut tablet, &cheap(), "ana", "pw", "tablet").is_err());
+    let tablet_session = account::login(&mut tablet, &cheap(), "ana", "new pw", "tablet").unwrap();
+    assert_eq!(tablet_session.wrapped_keys, b"new keys");
+    sync(&mut laptop, &mut device).unwrap();
+    laptop.revoke(tablet_session.device).unwrap();
+    tablet.set_token(Some(tablet_session.token));
+    assert!(matches!(tablet.devices(), Err(SyncError::Unauthorized)));
     assert!(matches!(
         sync(&mut phone, &mut phone_copy),
         Err(SyncError::Unauthorized)

@@ -113,6 +113,25 @@ impl HttpServer {
         self.request(path::DEVICES, None)
     }
 
+    /// Password change step 1 (see [`crate::account::change_password`]).
+    ///
+    /// # Errors
+    /// Unreachable or signed out.
+    pub fn password_start(
+        &self,
+        request: &RegisterStart,
+    ) -> Result<RegisterStartResponse, SyncError> {
+        self.post(path::PASSWORD_START, request)
+    }
+
+    /// Password change step 2.
+    ///
+    /// # Errors
+    /// Unreachable or signed out.
+    pub fn password_finish(&self, request: &RegisterFinish) -> Result<(), SyncError> {
+        self.post(path::PASSWORD_FINISH, request)
+    }
+
     /// Earlier versions of record `id`, newest first.
     ///
     /// # Errors

@@ -626,6 +626,64 @@ impl Server {
         Ok(Devices { devices })
     }
 
+    fn account_name(&self, caller: Caller) -> Result<String, ServerError> {
+        Ok(self.db()?.query_row(
+            "SELECT name FROM accounts WHERE id = ?1",
+            [caller.account],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Password change step 1, for the signed-in caller's account.
+    ///
+    /// # Errors
+    /// The request is malformed.
+    pub fn password_start(
+        &self,
+        caller: Caller,
+        request: &RegisterStart,
+    ) -> Result<RegisterStartResponse, ServerError> {
+        let account = self.account_name(caller)?;
+        let message = RegistrationRequest::<Suite>::deserialize(&request.request)
+            .map_err(bad("registration request"))?;
+        let result = ServerRegistration::<Suite>::start(&self.setup, message, account.as_bytes())
+            .map_err(bad("registration request"))?;
+        Ok(RegisterStartResponse {
+            response: result.message.serialize().to_vec(),
+        })
+    }
+
+    /// Password change step 2: stores the new login record and wrapped key, and signs every
+    /// other device out (they sign in again with the new password).
+    ///
+    /// # Errors
+    /// The request is malformed, or the database failed (nothing changed).
+    pub fn password_finish(
+        &self,
+        caller: Caller,
+        request: &RegisterFinish,
+    ) -> Result<(), ServerError> {
+        let upload = RegistrationUpload::<Suite>::deserialize(&request.upload)
+            .map_err(bad("registration upload"))?;
+        let record = ServerRegistration::<Suite>::finish(upload);
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        tx.execute(
+            "UPDATE accounts SET opaque = ?1, wrapped_keys = ?2 WHERE id = ?3",
+            params![
+                record.serialize().to_vec(),
+                request.wrapped_keys,
+                caller.account
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM devices WHERE account = ?1 AND id != ?2",
+            params![caller.account, caller.device],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Every account with its device count, record count and stored bytes, for the admin.
     ///
     /// # Errors

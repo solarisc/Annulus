@@ -52,6 +52,8 @@ fn router(server: Arc<Server>) -> Router {
         .route(path::LOGIN_FINISH, post(login_finish))
         .route(path::RECORDS, get(pull).post(push))
         .route(path::HISTORY, get(history))
+        .route(path::PASSWORD_START, post(password_start))
+        .route(path::PASSWORD_FINISH, post(password_finish))
         .route(path::DEVICES, get(devices))
         .route(path::REVOKE, post(revoke))
         .with_state(server)
@@ -220,6 +222,36 @@ async fn history(
             .history(caller, id)
             .map(|records| History { records }),
     )
+}
+
+async fn password_start(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let caller = match caller(&server, &headers) {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    match decode::<RegisterStart>(&body) {
+        Ok(request) => reply(server.password_start(caller, &request)),
+        Err(error) => failure(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn password_finish(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let caller = match caller(&server, &headers) {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    match decode::<RegisterFinish>(&body) {
+        Ok(request) => reply(server.password_finish(caller, &request)),
+        Err(error) => failure(StatusCode::BAD_REQUEST, error.to_string()),
+    }
 }
 
 async fn devices(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {

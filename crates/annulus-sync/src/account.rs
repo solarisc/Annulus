@@ -123,3 +123,38 @@ pub fn login(
         device: device.to_owned(),
     })
 }
+
+/// Re-registers the signed-in account with `new_password` and the re-wrapped key file
+/// `wrapped_keys`; the server signs every other device out.
+///
+/// # Errors
+/// Unreachable or signed out.
+pub fn change_password(
+    server: &mut crate::http::HttpServer,
+    ksf: &Argon2<'static>,
+    new_password: &str,
+    wrapped_keys: Vec<u8>,
+) -> Result<(), SyncError> {
+    let start = ClientRegistration::<Suite>::start(&mut OsRng, new_password.as_bytes())
+        .map_err(protocol)?;
+    let response = server.password_start(&RegisterStart {
+        account: String::new(),
+        request: start.message.serialize().to_vec(),
+    })?;
+    let response = RegistrationResponse::deserialize(&response.response).map_err(protocol)?;
+    let finish = start
+        .state
+        .finish(
+            &mut OsRng,
+            new_password.as_bytes(),
+            response,
+            ClientRegistrationFinishParameters::new(Identifiers::default(), Some(ksf)),
+        )
+        .map_err(protocol)?;
+    server.password_finish(&RegisterFinish {
+        account: String::new(),
+        upload: finish.message.serialize().to_vec(),
+        wrapped_keys,
+        device: String::new(),
+    })
+}

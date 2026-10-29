@@ -41,6 +41,11 @@ pub mod path {
     pub const RECORDS: &str = "/v1/records";
     /// Earlier versions of one record, `GET ?id=<record id>` ([`super::History`]).
     pub const HISTORY: &str = "/v1/records/history";
+    /// Starts a password change for the signed-in account ([`super::RegisterStart`]; its
+    /// account name is ignored).
+    pub const PASSWORD_START: &str = "/v1/account/password/start";
+    /// Finishes a password change ([`super::RegisterFinish`]); other devices are signed out.
+    pub const PASSWORD_FINISH: &str = "/v1/account/password/finish";
     /// The account's devices ([`super::Devices`]).
     pub const DEVICES: &str = "/v1/devices";
     /// Revokes a device ([`super::Revoke`]).
