@@ -423,18 +423,11 @@ impl TerminalTab {
             return;
         }
         let Some(session) = &self.session else { return };
+        scrollback_keys(ui, &response, session, cell.y);
         if response.has_focus() {
             keep_keys(ui, id);
             if !prompting {
                 self.sent = handle_input(ui, session);
-            }
-        }
-        // Ctrl+wheel zooms (handled by the shell); a plain wheel scrolls back.
-        if response.hovered() && !ui.input(|input| input.modifiers.ctrl) {
-            let scroll = ui.input(|input| input.smooth_scroll_delta().y);
-            if scroll.abs() > 0.0 {
-                #[allow(clippy::cast_possible_truncation)] // A few lines per wheel step.
-                session.scroll((scroll / cell.y).round() as i32);
             }
         }
 
@@ -772,6 +765,19 @@ fn context_menu(
             chosen = Some(PaneRequest::OpenSftp);
             ui.close();
         }
+        ui.separator();
+        if ui.button("Clear scrollback").clicked() {
+            session.clear_scrollback();
+            ui.close();
+        }
+        if ui
+            .button("Reset terminal")
+            .on_hover_text("Back to default modes and colors, with a clear screen")
+            .clicked()
+        {
+            session.reset();
+            ui.close();
+        }
         let broadcast = if skipped {
             "Take into broadcast"
         } else {
@@ -783,6 +789,22 @@ fn context_menu(
         }
     });
     (chosen, open_find)
+}
+
+/// Scrolling back with the wheel (Ctrl+wheel zooms, in the shell), and Ctrl+Shift+Backspace
+/// to clear the scrollback.
+fn scrollback_keys(ui: &Ui, response: &egui::Response, session: &Session, line: f32) {
+    let clear = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+    if response.has_focus() && ui.input_mut(|input| input.consume_key(clear, EguiKey::Backspace)) {
+        session.clear_scrollback();
+    }
+    if response.hovered() && !ui.input(|input| input.modifiers.ctrl) {
+        let scroll = ui.input(|input| input.smooth_scroll_delta().y);
+        if scroll.abs() > 0.0 {
+            #[allow(clippy::cast_possible_truncation)] // A few lines per wheel step.
+            session.scroll((scroll / line).round() as i32);
+        }
+    }
 }
 
 /// Tab, arrows and Escape belong to the program, not to egui's focus navigation.

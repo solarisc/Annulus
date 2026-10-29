@@ -552,6 +552,16 @@ impl Session {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 
+    /// Forgets the scrollback (Ctrl+Shift+Backspace).
+    pub fn clear_scrollback(&self) {
+        annulus_term::clear_scrollback(&mut self.term.lock());
+    }
+
+    /// Resets the terminal: modes, colors, screen and scrollback.
+    pub fn reset(&self) {
+        annulus_term::reset(&mut self.term.lock());
+    }
+
     /// Steps `find` to its next match (older text when `backwards`) and scrolls it into
     /// view; false when nothing matches.
     pub fn find_step(&self, find: &mut Find, backwards: bool) -> bool {

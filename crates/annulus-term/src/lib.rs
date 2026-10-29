@@ -110,9 +110,55 @@ impl Emulator {
     }
 }
 
+/// Forgets the scrollback; the screen stays as it is (F-TERM-014).
+pub fn clear_scrollback<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>) {
+    term.grid_mut().clear_history();
+}
+
+/// Resets the terminal as `reset` (RIS) does: modes, colors, the screen and the
+/// scrollback, for a program that left it in a mess (F-TERM-014).
+pub fn reset<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>) {
+    use alacritty_terminal::vte::ansi::Handler as _;
+    term.reset_state();
+    term.grid_mut().clear_history();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_drops_the_scrollback_and_reset_also_the_screen_and_modes() {
+        use alacritty_terminal::grid::Dimensions as _;
+        let mut emulator = Emulator::new(20, 4);
+        for n in 0..30 {
+            emulator.advance(format!("line {n}\r\n").as_bytes());
+        }
+        emulator.advance(b"\x1b[?1049h");
+        emulator.advance(b"\x1b[?1049l");
+        emulator.advance(b"kept");
+        assert!(emulator.term_mut().grid().history_size() > 0);
+        clear_scrollback(emulator.term_mut());
+        assert_eq!(emulator.term_mut().grid().history_size(), 0);
+        assert!(
+            crate::transcript::transcript(emulator.term_mut()).contains("kept"),
+            "the screen stays"
+        );
+
+        emulator.advance(b"\x1b[?25l\x1b[31mred");
+        reset(emulator.term_mut());
+        assert!(
+            !crate::transcript::transcript(emulator.term_mut()).contains("kept"),
+            "the screen is cleared"
+        );
+        assert!(
+            emulator
+                .term_mut()
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR),
+            "modes are back to their defaults"
+        );
+    }
 
     #[test]
     fn dragging_selects_text_and_highlights_it() {
