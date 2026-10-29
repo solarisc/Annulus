@@ -85,6 +85,8 @@ pub struct TerminalTab {
     started: f64,
     /// Set by the session when it has something new to draw; cleared when drawn.
     unread: Arc<AtomicBool>,
+    /// The current session has drawn something (cleared when it starts again).
+    drawn: Arc<AtomicBool>,
 }
 
 /// Tries before an automatic reconnect gives up and shows the error.
@@ -125,6 +127,7 @@ impl TerminalTab {
             carry: None,
             started: 0.0,
             unread: Arc::new(AtomicBool::new(false)),
+            drawn: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -166,8 +169,11 @@ impl TerminalTab {
         let (cells, cell_w, cell_h) = size;
         let wake_ctx = ctx.clone();
         let unread = self.unread.clone();
+        self.drawn = Arc::new(AtomicBool::new(false));
+        let drawn = self.drawn.clone();
         match Session::spawn(&self.program, cells, cell_w, cell_h, move || {
             unread.store(true, Ordering::Relaxed);
+            drawn.store(true, Ordering::Relaxed);
             wake_ctx.request_repaint();
         }) {
             Ok(session) => {
@@ -360,7 +366,25 @@ impl TerminalTab {
         if self.exited {
             let note = self.ended_note(ui.input(|input| input.time));
             paint_ended(ui, area.min, cell, size.rows, font, &note);
+        } else if self.connecting() {
+            paint_ended(
+                ui,
+                area.min,
+                cell,
+                1,
+                font,
+                &format!("Connecting to {}\u{2026}", self.title),
+            );
         }
+    }
+
+    /// An SSH session that has not drawn anything yet: the line says it is connecting.
+    fn connecting(&self) -> bool {
+        matches!(self.program, Program::Ssh { .. })
+            && self.session.is_some()
+            && self.failed.is_none()
+            && !self.exited
+            && !self.drawn.load(Ordering::Relaxed)
     }
 
     /// A finished session starts again on Enter (an SSH tab reconnects); a dropped one also
@@ -938,6 +962,39 @@ mod tests {
             tab.session.is_some() || tab.failed.is_some(),
             "it tried again without being shown"
         );
+    }
+
+    #[test]
+    fn an_ssh_tab_says_it_is_connecting_until_it_draws() {
+        let target = annulus_session::Target {
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "nobody".into(),
+        };
+        let dir = std::env::temp_dir();
+        let program = Program::Ssh {
+            target,
+            files: annulus_session::SshFiles {
+                known_hosts: dir.join("annulus-connecting-known_hosts"),
+                key_dir: None,
+            },
+            password: None,
+            identity: None,
+            via: Vec::new(),
+            proxy: None,
+            reconnect: false,
+            env: Vec::new(),
+            startup: None,
+        };
+        let mut tab = TerminalTab::new("db", program);
+        assert!(!tab.connecting(), "nothing started yet");
+        tab.session = Some(Session::spawn(&tab.program, Size::new(80, 24), 8, 16, || {}).unwrap());
+        assert!(tab.connecting());
+        tab.drawn.store(true, Ordering::Relaxed);
+        assert!(!tab.connecting(), "output arrived");
+        tab.drawn.store(false, Ordering::Relaxed);
+        tab.failed = Some("refused".into());
+        assert!(!tab.connecting(), "a failure shows instead");
     }
 
     #[test]
