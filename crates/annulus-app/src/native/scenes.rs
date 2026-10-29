@@ -925,6 +925,24 @@ fn the_tag_filter_works_by_keyboard() {
     let listed = |label: &str| output.zones.iter().any(|zone| zone.label == label);
     assert!(listed("web-1") && listed("staging-web"), "from every group");
     assert!(!listed("prod-db"));
+    // Clear drops the filter; so does closing the chips.
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Clear"),
+        time + 1.0,
+    );
+    assert_eq!(app.hosts.tags, Vec::<String>::new());
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "nginx (2)"),
+        time + 2.0,
+    );
+    assert_eq!(app.hosts.tags, ["nginx"]);
+    output = step(&mut app, &mut state, &click_on(&output, "Tags"), time + 3.0);
+    assert_eq!(app.hosts.tags, Vec::<String>::new());
+    assert!(!output.zones.iter().any(|zone| zone.label == "nginx (2)"));
 }
 
 #[test]

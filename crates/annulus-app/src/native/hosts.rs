@@ -2236,6 +2236,33 @@ mod tests {
     }
 
     #[test]
+    fn only_a_target_no_host_is_labelled_with_becomes_a_draft_in_the_group_shown() {
+        let mut vault = super::super::demo::fixture_vault("unsaved-target", false);
+        let mut saved = vault.draft_host();
+        (saved.label, saved.address) = ("db.example.com".into(), "db.example.com".into());
+        assert!(vault.upsert_host(saved).is_ok());
+        let view = HostsView {
+            group: Some("lab".into()),
+            ..HostsView::default()
+        };
+        let draft = view.unsaved_target(&vault, "deploy@10.0.9.9:22");
+        assert!(draft.is_some_and(|host| (
+            host.label.as_str(),
+            host.username.as_str(),
+            host.port,
+            host.group.as_deref()
+        ) == ("10.0.9.9", "deploy", None, Some("lab"))));
+        let plain = view.unsaved_target(&vault, "cache.lan");
+        assert!(plain.is_some_and(|host| (host.port, host.username.is_empty()) == (None, true)));
+        assert!(
+            view.unsaved_target(&vault, "db.example.com").is_none(),
+            "saved"
+        );
+        assert!(view.unsaved_target(&vault, "a b.lan").is_none(), "words");
+        assert!(view.unsaved_target(&vault, "web").is_none(), "a search");
+    }
+
+    #[test]
     fn a_host_can_turn_off_reconnecting() {
         let mut vault = super::super::demo::fixture_vault("no-reconnect", false);
         let mut host = vault.draft_host();
