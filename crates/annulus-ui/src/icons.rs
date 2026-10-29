@@ -230,6 +230,8 @@ icons! {
         Move(2.5, 2.5), Line(13.5, 2.5), Line(13.5, 13.5), Line(2.5, 13.5), Close,
         Move(5.0, 6.0), Line(7.5, 8.0), Line(5.0, 10.0), Move(8.5, 10.5), Line(11.0, 10.5),
     ];
+    /// Previous match, collapse.
+    CHEVRON_UP = 37, "chevron-up", [Move(4.0, 10.0), Line(8.0, 6.0), Line(12.0, 10.0)];
     /// This device: a local vault.
     DEVICE = 36, "device", [
         Move(2.0, 2.75), Line(14.0, 2.75), Line(14.0, 10.75), Line(2.0, 10.75), Close,

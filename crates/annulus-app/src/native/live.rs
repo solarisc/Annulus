@@ -11,7 +11,9 @@ use annulus_platform::window::Waker;
 use annulus_session::{HostKeyQuestion, Program, Session, SessionEvent};
 use annulus_ssh::Trust;
 use annulus_term::alacritty_terminal::term::TermMode;
+use annulus_term::find::Find;
 use annulus_term::keys::{self, Mods};
+use annulus_term::select::SelectionKind;
 use annulus_term::{Palette, Size};
 use annulus_ui::gfx::{Align, Font, Rect};
 use annulus_ui::icons;
@@ -45,6 +47,22 @@ pub struct LiveTerminal {
     exited: bool,
     ask: Option<Ask>,
     unread: Arc<AtomicBool>,
+    /// A drag selection in progress, from this cell.
+    selecting: Option<(usize, usize)>,
+    /// Wheel movement not yet a whole line.
+    wheel: f32,
+    find: Option<FindBar>,
+    /// What the keyboard sent this frame, for broadcast to other panes.
+    pub sent: Vec<Vec<u8>>,
+}
+
+/// The find bar of a terminal (Ctrl+Shift+F).
+#[derive(Default)]
+struct FindBar {
+    query: String,
+    search: Option<Find>,
+    case: bool,
+    focus: bool,
 }
 
 impl LiveTerminal {
@@ -60,6 +78,226 @@ impl LiveTerminal {
             exited: false,
             ask: None,
             unread: Arc::new(AtomicBool::new(false)),
+            selecting: None,
+            wheel: 0.0,
+            find: None,
+            sent: Vec::new(),
+        }
+    }
+
+    /// The program this terminal runs (a split pane runs it again).
+    #[must_use]
+    pub fn program(&self) -> Program {
+        self.program.clone()
+    }
+
+    /// Sends bytes typed in another pane (broadcast input).
+    pub fn write(&self, bytes: &[u8]) {
+        if let Some(session) = &self.session {
+            session.scroll_to_bottom();
+            session.write(bytes.to_vec());
+        }
+    }
+
+    /// The wheel scrolls back through history; in a full-screen program (vim, less) it
+    /// sends arrow keys instead, as xterm does.
+    fn scroll(&mut self, ui: &mut Ui<'_>, session: &Session, inner: Rect, cell_h: f32) {
+        let wheel = ui.take_wheel(inner);
+        if wheel == 0.0 {
+            return;
+        }
+        self.wheel += wheel / cell_h;
+        let lines = self.wheel.trunc();
+        if lines == 0.0 {
+            return;
+        }
+        self.wheel -= lines;
+        #[allow(clippy::cast_possible_truncation)] // A few lines per frame.
+        let lines = lines as i32;
+        let mode = session.mode();
+        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+            let key = if lines > 0 {
+                keys::Key::Up
+            } else {
+                keys::Key::Down
+            };
+            if let Some(bytes) = keys::encode(key, Mods::default(), mode) {
+                for _ in 0..lines.unsigned_abs() {
+                    session.write(bytes.clone());
+                }
+            }
+        } else {
+            session.scroll(lines);
+        }
+    }
+
+    /// Drag selects, a double click selects a word, Ctrl+click opens a link.
+    fn mouse(
+        &mut self,
+        ui: &mut Ui<'_>,
+        session: &Session,
+        response: &annulus_ui::kit::Response,
+        id: Id,
+        cell_at: impl Fn(annulus_ui::gfx::Point) -> (usize, usize),
+    ) {
+        let Some(pointer) = ui.pointer() else { return };
+        let (row, column) = cell_at(pointer);
+        let ctrl = ui.modifiers().ctrl;
+        if ctrl && response.hovered && session.link_at(row, column).is_some() {
+            ui.set_cursor(annulus_ui::kit::Cursor::Pointer);
+        } else if response.hovered {
+            ui.set_cursor(annulus_ui::kit::Cursor::Text);
+        }
+        if response.clicked && ctrl {
+            if let Some(link) = session.link_at(row, column)
+                && annulus_term::links::allowed(&link.url)
+            {
+                annulus_platform::window::open_url(&link.url);
+            }
+            return;
+        }
+        if response.double_clicked {
+            session.select_start(row, column, SelectionKind::Words);
+            session.select_to(row, column);
+            self.selecting = None;
+            return;
+        }
+        if ui.dragging(id) {
+            match self.selecting {
+                None => {
+                    session.select_start(row, column, SelectionKind::Characters);
+                    self.selecting = Some((row, column));
+                }
+                Some(_) => session.select_to(row, column),
+            }
+        } else if let Some(start) = self.selecting.take()
+            && start == (row, column)
+        {
+            // A click without a drag clears the selection.
+            session.clear_selection();
+        }
+    }
+
+    /// Keys for the program, and the terminal's own shortcuts.
+    fn keyboard(&mut self, ui: &mut Ui<'_>) {
+        let Some(session) = &self.session else { return };
+        let mode = session.mode();
+        self.sent.clear();
+        for typed in ui.take_typed() {
+            match typed {
+                Typed::Key(Key::Char('c'), modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
+                    if let Some(text) = session.selection_text() {
+                        ui.copy(text);
+                    }
+                }
+                Typed::Key(Key::Char('f'), modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
+                    self.find.get_or_insert_with(FindBar::default).focus = true;
+                }
+                Typed::Key(Key::Backspace, modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
+                    session.clear_scrollback();
+                }
+                typed => {
+                    if let Some(bytes) = encode(&typed, mode) {
+                        session.scroll_to_bottom();
+                        session.clear_selection();
+                        self.sent.push(bytes.clone());
+                        session.write(bytes);
+                    }
+                }
+            }
+        }
+    }
+
+    fn find_bar(&mut self, ui: &mut Ui<'_>, bar: Rect) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let Some(session) = &self.session else { return };
+        let t = ui.theme;
+        let panel = bar.inset(0.0, 4.0);
+        ui.gfx.fill_rect(panel, 10.0, t.raised);
+        ui.gfx.stroke_rect(panel, 10.0, 1.0, t.line);
+        let mut row = panel.inset(space::S, 4.0);
+        let close = row.take_right(28.0);
+        row.take_right(4.0);
+        let next = row.take_right(28.0);
+        row.take_right(4.0);
+        let previous = row.take_right(28.0);
+        row.take_right(space::S);
+        let case = row.take_right(button_width(ui.gfx, "Aa", None));
+        row.take_right(space::S);
+        let field_id = Id::new(("find", std::ptr::from_ref(&self.program) as usize));
+        if find.focus {
+            ui.state.set_focus(Some(field_id), false);
+            find.focus = false;
+        }
+        let field = ui.text_field(
+            field_id,
+            row,
+            &mut find.query,
+            FieldStyle {
+                placeholder: "Find in this terminal",
+                icon: Some(icons::SEARCH),
+                ..FieldStyle::default()
+            },
+        );
+        if ui
+            .button(
+                Id::new("find.case"),
+                case,
+                "Aa",
+                None,
+                if find.case {
+                    Kind::Secondary
+                } else {
+                    Kind::Ghost
+                },
+            )
+            .clicked
+        {
+            find.case = !find.case;
+            find.search = None;
+        }
+        if field.changed || (find.search.is_none() && !find.query.is_empty()) {
+            find.search = Find::new(&find.query, false, find.case).ok();
+        }
+        let back = ui
+            .icon_button(
+                Id::new("find.previous"),
+                previous,
+                icons::CHEVRON_UP,
+                "Previous match",
+                false,
+            )
+            .clicked
+            || ui.key(Key::Enter, Modifiers::SHIFT);
+        let forward = ui
+            .icon_button(
+                Id::new("find.next"),
+                next,
+                icons::CHEVRON_DOWN,
+                "Next match",
+                false,
+            )
+            .clicked
+            || field.submitted;
+        if let Some(search) = &mut find.search
+            && (back || forward)
+        {
+            session.find_step(search, back);
+        }
+        let closed = ui
+            .icon_button(
+                Id::new("find.close"),
+                close,
+                icons::CLOSE,
+                "Close find",
+                false,
+            )
+            .clicked
+            || (field.response.focused && ui.key(Key::Escape, Modifiers::NONE));
+        if closed {
+            self.find = None;
         }
     }
 
@@ -161,21 +399,54 @@ impl LiveTerminal {
             session.set_palette(palette);
         }
         self.drain();
+        // The find bar takes the bottom of the tab while open.
+        let mut inner = inner;
+        let bar = self.find.is_some().then(|| inner.take_bottom(44.0));
         let response = ui.zone(id, inner, Role::Terminal, "Terminal");
+        let (cell_w, cell_h) = terminal::cell_size(ui, font);
+        let cell_at = |point: annulus_ui::gfx::Point| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // On screen.
+            let column = ((point.x - inner.x) / cell_w).max(0.0) as usize;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // On screen.
+            let row = ((point.y - inner.y) / cell_h).max(0.0) as usize;
+            (
+                row.min(grid.1.saturating_sub(1)),
+                column.min(grid.0.saturating_sub(1)),
+            )
+        };
+        if let Some(session) = self.session.take() {
+            self.scroll(ui, &session, inner, cell_h);
+            self.mouse(ui, &session, &response, id, cell_at);
+            self.session = Some(session);
+        }
         if response.focused && self.ask.is_none() {
             self.unread.store(false, Ordering::Relaxed);
-            if let Some(session) = &self.session {
-                let mode = session.mode();
-                for typed in ui.take_typed() {
-                    if let Some(bytes) = encode(&typed, mode) {
-                        session.write(bytes);
-                    }
-                }
-            }
+            self.keyboard(ui);
         }
         if let Some(session) = &self.session {
             let screen = session.screen();
             terminal::draw(ui, inner, &screen, font, response.focused);
+            if let Some(find) = &mut self.find
+                && let Some(search) = &mut find.search
+            {
+                let t = ui.theme;
+                ui.push_clip(inner);
+                for mark in session.find_visible(search) {
+                    #[allow(clippy::cast_precision_loss)] // Screen cells.
+                    let cell = Rect::new(
+                        inner.x + mark.start as f32 * cell_w,
+                        inner.y + mark.row as f32 * cell_h,
+                        (mark.end + 1 - mark.start) as f32 * cell_w,
+                        cell_h,
+                    );
+                    let color = if mark.current { t.warn } else { t.accent };
+                    ui.gfx.fill_rect(cell, 2.0, color.alpha(0.35));
+                }
+                ui.pop_clip();
+            }
+        }
+        if let Some(bar) = bar {
+            self.find_bar(ui, bar);
         }
         self.ask_card(ui, rect);
         self.ended_banner(ui, rect);

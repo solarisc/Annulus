@@ -6029,6 +6029,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny-skia",
  "annulus-ui",
+ "webbrowser",
  "windows",
  "windows-numerics",
  "winit",

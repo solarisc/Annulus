@@ -203,6 +203,8 @@ pub enum Event {
     Text(String),
     /// Text pasted from the clipboard.
     Paste(String),
+    /// The modifier keys held changed (so clicks know about Ctrl, Shift).
+    Modifiers(Modifiers),
 }
 
 /// A key press or typed text, in arrival order.
@@ -384,6 +386,7 @@ pub struct UiState {
     zones: Vec<Zone>,
     next_zones: Vec<Zone>,
     pointer: Option<Point>,
+    modifiers: Modifiers,
     hovered: Option<Id>,
     pressed: Option<(Id, Button)>,
     clicks: Vec<(Id, Button)>,
@@ -489,6 +492,7 @@ impl UiState {
                 Event::Key(key, modifiers) => self.typed.push(Typed::Key(*key, *modifiers)),
                 Event::Text(text) => self.typed.push(Typed::Text(text.clone())),
                 Event::Paste(text) => self.typed.push(Typed::Paste(text.clone())),
+                Event::Modifiers(modifiers) => self.modifiers = *modifiers,
             }
         }
     }
@@ -729,6 +733,20 @@ impl<'a> Ui<'a> {
         } else {
             0.0
         }
+    }
+
+    /// The modifier keys held now.
+    #[must_use]
+    pub fn modifiers(&self) -> Modifiers {
+        self.state.modifiers
+    }
+
+    /// Whether the primary button is held down on `id` (a drag in progress).
+    #[must_use]
+    pub fn dragging(&self, id: Id) -> bool {
+        self.state
+            .pressed
+            .is_some_and(|(pressed, button)| pressed == id && button == Button::Primary)
     }
 
     /// The pointer, if it is over the window.

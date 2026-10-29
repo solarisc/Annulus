@@ -56,6 +56,18 @@ pub enum WindowError {
     Platform(String),
 }
 
+/// Opens `url` in the default browser. Only `http`, `https` and `mailto` links are passed on;
+/// anything else (a `file:` or custom scheme in terminal output) is refused.
+pub fn open_url(url: &str) {
+    let allowed = ["http://", "https://", "mailto:"].iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+    });
+    if allowed {
+        let _ = webbrowser::open(url);
+    }
+}
+
 /// Reads the clipboard's text, if any.
 pub(crate) fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
@@ -317,6 +329,7 @@ mod portable {
                         alt: state.alt_key(),
                         logo: state.super_key(),
                     };
+                    self.events.push(Event::Modifiers(self.modifiers));
                     return;
                 }
                 WindowEvent::CursorMoved { position, .. } => {

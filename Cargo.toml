@@ -43,6 +43,7 @@ directories = "6.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
 egui = "0.37.0"
 # Without wayland-csd-adwaita: we draw our own title bar (and it pulls in ttf-parser).
+webbrowser = "1.2.4"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 windows = "0.62.2"
 windows-numerics = "0.3.1"

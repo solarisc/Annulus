@@ -8,6 +8,7 @@ pub mod hosts;
 mod live;
 pub mod lock;
 mod pages;
+mod panes;
 #[cfg(test)]
 mod scenes;
 mod screens;
@@ -123,7 +124,7 @@ pub enum TermView {
     /// Recorded output (the scenes and the demo).
     Replay(Box<Emulator>),
     /// A running local shell or SSH session.
-    Live(Box<live::LiveTerminal>),
+    Live(Box<panes::Panes>),
 }
 
 /// Something only the window can do.
@@ -261,6 +262,55 @@ impl NativeApp {
         self.open(title, program);
     }
 
+    /// Split, close, broadcast and move between panes of the terminal tab in front
+    /// (UI-SPEC §7). Taken before the terminal sees the keys.
+    fn pane_shortcuts(&mut self, ui: &mut Ui<'_>) {
+        let close = ui.key(Key::Char('w'), Modifiers::CTRL_SHIFT);
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let uid = tab.uid;
+        let Some(TermView::Live(panes)) = tab.terminal.as_mut() else {
+            if close && self.active > 0 {
+                self.tabs.remove(self.active);
+                self.active -= 1;
+            }
+            return;
+        };
+        if close && !panes.close_focused() {
+            self.tabs.remove(self.active);
+            self.active -= 1;
+            return;
+        }
+        if ui.key(Key::Char('d'), Modifiers::CTRL_SHIFT) {
+            panes.split(true);
+        }
+        if ui.key(Key::Char('e'), Modifiers::CTRL_SHIFT) {
+            panes.split(false);
+        }
+        if ui.key(Key::Char('b'), Modifiers::CTRL_SHIFT) {
+            panes.broadcast = !panes.broadcast;
+        }
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        if panes.len() > 1 {
+            for (key, dx, dy) in [
+                (Key::Left, -1.0, 0.0),
+                (Key::Right, 1.0, 0.0),
+                (Key::Up, 0.0, -1.0),
+                (Key::Down, 0.0, 1.0),
+            ] {
+                if ui.key(key, alt) {
+                    panes.move_focus(dx, dy);
+                    ui.state
+                        .set_focus(Some(Id::new(("terminal", uid, panes.focused))), false);
+                }
+            }
+        }
+    }
+
     /// What another screen asked for.
     fn screen_action(&mut self, action: screens::ScreenAction) {
         match action {
@@ -351,10 +401,7 @@ impl NativeApp {
         if ui.key(Key::Char('t'), Modifiers::CTRL_SHIFT) {
             self.open_local();
         }
-        if ui.key(Key::Char('w'), Modifiers::CTRL_SHIFT) && self.active > 0 {
-            self.tabs.remove(self.active);
-            self.active -= 1;
-        }
+        self.pane_shortcuts(ui);
         let kind = self.tabs.get(self.active).map(|tab| tab.kind);
         if kind == Some(TabKind::Vault) {
             let compact = ui.viewport.w < COLLAPSE_BELOW;
@@ -389,10 +436,12 @@ impl NativeApp {
                     let screen = emulator.screen();
                     terminal::draw(ui, inner, &screen, font, true);
                 }
-                TermView::Live(live) => {
-                    let id = Id::new(("terminal", tab.uid));
-                    live.draw(ui, content, (font, &palette), self.waker.as_ref(), id);
-                    if let Some(title) = &live.title {
+                TermView::Live(panes) => {
+                    let uid = tab.uid;
+                    panes.draw(ui, content, (font, &palette), self.waker.as_ref(), |pane| {
+                        Id::new(("terminal", uid, pane))
+                    });
+                    if let Some(title) = panes.title() {
                         title.clone_into(&mut tab.title);
                     }
                 }
@@ -403,14 +452,16 @@ impl NativeApp {
         }
         ui.overlays();
         for tab in &mut self.tabs {
-            if let Some(TermView::Live(live)) = &tab.terminal {
-                tab.status = live.status();
+            if let Some(TermView::Live(panes)) = &tab.terminal {
+                tab.status = panes.status();
             }
         }
         for (title, program) in std::mem::take(&mut self.opens) {
             self.push_terminal(
                 title,
-                TermView::Live(Box::new(live::LiveTerminal::new(program))),
+                TermView::Live(Box::new(panes::Panes::new(live::LiveTerminal::new(
+                    program,
+                )))),
             );
             ui.request_repaint();
         }

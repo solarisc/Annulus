@@ -396,6 +396,7 @@ impl Host {
                 }
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                     let point = self.point(lparam);
+                    self.events.push(Event::Modifiers(Self::modifiers()));
                     self.events.push(Event::PointerMoved(point));
                     self.push(Event::PointerDown(Button::Primary));
                     LRESULT(0)

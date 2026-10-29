@@ -19,6 +19,7 @@ swash.workspace = true
 thiserror.workspace = true
 tiny-skia.workspace = true
 annulus-ui = { path = "../annulus-ui" }
+webbrowser.workspace = true
 winit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
