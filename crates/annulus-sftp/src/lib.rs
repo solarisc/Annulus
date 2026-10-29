@@ -225,6 +225,19 @@ impl Sftp {
         Ok(self.session.rename(from, to).await?)
     }
 
+    /// Sets the Unix permission bits of `path` (`0o644` and the like; type bits are
+    /// ignored).
+    ///
+    /// # Errors
+    /// The server refused, for example on a file of another user.
+    pub async fn set_permissions(&self, path: &str, mode: u32) -> Result<(), SftpError> {
+        let attrs = FileAttributes {
+            permissions: Some(mode & 0o7777),
+            ..FileAttributes::empty()
+        };
+        Ok(self.session.set_metadata(path, attrs).await?)
+    }
+
     /// Removes `path`; a directory is removed with everything in it. Links are removed,
     /// never followed. The caller confirms with the user first.
     ///

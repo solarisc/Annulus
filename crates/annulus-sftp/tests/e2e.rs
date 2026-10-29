@@ -459,12 +459,7 @@ async fn generated_keys_of_every_kind_install_once_and_log_in() {
             .exec("grep -c annulus-e2e ~/.ssh/authorized_keys; stat -c %a ~/.ssh/authorized_keys")
             .await
             .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&check.output),
-            "1
-600
-"
-        );
+        assert_eq!(String::from_utf8_lossy(&check.output), "1\n600\n");
         let answers = trusting(None);
         let connection = connect(
             &target(&env.vm2, &env.user),
@@ -577,4 +572,29 @@ async fn a_download_cut_off_by_the_server_continues_where_it_stopped() {
     let same = resumed == std::fs::read(whole.join("annulus-resume.bin")).unwrap();
     assert!(same, "the resumed copy differs from a whole one");
     run(&again, "rm -f ~/annulus-resume.bin").await;
+}
+
+#[tokio::test]
+#[ignore = "needs the test servers"]
+async fn permissions_are_set_on_the_server() {
+    let env = env();
+    let connection = with_key(&env, &env.vm1, "chmod").await;
+    let sftp = Sftp::open(&connection).await.unwrap();
+    let home = sftp.home().await.unwrap();
+    run(
+        &connection,
+        "printf x > ~/annulus-chmod.txt && chmod 644 ~/annulus-chmod.txt",
+    )
+    .await;
+    sftp.set_permissions(&format!("{home}/annulus-chmod.txt"), 0o600)
+        .await
+        .unwrap();
+    let mode = run(
+        &connection,
+        "stat -c %a ~/annulus-chmod.txt; rm ~/annulus-chmod.txt",
+    )
+    .await;
+    assert!(mode.split(['\r', '\n']).any(|line| line == "600"), "{mode}");
+    let listed = sftp.list(&home).await.unwrap();
+    assert!(!listed.iter().any(|entry| entry.name == "annulus-chmod.txt"));
 }

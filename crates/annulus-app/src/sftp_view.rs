@@ -39,6 +39,8 @@ enum Command {
     CreateDir(String),
     Rename(String, String),
     Remove(String),
+    /// Set the permission bits of a path.
+    Chmod(String, u32),
 }
 
 /// What the connection thread reports.
@@ -190,9 +192,11 @@ fn refuse(command: Command, message: &str, send: &Send) {
             id,
             result: Err(message.to_owned()),
         },
-        Command::CreateDir(_) | Command::Rename(..) | Command::Remove(_) => Reply::Changed {
-            error: Some(message.to_owned()),
-        },
+        Command::CreateDir(_) | Command::Rename(..) | Command::Remove(_) | Command::Chmod(..) => {
+            Reply::Changed {
+                error: Some(message.to_owned()),
+            }
+        }
     });
 }
 
@@ -257,6 +261,7 @@ async fn run(sftp: Arc<Sftp>, command: Command, send: Send, suspect: Arc<AtomicB
         }
         Command::CreateDir(path) => send(changed(sftp.create_dir(&path).await)),
         Command::Rename(from, to) => send(changed(sftp.rename(&from, &to).await)),
+        Command::Chmod(path, mode) => send(changed(sftp.set_permissions(&path, mode).await)),
         Command::Remove(path) => send(changed(sftp.remove(&path).await)),
     }
 }
@@ -343,8 +348,29 @@ enum TransferState {
 /// A dialog waiting for the user.
 enum Dialog {
     NewFolder(String),
-    Rename { from: String, to: String },
+    Rename {
+        from: String,
+        to: String,
+    },
     Delete(Entry),
+    /// Permission bits of `name`, typed in octal.
+    Permissions {
+        name: String,
+        mode: String,
+    },
+}
+
+impl Dialog {
+    /// The Permissions dialog for `entry`, filled with its current bits.
+    fn permissions(entry: &Entry) -> Self {
+        Dialog::Permissions {
+            name: entry.name.clone(),
+            mode: entry
+                .permissions
+                .map(|bits| format!("{:o}", bits & 0o7777))
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Where and how a tab logs in: the jump hosts, the destination, and the SSH files.
@@ -789,6 +815,9 @@ impl SftpTab {
                             if ui.button("Delete").clicked() {
                                 self.dialog = Some(Dialog::Delete(entry.clone()));
                             }
+                            if ui.button("Permissions\u{2026}").clicked() {
+                                self.dialog = Some(Dialog::permissions(entry));
+                            }
                         });
                         ui.label(if entry.is_dir() {
                             String::new()
@@ -929,6 +958,9 @@ impl SftpTab {
                     });
                 });
             }
+            Dialog::Permissions { name, mode } => {
+                command = permissions_dialog(ctx, &cwd, name, mode, &mut close);
+            }
             Dialog::Delete(entry) => {
                 window("Delete").show(ctx, |ui| {
                     ui.label(format!("Delete {} from the server?", entry.name));
@@ -1003,6 +1035,49 @@ fn pace(moved: u64, left: u64, seconds: f64) -> String {
         format!("{}:{:02}", eta / 60, eta % 60)
     };
     format!("{}/s \u{b7} {eta} left", human_size(rate))
+}
+
+/// The Permissions dialog for `name` in `cwd`; returns the command once the mode is set.
+fn permissions_dialog(
+    ctx: &egui::Context,
+    cwd: &str,
+    name: &str,
+    mode: &mut String,
+    close: &mut bool,
+) -> Option<Command> {
+    let mut command = None;
+    egui::Window::new("Permissions")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!("Permissions of {name}, in octal (for example 644)"));
+            let field = ui.add(egui::TextEdit::singleline(mode).desired_width(80.0));
+            field.request_focus();
+            let enter = field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+            let parsed = parse_mode(mode);
+            if parsed.is_none() && !mode.trim().is_empty() {
+                ui.label("Three or four octal digits, 0 to 7.");
+            }
+            ui.horizontal(|ui| {
+                if let Some(bits) = parsed
+                    && (ui.button("Set").clicked() || enter)
+                {
+                    command = Some(Command::Chmod(join(cwd, name), bits));
+                }
+                *close |= ui.button("Cancel").clicked();
+            });
+        });
+    command
+}
+
+/// Permission bits typed in octal: three or four digits, `644` or `0755`.
+fn parse_mode(text: &str) -> Option<u32> {
+    let text = text.trim();
+    if !(3..=4).contains(&text.len()) || !text.chars().all(|c| ('0'..='7').contains(&c)) {
+        return None;
+    }
+    u32::from_str_radix(text, 8).ok()
 }
 
 /// `1536` → `1.5 KiB`.
@@ -1172,6 +1247,17 @@ mod tests {
             pace(1024, 1024 * 4000, 1.0),
             "1.0 KiB/s \u{b7} 1:06:40 left"
         );
+    }
+
+    #[test]
+    fn modes_are_three_or_four_octal_digits() {
+        assert_eq!(parse_mode("644"), Some(0o644));
+        assert_eq!(parse_mode(" 0755 "), Some(0o755));
+        assert_eq!(parse_mode("4755"), Some(0o4755));
+        assert_eq!(parse_mode("78"), None);
+        assert_eq!(parse_mode("648"), None);
+        assert_eq!(parse_mode("12345"), None);
+        assert_eq!(parse_mode("rw-"), None);
     }
 
     #[test]
