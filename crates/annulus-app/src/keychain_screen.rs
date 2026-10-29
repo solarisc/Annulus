@@ -18,6 +18,7 @@ enum Form {
     Closed,
     Generate {
         label: String,
+        kind: keys::KeyKind,
     },
     Import {
         label: String,
@@ -64,6 +65,7 @@ impl KeychainScreen {
             if ui.button("Generate key").clicked() {
                 self.form = Form::Generate {
                     label: String::new(),
+                    kind: keys::KeyKind::Ed25519,
                 };
                 self.message = None;
             }
@@ -101,18 +103,26 @@ impl KeychainScreen {
         let mut cancel = false;
         match &mut self.form {
             Form::Closed => return,
-            Form::Generate { label } => {
+            Form::Generate { label, kind } => {
                 ui.add_space(space::S);
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(label).hint_text("work laptop"));
+                    egui::ComboBox::from_label("Type")
+                        .selected_text(kind.name())
+                        .show_ui(ui, |ui| {
+                            for choice in keys::KeyKind::ALL {
+                                ui.selectable_value(kind, choice, choice.name());
+                            }
+                        });
                     let ready = !label.trim().is_empty();
                     if ui
-                        .add_enabled(ready, egui::Button::new("Generate Ed25519 key"))
+                        .add_enabled(ready, egui::Button::new("Generate"))
                         .clicked()
                     {
                         done = Some(
-                            keys::generate(&comment()).map(|pair| stored(vault, label, &pair)),
+                            keys::generate(*kind, &comment())
+                                .map(|pair| stored(vault, label, &pair)),
                         );
                     }
                     cancel |= ui.button("Cancel").clicked();
@@ -242,7 +252,7 @@ mod tests {
             },
         )
         .unwrap();
-        let pair = keys::generate("me@test").unwrap();
+        let pair = keys::generate(keys::KeyKind::Ed25519, "me@test").unwrap();
         let key = stored(&vault, "  work  ", &pair);
         assert_eq!(key.label, "work");
         assert_eq!(key.public, pair.public);

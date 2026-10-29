@@ -500,7 +500,7 @@ async fn a_remote_forward_reaches_a_destination_on_this_side() {
 #[tokio::test]
 async fn a_keychain_key_logs_in_without_asking_for_a_password() {
     let port = serve(new_key()).await;
-    let key = keys::generate("bob@test").unwrap();
+    let key = keys::generate(keys::KeyKind::Ed25519, "bob@test").unwrap();
     // No passwords to hand out: asking for one would fail the login.
     let script = Script::new(true, &[]);
     let connection = connect(

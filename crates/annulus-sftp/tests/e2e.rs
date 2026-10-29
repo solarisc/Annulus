@@ -437,32 +437,30 @@ async fn a_jump_host_carries_the_connection() {
 
 #[tokio::test]
 #[ignore = "needs the test servers"]
-async fn a_generated_keychain_key_logs_in_once_installed() {
+async fn generated_keychain_keys_of_every_kind_log_in_once_installed() {
     let env = env();
-    let key = annulus_ssh::keys::generate("annulus-e2e").unwrap();
     let admin = with_key(&env, &env.vm2, "keychain-admin").await;
-    run(
-        &admin,
-        &format!("echo '{}' >> ~/.ssh/authorized_keys", key.public),
-    )
-    .await;
-
-    let answers = trusting(None);
-    let connection = connect(
-        &target(&env.vm2, &env.user),
-        &known_hosts("keychain"),
-        None,
-        &[key.private],
-        answers.clone(),
-    )
-    .await
-    .expect("the new key logs in");
-    assert_eq!(*answers.asked_password.lock().unwrap(), 0);
-    run(
-        &connection,
-        &format!("sed -i '/{}/d' ~/.ssh/authorized_keys", "annulus-e2e"),
-    )
-    .await;
+    for kind in annulus_ssh::keys::KeyKind::ALL {
+        let key = annulus_ssh::keys::generate(kind, "annulus-e2e").unwrap();
+        run(
+            &admin,
+            &format!("echo '{}' >> ~/.ssh/authorized_keys", key.public),
+        )
+        .await;
+        let answers = trusting(None);
+        let connection = connect(
+            &target(&env.vm2, &env.user),
+            &known_hosts("keychain"),
+            None,
+            &[key.private],
+            answers.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("the new {} key logs in: {error}", kind.name()));
+        assert_eq!(*answers.asked_password.lock().unwrap(), 0);
+        drop(connection);
+        run(&admin, "sed -i '/annulus-e2e/d' ~/.ssh/authorized_keys").await;
+    }
 }
 
 /// Reads a shell until it ends.
