@@ -1,2 +1,4 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# LF everywhere, so rustfmt's `newline_style = "Unix"` holds on Windows checkouts too.
+* text=auto eol=lf
+*.png binary
+*.ttf binary

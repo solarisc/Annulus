@@ -1,0 +1,12 @@
+[package]
+name = "annulus-ssh"
+description = "SSH connection resolution, transport, authentication, host-key verification, jump chains, proxies, forwarding and the built-in agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

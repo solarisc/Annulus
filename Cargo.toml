@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/solarisc/terminal-emu"
+publish = false
+
+# Direct dependency versions are pinned here once; crates inherit them with `foo.workspace = true`.
+[workspace.dependencies]
+anyhow = "1.0.104"
+serde_json = "1.0.154"
+
+# `deny`, not `forbid`, since a `forbid` cannot be relaxed further down. Crates other than annulus-platform add
+# `#![forbid(unsafe_code)]` in their crate root, and `cargo xtask docs-check` verifies it.
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+undocumented_unsafe_blocks = "deny"
+module_name_repetitions = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+# Keep line tables in separate debug files (PDB on Windows, dSYM/.dwp elsewhere) for symbolication.
+debug = "line-tables-only"
+split-debuginfo = "packed"

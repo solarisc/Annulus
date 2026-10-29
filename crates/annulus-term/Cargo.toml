@@ -1,0 +1,12 @@
+[package]
+name = "annulus-term"
+description = "Terminal emulation: VT parsing, screen and scrollback model, selection, search, reflow and key encoding. Bytes in, state out."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

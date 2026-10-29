@@ -1,0 +1,12 @@
+[package]
+name = "annulus-server"
+description = "Self-hosted Annulus sync server: accounts, OPAQUE login, devices, record store, history and trash."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

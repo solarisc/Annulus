@@ -1,0 +1,12 @@
+[package]
+name = "annulus-platform"
+description = "Platform traits and their per-OS implementations: windowing, renderers, PTYs, secret stores, biometrics, FIDO2. The only crate allowed to use unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

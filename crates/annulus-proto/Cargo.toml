@@ -1,0 +1,12 @@
+[package]
+name = "annulus-proto"
+description = "Versioned wire types shared by the Annulus client and the sync server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
