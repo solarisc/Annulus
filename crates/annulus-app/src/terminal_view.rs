@@ -68,6 +68,8 @@ pub enum PaneRequest {
     OpenSftp,
     /// Show the snippet panel.
     Snippets,
+    /// Leave this pane out of broadcast input, or take it back in (F-WS-003).
+    ToggleBroadcast,
 }
 
 /// What a tab's status dot says (F-APP-002), least to most urgent.
@@ -123,6 +125,8 @@ pub struct TerminalTab {
     unread: Arc<AtomicBool>,
     /// The current session has drawn something (cleared when it starts again).
     drawn: Arc<AtomicBool>,
+    /// Broadcast input from another pane does not reach this one.
+    pub skip_broadcast: bool,
 }
 
 /// Tries before an automatic reconnect gives up and shows the error.
@@ -164,6 +168,7 @@ impl TerminalTab {
             started: 0.0,
             unread: Arc::new(AtomicBool::new(false)),
             drawn: Arc::new(AtomicBool::new(false)),
+            skip_broadcast: false,
         }
     }
 
@@ -357,6 +362,7 @@ impl TerminalTab {
             &response,
             session,
             matches!(self.program, Program::Ssh { .. }),
+            self.skip_broadcast,
         );
         if request.is_some() {
             self.request = request;
@@ -683,6 +689,7 @@ fn context_menu(
     response: &egui::Response,
     session: &Session,
     is_ssh: bool,
+    skipped: bool,
 ) -> (Option<PaneRequest>, bool) {
     let mut chosen = None;
     let mut open_find = false;
@@ -719,6 +726,15 @@ fn context_menu(
         }
         if is_ssh && ui.button("Open SFTP here").clicked() {
             chosen = Some(PaneRequest::OpenSftp);
+            ui.close();
+        }
+        let broadcast = if skipped {
+            "Take into broadcast"
+        } else {
+            "Leave out of broadcast"
+        };
+        if ui.button(broadcast).clicked() {
+            chosen = Some(PaneRequest::ToggleBroadcast);
             ui.close();
         }
     });

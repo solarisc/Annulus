@@ -177,12 +177,28 @@ impl Panes {
     /// A context-menu choice from any pane, with the pane focused (taken once).
     pub fn take_request(&mut self) -> Option<crate::terminal_view::PaneRequest> {
         for (index, pane) in self.list.iter_mut().enumerate() {
-            if let Some(request) = pane.take_request() {
-                self.focused = index;
-                return Some(request);
+            match pane.take_request() {
+                // The pane's own setting: nothing for the tab or window to do.
+                Some(crate::terminal_view::PaneRequest::ToggleBroadcast) => {
+                    pane.skip_broadcast = !pane.skip_broadcast;
+                }
+                Some(request) => {
+                    self.focused = index;
+                    return Some(request);
+                }
+                None => {}
             }
         }
         None
+    }
+
+    /// The panes that typing in the focused one reaches while broadcasting: all others but
+    /// those left out.
+    #[must_use]
+    pub fn receivers(&self) -> Vec<usize> {
+        (0..self.list.len())
+            .filter(|index| *index != self.focused && !self.list[*index].skip_broadcast)
+            .collect()
     }
 
     /// How many panes there are.
@@ -206,7 +222,7 @@ impl Panes {
                 BROADCAST,
                 format!(
                     "Typing into {} panes \u{b7} Ctrl+Shift+B to stop",
-                    self.list.len()
+                    self.receivers().len() + 1
                 ),
             );
         }
@@ -227,7 +243,7 @@ impl Panes {
                 pane.poll(ui.ctx());
                 continue;
             };
-            if broadcasting {
+            if broadcasting && (index == focused || !pane.skip_broadcast) {
                 ui.painter().rect_stroke(
                     rect.expand(1.0),
                     0.0,
@@ -264,11 +280,9 @@ impl Panes {
             .map(TerminalTab::take_sent)
             .unwrap_or_default();
         if self.broadcasting() {
-            for (index, pane) in self.list.iter().enumerate() {
-                if index != focused {
-                    for bytes in &typed {
-                        pane.write(bytes);
-                    }
+            for index in self.receivers() {
+                for bytes in &typed {
+                    self.list[index].write(bytes);
                 }
             }
         }
@@ -427,6 +441,17 @@ mod tests {
         assert!(tab.broadcasting());
         tab.close_focused();
         assert!(!tab.broadcasting());
+    }
+
+    #[test]
+    fn a_pane_left_out_of_broadcast_gets_no_typing() {
+        let mut tab = panes();
+        tab.split(Layout::Row, "two", Program::DefaultShell);
+        tab.split(Layout::Row, "three", Program::DefaultShell);
+        tab.focused = 0;
+        assert_eq!(tab.receivers(), [1, 2]);
+        tab.list[2].skip_broadcast = true;
+        assert_eq!(tab.receivers(), [1]);
     }
 
     #[test]
