@@ -15,7 +15,8 @@ use crate::password_screen::PasswordScreen;
 use crate::sftp_view::SftpTab;
 use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::SyncScreen;
-use crate::terminal_view::{DEFAULT_FONT_SIZE, FONT_SIZES, TerminalTab};
+use crate::terminal_view::{FONT_SIZES, TerminalTab};
+use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
 
 /// A section of the vault's left navigation (F-APP-003).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,7 +132,12 @@ pub struct Shell {
     /// When input last arrived, in egui seconds.
     last_input: f64,
     applied: Option<Appearance>,
+    /// The settings as last saved.
+    saved: Settings,
 }
+
+/// The device settings' file name in the data folder.
+const SETTINGS_FILE: &str = "settings.json";
 
 /// The vault's file name in the data folder.
 const VAULT_FILE: &str = "vault.anv";
@@ -140,11 +146,12 @@ impl Shell {
     /// A window whose saved data lives in `data_dir`.
     #[must_use]
     pub fn new(data_dir: &std::path::Path) -> Self {
+        let settings = Settings::load(&data_dir.join(SETTINGS_FILE));
         Self {
             tabs: vec![Tab::Vault],
             active_tab: 0,
             section: Section::Hosts,
-            theme_mode: ThemeMode::System,
+            theme_mode: settings.theme,
             hosts: None,
             forwards: ForwardsScreen::default(),
             sync: SyncScreen::default(),
@@ -154,10 +161,31 @@ impl Shell {
             snippet_panel: None,
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
             data_dir: data_dir.to_path_buf(),
-            font_size: DEFAULT_FONT_SIZE,
-            auto_lock_minutes: 15,
+            font_size: settings
+                .font_size
+                .clamp(*FONT_SIZES.start(), *FONT_SIZES.end()),
+            auto_lock_minutes: settings.auto_lock_minutes,
             last_input: 0.0,
             applied: None,
+            saved: settings,
+        }
+    }
+
+    /// The settings as they are now.
+    fn current_settings(&self) -> Settings {
+        Settings {
+            theme: self.theme_mode,
+            font_size: self.font_size,
+            auto_lock_minutes: self.auto_lock_minutes,
+            ..self.saved.clone()
+        }
+    }
+
+    /// Saves the settings when they changed (a small file; checked once per frame).
+    fn persist(&mut self) {
+        let now = self.current_settings();
+        if now != self.saved && now.save(&self.data_dir.join(SETTINGS_FILE)).is_ok() {
+            self.saved = now;
         }
     }
 }
@@ -227,6 +255,7 @@ impl Shell {
 
     /// Draws the window.
     pub fn ui(&mut self, ui: &mut Ui) {
+        self.persist();
         self.apply_theme(&ui.ctx().clone());
         // Ctrl+Shift+/-/0 zoom the terminal, not the whole UI.
         ui.ctx()

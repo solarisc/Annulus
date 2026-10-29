@@ -15,9 +15,6 @@ use annulus_term::{Screen, Size};
 
 use crate::ssh_dialogs::SshDialogs;
 
-/// Default font size of terminal text, in points.
-pub const DEFAULT_FONT_SIZE: f32 = 14.0;
-
 /// Smallest and largest terminal font size.
 pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 

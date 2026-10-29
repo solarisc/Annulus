@@ -42,7 +42,8 @@ impl Rgb {
 }
 
 /// Which theme the user picked in Settings (F-SET-002).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
     /// Always light.
     Light,
