@@ -133,8 +133,13 @@ pub(crate) fn needs_confirm(text: &str, mode: TermMode) -> bool {
 pub(crate) fn paste_bytes(text: &str, mode: TermMode) -> Vec<u8> {
     let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
     if mode.contains(TermMode::BRACKETED_PASTE) {
-        // A paste that contains the end marker could break out of the bracket; drop it.
-        let safe = normalized.replace("\x1b[201~", "");
+        // A paste that contains the end marker could break out of the bracket; drop it, again
+        // and again, since dropping one can join the pieces around it into another
+        // (`ESC[2` `ESC[201~` `01~`). Each pass shortens the text, so this ends.
+        let mut safe = normalized;
+        while safe.contains("\x1b[201~") {
+            safe = safe.replace("\x1b[201~", "");
+        }
         format!("\x1b[200~{safe}\x1b[201~").into_bytes()
     } else {
         normalized.into_bytes()
@@ -234,6 +239,14 @@ mod tests {
     fn bracketed_paste_wraps_and_cannot_be_escaped() {
         let pasted = paste_bytes("ls\nrm -rf x\x1b[201~; reboot", TermMode::BRACKETED_PASTE);
         assert_eq!(pasted, b"\x1b[200~ls\rrm -rf x; reboot\x1b[201~");
+        // Taking out one marker must not leave a new one made of the pieces around it.
+        let nested = paste_bytes("x\x1b[2\x1b[201~01~; reboot", TermMode::BRACKETED_PASTE);
+        let body = &nested[6..nested.len() - 6];
+        assert!(
+            !body.windows(6).any(|window| window == b"\x1b[201~"),
+            "{:?}",
+            String::from_utf8_lossy(&nested)
+        );
         assert_eq!(paste_bytes("a\r\nb", TermMode::empty()), b"a\rb");
     }
 }
