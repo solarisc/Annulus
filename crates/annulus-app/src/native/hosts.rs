@@ -85,6 +85,8 @@ pub struct HostsView {
     notice: Option<String>,
     /// A host's More menu choice this frame: the host and the item.
     picked: Option<(u64, usize)>,
+    /// Deleting a tag from every host: the tag, and whether the user said yes.
+    untag: Option<(String, bool)>,
 }
 
 /// The host editor's draft.
@@ -321,6 +323,11 @@ impl HostsView {
         if self.tag_bar && !tags.is_empty() {
             let used = self.tag_chips(ui, main, &tags);
             main.take_top(used + space::L);
+        }
+        if let Some((tag, true)) = self.untag.clone() {
+            self.untag = None;
+            self.notice = Some(untag_everywhere(vault, &tag));
+            self.tags.retain(|chosen| *chosen != tag);
         }
         if let Some(notice) = &self.notice {
             let t = ui.theme;
@@ -679,6 +686,61 @@ impl HostsView {
                 self.tags.clear();
             }
         }
+        // One tag chosen: it can be taken off every host, after a yes.
+        if let [only] = self.tags.as_slice() {
+            let only = only.clone();
+            let count = tags
+                .iter()
+                .find(|(tag, _)| *tag == only)
+                .map_or(0, |(_, count)| *count);
+            match &self.untag {
+                Some((tag, false)) if *tag == only => {
+                    let label = match count {
+                        1 => format!("Delete \u{201c}{only}\u{201d} from 1 host"),
+                        n => format!("Delete \u{201c}{only}\u{201d} from {n} hosts"),
+                    };
+                    let cancel = place(button_width(ui.gfx, "Cancel", None));
+                    let yes = place(button_width(ui.gfx, &label, None));
+                    if ui
+                        .button(
+                            Id::new("hosts.untag.cancel"),
+                            cancel,
+                            "Cancel",
+                            None,
+                            Kind::Ghost,
+                        )
+                        .clicked
+                        || ui.key(Key::Escape, Modifiers::NONE)
+                    {
+                        self.untag = None;
+                    }
+                    if ui
+                        .button(Id::new("hosts.untag.yes"), yes, &label, None, Kind::Danger)
+                        .clicked
+                    {
+                        self.untag = Some((only, true));
+                    }
+                }
+                Some((_, true)) => {}
+                _ => {
+                    let ask = place(button_width(ui.gfx, "Delete tag\u{2026}", None));
+                    if ui
+                        .button(
+                            Id::new("hosts.untag"),
+                            ask,
+                            "Delete tag\u{2026}",
+                            None,
+                            Kind::Ghost,
+                        )
+                        .clicked
+                    {
+                        self.untag = Some((only, false));
+                    }
+                }
+            }
+        } else if self.untag.as_ref().is_some_and(|(_, yes)| !yes) {
+            self.untag = None;
+        }
         if let Some(tag) = flipped {
             if self.tags.contains(&tag) {
                 self.tags.retain(|chosen| *chosen != tag);
@@ -934,9 +996,29 @@ impl HostsView {
             "10.0.4.12 or db.example.com",
             address_error,
         );
+        let (inherited, from) = inherited(vault, &editor.host, editor.group.clone());
+        let user_hint = hint(&inherited.username, from.username.as_ref(), "root");
+        let port = inherited
+            .port
+            .map(|port| port.to_string())
+            .unwrap_or_default();
+        let port_hint = hint(&port, from.port.as_ref(), "22");
+        let startup_hint = hint(&inherited.startup, from.startup.as_ref(), "tmux attach");
+        // A proxy can hold a password: say where it comes from, never what it is.
+        let proxy_hint = from.proxy.as_ref().map_or_else(
+            || "socks5://host:1080 or http://host:3128".to_owned(),
+            |group| format!("From {group}"),
+        );
         let (left, right) = form.split(96.0);
         let mut port_form = Form { w: left, ..form };
-        port_form.text(ui, "editor.port", "Port", &mut editor.port, "22", None);
+        port_form.text(
+            ui,
+            "editor.port",
+            "Port",
+            &mut editor.port,
+            &port_hint,
+            None,
+        );
         let mut group_form = Form {
             x: form.x + left + space::M,
             w: right,
@@ -967,7 +1049,7 @@ impl HostsView {
             "editor.user",
             "Username",
             &mut editor.username,
-            "root",
+            &user_hint,
             None,
         );
         let password_hint = if editor.host.password.is_some() {
@@ -982,7 +1064,14 @@ impl HostsView {
             &mut editor.password,
             password_hint,
         );
-        let mut key_items = vec!["Default keys (~/.ssh)".to_owned()];
+        let inherited_key = inherited
+            .key_id
+            .and_then(|id| keys.iter().find(|(known, _)| *known == id))
+            .zip(from.key_id.as_ref());
+        let mut key_items = vec![inherited_key.map_or_else(
+            || "Default keys (~/.ssh)".to_owned(),
+            |((_, key), group)| format!("{key} \u{b7} from {group}"),
+        )];
         key_items.extend(keys.iter().map(|(_, label)| label.clone()));
         let key_index = editor
             .key
@@ -1000,7 +1089,14 @@ impl HostsView {
             editor.advanced = !editor.advanced;
         }
         if editor.advanced {
-            let mut jump_items = vec!["None (direct)".to_owned()];
+            let inherited_jump = inherited
+                .jump_id
+                .and_then(|id| hosts.iter().find(|(known, _)| *known == id))
+                .zip(from.jump_id.as_ref());
+            let mut jump_items = vec![inherited_jump.map_or_else(
+                || "None (direct)".to_owned(),
+                |((_, jump), group)| format!("{jump} \u{b7} from {group}"),
+            )];
             jump_items.extend(hosts.iter().map(|(_, label)| label.clone()));
             let jump_index = editor
                 .jump
@@ -1018,13 +1114,7 @@ impl HostsView {
                     .and_then(|at| hosts.get(at))
                     .map(|(id, _)| *id);
             }
-            form.secret(
-                ui,
-                "editor.proxy",
-                "Proxy",
-                &mut editor.proxy,
-                "socks5://host:1080 or http://host:3128",
-            );
+            form.secret(ui, "editor.proxy", "Proxy", &mut editor.proxy, &proxy_hint);
             form.text(
                 ui,
                 "editor.env",
@@ -1038,7 +1128,7 @@ impl HostsView {
                 "editor.startup",
                 "Startup command",
                 &mut editor.startup,
-                "tmux attach",
+                &startup_hint,
                 None,
             );
             form.text(
@@ -1707,6 +1797,8 @@ impl Form {
                 ..FieldStyle::default()
             },
         );
+        // A screen reader says "Username", not the example in the empty field.
+        ui.set_name(Id::new(id), label);
         self.y += CONTROL;
         if let Some(error) = error {
             let t = ui.theme;
@@ -1828,6 +1920,56 @@ fn host_menu(moves: &[(String, String)]) -> Vec<String> {
     ];
     items.extend(moves.iter().map(|(_, path)| format!("Move to {path}")));
     items
+}
+
+/// Takes `tag` off every host that has it (F-HOST-004); the message to show.
+fn untag_everywhere(vault: &mut Vault, tag: &str) -> String {
+    let tagged: Vec<Host> = vault
+        .hosts()
+        .iter()
+        .filter(|host| host.tags.iter().any(|known| known == tag))
+        .cloned()
+        .collect();
+    let mut done = 0;
+    for mut host in tagged {
+        host.tags.retain(|known| known != tag);
+        if vault.upsert_host(host).is_ok() {
+            done += 1;
+        }
+    }
+    match done {
+        1 => format!("Deleted the tag \u{201c}{tag}\u{201d} from 1 host."),
+        n => format!("Deleted the tag \u{201c}{tag}\u{201d} from {n} hosts."),
+    }
+}
+
+/// What `host` would take from `group` (and the groups above it) for every field it leaves
+/// empty, and from which group each comes (F-HOST-003).
+fn inherited(
+    vault: &Vault,
+    host: &Host,
+    group: Option<String>,
+) -> (Host, annulus_vault::groups::Sources) {
+    let probe = Host {
+        group,
+        username: String::new(),
+        port: None,
+        key_id: None,
+        jump_id: None,
+        proxy: None,
+        startup: String::new(),
+        ..host.clone()
+    };
+    vault.resolve(&probe)
+}
+
+/// The text of an empty field: `value` and the group it comes from, or `example` when the
+/// field inherits nothing.
+fn hint(value: &str, group: Option<&String>, example: &str) -> String {
+    match group {
+        Some(group) if !value.is_empty() => format!("{value} \u{b7} from {group}"),
+        _ => example.to_owned(),
+    }
 }
 
 /// The More button of a host card or row and its menu; returns the item chosen.
@@ -2179,6 +2321,34 @@ fn no_results(ui: &mut Ui<'_>, rect: Rect, query: &str, can_save: bool) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_field_shows_what_the_host_takes_from_its_group() {
+        let mut vault = crate::native::demo::fixture_vault("inherited-hints", false);
+        let mut group = vault.draft_group(None).unwrap();
+        group.name = "Production".into();
+        group.defaults.username = "deploy".into();
+        group.defaults.port = Some(2222);
+        let uid = group.uid.clone();
+        vault.upsert_group(group).unwrap();
+        let host = vault.draft_host();
+        let (values, from) = inherited(&vault, &host, Some(uid));
+        assert_eq!(
+            hint(&values.username, from.username.as_ref(), "root"),
+            "deploy \u{b7} from Production"
+        );
+        let port = values.port.map(|port| port.to_string()).unwrap_or_default();
+        assert_eq!(
+            hint(&port, from.port.as_ref(), "22"),
+            "2222 \u{b7} from Production"
+        );
+        let (top, from) = inherited(&vault, &host, None);
+        assert_eq!(
+            hint(&top.username, from.username.as_ref(), "root"),
+            "root",
+            "no group"
+        );
+    }
 
     #[test]
     fn initials_take_two_words_or_two_letters() {

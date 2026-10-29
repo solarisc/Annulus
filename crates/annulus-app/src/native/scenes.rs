@@ -1790,6 +1790,55 @@ fn escape_closes_the_open_card_and_keeps_what_a_delete_would_remove() {
 }
 
 #[test]
+fn a_tag_is_deleted_from_every_host_only_after_a_yes() {
+    let mut app = NativeApp::new(Some(fixture_vault("untag", true)));
+    let tagged = |app: &NativeApp| {
+        app.vault
+            .as_ref()
+            .unwrap()
+            .hosts()
+            .iter()
+            .filter(|host| host.tags.iter().any(|tag| tag == "nginx"))
+            .count()
+    };
+    let before = tagged(&app);
+    assert!(before > 0);
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    output = step(&mut app, &mut state, &click_on(&output, "Tags"), 1.0);
+    let chip = output
+        .zones
+        .iter()
+        .find(|zone| zone.label.starts_with("nginx ("))
+        .map(|zone| zone.label.clone())
+        .unwrap();
+    output = step(&mut app, &mut state, &click_on(&output, &chip), 2.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Delete tag\u{2026}"),
+        3.0,
+    );
+    // Cancel keeps it.
+    output = step(&mut app, &mut state, &click_on(&output, "Cancel"), 4.0);
+    assert_eq!(tagged(&app), before);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Delete tag\u{2026}"),
+        5.0,
+    );
+    let yes = output
+        .zones
+        .iter()
+        .find(|zone| zone.label.starts_with("Delete \u{201c}nginx\u{201d} from"))
+        .map(|zone| zone.label.clone())
+        .unwrap();
+    step(&mut app, &mut state, &click_on(&output, &yes), 6.0);
+    assert_eq!(tagged(&app), 0, "gone from every host");
+}
+
+#[test]
 fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
     let mut app = NativeApp::new(Some(fixture_vault("import-key", true)));
     app.section = super::Section::Keychain;
