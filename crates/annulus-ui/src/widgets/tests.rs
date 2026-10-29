@@ -299,6 +299,7 @@ fn every_widget_has_a_role_and_an_accessible_name() {
         )),
         Box::new(Label::new("Hosts")),
         Box::new(Tooltip::new("Copy ssh command")),
+        Box::new(Modal::new("Add host")),
     ];
     for widget in &widgets {
         assert_ne!(widget.role(), Role::Group, "{}", widget.name());
@@ -307,7 +308,7 @@ fn every_widget_has_a_role_and_an_accessible_name() {
             "{}",
             widget.name()
         );
-        let interactive = !matches!(widget.role(), Role::Label | Role::Tooltip);
+        let interactive = !matches!(widget.role(), Role::Label | Role::Tooltip | Role::Dialog);
         assert_eq!(widget.focusable(), interactive, "{}", widget.name());
     }
 }
@@ -324,4 +325,106 @@ fn text_on_filled_controls_meets_contrast_in_both_themes() {
             );
         }
     }
+}
+
+/// The vault behind an "Add host" dialog: a button underneath, a field and two buttons
+/// inside.
+struct DialogFixture {
+    tree: Tree,
+    behind: NodeId,
+    modal: NodeId,
+    field: NodeId,
+    save: NodeId,
+    cancel: NodeId,
+}
+
+fn dialog_fixture() -> DialogFixture {
+    let mut tree = Tree::new(Box::new(Group));
+    let root = tree.root();
+    let behind = tree
+        .append_child(root, Box::new(Button::new("New host", ButtonKind::Primary)))
+        .unwrap();
+    let modal = tree
+        .append_child(root, Box::new(Modal::new("Add host")))
+        .unwrap();
+    tree.set_style(modal, Modal::style()).unwrap();
+    let panel = tree
+        .append_child(modal, Box::new(DialogPanel::new("Add host")))
+        .unwrap();
+    tree.set_style(panel, DialogPanel::style(300.0)).unwrap();
+    let field = tree
+        .append_child(
+            panel,
+            Box::new(TextField::new(FieldStyle::Text, "Hostname")),
+        )
+        .unwrap();
+    let save = tree
+        .append_child(panel, Box::new(Button::new("Save", ButtonKind::Primary)))
+        .unwrap();
+    let cancel = tree
+        .append_child(panel, Box::new(Button::new("Cancel", ButtonKind::Ghost)))
+        .unwrap();
+    tree.layout(Size::new(800.0, 600.0), &mut FixedAdvance);
+    DialogFixture {
+        tree,
+        behind,
+        modal,
+        field,
+        save,
+        cancel,
+    }
+}
+
+#[test]
+fn tab_stays_inside_an_open_modal() {
+    let DialogFixture {
+        mut tree,
+        behind,
+        field,
+        save,
+        cancel,
+        ..
+    } = dialog_fixture();
+    tree.set_focus(Some(behind), true);
+    let mut order = Vec::new();
+    for _ in 0..4 {
+        press(&mut tree, Key::Tab, NONE);
+        order.push(tree.focused().unwrap());
+    }
+    assert_eq!(order, [field, save, cancel, field]);
+}
+
+#[test]
+fn clicks_outside_a_modal_never_reach_the_app_underneath() {
+    let DialogFixture {
+        mut tree, behind, ..
+    } = dialog_fixture();
+    let under = inside(&tree, behind);
+    assert_eq!(
+        tree.hit_test(under),
+        Some(behind),
+        "the button lies under the scrim"
+    );
+    click(&mut tree, under);
+    assert_eq!(actions(&mut tree), []);
+    assert_ne!(tree.focused(), Some(behind));
+}
+
+#[test]
+fn escape_in_a_modal_dismisses_it_and_keys_never_leak_out() {
+    let DialogFixture {
+        mut tree,
+        behind,
+        modal,
+        field,
+        ..
+    } = dialog_fixture();
+    tree.set_focus(Some(field), true);
+    press(&mut tree, Key::Escape, NONE);
+    assert_eq!(tree.take_actions(), [(modal, Action::Dismiss)]);
+
+    // Focus left on the app underneath: Enter must not press that button.
+    tree.set_focus(Some(behind), true);
+    press(&mut tree, Key::Enter, NONE);
+    assert_eq!(actions(&mut tree), []);
 }

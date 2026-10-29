@@ -59,6 +59,9 @@ impl Tree {
             }),
             (_, None) => {}
         }
+        if widget.modal() {
+            node.set_modal();
+        }
         if widget.focusable() {
             node.add_action(AxAction::Focus);
             node.add_action(AxAction::Click);
@@ -99,6 +102,7 @@ fn ax_role(role: Role) -> AxRole {
         Role::ComboBox => AxRole::ComboBox,
         Role::RadioGroup => AxRole::RadioGroup,
         Role::Tooltip => AxRole::Tooltip,
+        Role::Dialog => AxRole::Dialog,
     }
 }
 

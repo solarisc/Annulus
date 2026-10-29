@@ -4,6 +4,7 @@
 
 mod button;
 mod choice;
+mod dialog;
 mod label;
 mod text_field;
 mod toggle;
@@ -13,6 +14,7 @@ mod tests;
 
 pub use button::{Button, ButtonKind, IconButton, SplitButton};
 pub use choice::{Segmented, Select};
+pub use dialog::{DialogPanel, Modal};
 pub use label::{Group, Label, Tooltip};
 pub use text_field::{FieldStyle, TextField};
 pub use toggle::{Checkbox, Radio, Switch};

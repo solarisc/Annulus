@@ -62,7 +62,7 @@ impl Tree {
     pub fn dispatch(&mut self, event: &Event) -> Option<NodeId> {
         match event {
             Event::PointerDown { position, .. } => {
-                let target = self.hit_test(*position);
+                let target = self.pointer_target(*position);
                 let focus = target.and_then(|id| self.focusable_ancestor_or_self(id));
                 self.set_focus(focus, false);
                 let handler = target.and_then(|id| self.bubble(id, event));
@@ -70,22 +70,25 @@ impl Tree {
                 handler
             }
             Event::PointerUp { position, .. } => {
-                let target = self.captured.take().or_else(|| self.hit_test(*position));
+                let target = self
+                    .captured
+                    .take()
+                    .or_else(|| self.pointer_target(*position));
                 target.and_then(|id| self.bubble(id, event))
             }
             Event::PointerMove { position } => {
                 self.update_hover(*position);
                 let target = self.captured.filter(|id| self.contains(*id));
-                let target = target.or_else(|| self.hit_test(*position));
+                let target = target.or_else(|| self.pointer_target(*position));
                 target.and_then(|id| self.bubble(id, event))
             }
             Event::Wheel { position, delta } => {
-                let target = self.hit_test(*position)?;
+                let target = self.pointer_target(*position)?;
                 self.bubble(target, event)
                     .or_else(|| self.scroll_ancestor(target, *delta))
             }
             Event::KeyDown { key, modifiers } => {
-                let start = self.focused().unwrap_or(self.root());
+                let start = self.keyboard_target();
                 self.bubble(start, event).or_else(|| match key {
                     Key::Tab if modifiers.shift => self.focus_previous(),
                     Key::Tab => self.focus_next(),
@@ -93,7 +96,7 @@ impl Tree {
                 })
             }
             Event::Text(_) => {
-                let start = self.focused().unwrap_or(self.root());
+                let start = self.keyboard_target();
                 self.bubble(start, event)
             }
         }
@@ -121,7 +124,7 @@ impl Tree {
 
     /// Tracks the node under the pointer; the nodes it leaves and enters repaint.
     fn update_hover(&mut self, position: Point) {
-        let now = self.hit_test(position);
+        let now = self.pointer_target(position);
         if now != self.hovered {
             for changed in [self.hovered, now].into_iter().flatten() {
                 let _ = self.mark_dirty(changed, Dirty::PAINT);
@@ -156,11 +159,54 @@ impl Tree {
         None
     }
 
+    /// The topmost open modal overlay, which confines focus and pointer input.
+    #[must_use]
+    pub fn active_modal(&self) -> Option<NodeId> {
+        self.paint_order()
+            .into_iter()
+            .rev()
+            .find(|id| self.widget(*id).is_some_and(Widget::modal))
+    }
+
+    /// Whether `id` is `ancestor` or inside it.
+    fn is_within(&self, id: NodeId, ancestor: NodeId) -> bool {
+        let mut current = Some(id);
+        while let Some(node) = current {
+            if node == ancestor {
+                return true;
+            }
+            current = self.parent(node);
+        }
+        false
+    }
+
+    /// Where keyboard input starts: the focused node, unless a modal is open and focus is
+    /// outside it, in which case the modal; the root when nothing is focused.
+    fn keyboard_target(&self) -> NodeId {
+        let modal = self.active_modal();
+        self.focused()
+            .filter(|id| modal.is_none_or(|modal| self.is_within(*id, modal)))
+            .or(modal)
+            .unwrap_or(self.root())
+    }
+
+    /// The node a pointer event at `position` goes to: the hit node, except that while a
+    /// modal is open, anything outside it goes to the modal instead.
+    fn pointer_target(&self, position: Point) -> Option<NodeId> {
+        let hit = self.hit_test(position);
+        match self.active_modal() {
+            Some(modal) if !hit.is_some_and(|id| self.is_within(id, modal)) => Some(modal),
+            _ => hit,
+        }
+    }
+
     fn focus_step(&mut self, forward: bool) -> Option<NodeId> {
+        let modal = self.active_modal();
         let order: Vec<NodeId> = self
             .paint_order()
             .into_iter()
             .filter(|id| self.widget(*id).is_some_and(Widget::focusable))
+            .filter(|id| modal.is_none_or(|modal| self.is_within(*id, modal)))
             .collect();
         let current = self
             .focused()

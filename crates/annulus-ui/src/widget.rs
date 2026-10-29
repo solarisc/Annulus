@@ -42,6 +42,8 @@ pub enum Role {
     RadioGroup,
     /// A short description shown on hover or focus.
     Tooltip,
+    /// A modal dialog.
+    Dialog,
 }
 
 /// What the tree knows about a node when it is painted.
@@ -83,6 +85,8 @@ pub enum Action {
     Select(usize),
     /// The widget asks to open its list or menu (selects, split buttons).
     Open,
+    /// A dialog, menu or banner asks to be closed (Escape, close button).
+    Dismiss,
 }
 
 /// Lets a widget report actions while it handles an event.
@@ -152,6 +156,12 @@ pub trait Widget {
 
     /// Appends this widget's own drawing (not its children's).
     fn paint(&self, cx: &mut PaintCx<'_>, list: &mut DisplayList);
+
+    /// Whether this node is a modal overlay: while it is open, Tab stays inside it and
+    /// pointer input outside it goes to it instead of the app underneath.
+    fn modal(&self) -> bool {
+        false
+    }
 
     /// Whether Tab and clicks can focus this widget.
     fn focusable(&self) -> bool {
