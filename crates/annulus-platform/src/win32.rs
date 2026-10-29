@@ -45,7 +45,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
     TrackMouseEvent, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE,
-    VK_F1, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_COMMA,
+    VK_F1, VK_F10, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_COMMA,
     VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT,
     VK_SPACE, VK_TAB, VK_UP,
 };
@@ -65,7 +65,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE,
     WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
     WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -570,11 +570,32 @@ impl Host {
                     if let Some(key) = key {
                         self.push(Event::Key(key, modifiers));
                     }
-                    if message == WM_SYSKEYDOWN {
+                    // System keys go on to Windows (Alt+F4, Alt+Space), except those the app
+                    // uses: F10 would put the window in menu mode, eating the next keys, and
+                    // Alt with a digit, a letter or an arrow would beep.
+                    let ours = code == VK_F10
+                        || (modifiers.alt
+                            && matches!(
+                                key,
+                                Some(
+                                    kit::Key::Char(_)
+                                        | kit::Key::Left
+                                        | kit::Key::Right
+                                        | kit::Key::Up
+                                        | kit::Key::Down
+                                )
+                            ));
+                    if message == WM_SYSKEYDOWN && !ours {
                         return DefWindowProcW(hwnd, message, wparam, lparam);
                     }
                     LRESULT(0)
                 }
+                // F10 let go would also open the menu mode.
+                #[allow(clippy::cast_possible_truncation)] // Virtual-key codes are 16-bit.
+                WM_SYSKEYUP if VIRTUAL_KEY(wparam.0 as u16) == VK_F10 => LRESULT(0),
+                // Alt with a character beeps when no menu takes it; Alt+Space still opens the
+                // window's menu.
+                WM_SYSCHAR if wparam.0 != usize::from(b' ') => LRESULT(0),
                 WM_CHAR => {
                     #[allow(clippy::cast_possible_truncation)] // A UTF-16 unit.
                     let unit = wparam.0 as u16;

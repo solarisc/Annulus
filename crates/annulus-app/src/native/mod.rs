@@ -611,10 +611,11 @@ impl NativeApp {
             return;
         }
         let size = self.settings.font_size;
+        // Within the sizes Settings lists, so it always shows the size in use.
         let zoomed = if shortcuts::ZOOM_IN.pressed(ui) {
-            (size + 1.0).min(32.0)
+            (size + 1.0).min(20.0)
         } else if shortcuts::ZOOM_OUT.pressed(ui) {
-            (size - 1.0).max(8.0)
+            (size - 1.0).max(11.0)
         } else if shortcuts::ZOOM_RESET.pressed(ui) {
             annulus_config::settings::DEFAULT_FONT_SIZE
         } else {
