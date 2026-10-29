@@ -203,7 +203,16 @@ impl Vault {
         let mut groups = Vec::new();
         let mut sync = None;
         for record in &file.records {
-            let damaged = |error: serde_json::Error| VaultError::Damaged(error.to_string());
+            // serde's message can quote the decrypted text (a password, a private key), so
+            // only where reading stopped is kept.
+            let damaged = |error: serde_json::Error| {
+                VaultError::Damaged(format!(
+                    "a record of kind {} does not read (line {}, column {})",
+                    record.kind,
+                    error.line(),
+                    error.column()
+                ))
+            };
             match record.kind {
                 KIND_HOST => {
                     let plaintext = keys.open_record(&record.id, record.kind, &record.sealed)?;
@@ -615,11 +624,15 @@ impl Vault {
         &self.path
     }
 
-    /// Moves the vault file to `path`, replacing what is there.
+    /// Moves the vault file to `path`, replacing what is there. That is kept as
+    /// `<name>.bak` first, so a replaced vault can still be opened.
     ///
     /// # Errors
     /// The file system refused; the vault stays where it was.
     pub fn move_to(&mut self, path: &Path) -> Result<(), VaultError> {
+        if path.exists() {
+            std::fs::copy(path, crate::files::backup_path(path))?;
+        }
         std::fs::rename(&self.path, path)?;
         self.path = path.to_path_buf();
         Ok(())
@@ -1553,6 +1566,10 @@ mod tests {
         joined.move_to(&live).unwrap();
         assert!(!joining.exists());
         assert!(Vault::unlock(&live, "account pw").is_ok());
+        assert!(
+            Vault::unlock(&crate::files::backup_path(&live), "local pw").is_ok(),
+            "the replaced vault is kept"
+        );
         assert!(matches!(
             Vault::unlock(&live, "local pw"),
             Err(VaultError::WrongPassword)
@@ -1660,6 +1677,29 @@ mod tests {
             Err(VaultError::Damaged(_))
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn a_record_that_does_not_read_is_reported_without_its_text() {
+        let path = temp("unreadable");
+        let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();
+        let web = host(&vault, "web");
+        vault.upsert_host(web).unwrap();
+        let mut file = read(&path).unwrap();
+        let record = file
+            .records
+            .iter_mut()
+            .find(|record| record.kind == KIND_HOST)
+            .unwrap();
+        record.sealed = vault
+            .keys
+            .seal_record(&record.id, KIND_HOST, br#"{"id":"hunter2-secret"}"#)
+            .unwrap();
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let Err(VaultError::Damaged(why)) = Vault::unlock(&path, "pw") else {
+            panic!("a record that does not read is damage");
+        };
+        assert!(!why.contains("hunter2"), "{why}");
     }
 
     #[test]
