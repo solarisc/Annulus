@@ -77,6 +77,11 @@ impl D2d {
         })
     }
 
+    /// The Direct2D factory, for render targets.
+    pub(crate) fn factory(&self) -> &ID2D1Factory1 {
+        &self.factory
+    }
+
     /// Draws a `width` x `height` pixel frame at `scale` into memory with `draw`, and returns
     /// it as a PNG file.
     ///
@@ -122,6 +127,8 @@ impl D2d {
                 .factory
                 .CreateWicBitmapRenderTarget(&bitmap, &properties)
                 .map_err(fail("render target"))?;
+            // A bitmap with alpha cannot take ClearType.
+            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             (bitmap, target)
         };
         {
@@ -199,7 +206,6 @@ impl<'a> D2dCanvas<'a> {
     pub fn new(d2d: &'a D2d, target: ID2D1RenderTarget, scale: f32) -> windows::core::Result<Self> {
         // SAFETY: target-owned resources made on the target's thread.
         let (brush, round) = unsafe {
-            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let brush = target.CreateSolidColorBrush(&color(Color::BLACK), None)?;
             let base: &ID2D1Factory = &d2d.factory;
             let round = base.CreateStrokeStyle(

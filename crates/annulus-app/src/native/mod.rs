@@ -357,6 +357,10 @@ impl WindowApp for Preview {
         Id::new(titlebar::DRAG)
     }
 
+    fn maximize_zone(&self) -> Id {
+        Id::new(titlebar::MAXIMIZE)
+    }
+
     fn theme(&self) -> Theme {
         self.theme
     }
