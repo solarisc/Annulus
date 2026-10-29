@@ -67,7 +67,7 @@ impl fmt::Debug for TextEditor {
         debug
             .field("cursor", &self.cursor)
             .field("anchor", &self.anchor)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -204,8 +204,8 @@ impl TextEditor {
                 .text
                 .unicode_word_indices()
                 .map(|(start, _)| start)
-                .filter(|start| *start < self.cursor)
-                .last()
+                .rev()
+                .find(|start| *start < self.cursor)
                 .unwrap_or(0),
         };
         self.move_to(target, extend);
