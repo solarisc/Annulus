@@ -363,6 +363,31 @@ fn http_server() -> String {
 }
 
 #[test]
+fn a_first_sync_with_several_large_records_goes_through_over_http() {
+    let base = http_server();
+    let mut laptop = crate::http::HttpServer::new(&base, None).unwrap();
+    let session = account::register(
+        &mut laptop,
+        &cheap(),
+        "big",
+        "pw",
+        b"keys".to_vec(),
+        "laptop",
+    )
+    .unwrap();
+    laptop.set_token(Some(session.token));
+    // Session logs may be up to 1 MiB each; a new device pushes them all at once.
+    let mut device = Device::default();
+    let log = "x".repeat(1024 * 1024);
+    for (index, id) in ["l1", "l2", "l3", "l4", "l5"].into_iter().enumerate() {
+        device.edit(id, &log, 10 + index as u64);
+    }
+    // A sealed 1 MiB log is several MiB on the wire; one record that size goes alone.
+    device.edit("huge", &"y".repeat(3 * 1024 * 1024), 20);
+    assert_eq!(sync(&mut laptop, &mut device).unwrap().pushed, 6);
+}
+
+#[test]
 fn a_full_round_over_http_then_a_revoked_device_is_refused() {
     let base = http_server();
     let mut laptop = crate::http::HttpServer::new(&base, None).unwrap();

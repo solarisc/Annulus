@@ -57,6 +57,9 @@ fn router(server: Arc<Server>) -> Router {
         .route(path::PASSWORD_FINISH, post(password_finish))
         .route(path::DEVICES, get(devices))
         .route(path::REVOKE, post(revoke))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            annulus_proto::MAX_BODY,
+        ))
         .with_state(server)
 }
 

@@ -13,6 +13,10 @@ use annulus_proto::{Change, Changes, PushResult};
 /// How often a round retries after another device pushed in between.
 const ROUNDS: usize = 3;
 
+/// Ciphertext bytes sent in one push request at most (a record bigger than this goes
+/// alone); the server accepts requests up to `annulus_proto::MAX_BODY`.
+pub const PUSH_BATCH_BYTES: usize = 1024 * 1024;
+
 /// Why a sync round failed. Nothing local is lost; the next round retries.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -249,12 +253,35 @@ fn push(
             deleted: change.item.is_none(),
         });
     }
-    let result = transport.push(&changes)?;
-    for (id, seq) in &result.accepted {
-        replica.pushed(id, *seq);
-        report.pushed += 1;
+    let mut clean = true;
+    for batch in batches(&changes, PUSH_BATCH_BYTES) {
+        let result = transport.push(batch)?;
+        for (id, seq) in &result.accepted {
+            replica.pushed(id, *seq);
+            report.pushed += 1;
+        }
+        clean &= result.conflicts.is_empty();
     }
-    Ok(result.conflicts.is_empty())
+    Ok(clean)
+}
+
+/// `changes` cut into runs of at most `budget` ciphertext bytes; each run holds at least
+/// one change, so a single large record still goes.
+fn batches(changes: &[Change], budget: usize) -> Vec<&[Change]> {
+    let mut runs = Vec::new();
+    let (mut start, mut size) = (0, 0);
+    for (index, change) in changes.iter().enumerate() {
+        let bytes = change.ciphertext.len() + change.id.len();
+        if index > start && size + bytes > budget {
+            runs.push(&changes[start..index]);
+            (start, size) = (index, 0);
+        }
+        size += bytes;
+    }
+    if start < changes.len() {
+        runs.push(&changes[start..]);
+    }
+    runs
 }
 
 /// Brings back an earlier `version` of record `id` (from its history, e.g. a deleted host):
@@ -284,4 +311,34 @@ pub fn restore(
     };
     replica.apply(id, seq, Some(item));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change(id: &str, bytes: usize) -> Change {
+        Change {
+            id: id.into(),
+            base: 0,
+            ciphertext: vec![0; bytes],
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn pushes_are_cut_into_batches_and_a_big_record_goes_alone() {
+        let changes = [
+            change("a", 40),
+            change("b", 40),
+            change("c", 300),
+            change("d", 10),
+        ];
+        let sizes: Vec<Vec<&str>> = batches(&changes, 100)
+            .into_iter()
+            .map(|run| run.iter().map(|c| c.id.as_str()).collect())
+            .collect();
+        assert_eq!(sizes, [vec!["a", "b"], vec!["c"], vec!["d"]]);
+        assert_eq!(batches(&[], 100), Vec::<&[Change]>::new());
+    }
 }
