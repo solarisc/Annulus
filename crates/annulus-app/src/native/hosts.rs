@@ -4,13 +4,14 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use annulus_config::tokens::{TILES, space};
+use annulus_session::Target;
 use annulus_ui::gfx::{Align, Color, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::widgets::{
     BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, TITLE, button_width,
 };
-use annulus_vault::hosts::{Host, Secret};
+use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
 use zeroize::Zeroizing;
 
@@ -18,6 +19,8 @@ use crate::{connect, groups_view};
 
 /// Width of the editor panel.
 const EDITOR_W: f32 = 392.0;
+/// Height of a chip of the tag filter.
+const CHIP_H: f32 = 28.0;
 /// The narrowest a host card gets before the grid drops a column.
 const CARD_MIN_W: f32 = 264.0;
 const CARD_H: f32 = 72.0;
@@ -42,6 +45,8 @@ pub enum Mode {
 pub enum HostsAction {
     /// Connect to a saved host.
     Connect(u64),
+    /// Connect to every host directly in the group with this uid, one tab each (F-HOST-008).
+    ConnectAll(String),
     /// Connect to a typed `user@host:port`.
     QuickConnect(String),
     /// Open a local terminal.
@@ -63,6 +68,11 @@ pub struct HostsView {
     pub selected: Option<u64>,
     /// The group being shown (`None` is the top level).
     pub group: Option<String>,
+    /// The tags a listed host must all have (F-HOST-004); while any are chosen, matching
+    /// hosts from every group are listed.
+    pub tags: Vec<String>,
+    /// The tag filter's chips are shown.
+    tag_bar: bool,
     /// The editor, while open.
     pub editor: Option<Editor>,
     /// The group editor, while open.
@@ -187,6 +197,20 @@ struct GroupCard {
     holds: String,
 }
 
+/// Every tag in use and how many hosts have it, by name.
+fn all_tags(hosts: &[Host]) -> Vec<(String, usize)> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for tag in hosts.iter().flat_map(|host| &host.tags) {
+        *counts.entry(tag.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// Whether `host` has every tag in `filter`.
+fn has_tags(host: &Host, filter: &[String]) -> bool {
+    filter.iter().all(|tag| host.tags.contains(tag))
+}
+
 impl HostsView {
     /// Opens the editor on a new host.
     pub fn new_host(&mut self, vault: &Vault) {
@@ -236,6 +260,30 @@ impl HostsView {
         action
     }
 
+    /// Whether a search or the tag filter narrows the listing to matching hosts.
+    fn filtering(&self) -> bool {
+        !self.query.trim().is_empty() || !self.tags.is_empty()
+    }
+
+    /// What the search box holds as a new host, when it is an SSH target (`user@host:port`)
+    /// that no saved host has the label of (F-APP-006).
+    fn unsaved_target(&self, vault: &Vault, query: &str) -> Option<Host> {
+        if !query.contains(['@', ':', '.'])
+            || query.contains(char::is_whitespace)
+            || vault.hosts().iter().any(|host| host.label == query)
+        {
+            return None;
+        }
+        let target = Target::parse(query, "")?;
+        let mut host = vault.draft_host();
+        host.label.clone_from(&target.host);
+        host.address = target.host;
+        host.port = (target.port != DEFAULT_PORT).then_some(target.port);
+        host.username = target.user;
+        host.group.clone_from(&self.group);
+        Some(host)
+    }
+
     /// Everything left of the editor: header, toolbar, and the list or an empty state.
     fn listing_area(
         &mut self,
@@ -244,32 +292,47 @@ impl HostsView {
         vault: &mut Vault,
     ) -> Option<HostsAction> {
         let mut action = None;
+        let tags = all_tags(vault.hosts());
+        // A tag no host has any more cannot filter.
+        self.tags
+            .retain(|chosen| tags.iter().any(|(tag, _)| tag == chosen));
         let (cards, groups) = self.gather(vault);
         let mut main = area.inset(PAD, 0.0);
         main.take_top(space::XL);
-        self.header(ui, main.take_top(36.0), cards.len());
+        self.header(ui, main.take_top(36.0), cards.len(), !tags.is_empty());
         main.take_top(space::L);
-        if let Some(toolbar) = self.toolbar(ui, main.take_top(CONTROL), vault, &cards) {
+        if let Some(toolbar) = self.toolbar(ui, main.take_top(CONTROL), vault) {
             action = Some(toolbar);
         }
         main.take_top(space::L);
+        if self.tag_bar && !tags.is_empty() {
+            let used = self.tag_chips(ui, main, &tags);
+            main.take_top(used + space::L);
+        }
         if let Some(notice) = &self.notice {
             let t = ui.theme;
             ui.gfx
                 .text(main.take_top(20.0), notice, SMALL, t.text2, Align::Start);
             main.take_top(space::S);
         }
-        if self.group.is_some() && self.query.trim().is_empty() {
-            self.breadcrumb(ui, main.take_top(CONTROL), vault);
+        if self.group.is_some() && !self.filtering() {
+            if let Some(all) = self.breadcrumb(ui, main.take_top(CONTROL), vault) {
+                action = Some(all);
+            }
             main.take_top(space::M);
         }
-        if cards.is_empty() && groups.is_empty() && self.group.is_none() {
-            if self.query.trim().is_empty() {
-                if let Some(empty) = self.empty_state(ui, main, vault) {
-                    action = Some(empty);
+        if cards.is_empty() && groups.is_empty() && (self.group.is_none() || self.filtering()) {
+            if self.filtering() {
+                let typed = self.unsaved_target(vault, self.query.trim());
+                if no_results(ui, main, self.query.trim(), typed.is_some())
+                    && let Some(host) = typed
+                {
+                    self.group_editor = None;
+                    self.editor = Some(Editor::new(host, true));
+                    self.query.clear();
                 }
-            } else {
-                no_results(ui, main, &self.query);
+            } else if let Some(empty) = self.empty_state(ui, main, vault) {
+                action = Some(empty);
             }
             return action;
         }
@@ -331,13 +394,17 @@ impl HostsView {
         });
     }
 
+    /// The hosts and groups to list: those of the group shown, or the hosts of every group
+    /// that match the search and have every chosen tag.
     fn gather(&self, vault: &Vault) -> (Vec<Card>, Vec<GroupCard>) {
         let query = self.query.trim().to_lowercase();
         let searching = !query.is_empty();
+        let filtering = self.filtering();
         let cards = vault
             .hosts()
             .iter()
-            .filter(|host| searching || host.group == self.group)
+            .filter(|host| filtering || host.group == self.group)
+            .filter(|host| has_tags(host, &self.tags))
             .filter(|host| {
                 !searching
                     || host.label.to_lowercase().contains(&query)
@@ -358,7 +425,7 @@ impl HostsView {
                 }
             })
             .collect();
-        let groups = if searching {
+        let groups = if filtering {
             Vec::new()
         } else {
             vault
@@ -387,10 +454,18 @@ impl HostsView {
         (cards, groups)
     }
 
-    fn header(&mut self, ui: &mut Ui<'_>, rect: Rect, count: usize) {
+    /// The title, the host count, the Tags button (when any host has a tag) and the grid/list
+    /// toggle.
+    fn header(&mut self, ui: &mut Ui<'_>, rect: Rect, count: usize, tagged: bool) {
         let t = ui.theme;
         let mut row = rect;
+        // Laid out from the right, drawn from the left: Tab follows the drawing order.
         let toggle = row.take_right(72.0);
+        let tags = tagged.then(|| {
+            row.take_right(space::S);
+            let width = button_width(ui.gfx, "Tags", Some(icons::TAG));
+            row.take_right(width).centered(width, CONTROL)
+        });
         let title = ui.gfx.measure("Hosts", TITLE).width;
         let head = row.take_left(title + 2.0);
         ui.strict_text(head, "Hosts", TITLE, t.text, Align::Start);
@@ -401,6 +476,20 @@ impl HostsView {
             let badge = Rect::new(row.x, row.center().y - 10.0, width, 20.0);
             ui.gfx.fill_rect(badge, 10.0, t.hover);
             ui.gfx.text(badge, &label, SMALL, t.text2, Align::Center);
+        }
+        let kind = if self.tag_bar {
+            Kind::Secondary
+        } else {
+            Kind::Ghost
+        };
+        if let Some(tags) = tags
+            && ui
+                .button(Id::new("hosts.tags"), tags, "Tags", Some(icons::TAG), kind)
+                .clicked
+        {
+            // Closing the chips stops filtering: a filter is never on out of sight.
+            self.tag_bar = !self.tag_bar;
+            self.tags.clear();
         }
         let segment = toggle.centered(72.0, 32.0);
         ui.gfx.fill_rect(segment, 8.0, t.surface);
@@ -434,13 +523,7 @@ impl HostsView {
         }
     }
 
-    fn toolbar(
-        &mut self,
-        ui: &mut Ui<'_>,
-        rect: Rect,
-        vault: &mut Vault,
-        cards: &[Card],
-    ) -> Option<HostsAction> {
+    fn toolbar(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) -> Option<HostsAction> {
         let mut row = rect;
         let mut action = None;
         let new_w = button_width(ui.gfx, "New host", Some(icons::PLUS));
@@ -474,6 +557,8 @@ impl HostsView {
             },
         );
         if field.submitted {
+            // Matched against the text as it is now: what was typed this frame counts.
+            let (cards, _) = self.gather(vault);
             let query = self.query.trim();
             if let Some(first) = cards.first() {
                 action = Some(HostsAction::Connect(first.id));
@@ -535,6 +620,55 @@ impl HostsView {
             action = Some(HostsAction::LocalTerminal);
         }
         action
+    }
+
+    /// The tag filter (F-HOST-004): a chip per tag in use, `(name, hosts)`, that chooses or
+    /// drops it, wrapping onto more lines as needed, and Clear while any is chosen. Returns
+    /// the height taken from the top of `rect`.
+    fn tag_chips(&mut self, ui: &mut Ui<'_>, rect: Rect, tags: &[(String, usize)]) -> f32 {
+        let (mut x, mut y) = (rect.x, rect.y);
+        // The next chip's place, on a new line when the one it is on is full.
+        let mut place = |width: f32| {
+            let width = width.min(rect.w);
+            if x > rect.x && x + width > rect.r() {
+                (x, y) = (rect.x, y + CHIP_H + space::S);
+            }
+            let slot = Rect::new(x, y, width, CHIP_H);
+            x += width + space::S;
+            slot
+        };
+        let mut flipped = None;
+        for (tag, count) in tags {
+            let label = format!("{tag} ({count})");
+            let chip = place(ui.gfx.measure(&label, SMALL).width + 2.0 * space::M);
+            let on = self.tags.contains(tag);
+            if tag_chip(ui, Id::new(("hosts.tag", tag.as_str())), chip, &label, on) {
+                flipped = Some(tag.clone());
+            }
+        }
+        if !self.tags.is_empty() {
+            let clear = place(button_width(ui.gfx, "Clear", None));
+            if ui
+                .button(
+                    Id::new("hosts.tags.clear"),
+                    clear,
+                    "Clear",
+                    None,
+                    Kind::Ghost,
+                )
+                .clicked
+            {
+                self.tags.clear();
+            }
+        }
+        if let Some(tag) = flipped {
+            if self.tags.contains(&tag) {
+                self.tags.retain(|chosen| *chosen != tag);
+            } else {
+                self.tags.push(tag);
+            }
+        }
+        y + CHIP_H - rect.y
     }
 
     fn empty_state(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &Vault) -> Option<HostsAction> {
@@ -648,10 +782,10 @@ impl HostsView {
             y += rows(groups.len(), columns, GROUP_H) + space::XL;
         }
         let label = Rect::new(rect.x, y, rect.w, 20.0);
-        let heading = if self.query.trim().is_empty() {
-            format!("Hosts \u{b7} {}", cards.len())
-        } else {
+        let heading = if self.filtering() {
             format!("Results \u{b7} {}", cards.len())
+        } else {
+            format!("Hosts \u{b7} {}", cards.len())
         };
         ui.section_label(label, &heading);
         y += 28.0;
@@ -1150,8 +1284,9 @@ impl HostsView {
         }
     }
 
-    /// The path back up from the group shown: All hosts, then each parent.
-    fn breadcrumb(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &Vault) {
+    /// The path back up from the group shown (All hosts, then each parent), its edit button,
+    /// and Connect all at the right while hosts are directly in it.
+    fn breadcrumb(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &Vault) -> Option<HostsAction> {
         let t = ui.theme;
         let mut chain: Vec<(String, String)> =
             annulus_vault::groups::chain(vault.groups(), self.group.as_deref())
@@ -1160,6 +1295,12 @@ impl HostsView {
                 .collect();
         chain.reverse();
         let mut row = rect;
+        // Laid out first, drawn last: Tab follows the drawing order, left to right.
+        let connect_all = vault
+            .hosts()
+            .iter()
+            .any(|host| host.group.is_some() && host.group == self.group)
+            .then(|| row.take_right(button_width(ui.gfx, "Connect all", Some(icons::PLAY))));
         let mut go = None;
         let all_w = button_width(ui.gfx, "All hosts", None);
         if ui
@@ -1207,9 +1348,24 @@ impl HostsView {
                 self.group_editor = Some(GroupEditor::new(found.clone(), false));
             }
         }
+        let mut action = None;
+        if let (Some(slot), Some(uid)) = (connect_all, self.group.clone())
+            && ui
+                .button(
+                    Id::new("crumb.connect-all"),
+                    slot,
+                    "Connect all",
+                    Some(icons::PLAY),
+                    Kind::Secondary,
+                )
+                .clicked
+        {
+            action = Some(HostsAction::ConnectAll(uid));
+        }
         if let Some(target) = go {
             self.group = target;
         }
+        action
     }
 
     #[allow(clippy::too_many_lines)] // One panel, top to bottom: header, form, footer.
@@ -1821,6 +1977,35 @@ fn draw_tags(ui: &mut Ui<'_>, rect: Rect, tags: &[String]) {
     }
 }
 
+/// A chip of the tag filter, accent-colored while chosen; a check box to assistive
+/// technology. Returns whether it was clicked (or pressed with Space or Enter).
+fn tag_chip(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str, on: bool) -> bool {
+    let response = ui.zone(id, rect, Role::CheckBox, label);
+    ui.set_toggled(id, on);
+    let t = ui.theme;
+    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    let round = rect.h / 2.0;
+    let (fill, border, ink) = if on {
+        (t.selected, t.accent, t.accent)
+    } else {
+        (
+            t.surface.mix(t.hover, hover),
+            t.line.mix(t.line_strong, hover),
+            t.text2.mix(t.text, hover),
+        )
+    };
+    ui.gfx.fill_rect(rect, round, fill);
+    ui.gfx.stroke_rect(rect, round, 1.0, border);
+    if response.focus_ring {
+        ui.focus_ring(rect, round);
+    }
+    ui.gfx.text(rect, label, SMALL, ink, Align::Center);
+    if response.hovered {
+        ui.set_cursor(Cursor::Pointer);
+    }
+    response.clicked
+}
+
 fn list_header(ui: &mut Ui<'_>, rect: Rect) {
     let t = ui.theme;
     let [name, address, tags] = list_columns(rect);
@@ -1922,27 +2107,54 @@ fn group_card(ui: &mut Ui<'_>, rect: Rect, group: &GroupCard) -> bool {
     response.double_clicked || response.clicked
 }
 
-fn no_results(ui: &mut Ui<'_>, rect: Rect, query: &str) {
+/// What a search or tag filter that matches no host shows, with Save as host when `query`
+/// is a target that can be saved (F-APP-006). Returns whether that was clicked.
+fn no_results(ui: &mut Ui<'_>, rect: Rect, query: &str, can_save: bool) -> bool {
     let t = ui.theme;
-    let block = rect.centered(rect.w.min(460.0), 120.0);
+    let height = if can_save {
+        120.0 + space::L + CONTROL
+    } else {
+        120.0
+    };
+    let block = rect.centered(rect.w.min(460.0), height);
     let mut column = block;
     let icon = column.take_top(32.0).centered(28.0, 28.0);
     ui.gfx.icon(icons::SEARCH, icon, t.text3);
     column.take_top(space::M);
+    let (title, detail) = if query.is_empty() {
+        (
+            "No host has every chosen tag".to_owned(),
+            "Choose fewer tags to see more hosts.",
+        )
+    } else {
+        (
+            format!("No hosts match \u{201c}{query}\u{201d}"),
+            "Press Enter to connect to it as typed.",
+        )
+    };
     ui.gfx.text(
         column.take_top(22.0),
-        &format!("No hosts match \u{201c}{query}\u{201d}"),
+        &title,
         BODY_STRONG,
         t.text,
         Align::Center,
     );
-    ui.gfx.text(
-        column.take_top(20.0),
-        "Press Enter to connect to it as typed.",
-        BODY,
-        t.text2,
-        Align::Center,
-    );
+    ui.gfx
+        .text(column.take_top(20.0), detail, BODY, t.text2, Align::Center);
+    if !can_save {
+        return false;
+    }
+    column.take_top(space::L);
+    let width = button_width(ui.gfx, "Save as host", Some(icons::PLUS));
+    let save = column.take_top(CONTROL).centered(width, CONTROL);
+    ui.button(
+        Id::new("hosts.save-target"),
+        save,
+        "Save as host",
+        Some(icons::PLUS),
+        Kind::Secondary,
+    )
+    .clicked
 }
 
 #[cfg(test)]
@@ -1984,5 +2196,109 @@ mod tests {
         editor.port.clear();
         editor.address.clear();
         assert_eq!(editor.build().err().as_deref(), Some("Enter an address"));
+    }
+
+    #[test]
+    fn tags_are_counted_and_a_filter_needs_every_chosen_tag() {
+        let mut vault = super::super::demo::fixture_vault("tag-filter", false);
+        let Ok(mut group) = vault.draft_group(None) else {
+            unreachable!("a draft group in an empty vault")
+        };
+        group.name = "Lab".into();
+        assert!(vault.upsert_group(group.clone()).is_ok());
+        for (label, tags, group) in [
+            ("tagged", &["prod", "db"][..], None),
+            ("web", &["prod"][..], None),
+            ("grouped", &["db", "prod"][..], Some(group.uid.clone())),
+        ] {
+            let mut host = vault.draft_host();
+            (host.label, host.address, host.group) = (label.into(), format!("{label}.lan"), group);
+            host.tags = tags.iter().map(|tag| (*tag).to_owned()).collect();
+            assert!(vault.upsert_host(host).is_ok());
+        }
+        assert_eq!(
+            all_tags(vault.hosts()),
+            [("db".to_owned(), 2), ("prod".to_owned(), 3)]
+        );
+        let host = |label: &str| vault.hosts().iter().find(|host| host.label == label);
+        let both = ["prod".to_owned(), "db".to_owned()];
+        assert!(host("tagged").is_some_and(|host| has_tags(host, &both)));
+        assert!(
+            host("web").is_some_and(|host| !has_tags(host, &both)),
+            "all, not any"
+        );
+        assert!(host("web").is_some_and(|host| has_tags(host, &[])));
+        // The listing with the filter on: every group's hosts with both tags, and no groups.
+        let view = HostsView {
+            tags: both.to_vec(),
+            ..HostsView::default()
+        };
+        let (cards, groups) = view.gather(&vault);
+        let labels: Vec<&str> = cards.iter().map(|card| card.label.as_str()).collect();
+        assert_eq!(labels, ["grouped", "tagged"]);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn only_a_target_no_host_is_labelled_with_becomes_a_draft_in_the_group_shown() {
+        let mut vault = super::super::demo::fixture_vault("unsaved-target", false);
+        let mut saved = vault.draft_host();
+        (saved.label, saved.address) = ("db.example.com".into(), "db.example.com".into());
+        assert!(vault.upsert_host(saved).is_ok());
+        let view = HostsView {
+            group: Some("lab".into()),
+            ..HostsView::default()
+        };
+        let draft = view.unsaved_target(&vault, "deploy@10.0.9.9:22");
+        assert!(draft.is_some_and(|host| (
+            host.label.as_str(),
+            host.username.as_str(),
+            host.port,
+            host.group.as_deref()
+        ) == ("10.0.9.9", "deploy", None, Some("lab"))));
+        let plain = view.unsaved_target(&vault, "cache.lan");
+        assert!(plain.is_some_and(|host| (host.port, host.username.is_empty()) == (None, true)));
+        assert!(
+            view.unsaved_target(&vault, "db.example.com").is_none(),
+            "saved"
+        );
+        assert!(view.unsaved_target(&vault, "a b.lan").is_none(), "words");
+        assert!(view.unsaved_target(&vault, "web").is_none(), "a search");
+    }
+
+    #[test]
+    fn a_host_can_turn_off_reconnecting() {
+        let mut vault = super::super::demo::fixture_vault("no-reconnect", false);
+        let mut host = vault.draft_host();
+        host.address = "10.0.4.12".into();
+        assert!(vault.upsert_host(host.clone()).is_ok());
+        let files = annulus_session::SshFiles {
+            known_hosts: std::env::temp_dir().join("annulus-no-reconnect-known_hosts"),
+            key_dir: None,
+        };
+        let reconnects = |vault: &Vault| {
+            vault.hosts().iter().all(|host| {
+                matches!(
+                    connect::host(vault, &files, host),
+                    annulus_session::Program::Ssh {
+                        reconnect: true,
+                        ..
+                    }
+                )
+            })
+        };
+        assert!(reconnects(&vault), "on by default");
+        let mut editor = Editor::new(host, false);
+        assert!(editor.reconnect, "the switch shows it on");
+        editor.reconnect = false;
+        let Ok(edited) = editor.build() else {
+            unreachable!("a host with an address builds")
+        };
+        assert!(vault.upsert_host(edited.clone()).is_ok());
+        assert!(!reconnects(&vault));
+        assert!(
+            !Editor::new(edited, false).reconnect,
+            "and shows it off again"
+        );
     }
 }

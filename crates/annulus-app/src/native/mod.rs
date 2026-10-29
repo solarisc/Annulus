@@ -558,9 +558,32 @@ impl NativeApp {
                     .host_opened(id, vault, &self.ssh_files, self.waker.as_ref());
                 self.opens.push((title, program, Some(OpenTab::Host(id))));
             }
+            hosts::HostsAction::ConnectAll(uid) => {
+                // The hosts directly in the group, not those of its subgroups.
+                let ids: Vec<u64> = self
+                    .vault
+                    .iter()
+                    .flat_map(Vault::hosts)
+                    .filter(|host| host.group.as_deref() == Some(uid.as_str()))
+                    .map(|host| host.id)
+                    .collect();
+                for id in ids {
+                    self.act(hosts::HostsAction::Connect(id));
+                }
+            }
             hosts::HostsAction::QuickConnect(target) => {
-                let program = connect::quick(&target, &self.ssh_files);
-                self.open(target, program);
+                // A saved host's label connects to that host, with its details.
+                let saved = self
+                    .vault
+                    .as_ref()
+                    .and_then(|vault| connect::saved(vault, &target))
+                    .map(|host| host.id);
+                if let Some(id) = saved {
+                    self.act(hosts::HostsAction::Connect(id));
+                } else {
+                    let program = connect::quick(&target, &self.ssh_files);
+                    self.open(target, program);
+                }
             }
             hosts::HostsAction::LocalTerminal => self.open_local(),
             hosts::HostsAction::Sftp(id) => {

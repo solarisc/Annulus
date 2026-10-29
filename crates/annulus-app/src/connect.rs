@@ -30,6 +30,17 @@ pub fn quick(target: &str, files: &SshFiles) -> Program {
     }
 }
 
+/// The saved host typed text names, by its label in any case: a quick connect to it uses
+/// its details (F-APP-006).
+#[must_use]
+pub fn saved<'a>(vault: &'a Vault, text: &str) -> Option<&'a Host> {
+    let text = text.trim();
+    vault
+        .hosts()
+        .iter()
+        .find(|host| host.label.eq_ignore_ascii_case(text))
+}
+
 /// How to log in to a saved host: its target, saved password and keychain key, with what it
 /// inherits from its groups.
 fn hop(vault: &Vault, host: &Host) -> Option<Hop> {
@@ -133,20 +144,84 @@ mod tests {
 
     use super::*;
 
+    /// An empty vault of its own for test `name` (tests run side by side).
+    fn vault(name: &str) -> Vault {
+        let dir =
+            std::env::temp_dir().join(format!("annulus-connect-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cheap = annulus_vault::crypto::KdfParams {
+            memory_kib: 64,
+            iterations: 1,
+            parallelism: 1,
+        };
+        Vault::create(dir.join("vault.anv"), "pw", cheap).unwrap().0
+    }
+
+    /// Saves a host with `label` at `address`; returns it.
+    fn add(vault: &mut Vault, label: &str, address: &str) -> Host {
+        let mut host = vault.draft_host();
+        (host.label, host.address) = (label.into(), address.into());
+        vault.upsert_host(host.clone()).unwrap();
+        host
+    }
+
+    fn files() -> SshFiles {
+        SshFiles {
+            known_hosts: std::env::temp_dir().join("annulus-connect-known_hosts"),
+            key_dir: None,
+        }
+    }
+
+    #[test]
+    fn a_host_in_a_group_connects_with_what_it_inherits() {
+        let mut vault = vault("inherits");
+        let bastion = add(&mut vault, "bastion", "jump.example.com");
+        let mut group = vault.draft_group(None).unwrap();
+        group.name = "prod".into();
+        group.defaults.username = "deploy".into();
+        group.defaults.port = Some(2200);
+        group.defaults.jump_id = Some(bastion.id);
+        vault.upsert_group(group.clone()).unwrap();
+        // It sets nothing but its address and group.
+        let mut inner = add(&mut vault, "grp", "10.0.4.12");
+        inner.group = Some(group.uid);
+        vault.upsert_host(inner.clone()).unwrap();
+        let Program::Ssh { target, via, .. } = host(&vault, &files(), &inner) else {
+            unreachable!("a saved host with an address is an ssh program")
+        };
+        assert_eq!(
+            (target.user.as_str(), target.host.as_str(), target.port),
+            ("deploy", "10.0.4.12", 2200)
+        );
+        let hops: Vec<&str> = via.iter().map(|hop| hop.target.host.as_str()).collect();
+        assert_eq!(hops, ["jump.example.com"], "through the group's jump host");
+    }
+
+    #[test]
+    fn a_jump_chain_runs_outermost_first_and_stops_at_a_loop() {
+        let mut vault = vault("chain");
+        let mut inner = add(&mut vault, "inner", "inner.example.com");
+        let mut middle = add(&mut vault, "middle", "middle.example.com");
+        let mut outer = add(&mut vault, "outer", "outer.example.com");
+        inner.jump_id = Some(middle.id);
+        middle.jump_id = Some(outer.id);
+        vault.upsert_host(inner.clone()).unwrap();
+        vault.upsert_host(middle).unwrap();
+        let hops: Vec<String> = jump_chain(&vault, &inner)
+            .into_iter()
+            .map(|hop| hop.target.host)
+            .collect();
+        assert_eq!(hops, ["outer.example.com", "middle.example.com"]);
+
+        // outer → inner closes a loop: the chain stops instead of going round.
+        outer.jump_id = Some(inner.id);
+        vault.upsert_host(outer).unwrap();
+        assert_eq!(jump_chain(&vault, &inner).len(), 2);
+    }
+
     #[test]
     fn the_ssh_command_has_port_jump_and_user_but_never_a_password() {
-        let dir = std::env::temp_dir().join(format!("annulus-connect-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let (mut vault, _) = Vault::create(
-            dir.join("vault.anv"),
-            "pw",
-            annulus_vault::crypto::KdfParams {
-                memory_kib: 64,
-                iterations: 1,
-                parallelism: 1,
-            },
-        )
-        .unwrap();
+        let mut vault = vault("command");
         let mut jump = vault.draft_host();
         (jump.label, jump.address, jump.username) = (
             "bastion".into(),
