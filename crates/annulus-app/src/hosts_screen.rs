@@ -59,6 +59,8 @@ pub struct HostsScreen {
     /// The group being browsed (its uid); `None` is the top level.
     group: Option<String>,
     group_editor: Option<GroupDraft>,
+    /// A saved host a terminal was just opened to, for rules that start with it.
+    opened: Option<u64>,
 }
 
 impl HostsScreen {
@@ -74,6 +76,7 @@ impl HostsScreen {
             notice: None,
             group: None,
             group_editor: None,
+            opened: None,
         }
     }
 
@@ -210,6 +213,7 @@ impl HostsScreen {
     ) -> Option<Request> {
         match action {
             RowAction::Connect => {
+                self.opened = Some(host.id);
                 return Some(Request::Open(host.label.clone(), self.connect_host(host)));
             }
             RowAction::Sftp => {
@@ -255,6 +259,11 @@ impl HostsScreen {
             RowAction::None => {}
         }
         None
+    }
+
+    /// The saved host a terminal was just opened to, once (F-FWD-004).
+    pub fn take_opened(&mut self) -> Option<u64> {
+        self.opened.take()
     }
 
     /// The unlocked vault.

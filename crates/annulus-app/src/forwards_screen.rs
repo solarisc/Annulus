@@ -208,6 +208,11 @@ async fn run_rule(
     }
 }
 
+/// Whether `rule` starts when a terminal to `host_id` opens.
+fn starts_with(rule: &PortForward, host_id: u64) -> bool {
+    rule.with_host && rule.host_id == host_id
+}
+
 /// The saved rule as the forwarding engine runs it; `None` if it is not valid.
 fn engine_rule(rule: &PortForward) -> Option<Rule> {
     match (rule.kind, rule.bind()) {
@@ -312,6 +317,21 @@ impl ForwardsScreen {
             .forwards()
             .iter()
             .filter(|rule| rule.auto_start)
+            .cloned()
+            .collect();
+        for rule in &rules {
+            self.start_rule(ctx, rule, hosts);
+        }
+    }
+
+    /// Starts the rules marked to start with `host_id`'s terminal (F-FWD-004) that are not
+    /// running yet.
+    pub fn host_opened(&mut self, ctx: &egui::Context, host_id: u64, hosts: &HostsScreen) {
+        let rules: Vec<PortForward> = hosts
+            .vault()
+            .forwards()
+            .iter()
+            .filter(|rule| starts_with(rule, host_id) && !self.running.contains_key(&rule.id))
             .cloned()
             .collect();
         for rule in &rules {
@@ -586,6 +606,10 @@ fn fields(ui: &mut Ui, draft: &mut Draft, host_names: &[(u64, String)]) {
             }
             ui.label("");
             ui.checkbox(&mut draft.rule.auto_start, "Start when the vault unlocks");
+            ui.checkbox(
+                &mut draft.rule.with_host,
+                "Start when I open a terminal to its host",
+            );
             ui.end_row();
         });
 }
@@ -672,6 +696,15 @@ mod tests {
         });
         wait_for(&mut running, |status| matches!(status, Status::Active(_)));
         assert!(banner_through(port).is_some_and(|b| b.starts_with("SSH-2.0-OpenSSH")));
+    }
+
+    #[test]
+    fn a_rule_starts_with_its_own_hosts_terminal_only_when_asked() {
+        let mut rule = PortForward::new(1, 7);
+        assert!(!starts_with(&rule, 7), "off unless chosen");
+        rule.with_host = true;
+        assert!(starts_with(&rule, 7));
+        assert!(!starts_with(&rule, 8), "another host's terminal");
     }
 
     #[test]

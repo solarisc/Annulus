@@ -46,6 +46,10 @@ pub struct PortForward {
     /// Start the rule when the vault is unlocked (F-FWD-004).
     #[serde(default)]
     pub auto_start: bool,
+    /// Start the rule when a terminal to its host opens (F-FWD-004). Like `auto_start`,
+    /// this device's choice only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub with_host: bool,
 }
 
 fn loopback() -> String {
@@ -66,6 +70,7 @@ impl PortForward {
             destination_host: String::new(),
             destination_port: 0,
             auto_start: false,
+            with_host: false,
         }
     }
 

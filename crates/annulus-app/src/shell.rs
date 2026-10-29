@@ -431,6 +431,9 @@ impl Shell {
                 self.forwards = ForwardsScreen::default();
             }
             self.forwards.auto_start(ui.ctx(), hosts);
+            if let Some(host_id) = hosts.take_opened() {
+                self.forwards.host_opened(ui.ctx(), host_id, hosts);
+            }
         }
         self.forwards.prompts(ui.ctx());
         if matches!(self.tabs.get(self.active_tab), Some(Tab::Vault)) {

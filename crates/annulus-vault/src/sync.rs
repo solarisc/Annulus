@@ -396,10 +396,11 @@ impl SyncCopy {
             kind::FORWARD => {
                 let rule = self.forwards.iter().find(|rule| rule.id == entry.local)?;
                 let synced = SyncedForward {
-                    // Auto-start is this device's choice (a rule listening on 0.0.0.0 should
-                    // not start everywhere), so it never syncs.
+                    // Starting on its own is this device's choice (a rule listening on
+                    // 0.0.0.0 should not start everywhere), so it never syncs.
                     rule: PortForward {
                         auto_start: false,
+                        with_host: false,
                         ..rule.clone()
                     },
                     host: self
@@ -572,11 +573,9 @@ impl SyncCopy {
                     self.state
                         .fresh_id(kind::FORWARD, self.forwards.iter().map(|r| r.id))
                 });
-                rule.auto_start = self
-                    .forwards
-                    .iter()
-                    .find(|local| local.id == rule.id)
-                    .is_some_and(|local| local.auto_start);
+                let local = self.forwards.iter().find(|local| local.id == rule.id);
+                rule.auto_start = local.is_some_and(|local| local.auto_start);
+                rule.with_host = local.is_some_and(|local| local.with_host);
                 // The host's local id here; 0 shows as "(host deleted)" until it arrives.
                 rule.host_id = synced
                     .host
@@ -857,11 +856,13 @@ mod tests {
         let mut copy = copy();
         let mut mine = PortForward::new(1, 0);
         mine.auto_start = true;
+        mine.with_host = true;
         copy.forwards.push(mine);
         copy.state.touch(kind::FORWARD, 1, false).unwrap();
         let (_, body) = copy.pending()[0].content.clone().unwrap();
         let sent: SyncedForward = serde_json::from_slice(&body).unwrap();
         assert!(!sent.rule.auto_start, "never sent");
+        assert!(!sent.rule.with_host, "never sent");
 
         // An edit from elsewhere keeps this device's choice.
         let id = copy.pending()[0].id.clone();
@@ -874,6 +875,7 @@ mod tests {
         );
         assert_eq!(copy.forwards[0].label, "renamed");
         assert!(copy.forwards[0].auto_start);
+        assert!(copy.forwards[0].with_host);
     }
 
     #[test]
