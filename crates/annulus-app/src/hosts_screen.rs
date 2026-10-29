@@ -190,8 +190,15 @@ impl HostsScreen {
         }
     }
 
-    /// Acts on a host row's button or menu choice; a connect becomes a request.
-    fn row_action(&mut self, ui: &Ui, host: &Host, action: RowAction) -> Option<Request> {
+    /// Acts on a host row's button or menu choice; a connect becomes a request. `groups` is
+    /// the list the row's "Move to group" menu showed.
+    fn row_action(
+        &mut self,
+        ui: &Ui,
+        host: &Host,
+        action: RowAction,
+        groups: &[(String, String)],
+    ) -> Option<Request> {
         match action {
             RowAction::Connect => {
                 return Some(Request::Open(host.label.clone(), self.connect_host(host)));
@@ -233,6 +240,17 @@ impl HostsScreen {
                     proxy: SecretText::from(host.proxy.as_ref().map_or("", |url| url.expose())),
                     host: host.clone(),
                 });
+            }
+            RowAction::MoveTo(index) => {
+                let mut moved = host.clone();
+                moved.group = index
+                    .and_then(|index| groups.get(index))
+                    .map(|(uid, _)| uid.clone());
+                self.notice = self
+                    .vault
+                    .upsert_host(moved)
+                    .err()
+                    .map(|error| format!("Could not move: {error}"));
             }
             RowAction::None => {}
         }
@@ -333,11 +351,12 @@ impl HostsScreen {
             );
             return request;
         }
+        let targets = groups_view::choices(self.vault.groups(), None);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for host in &matches {
                 let shown = self.vault.resolve(host).0;
-                let action = host_row(ui, &shown, palette);
-                if let Some(chosen) = self.row_action(ui, host, action) {
+                let action = host_row(ui, &shown, palette, &targets);
+                if let Some(chosen) = self.row_action(ui, host, action, &targets) {
                     request = Some(chosen);
                 }
             }
@@ -418,6 +437,7 @@ impl HostsScreen {
             return None;
         }
         let mut request = None;
+        let targets = groups_view::choices(&groups, None);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for group in &subgroups {
                 let count = |uid: Option<&str>| uid == Some(group.uid.as_str());
@@ -440,8 +460,8 @@ impl HostsScreen {
             }
             for host in &hosts {
                 let shown = self.vault.resolve(host).0;
-                let action = host_row(ui, &shown, palette);
-                if let Some(chosen) = self.row_action(ui, host, action) {
+                let action = host_row(ui, &shown, palette, &targets);
+                if let Some(chosen) = self.row_action(ui, host, action, &targets) {
                     request = Some(chosen);
                 }
             }
@@ -726,6 +746,8 @@ enum RowAction {
     Edit,
     CopyCommand,
     Duplicate,
+    /// Move into the group at this index of the row's group list; `None` is the top level.
+    MoveTo(Option<usize>),
 }
 
 /// The editor row for the host's auto-reconnect switch (F-SSH-009).
@@ -756,7 +778,8 @@ fn ssh_command(host: &Host, jump: Option<&Host>) -> String {
     parts.join(" ")
 }
 
-fn host_row(ui: &mut Ui, host: &Host, palette: &Palette) -> RowAction {
+/// One host in the list. `groups` are the `(uid, path)` choices of "Move to group".
+fn host_row(ui: &mut Ui, host: &Host, palette: &Palette, groups: &[(String, String)]) -> RowAction {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 44.0), Sense::click());
     response.widget_info(|| {
@@ -825,6 +848,18 @@ fn host_row(ui: &mut Ui, host: &Host, palette: &Palette) -> RowAction {
                 chosen = RowAction::Duplicate;
                 ui.close();
             }
+            ui.menu_button("Move to group", |ui| {
+                if ui.button("Top level").clicked() {
+                    chosen = RowAction::MoveTo(None);
+                    ui.close();
+                }
+                for (index, (_, path)) in groups.iter().enumerate() {
+                    if ui.button(path).clicked() {
+                        chosen = RowAction::MoveTo(Some(index));
+                        ui.close();
+                    }
+                }
+            });
         });
     });
     if !matches!(chosen, RowAction::None) {
@@ -901,6 +936,25 @@ mod tests {
         assert_eq!(hints.port, "2200 (from prod)");
         assert_eq!(hints.username, "deploy (from prod)");
         assert_eq!(hints.key, "Default keys");
+    }
+
+    #[test]
+    fn move_to_group_puts_the_host_in_the_chosen_group_or_back_on_top() {
+        let mut screen = screen_with("move");
+        let mut group = screen.vault.draft_group(None).unwrap();
+        group.name = "prod".into();
+        screen.vault.upsert_group(group.clone()).unwrap();
+        let targets = groups_view::choices(screen.vault.groups(), None);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let host = screen.vault.hosts()[0].clone();
+            screen.row_action(ui, &host, RowAction::MoveTo(Some(0)), &targets);
+            assert_eq!(screen.vault.hosts()[0].group.as_deref(), Some(group.uid.as_str()));
+            let host = screen.vault.hosts()[0].clone();
+            screen.row_action(ui, &host, RowAction::MoveTo(None), &targets);
+            assert_eq!(screen.vault.hosts()[0].group, None);
+        });
+        output.textures_delta.clear();
     }
 
     #[test]
