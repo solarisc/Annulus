@@ -216,6 +216,46 @@ impl server::Handler for TestServer {
         self.record(format!("exec {}", String::from_utf8_lossy(data)));
         self.channels.lock().unwrap().remove(&channel);
         session.channel_success(channel)?;
+        if data == b"flood" {
+            // Three mebibytes, more than the client keeps.
+            let chunk = vec![b'y'; 64 * 1024];
+            for _ in 0..48 {
+                session.data(channel, chunk.clone())?;
+            }
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            return session.close(channel);
+        }
+        if data == b"open-channels" {
+            // A hostile server opens channels the client never asked for, then answers.
+            let (handle, requests) = (session.handle(), self.requests.clone());
+            tokio::spawn(async move {
+                let record = |kind: &str, opened: bool| {
+                    let outcome = if opened { "accepted" } else { "refused" };
+                    requests.lock().unwrap().push(format!("{kind} {outcome}"));
+                };
+                record(
+                    "x11",
+                    handle.channel_open_x11("127.0.0.1", 6000).await.is_ok(),
+                );
+                record("agent", handle.channel_open_agent().await.is_ok());
+                record("session", handle.channel_open_session().await.is_ok());
+                let opened = handle.channel_open_direct_streamlocal("/tmp/socket").await;
+                record("direct-streamlocal", opened.is_ok());
+                let opened = handle
+                    .channel_open_forwarded_streamlocal("/tmp/socket")
+                    .await;
+                record("forwarded-streamlocal", opened.is_ok());
+                let opened = handle
+                    .channel_open_direct_tcpip("127.0.0.1", 22, "127.0.0.1", 5000)
+                    .await;
+                record("direct-tcpip", opened.is_ok());
+                let _ = handle.exit_status_request(channel, 0).await;
+                let _ = handle.eof(channel).await;
+                let _ = handle.close(channel).await;
+            });
+            return Ok(());
+        }
         session.data(channel, [b"ran: ", data].concat())?;
         session.exit_status_request(channel, 3)?;
         session.eof(channel)?;
@@ -418,6 +458,132 @@ async fn a_session_asks_the_server_for_nothing_the_user_did_not() {
         ["session", "pty", "shell", "session", "subsystem sftp"],
         "no exec, env or forwarding the user did not ask for (F-SSH-011)"
     );
+}
+
+#[tokio::test]
+async fn a_host_key_that_cannot_be_saved_is_reported_not_forgotten() {
+    let port = serve(new_key()).await;
+    // known_hosts would go inside a file, which cannot be.
+    let blocker = known_hosts("unsaved").with_file_name("not-a-folder");
+    std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, b"").unwrap();
+    let result = connect(
+        &target(port, "alice"),
+        &blocker.join("known_hosts"),
+        None,
+        &[],
+        Script::new(true, &["secret"]),
+    )
+    .await;
+    assert!(
+        matches!(&result, Err(SshError::Protocol(why)) if why.contains("could not be saved")),
+        "{:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_never_answers_fails_in_time() {
+    // It takes the connection and never speaks, as a stalled or hostile host can.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let started = std::time::Instant::now();
+    let result = connect(
+        &target(port, "alice"),
+        &known_hosts("silent"),
+        None,
+        &[],
+        Script::new(true, &[]),
+    )
+    .await;
+    assert!(
+        matches!(&result, Err(SshError::Unreachable(_, why)) if why.starts_with("no answer")),
+        "{:?}",
+        result.err()
+    );
+    assert!(started.elapsed() < ANSWER * 2);
+}
+
+#[tokio::test]
+async fn the_time_spent_deciding_on_a_host_key_does_not_count() {
+    struct Slow;
+    impl Prompt for Slow {
+        fn trust_new_host_key(&self, _: HostKeyQuestion) -> oneshot::Receiver<Trust> {
+            let (tx, rx) = oneshot::channel();
+            tokio::spawn(async move {
+                // Longer than any one step may take.
+                tokio::time::sleep(ANSWER + std::time::Duration::from_secs(1)).await;
+                let _ = tx.send(Trust::Once);
+            });
+            rx
+        }
+        fn password(&self, _: String, _: String) -> oneshot::Receiver<Option<Zeroizing<String>>> {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Some(Zeroizing::new("secret".to_owned())));
+            rx
+        }
+    }
+    let port = serve(new_key()).await;
+    let connection = connect(
+        &target(port, "alice"),
+        &known_hosts("slow-user"),
+        None,
+        &[],
+        Arc::new(Slow),
+    )
+    .await;
+    assert!(connection.is_ok(), "{:?}", connection.err());
+}
+
+#[tokio::test]
+async fn a_command_that_prints_without_end_is_cut_at_a_mebibyte() {
+    let port = serve(new_key()).await;
+    let connection = connect(
+        &target(port, "alice"),
+        &known_hosts("flood"),
+        None,
+        &[],
+        Script::new(true, &["secret"]),
+    )
+    .await
+    .unwrap();
+    let exec = connection.exec("flood").await.unwrap();
+    assert_eq!(exec.output.len(), MOST_OUTPUT + CUT.len());
+    assert!(exec.output.ends_with(CUT));
+}
+
+#[tokio::test]
+async fn channels_a_server_opens_unasked_are_refused() {
+    let (port, requests) = serve_recording(new_key()).await;
+    let script = Script::new(true, &["secret"]);
+    let connection = connect(
+        &target(port, "alice"),
+        &known_hosts("unasked-channels"),
+        None,
+        &[],
+        script,
+    )
+    .await
+    .unwrap();
+    connection.exec("open-channels").await.unwrap();
+    let requests = requests.lock().unwrap().clone();
+    for kind in [
+        "x11",
+        "agent",
+        "session",
+        "direct-streamlocal",
+        "forwarded-streamlocal",
+        "direct-tcpip",
+    ] {
+        assert!(
+            requests.contains(&format!("{kind} refused")),
+            "{kind}: {requests:?}"
+        );
+    }
 }
 
 #[tokio::test]

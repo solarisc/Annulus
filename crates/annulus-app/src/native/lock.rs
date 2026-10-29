@@ -471,7 +471,10 @@ mod tests {
             recovery: true,
         };
         let printed = format!("{create:?} {unlock:?}");
-        assert!(!printed.contains("hunter2") && !printed.contains("ABCD"), "{printed}");
+        assert!(
+            !printed.contains("hunter2") && !printed.contains("ABCD"),
+            "{printed}"
+        );
         assert!(printed.contains("recovery: true"), "{printed}");
     }
 

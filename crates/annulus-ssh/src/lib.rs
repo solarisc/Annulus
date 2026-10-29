@@ -160,13 +160,69 @@ impl From<russh::Error> for SshError {
     }
 }
 
+/// How long a server may take over one step of connecting (reaching it and showing its host
+/// key, finishing the key exchange, answering one login attempt) before Annulus gives up.
+/// The time the user spends on a question does not count.
+const ANSWER: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_secs(3)
+} else {
+    std::time::Duration::from_secs(30)
+};
+
+/// The most of a command's output [`Connection::exec`] keeps.
+const MOST_OUTPUT: usize = 1 << 20;
+
+/// `step` if it ends within [`ANSWER`]; otherwise the host `name` did not answer.
+async fn in_time<T>(
+    name: &str,
+    step: impl std::future::Future<Output = Result<T, SshError>>,
+) -> Result<T, SshError> {
+    tokio::time::timeout(ANSWER, step)
+        .await
+        .unwrap_or_else(|_| Err(no_answer(name)))
+}
+
+fn no_answer(name: &str) -> SshError {
+    SshError::Unreachable(
+        name.to_owned(),
+        format!("no answer in {} s", ANSWER.as_secs()),
+    )
+}
+
+/// Runs `connecting` with [`ANSWER`] for each step, except while `asking` says the user is
+/// deciding whether to trust the host's key.
+async fn connect_in_time<T>(
+    name: &str,
+    mut asking: tokio::sync::watch::Receiver<bool>,
+    connecting: impl std::future::Future<Output = T>,
+) -> Result<T, SshError> {
+    tokio::pin!(connecting);
+    loop {
+        let waiting = !*asking.borrow_and_update();
+        tokio::select! {
+            result = &mut connecting => return Ok(result),
+            changed = asking.changed() => {
+                if changed.is_err() {
+                    // The handler is gone, so the connection is ending.
+                    return Ok(connecting.await);
+                }
+            }
+            () = tokio::time::sleep(ANSWER), if waiting => return Err(no_answer(name)),
+        }
+    }
+}
+
 /// What the client handler learned during key exchange.
 struct Checker {
     host: String,
     port: u16,
     known_hosts: PathBuf,
     prompt: Arc<dyn Prompt>,
+    /// The user is being asked about the host's key, so the server is not late.
+    asking: tokio::sync::watch::Sender<bool>,
     changed: Arc<std::sync::Mutex<Option<String>>>,
+    /// Why a key the user chose to trust and save could not be saved.
+    unsaved: Arc<std::sync::Mutex<Option<String>>>,
     /// Where connections to each remote-forwarded port go.
     remote: forward::RemoteMap,
 }
@@ -199,6 +255,79 @@ impl client::Handler for Checker {
         Ok(())
     }
 
+    // Every other channel a server can open toward the client is refused (dropping `reply`
+    // declines it): Annulus forwards no X11, agent or sockets, and runs nothing a server asks
+    // for. russh would otherwise confirm them.
+
+    fn server_channel_open_x11(
+        &mut self,
+        _channel: Channel<Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        drop(reply);
+        std::future::ready(Ok(()))
+    }
+
+    fn server_channel_open_agent_forward(
+        &mut self,
+        _channel: Channel<Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        drop(reply);
+        std::future::ready(Ok(()))
+    }
+
+    fn server_channel_open_session(
+        &mut self,
+        _channel: Channel<Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        drop(reply);
+        std::future::ready(Ok(()))
+    }
+
+    #[allow(clippy::too_many_arguments)] // The trait's signature.
+    fn server_channel_open_direct_tcpip(
+        &mut self,
+        _channel: Channel<Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        drop(reply);
+        std::future::ready(Ok(()))
+    }
+
+    fn server_channel_open_direct_streamlocal(
+        &mut self,
+        _channel: Channel<Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        drop(reply);
+        std::future::ready(Ok(()))
+    }
+
+    fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        _channel: Channel<Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        drop(reply);
+        std::future::ready(Ok(()))
+    }
+
     async fn check_server_key(
         &mut self,
         server_key: &PublicKeyOrCertificate,
@@ -227,21 +356,36 @@ impl client::Handler for Checker {
                     algorithm: key.algorithm().as_str().to_owned(),
                     fingerprint,
                 };
+                let _ = self.asking.send(true);
                 let answer = self
                     .prompt
                     .trust_new_host_key(question)
                     .await
                     .unwrap_or(Trust::Reject);
+                let _ = self.asking.send(false);
                 if answer == Trust::Save {
-                    if let Some(parent) = self.known_hosts.parent() {
-                        let _ = std::fs::create_dir_all(parent);
+                    let saved = self
+                        .known_hosts
+                        .parent()
+                        .map_or(Ok(()), std::fs::create_dir_all)
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| {
+                            russh::keys::known_hosts::learn_known_hosts_path(
+                                &self.host,
+                                self.port,
+                                key,
+                                &self.known_hosts,
+                            )
+                            .map_err(|error| error.to_string())
+                        });
+                    // Not remembered, though the user asked: say so rather than ask again
+                    // next time with no reason given.
+                    if let Err(why) = saved {
+                        if let Ok(mut unsaved) = self.unsaved.lock() {
+                            *unsaved = Some(why);
+                        }
+                        return Ok(false);
                     }
-                    let _ = russh::keys::known_hosts::learn_known_hosts_path(
-                        &self.host,
-                        self.port,
-                        key,
-                        &self.known_hosts,
-                    );
                 }
                 Ok(answer != Trust::Reject)
             }
@@ -410,79 +554,103 @@ async fn handshake(
         ..client::Config::default()
     });
     let changed = Arc::new(std::sync::Mutex::new(None));
+    let unsaved = Arc::new(std::sync::Mutex::new(None));
     let remote = forward::RemoteMap::default();
+    let (asking, asked) = tokio::sync::watch::channel(false);
     let checker = Checker {
         host: target.host.clone(),
         port: target.port,
         known_hosts: known_hosts.to_path_buf(),
         prompt,
+        asking,
         changed: changed.clone(),
+        unsaved: unsaved.clone(),
         remote: remote.clone(),
     };
     let name = known_hosts_name(&target.host, target.port);
-    let connected = match route {
-        Route::Direct => {
-            client::connect(config, (target.host.as_str(), target.port), checker).await
-        }
-        Route::Jump(jump) => {
-            let channel = jump
-                .handle
-                .channel_open_direct_tcpip(
-                    target.host.as_str(),
-                    u32::from(target.port),
-                    "127.0.0.1",
-                    0,
-                )
-                .await
-                .map_err(|error| {
-                    SshError::Unreachable(
-                        name.clone(),
-                        format!("the jump host could not connect: {error}"),
+    let connecting = async {
+        Ok::<_, SshError>(match route {
+            Route::Direct => {
+                client::connect(config, (target.host.as_str(), target.port), checker).await
+            }
+            Route::Jump(jump) => {
+                let channel = jump
+                    .handle
+                    .channel_open_direct_tcpip(
+                        target.host.as_str(),
+                        u32::from(target.port),
+                        "127.0.0.1",
+                        0,
                     )
-                })?;
-            client::connect_stream(config, channel.into_stream(), checker).await
-        }
-        Route::Proxy(proxy) => {
-            let stream = proxy
-                .connect(&target.host, target.port)
-                .await
-                .map_err(|error| {
-                    SshError::Unreachable(
-                        name.clone(),
-                        format!("through the proxy {}:{}: {error}", proxy.host, proxy.port),
-                    )
-                })?;
-            client::connect_stream(config, stream, checker).await
-        }
+                    .await
+                    .map_err(|error| {
+                        SshError::Unreachable(
+                            name.clone(),
+                            format!("the jump host could not connect: {error}"),
+                        )
+                    })?;
+                client::connect_stream(config, channel.into_stream(), checker).await
+            }
+            Route::Proxy(proxy) => {
+                let stream = proxy
+                    .connect(&target.host, target.port)
+                    .await
+                    .map_err(|error| {
+                        SshError::Unreachable(
+                            name.clone(),
+                            format!("through the proxy {}:{}: {error}", proxy.host, proxy.port),
+                        )
+                    })?;
+                client::connect_stream(config, stream, checker).await
+            }
+        })
     };
+    let connected = connect_in_time(&name, asked, connecting).await??;
     match connected {
         Ok(handle) => Ok((handle, remote)),
-        Err(error) => {
-            if let Some(fingerprint) = changed.lock().ok().and_then(|mut slot| slot.take()) {
-                return Err(SshError::HostKeyChanged {
-                    host: name,
-                    fingerprint,
-                });
-            }
-            // A known host that offers none of the kinds of key we know for it: the same as a
-            // changed key (someone in between offering another kind, or a reinstall).
-            let known = known_host_keys_path(&target.host, target.port, known_hosts)
-                .is_ok_and(|keys| !keys.is_empty());
-            if known
-                && let russh::Error::NoCommonAlgo { kind, .. } = &error
-                && matches!(kind, russh::AlgorithmKind::Key)
-            {
-                return Err(SshError::HostKeyChanged {
-                    host: name,
-                    fingerprint: "a key of another kind".into(),
-                });
-            }
-            Err(match error {
-                russh::Error::UnknownKey => SshError::HostKeyRejected,
-                russh::Error::IO(io) => SshError::Unreachable(name, io.to_string()),
-                other => SshError::Protocol(other.to_string()),
-            })
-        }
+        Err(error) => Err(refused(error, target, known_hosts, &unsaved, &changed)),
+    }
+}
+
+/// What a failed handshake with `target` means for the user.
+fn refused(
+    error: russh::Error,
+    target: &Target,
+    known_hosts: &Path,
+    unsaved: &std::sync::Mutex<Option<String>>,
+    changed: &std::sync::Mutex<Option<String>>,
+) -> SshError {
+    let name = known_hosts_name(&target.host, target.port);
+    if let Some(why) = unsaved.lock().ok().and_then(|mut slot| slot.take()) {
+        return SshError::Protocol(format!(
+            "the host key could not be saved to {}: {why}. Connect once instead, or \
+             fix that file",
+            known_hosts.display()
+        ));
+    }
+    if let Some(fingerprint) = changed.lock().ok().and_then(|mut slot| slot.take()) {
+        return SshError::HostKeyChanged {
+            host: name,
+            fingerprint,
+        };
+    }
+    // A known host that offers none of the kinds of key we know for it: the same as a
+    // changed key (someone in between offering another kind, or a reinstall).
+    let known = known_host_keys_path(&target.host, target.port, known_hosts)
+        .is_ok_and(|keys| !keys.is_empty());
+    if known
+        && let russh::Error::NoCommonAlgo { kind, .. } = &error
+        && matches!(kind, russh::AlgorithmKind::Key)
+    {
+        return SshError::HostKeyChanged {
+            host: name,
+            fingerprint: "a key of another kind".into(),
+        };
+    }
+    match error {
+        russh::Error::UnknownKey => SshError::HostKeyRejected,
+        russh::Error::IO(io) => SshError::Unreachable(name, io.to_string()),
+        other => SshError::Protocol(other.to_string()),
     }
 }
 
@@ -498,16 +666,20 @@ async fn log_in(
 ) -> Result<Connection, SshError> {
     let mut tried = Vec::new();
     let mut offered = String::from("unknown");
+    let name = known_hosts_name(&target.host, target.port);
     for (label, key) in candidate_keys(identities, key_dir) {
-        let hash = handle
-            .best_supported_rsa_hash()
-            .await
+        let hash = in_time(&name, async { Ok(handle.best_supported_rsa_hash().await) })
+            .await?
             .ok()
             .flatten()
             .flatten();
         tried.push(label);
         let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
-        match handle.authenticate_publickey(&target.user, key).await? {
+        let answer = in_time(&name, async {
+            Ok(handle.authenticate_publickey(&target.user, key).await?)
+        })
+        .await?;
+        match answer {
             AuthResult::Success => {
                 return Ok(Connection {
                     handle,
@@ -530,10 +702,13 @@ async fn log_in(
             return Err(SshError::Cancelled);
         };
         tried.push("password".into());
-        match handle
-            .authenticate_password(&target.user, password.as_str())
-            .await?
-        {
+        let answer = in_time(&name, async {
+            Ok(handle
+                .authenticate_password(&target.user, password.as_str())
+                .await?)
+        })
+        .await?;
+        match answer {
             AuthResult::Success => {
                 return Ok(Connection {
                     handle,
@@ -613,10 +788,20 @@ impl Connection {
         let mut channel = self.handle.channel_open_session().await?;
         channel.exec(true, command).await?;
         let mut exec = Exec::default();
+        let mut cut = false;
         loop {
             match channel.wait().await {
                 Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
-                    exec.output.extend_from_slice(&data);
+                    // A command that prints without end does not fill the memory: the rest
+                    // is read and dropped.
+                    let kept = data
+                        .len()
+                        .min(MOST_OUTPUT.saturating_sub(exec.output.len()));
+                    exec.output.extend_from_slice(&data[..kept]);
+                    if kept < data.len() && !cut {
+                        cut = true;
+                        exec.output.extend_from_slice(CUT);
+                    }
                 }
                 Some(ChannelMsg::ExitStatus { exit_status }) => exec.status = Some(exit_status),
                 Some(ChannelMsg::Close) | None => return Ok(exec),
@@ -637,6 +822,9 @@ impl Connection {
         Ok(channel.into_stream())
     }
 }
+
+/// Added to a command's output after the first [`MOST_OUTPUT`] bytes.
+const CUT: &[u8] = b"\n[Annulus kept only the first 1 MiB of the output]\n";
 
 /// How a command run with [`Connection::exec`] ended.
 #[derive(Debug, Default, PartialEq, Eq)]
