@@ -5,14 +5,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use annulus_config::tokens::{metrics, radius, space, text};
 
 use super::{centered_baseline, color, is_key};
-use crate::display_list::{DisplayList, IconId, Op};
+use crate::display_list::{DisplayList, Op};
 use crate::geometry::{Point, Rect, Size};
+use crate::icons::SEARCH;
 use crate::input::{Button, Event, Handled, Key, Modifiers};
 use crate::text_edit::{FieldKind, TextEditor};
 use crate::widget::{Action, EventCx, PaintCx, Role, TextMeasure, Widget};
-
-/// The magnifier drawn in search fields.
-pub const SEARCH: IconId = IconId(3);
 
 /// Room for the search icon before the text.
 const ICON_SPACE: f32 = 24.0;

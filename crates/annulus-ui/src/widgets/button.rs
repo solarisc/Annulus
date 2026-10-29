@@ -5,6 +5,7 @@ use annulus_config::tokens::{metrics, radius, space, text};
 use super::{centered_baseline, color, is_activation_key, is_click, text_on};
 use crate::display_list::{DisplayList, IconId, Op};
 use crate::geometry::{Color, Point, Rect, Size};
+use crate::icons::CHEVRON_DOWN;
 use crate::input::{Event, Handled, Key, Modifiers};
 use crate::widget::{Action, EventCx, PaintCx, Role, TextMeasure, Widget};
 
@@ -20,9 +21,6 @@ pub enum ButtonKind {
     /// A destructive action: filled with the error color.
     Danger,
 }
-
-/// The icon drawn on a split button's menu part.
-pub const CHEVRON_DOWN: IconId = IconId(1);
 
 /// Width of a split button's menu part, in DIPs.
 const SPLIT_MENU_WIDTH: f32 = 28.0;

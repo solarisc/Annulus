@@ -2,9 +2,10 @@
 
 use annulus_config::tokens::{metrics, radius, space, text};
 
-use super::{button::CHEVRON_DOWN, centered_baseline, color, is_activation_key, is_key, text_on};
+use super::{centered_baseline, color, is_activation_key, is_key, text_on};
 use crate::display_list::{DisplayList, Op};
 use crate::geometry::{Point, Rect, Size};
+use crate::icons::CHEVRON_DOWN;
 use crate::input::{Button, Event, Handled, Key, Modifiers};
 use crate::widget::{Action, EventCx, PaintCx, Role, TextMeasure, Widget};
 

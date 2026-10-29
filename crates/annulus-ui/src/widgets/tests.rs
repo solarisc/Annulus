@@ -283,7 +283,7 @@ fn segmented_picks_the_segment_under_the_pointer_and_moves_with_arrows() {
 fn every_widget_has_a_role_and_an_accessible_name() {
     let widgets: Vec<Box<dyn Widget>> = vec![
         Box::new(Button::new("Connect", ButtonKind::Primary)),
-        Box::new(IconButton::new(crate::display_list::IconId(9), "Settings")),
+        Box::new(IconButton::new(crate::icons::SETTINGS, "Settings")),
         Box::new(SplitButton::new("New", ButtonKind::Secondary)),
         Box::new(Checkbox::new("Agent forwarding", false)),
         Box::new(Switch::new("Auto-reconnect", true)),

@@ -37,7 +37,7 @@ pub(crate) fn text_on(background: Rgb, palette: &Palette) -> Rgb {
 /// The baseline that centers one line of `size` text vertically in `bounds`. 0.7 is a
 /// typical cap-height ratio for UI fonts.
 pub(crate) fn centered_baseline(bounds: Rect, size: f32) -> f32 {
-    bounds.origin.y + (bounds.size.height + size * 0.7) / 2.0
+    bounds.origin.y + f32::midpoint(bounds.size.height, size * 0.7)
 }
 
 /// Whether `event` is a key press of `key` with no modifiers.

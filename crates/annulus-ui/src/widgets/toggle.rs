@@ -4,13 +4,11 @@
 use annulus_config::tokens::{radius, space, text};
 
 use super::{centered_baseline, color, is_activation_key, is_click, text_on};
-use crate::display_list::{DisplayList, IconId, Op};
+use crate::display_list::{DisplayList, Op};
 use crate::geometry::{Point, Rect, Size};
+use crate::icons::CHECK;
 use crate::input::{Button, Event, Handled};
 use crate::widget::{Action, EventCx, PaintCx, Role, TextMeasure, Widget};
-
-/// The check mark drawn in a checked box.
-pub const CHECK: IconId = IconId(2);
 
 const BOX: f32 = 16.0;
 const TRACK: Size = Size::new(32.0, 18.0);

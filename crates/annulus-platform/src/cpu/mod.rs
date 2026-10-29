@@ -148,9 +148,9 @@ impl Canvas {
                 size,
                 color,
             } => self.text_run(*origin, text, *size, *color),
-            // TODO: icons need the icon set.
             // TODO: images need an image store; none are used before the host grid.
-            Op::Icon { .. } | Op::Image { .. } => {}
+            Op::Icon { icon, rect, color } => self.icon(*icon, *rect, *color),
+            Op::Image { .. } => {}
             Op::PushClip(rect) => self.push_clip(*rect),
             Op::PopClip => {
                 self.clips.pop();
@@ -185,6 +185,49 @@ impl Canvas {
         let mask = self.clips.last().and_then(Option::as_ref);
         let baseline = annulus_ui::Point::new(origin.x * scale, origin.y * scale);
         engine.draw(target, baseline, text, size * scale, color, mask);
+    }
+
+    /// Strokes one of our line icons, scaled from its 16-unit grid into `rect`. Unknown
+    /// icons draw nothing.
+    fn icon(&mut self, id: annulus_ui::display_list::IconId, rect: Rect, color: Color) {
+        use annulus_ui::icons::{self, Segment};
+        let Some(icon) = icons::icon(id) else { return };
+        if rect.is_empty() || !rect.origin.x.is_finite() || !rect.origin.y.is_finite() {
+            return;
+        }
+        let unit = rect.size.width.min(rect.size.height) / icons::GRID;
+        let at = |x: f32, y: f32| (rect.origin.x + x * unit, rect.origin.y + y * unit);
+        let mut path = PathBuilder::new();
+        for segment in icon.segments {
+            match *segment {
+                Segment::Move(x, y) => {
+                    let (x, y) = at(x, y);
+                    path.move_to(x, y);
+                }
+                Segment::Line(x, y) => {
+                    let (x, y) = at(x, y);
+                    path.line_to(x, y);
+                }
+                Segment::Close => path.close(),
+                Segment::Circle(x, y, r) => {
+                    let (x, y) = at(x, y);
+                    path.push_circle(x, y, r * unit);
+                }
+            }
+        }
+        let Some(path) = path.finish() else { return };
+        let stroke = Stroke {
+            width: icons::STROKE * unit,
+            line_cap: tiny_skia::LineCap::Round,
+            line_join: tiny_skia::LineJoin::Round,
+            ..Stroke::default()
+        };
+        let paint = paint(color);
+        let transform = self.transform();
+        let mask = self.clips.last().and_then(Option::as_ref);
+        if let Some((target, _)) = self.layers.last_mut() {
+            target.stroke_path(&path, &paint, &stroke, transform, mask);
+        }
     }
 
     fn border(&mut self, rect: Rect, radius: f32, width: f32, color: Color) {

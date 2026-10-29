@@ -7,6 +7,7 @@
 pub mod animation;
 pub mod display_list;
 pub mod geometry;
+pub mod icons;
 pub mod input;
 mod layout;
 mod routing;
