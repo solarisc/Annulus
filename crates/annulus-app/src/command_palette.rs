@@ -5,8 +5,10 @@
 use eframe::egui::{self, Key, RichText, Ui};
 
 /// What choosing an item does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Connect to what was typed (`user@host:port`), saved or not (F-APP-006).
+    QuickConnect(String),
     /// Connect to the saved host with this id.
     Connect(u64),
     /// Bring the tab at this index to the front.
@@ -64,6 +66,17 @@ pub fn score(query: &str, text: &str) -> Option<i64> {
     Some(total * 100 - i64::try_from(text.len()).unwrap_or(i64::MAX).min(99))
 }
 
+/// What was typed, when it reads as an SSH target (`user@host`, `host:port`, an address
+/// or a dotted name) rather than words to search for.
+#[must_use]
+pub fn typed_target(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let looks = !query.is_empty()
+        && !query.contains(char::is_whitespace)
+        && query.contains(['@', ':', '.']);
+    looks.then_some(query)
+}
+
 /// `items` that match `query`, best first; with no query, in their own order (hosts first).
 #[must_use]
 pub fn rank<'a>(query: &str, items: &'a [Item]) -> Vec<&'a Item> {
@@ -96,7 +109,15 @@ pub enum Outcome {
 impl CommandPalette {
     /// Draws the palette over the window.
     pub fn ui(&mut self, ctx: &egui::Context, items: &[Item]) -> Outcome {
-        let ranked = rank(&self.query, items);
+        let typed = typed_target(&self.query).map(|target| Item {
+            label: format!("Connect to {target}"),
+            kind: "Quick connect",
+            action: Action::QuickConnect(target.to_owned()),
+        });
+        let mut ranked = rank(&self.query, items);
+        if let Some(item) = &typed {
+            ranked.insert(0, item);
+        }
         let (up, down, enter, escape) = ctx.input_mut(|input| {
             (
                 input.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
@@ -136,7 +157,7 @@ impl CommandPalette {
                 chosen = self.list(ui, &ranked);
             });
         if enter {
-            chosen = ranked.get(self.selected).map(|item| item.action);
+            chosen = ranked.get(self.selected).map(|item| item.action.clone());
         }
         chosen.map_or(Outcome::Open, Outcome::Chosen)
     }
@@ -160,7 +181,7 @@ impl CommandPalette {
                         row.scroll_to_me(None);
                     }
                     if row.clicked() {
-                        chosen = Some(item.action);
+                        chosen = Some(item.action.clone());
                     }
                 }
             });
@@ -178,6 +199,17 @@ mod tests {
             kind: "Host",
             action: Action::NewLocal,
         }
+    }
+
+    #[test]
+    fn a_typed_target_is_offered_as_a_quick_connect() {
+        assert_eq!(
+            typed_target(" root@10.0.0.9:2222 "),
+            Some("root@10.0.0.9:2222")
+        );
+        assert_eq!(typed_target("db.example.com"), Some("db.example.com"));
+        assert_eq!(typed_target("prod db"), None, "words are a search");
+        assert_eq!(typed_target("settings"), None);
     }
 
     #[test]

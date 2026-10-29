@@ -314,6 +314,15 @@ impl Shell {
     /// Does what a palette item says.
     fn run_action(&mut self, action: Action) {
         match action {
+            Action::QuickConnect(target) => {
+                let Some(hosts) = &self.hosts else {
+                    self.open_terminal(target.clone(), Program::system_ssh(&target));
+                    return;
+                };
+                if let Request::Open(title, program) = hosts.quick_connect(&target) {
+                    self.open_terminal(title, program);
+                }
+            }
             Action::Connect(id) => {
                 let Some(hosts) = &mut self.hosts else { return };
                 let Some(host) = hosts.vault().hosts().iter().find(|h| h.id == id).cloned() else {

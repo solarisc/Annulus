@@ -536,7 +536,7 @@ impl HostsScreen {
 
     /// A query that names a saved host (by label, case-insensitively) connects to it;
     /// anything else is an SSH target.
-    fn quick_connect(&self, query: &str) -> Request {
+    pub fn quick_connect(&self, query: &str) -> Request {
         if let Some(host) = self
             .vault
             .hosts()
