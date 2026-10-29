@@ -6,6 +6,8 @@ use std::collections::HashSet;
 use super::{Problem, Tree, has_extension, markdown};
 
 const FEATURES: &str = "docs/FEATURES.md";
+/// The status values FEATURES.md defines. Anything else would hide a Done row from this check.
+const STATUSES: [&str; 3] = ["Planned", "In progress", "Done"];
 
 pub fn check(tree: &Tree) -> Vec<Problem> {
     let text = match tree.text(FEATURES) {
@@ -31,20 +33,36 @@ fn check_rows(text: &str, functions: &HashSet<&str>) -> Vec<Problem> {
             }
             continue;
         };
+        let line_no = index + 1;
         if cells.first() == Some(&"ID") {
             let status = cells.iter().position(|cell| *cell == "Status");
             let tests = cells.iter().position(|cell| *cell == "Tests");
             columns = status.zip(tests);
+            if columns.is_none() {
+                problems.push(Problem::new(
+                    FEATURES,
+                    line_no,
+                    "feature table needs `Status` and `Tests` columns",
+                ));
+            }
             continue;
         }
         let Some((status_col, tests_col)) = columns else {
             continue;
         };
-        if cells.get(status_col) != Some(&"Done") {
+        let id = cells.first().copied().unwrap_or_default();
+        let status = cells.get(status_col).copied().unwrap_or_default();
+        if !STATUSES.contains(&status) {
+            problems.push(Problem::new(
+                FEATURES,
+                line_no,
+                format!("{id} has status `{status}`; use one of {STATUSES:?}"),
+            ));
             continue;
         }
-        let id = cells.first().copied().unwrap_or_default();
-        let line_no = index + 1;
+        if status != "Done" {
+            continue;
+        }
         let names = markdown::code_spans(cells.get(tests_col).copied().unwrap_or_default());
         if names.is_empty() {
             problems.push(Problem::new(
@@ -67,11 +85,13 @@ fn check_rows(text: &str, functions: &HashSet<&str>) -> Vec<Problem> {
     problems
 }
 
-/// Names of every `fn` declared in the given Rust sources.
+/// Names of every `fn` declared in the given Rust sources: `fn name(` or `fn name<`, outside
+/// line comments.
 fn function_names<'a>(sources: impl Iterator<Item = &'a str>) -> HashSet<&'a str> {
     let mut names = HashSet::new();
-    for source in sources {
-        let mut rest = source;
+    for line in sources.flat_map(str::lines) {
+        let code = line.split_once("//").map_or(line, |(code, _comment)| code);
+        let mut rest = code;
         while let Some(at) = rest.find("fn ") {
             let preceded_by_word = rest[..at].chars().next_back().is_some_and(is_ident_char);
             rest = &rest[at + 3..];
@@ -79,7 +99,8 @@ fn function_names<'a>(sources: impl Iterator<Item = &'a str>) -> HashSet<&'a str
                 continue;
             }
             let end = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
-            if end > 0 {
+            let declares = rest[end..].starts_with(['(', '<']);
+            if end > 0 && declares {
                 names.insert(&rest[..end]);
             }
         }
@@ -139,10 +160,62 @@ mod tests {
     }
 
     #[test]
+    fn unknown_status_is_reported_instead_of_skipped() {
+        let found = messages(
+            "| F-X-001 | x | Done (soon) | `ghost` |
+",
+            &[],
+        );
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("status `Done (soon)`"), "{found:?}");
+    }
+
+    #[test]
+    fn table_without_tests_column_is_reported() {
+        let text = "| ID | Feature | Status | Test |
+|---|---|---|---|
+| F-X-001 | x | Done | `ghost` |
+";
+        let found = check_rows(text, &HashSet::new());
+        assert_eq!(found.len(), 1);
+        assert!(found[0].message.contains("needs `Status` and `Tests`"));
+    }
+
+    #[test]
+    fn fn_mentioned_in_a_comment_or_prose_does_not_count() {
+        let sources = [
+            "// fn ghost_test is documented here",
+            "let s = \"see fn ghost_test\";",
+        ];
+        assert_eq!(
+            messages(
+                "| F-X-001 | x | Done | `ghost_test` |
+",
+                &sources
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn generic_function_counts() {
+        let sources = ["fn ghost_test<T>() {}"];
+        assert_eq!(
+            messages(
+                "| F-X-001 | x | Done | `ghost_test` |
+",
+                &sources
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn identifier_suffix_is_not_a_function_declaration() {
         let found = messages(
             "| F-X-001 | x | Done | `ghost` |\n",
-            &["let tfn ghost = 1;"],
+            &["let tfn ghost() = 1;"],
         );
         assert_eq!(found.len(), 1);
     }

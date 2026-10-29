@@ -2,8 +2,6 @@
 
 use std::process::Command;
 
-use anyhow::Context as _;
-
 use crate::{docs_check, repo};
 
 /// One external command run by CI.
@@ -61,13 +59,17 @@ pub fn run() -> anyhow::Result<bool> {
     for step in STEPS {
         println!("==> {}", step.name);
         let program = step.program.unwrap_or(&cargo);
-        let status = Command::new(program)
+        match Command::new(program)
             .args(step.args)
             .current_dir(&root)
             .status()
-            .with_context(|| format!("could not start `{program} {}`", step.args.join(" ")))?;
-        if !status.success() {
-            failed.push(step.name);
+        {
+            Ok(status) if status.success() => {}
+            Ok(_) => failed.push(step.name),
+            Err(error) => {
+                eprintln!("could not start `{program}`: {error}");
+                failed.push(step.name);
+            }
         }
     }
 

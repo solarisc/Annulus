@@ -34,7 +34,12 @@ pub fn check(tree: &Tree) -> Vec<Problem> {
                 index + 1,
                 format!("`{path}` does not exist"),
             )),
-            Some(text) if !text.lines().take(MAX_LINE).any(is_last_verified) => {
+            Some(text)
+                if !markdown::strip_code(text)
+                    .lines()
+                    .take(MAX_LINE)
+                    .any(is_last_verified) =>
+            {
                 problems.push(Problem::new(
                     &path,
                     0,
@@ -72,16 +77,22 @@ fn is_last_verified(line: &str) -> bool {
         && (after_sha.is_empty() || after_sha.starts_with(' '))
 }
 
+/// `YYYY-MM-DD` with a month of 01–12 and a day of 01–31.
 fn is_date(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    bytes.len() == 10
-        && bytes.iter().enumerate().all(|(i, b)| {
-            if i == 4 || i == 7 {
-                *b == b'-'
-            } else {
-                b.is_ascii_digit()
-            }
-        })
+    let mut parts = text.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let number = |part: &str, len: usize| {
+        (part.len() == len && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    };
+    number(year, 4).is_some()
+        && number(month, 2).is_some_and(|m| (1..=12).contains(&m))
+        && number(day, 2).is_some_and(|d| (1..=31).contains(&d))
 }
 
 #[cfg(test)]
@@ -128,6 +139,29 @@ mod tests {
             messages("Last verified: 2026-10-28 @ befd26\n", GOOD).len(),
             1
         );
+    }
+
+    #[test]
+    fn impossible_date_fails() {
+        assert_eq!(
+            messages(
+                "Last verified: 2026-13-45 @ befd268
+",
+                GOOD
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn line_inside_a_code_fence_does_not_count() {
+        let fenced = "# A
+```
+Last verified: 2026-10-28 @ befd268
+```
+";
+        assert_eq!(messages(fenced, GOOD).len(), 1);
     }
 
     #[test]

@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn forbid_attribute_must_be_on_its_own_line() {
+    fn forbid_attribute_mentioned_in_prose_does_not_count() {
         assert!(has_forbid_unsafe("//! Docs\n\n#![forbid(unsafe_code)]\n"));
         assert!(!has_forbid_unsafe(
             "//! Mentions #![forbid(unsafe_code)] in prose\n"

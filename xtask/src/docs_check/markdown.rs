@@ -75,7 +75,12 @@ pub fn anchors(text: &str) -> HashSet<String> {
         }
         let mut rest = line;
         while let Some(at) = rest.find("id=\"") {
+            // `data-id="..."` and the like are not anchors.
+            let is_attribute = rest[..at].ends_with([' ', '<', '\t']);
             rest = &rest[at + 4..];
+            if !is_attribute {
+                continue;
+            }
             if let Some(end) = rest.find('"') {
                 seen.insert(rest[..end].to_owned());
                 rest = &rest[end..];
@@ -113,12 +118,29 @@ fn heading_text(line: &str) -> Option<&str> {
 /// GitHub's heading slug: lowercase, drop everything but letters, digits, `-`, `_` and spaces,
 /// then turn spaces into hyphens.
 pub fn slug(heading: &str) -> String {
-    heading
+    link_text_only(heading)
         .to_lowercase()
         .chars()
         .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' '))
         .map(|c| if c == ' ' { '-' } else { c })
         .collect()
+}
+
+/// Replaces each `[text](target)` with `text`, as GitHub does before slugging a heading.
+fn link_text_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some((label, tail)) = rest[open + 1..].split_once("](") else {
+            break;
+        };
+        let Some(close) = tail.find(')') else { break };
+        out.push_str(&rest[..open]);
+        out.push_str(label);
+        rest = &tail[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// An inline link target found in a document.
@@ -182,6 +204,7 @@ mod tests {
             "data-loss-rules-hard-requirements"
         );
         assert_eq!(slug("§7 `annulus-ui`"), "7-annulus-ui");
+        assert_eq!(slug("[Foo](x.md) bar"), "foo-bar");
     }
 
     #[test]
@@ -200,6 +223,7 @@ mod tests {
     #[test]
     fn explicit_id_attributes_are_anchors() {
         assert!(anchors("<a id=\"custom\"></a>\n").contains("custom"));
+        assert!(!anchors("<div data-id=\"bogus\"></div>\n").contains("bogus"));
     }
 
     #[test]
