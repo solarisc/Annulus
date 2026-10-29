@@ -328,6 +328,8 @@ impl Found {
             env: Vec::new(),
             startup: String::new(),
             term: String::new(),
+            os: String::new(),
+            os_by_hand: false,
         }
     }
 
@@ -498,6 +500,8 @@ mod tests {
             env: Vec::new(),
             startup: String::new(),
             term: String::new(),
+            os: String::new(),
+            os_by_hand: false,
         }
     }
 }

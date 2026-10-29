@@ -41,6 +41,8 @@ enum Act {
     /// Press the primary button on the zone with this name and keep it down (a drag starts;
     /// a later `Hover` moves it).
     Hold(&'static str),
+    /// Right-click it (a context menu).
+    RightClick(&'static str),
 }
 
 struct Scene {
@@ -282,22 +284,42 @@ const SCENES: &[Scene] = &[
         acts: &[Act::Click("More ways to add hosts")],
     },
     Scene {
-        name: "hosts-more-menu",
+        name: "hosts-context-menu",
         width: 1100,
         height: 720,
         scale: 1.0,
         populated: true,
         setup: nothing,
-        acts: &[Act::Hover("prod-db"), Act::Click("More actions")],
+        acts: &[Act::Hover("prod-db"), Act::RightClick("prod-db")],
     },
     Scene {
-        name: "hosts-list-more-menu",
+        name: "hosts-list-context-menu",
         width: 1100,
         height: 720,
         scale: 1.0,
         populated: true,
         setup: list_mode,
-        acts: &[Act::Hover("grafana"), Act::Click("More actions")],
+        acts: &[Act::Hover("grafana"), Act::RightClick("grafana")],
+    },
+    // On a narrow card the hover buttons squeezed the name and address.
+    // Now only Edit shows, in room kept for it, and the tags stay.
+    Scene {
+        name: "hosts-card-hover-narrow",
+        width: 760,
+        height: 560,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Hover("cache-eu-1")],
+    },
+    Scene {
+        name: "hosts-card-selected",
+        width: 1100,
+        height: 720,
+        scale: 1.25,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Click("nas")],
     },
     // A group opened: the breadcrumb, and Connect all for the hosts directly in it.
     Scene {
@@ -999,6 +1021,11 @@ fn render(
                 events.push(Event::PointerMoved(zone_center(&output.zones, name)));
                 events.push(Event::PointerDown(Button::Primary));
             }
+            Some(Act::RightClick(name)) => {
+                events.push(Event::PointerMoved(zone_center(&output.zones, name)));
+                events.push(Event::PointerDown(Button::Secondary));
+                events.push(Event::PointerUp(Button::Secondary));
+            }
             None => break,
         }
     }
@@ -1413,17 +1440,24 @@ fn click_on(output: &FrameOutput, name: &str) -> Vec<Event> {
     ]
 }
 
+/// A right click on the zone named `name` in the last frame.
+fn right_click_on(output: &FrameOutput, name: &str) -> Vec<Event> {
+    vec![
+        Event::PointerMoved(zone_center(&output.zones, name)),
+        Event::PointerDown(Button::Secondary),
+        Event::PointerUp(Button::Secondary),
+    ]
+}
+
 #[test]
-fn a_hosts_more_menu_copies_its_ssh_command_and_duplicates_it() {
+fn a_hosts_context_menu_copies_its_ssh_command_and_duplicates_it() {
     let mut app = NativeApp::new(Some(fixture_vault("more-menu", true)));
     let mut state = UiState::default();
     let mut output = step(&mut app, &mut state, &[], 0.0);
-    // Selecting the card shows its buttons, More among them.
-    output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 1.0);
     output = step(
         &mut app,
         &mut state,
-        &click_on(&output, "More actions"),
+        &right_click_on(&output, "prod-db"),
         2.0,
     );
     output = step(
@@ -1440,7 +1474,7 @@ fn a_hosts_more_menu_copies_its_ssh_command_and_duplicates_it() {
     output = step(
         &mut app,
         &mut state,
-        &click_on(&output, "More actions"),
+        &right_click_on(&output, "prod-db"),
         4.0,
     );
     step(&mut app, &mut state, &click_on(&output, "Duplicate"), 5.0);
@@ -1463,7 +1497,66 @@ fn a_hosts_more_menu_copies_its_ssh_command_and_duplicates_it() {
 }
 
 #[test]
-fn a_hovered_cards_more_menu_stays_open_after_the_hover_fades() {
+fn a_hovered_card_shows_only_edit_and_its_other_actions_are_in_its_context_menu() {
+    let mut app = NativeApp::new(Some(fixture_vault("card-hover", true)));
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let card = zone_center(&output.zones, "prod-db");
+    output = step(&mut app, &mut state, &[Event::PointerMoved(card)], 1.0);
+    let card_rect = output
+        .zones
+        .iter()
+        .find(|zone| zone.label == "prod-db")
+        .unwrap()
+        .rect;
+    let inside: Vec<&str> = output
+        .zones
+        .iter()
+        .filter(|zone| zone.label != "prod-db" && card_rect.overlaps(&zone.rect))
+        .map(|zone| zone.label.as_str())
+        .collect();
+    assert_eq!(inside, ["Edit"], "the card's own buttons");
+    // Shift+F10 on the focused card opens the same menu as a right click.
+    state.set_focus(
+        output
+            .zones
+            .iter()
+            .find(|zone| zone.label == "prod-db")
+            .map(|zone| zone.id),
+        true,
+    );
+    output = step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::F(10), Modifiers::SHIFT)],
+        2.0,
+    );
+    let menu: Vec<&str> = output
+        .zones
+        .iter()
+        .filter(|zone| zone.role == Role::MenuItem)
+        .map(|zone| zone.label.as_str())
+        .collect();
+    assert_eq!(
+        &menu[..5],
+        [
+            "Connect",
+            "Open SFTP",
+            "Edit",
+            "Copy ssh command",
+            "Duplicate"
+        ]
+    );
+    output = step(&mut app, &mut state, &click_on(&output, "Edit"), 3.0);
+    assert!(
+        app.hosts.editor.is_some(),
+        "Edit from the menu opens the editor"
+    );
+    assert!(output.zones.iter().any(|zone| zone.label == "Label"));
+}
+
+#[test]
+fn a_hovered_cards_context_menu_stays_open_after_the_hover_fades() {
     let mut app = NativeApp::new(Some(fixture_vault("more-stays", true)));
     let mut state = UiState::default();
     let mut output = step(&mut app, &mut state, &[], 0.0);
@@ -1472,7 +1565,7 @@ fn a_hovered_cards_more_menu_stays_open_after_the_hover_fades() {
     output = step(
         &mut app,
         &mut state,
-        &click_on(&output, "More actions"),
+        &right_click_on(&output, "prod-db"),
         2.0,
     );
     // The menu's backdrop now covers the card; well past any fade, the menu is still there.

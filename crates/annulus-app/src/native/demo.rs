@@ -119,6 +119,28 @@ pub fn fixture_vault(name: &str, populated: bool) -> Vault {
         host.group = group.map(|at| group_uids[at].clone());
         vault.upsert_host(host).expect("a temporary vault");
     }
+    // What their servers said they run (F-HOST-009); the others show their initials.
+    for (label, os) in [
+        ("prod-db", "debian"),
+        ("web-1", "ubuntu"),
+        ("cache-eu-1", "ubuntu"),
+        ("nas", "freebsd"),
+        ("pi-hole", "raspbian"),
+        ("api-1", "alpine"),
+        ("api-2", "alpine"),
+        ("staging-web", "ubuntu"),
+        ("router", "router"),
+    ] {
+        if let Some(mut host) = vault
+            .hosts()
+            .iter()
+            .find(|host| host.label == label)
+            .cloned()
+        {
+            os.clone_into(&mut host.os);
+            vault.upsert_host(host).expect("a temporary vault");
+        }
+    }
     let first = vault.hosts()[0].id;
     for (label, script) in [
         ("Restart nginx", "sudo systemctl restart nginx"),

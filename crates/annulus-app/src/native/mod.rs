@@ -9,6 +9,7 @@ pub mod demo;
 pub mod hosts;
 mod live;
 pub mod lock;
+mod os;
 mod pages;
 mod palette;
 mod panes;
@@ -716,6 +717,32 @@ impl NativeApp {
         }
     }
 
+    /// Saves on each host what its server said it runs, for the host's icon (F-HOST-009), once
+    /// it differs from what the host shows and was not picked by hand.
+    fn learn_server_os(&mut self) {
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
+        for tab in &self.tabs {
+            let (Some(OpenTab::Host(id)), Some(TermView::Live(panes))) =
+                (&tab.origin, &tab.terminal)
+            else {
+                continue;
+            };
+            let Some(server) = panes.server() else {
+                continue;
+            };
+            let Some(host) = vault.hosts().iter().find(|host| host.id == *id) else {
+                continue;
+            };
+            if let Some(os) = os::learned(host, server) {
+                let mut host = host.clone();
+                os.clone_into(&mut host.os);
+                let _ = vault.upsert_host(host);
+            }
+        }
+    }
+
     /// The sync badge for the vault's account state.
     fn sync_badge(&self) -> SyncBadge {
         let Some(state) = self.vault.as_ref().map(Vault::sync_state) else {
@@ -940,6 +967,7 @@ impl NativeApp {
                 tab.status = panes.status();
             }
         }
+        self.learn_server_os();
         for (title, program, origin) in std::mem::take(&mut self.opens) {
             self.push_terminal(
                 title,

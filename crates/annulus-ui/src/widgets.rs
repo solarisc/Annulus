@@ -785,6 +785,53 @@ impl Ui<'_> {
         self.popup_toggle(id, &response, rect, items, None, width)
     }
 
+    /// The context menu of zone `owner` (a card, a row) whose `response` this frame is: it opens
+    /// at the pointer on a right click, or under the zone on Shift+F10 while the zone has focus.
+    /// Returns the index chosen this frame.
+    pub fn context_menu(
+        &mut self,
+        owner: Id,
+        response: &Response,
+        items: &[String],
+    ) -> Option<usize> {
+        let chosen =
+            (0..items.len()).find(|index| self.state.was_clicked(owner.with(("item", *index))));
+        if chosen.is_some() {
+            self.state.popup = None;
+            return chosen;
+        }
+        let keyboard = response.focused && self.key(Key::F(10), Modifiers::SHIFT);
+        let anchor = if response.secondary_clicked {
+            // Already on screen: the pointer is never inside a layer.
+            self.pointer().map(|at| Rect::new(at.x, at.y, 1.0, 1.0))
+        } else if keyboard {
+            let below = Rect::new(
+                response.rect.x + space::M,
+                response.rect.b() - 6.0,
+                1.0,
+                1.0,
+            );
+            Some(self.gfx.to_screen(below))
+        } else {
+            None
+        };
+        if let Some(anchor) = anchor {
+            let width = items
+                .iter()
+                .map(|item| self.gfx.measure(item, BODY).width + 2.0 * space::L + 16.0)
+                .fold(200.0, f32::max);
+            self.state.popup = Some(Popup {
+                owner,
+                anchor,
+                items: items.to_vec(),
+                selected: None,
+                width,
+                shown: false,
+            });
+        }
+        None
+    }
+
     fn popup_toggle(
         &mut self,
         id: Id,

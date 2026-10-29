@@ -58,6 +58,8 @@ pub struct LiveTerminal {
     drawn: Arc<AtomicBool>,
     /// A paste of several lines waiting for a yes, since each line would run (F-TERM-006).
     held_paste: Option<String>,
+    /// The SSH server's identification line, once its shell opened (F-HOST-009).
+    pub server: Option<String>,
 }
 
 /// The find bar of a terminal (Ctrl+Shift+F).
@@ -91,6 +93,7 @@ impl LiveTerminal {
             cell: None,
             drawn: Arc::new(AtomicBool::new(false)),
             held_paste: None,
+            server: None,
         }
     }
 
@@ -492,6 +495,7 @@ impl LiveTerminal {
                     self.dropped(now, Some(message));
                 }
                 SessionEvent::Failed(message) => self.failed = Some(message),
+                SessionEvent::Server(id) => self.server = Some(id),
             }
         }
     }

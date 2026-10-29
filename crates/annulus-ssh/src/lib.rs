@@ -9,6 +9,7 @@
 pub mod forward;
 pub mod keys;
 pub mod known;
+pub mod os;
 pub mod proxy;
 
 use std::path::{Path, PathBuf};
@@ -225,10 +226,30 @@ struct Checker {
     unsaved: Arc<std::sync::Mutex<Option<String>>>,
     /// Where connections to each remote-forwarded port go.
     remote: forward::RemoteMap,
+    /// The server's identification line ("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13"), once a
+    /// channel opened.
+    server_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl client::Handler for Checker {
     type Error = russh::Error;
+
+    /// A channel we asked for opened: the session now knows the server's identification line,
+    /// which names the OS on some servers (F-HOST-009, read without running anything there).
+    fn channel_open_confirmation(
+        &mut self,
+        _id: russh::ChannelId,
+        _max_packet_size: u32,
+        _window_size: u32,
+        session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        if let Ok(mut id) = self.server_id.lock()
+            && id.is_none()
+        {
+            *id = Some(String::from_utf8_lossy(session.remote_sshid()).into_owned());
+        }
+        std::future::ready(Ok(()))
+    }
 
     /// A connection arrived at a port the server listens on for a remote rule: carry it to
     /// the rule's destination. Ports no rule asked for are refused (by dropping `reply`).
@@ -411,6 +432,7 @@ fn known_hosts_name(host: &str, port: u16) -> String {
 pub struct Connection {
     handle: Handle<Checker>,
     remote: forward::RemoteMap,
+    server_id: Arc<std::sync::Mutex<Option<String>>>,
     /// The jump host this connection runs through, kept open while this one lives.
     _via: Option<Arc<Connection>>,
 }
@@ -534,13 +556,19 @@ pub(crate) fn host_key_algorithms(host: &str, port: u16, known_hosts: &Path) -> 
     if wanted.is_empty() { safe } else { wanted }
 }
 
+/// What the handler shares with the connection it serves.
+struct Shared {
+    remote: forward::RemoteMap,
+    server_id: Arc<std::sync::Mutex<Option<String>>>,
+}
+
 /// Opens the SSH transport to `target` (directly, or through `via`) and checks its host key.
 async fn handshake(
     target: &Target,
     known_hosts: &Path,
     prompt: Arc<dyn Prompt>,
     route: Route<'_>,
-) -> Result<(Handle<Checker>, forward::RemoteMap), SshError> {
+) -> Result<(Handle<Checker>, Shared), SshError> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
         preferred: russh::Preferred {
@@ -556,6 +584,7 @@ async fn handshake(
     let changed = Arc::new(std::sync::Mutex::new(None));
     let unsaved = Arc::new(std::sync::Mutex::new(None));
     let remote = forward::RemoteMap::default();
+    let server_id = Arc::new(std::sync::Mutex::new(None));
     let (asking, asked) = tokio::sync::watch::channel(false);
     let checker = Checker {
         host: target.host.clone(),
@@ -566,6 +595,7 @@ async fn handshake(
         changed: changed.clone(),
         unsaved: unsaved.clone(),
         remote: remote.clone(),
+        server_id: server_id.clone(),
     };
     let name = known_hosts_name(&target.host, target.port);
     let connecting = async {
@@ -607,7 +637,7 @@ async fn handshake(
     };
     let connected = connect_in_time(&name, asked, connecting).await??;
     match connected {
-        Ok(handle) => Ok((handle, remote)),
+        Ok(handle) => Ok((handle, Shared { remote, server_id })),
         Err(error) => Err(refused(error, target, known_hosts, &unsaved, &changed)),
     }
 }
@@ -657,7 +687,7 @@ fn refused(
 /// Logs in on an open transport: keys first, then up to three passwords.
 async fn log_in(
     mut handle: Handle<Checker>,
-    remote: forward::RemoteMap,
+    Shared { remote, server_id }: Shared,
     via: Option<Arc<Connection>>,
     target: &Target,
     key_dir: Option<&Path>,
@@ -684,6 +714,7 @@ async fn log_in(
                 return Ok(Connection {
                     handle,
                     remote,
+                    server_id,
                     _via: via,
                 });
             }
@@ -713,6 +744,7 @@ async fn log_in(
                 return Ok(Connection {
                     handle,
                     remote,
+                    server_id,
                     _via: via,
                 });
             }
@@ -729,6 +761,12 @@ async fn log_in(
 }
 
 impl Connection {
+    /// The server's identification line, once a channel has opened on this connection.
+    #[must_use]
+    pub fn server_id(&self) -> Option<String> {
+        self.server_id.lock().ok().and_then(|id| id.clone())
+    }
+
     /// Whether the connection has ended (the server closed it, or the network dropped it
     /// and keepalives failed).
     #[must_use]

@@ -1,14 +1,13 @@
 //! The Hosts screen (UI-SPEC §2): a header, a search box that also quick-connects, groups and
 //! host cards (or a list), an empty state, and the host editor in a side panel.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
-
-use annulus_config::tokens::{TILES, space};
+use annulus_config::tokens::space;
 use annulus_session::Target;
 use annulus_ui::gfx::Canvas as _;
-use annulus_ui::gfx::{Align, Color, Point, Rect};
+use annulus_ui::gfx::{Align, Font, Rect, Weight};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, TITLE, button_width,
 };
@@ -16,6 +15,7 @@ use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
 use zeroize::Zeroizing;
 
+use super::os;
 use crate::{connect, groups_view};
 
 /// Width of the editor panel.
@@ -108,6 +108,8 @@ pub struct Editor {
     startup: String,
     term: String,
     reconnect: bool,
+    /// The icon picked by hand (an OS key), or `None` to show what the server says.
+    icon: Option<String>,
     /// The Advanced section is open.
     pub advanced: bool,
     problem: Option<String>,
@@ -138,6 +140,7 @@ impl Editor {
             startup: host.startup.clone(),
             term: host.term.clone(),
             reconnect: !host.no_reconnect,
+            icon: host.os_by_hand.then(|| host.os.clone()),
             advanced: false,
             problem: None,
             content_h: 0.0,
@@ -177,6 +180,18 @@ impl Editor {
         self.startup.trim().clone_into(&mut host.startup);
         self.term.trim().clone_into(&mut host.term);
         host.no_reconnect = !self.reconnect;
+        match &self.icon {
+            Some(os) => {
+                os.clone_into(&mut host.os);
+                host.os_by_hand = true;
+            }
+            // Back to automatic: the next connection says what it is.
+            None if self.host.os_by_hand => {
+                host.os.clear();
+                host.os_by_hand = false;
+            }
+            None => {}
+        }
         Ok(host)
     }
 
@@ -211,7 +226,14 @@ impl Editor {
             env,
             startup,
             term,
+            os,
+            os_by_hand,
         } = edited;
+        // The icon goes as one: what the server said, or what was picked.
+        if (os.as_str(), os_by_hand) != (before.os.as_str(), before.os_by_hand) {
+            host.os = os;
+            host.os_by_hand = os_by_hand;
+        }
         if label != before.label {
             host.label = label;
         }
@@ -277,6 +299,7 @@ struct Card {
     label: String,
     detail: String,
     tags: Vec<String>,
+    os: Option<&'static os::Os>,
 }
 
 /// What the screen shows of one group.
@@ -463,6 +486,9 @@ impl HostsView {
         let Some(host) = vault.hosts().iter().find(|host| host.id == id).cloned() else {
             return;
         };
+        let Some(choice) = choice.checked_sub(MENU_REST) else {
+            return;
+        };
         self.notice = Some(match choice {
             0 => {
                 ui.copy(connect::ssh_command(vault, &host));
@@ -527,6 +553,7 @@ impl HostsView {
                     label: host.label.clone(),
                     detail: resolved.target(),
                     tags: host.tags.clone(),
+                    os: os::of(host),
                 }
             })
             .collect();
@@ -960,13 +987,16 @@ impl HostsView {
             Mode::Grid => {
                 for (index, card) in cards.iter().enumerate() {
                     let cell = grid_cell(rect.x, y, rect.w - 8.0, columns, index, CARD_H);
-                    match host_card(ui, cell, card, self.selected == Some(card.id), menu) {
-                        CardEvent::Select => self.selected = Some(card.id),
-                        CardEvent::Connect => action = Some(HostsAction::Connect(card.id)),
-                        CardEvent::Edit => self.edit_host(vault, card.id),
-                        CardEvent::Files => action = Some(HostsAction::Sftp(card.id)),
-                        CardEvent::More(choice) => self.picked = Some((card.id, choice)),
-                        CardEvent::None => {}
+                    // Cards fill in one after another as the screen appears.
+                    let shown = ui.entrance(
+                        Id::new(("host", card.id)).with("enter"),
+                        Motion::SLOW.staggered(index),
+                    );
+                    ui.push_layer(Layer::fade(shown).shifted(0.0, 8.0 * (1.0 - shown)));
+                    let event = host_card(ui, cell, card, self.selected == Some(card.id), menu);
+                    ui.pop_layer();
+                    if let Some(found) = self.card_event(vault, card.id, event) {
+                        action = Some(found);
                     }
                 }
             }
@@ -975,13 +1005,9 @@ impl HostsView {
                 y += ROW_H - 12.0;
                 for card in cards {
                     let row = Rect::new(rect.x, y, rect.w - 8.0, ROW_H);
-                    match host_row(ui, row, card, self.selected == Some(card.id), menu) {
-                        CardEvent::Select => self.selected = Some(card.id),
-                        CardEvent::Connect => action = Some(HostsAction::Connect(card.id)),
-                        CardEvent::Edit => self.edit_host(vault, card.id),
-                        CardEvent::Files => action = Some(HostsAction::Sftp(card.id)),
-                        CardEvent::More(choice) => self.picked = Some((card.id, choice)),
-                        CardEvent::None => {}
+                    let event = host_row(ui, row, card, self.selected == Some(card.id), menu);
+                    if let Some(found) = self.card_event(vault, card.id, event) {
+                        action = Some(found);
                     }
                     y += ROW_H + GAP;
                 }
@@ -989,6 +1015,21 @@ impl HostsView {
         }
         ui.pop_clip();
         action
+    }
+
+    /// Acts on what a host's card or row did; returns a tab to open.
+    fn card_event(&mut self, vault: &Vault, id: u64, event: CardEvent) -> Option<HostsAction> {
+        match event {
+            CardEvent::Select => self.selected = Some(id),
+            CardEvent::Connect | CardEvent::More(MENU_CONNECT) => {
+                return Some(HostsAction::Connect(id));
+            }
+            CardEvent::More(MENU_SFTP) => return Some(HostsAction::Sftp(id)),
+            CardEvent::Edit | CardEvent::More(MENU_EDIT) => self.edit_host(vault, id),
+            CardEvent::More(choice) => self.picked = Some((id, choice)),
+            CardEvent::None => {}
+        }
+        None
     }
 
     #[allow(clippy::too_many_lines)] // One panel, top to bottom: header, form, footer.
@@ -1128,6 +1169,21 @@ impl HostsView {
             "postgres, prod",
             None,
         );
+        // The card's icon: what the server said it runs, or one picked here (F-HOST-009).
+        let detected = os::of(&editor.host).filter(|_| !editor.host.os_by_hand);
+        let mut icon_items = vec![detected.map_or_else(
+            || "Automatic, from the server".to_owned(),
+            |os| format!("Automatic ({})", os.name),
+        )];
+        icon_items.extend(os::ALL.iter().map(|os| os.name.to_owned()));
+        let icon_at = editor
+            .icon
+            .as_deref()
+            .and_then(|key| os::ALL.iter().position(|os| os.key == key))
+            .map_or(0, |at| at + 1);
+        if let Some(chosen) = form.select(ui, "editor.icon", "Icon", &icon_items, Some(icon_at)) {
+            editor.icon = chosen.checked_sub(1).map(|at| os::ALL[at].key.to_owned());
+        }
 
         form.gap(space::S);
         form.section(ui, "Credentials");
@@ -1982,20 +2038,32 @@ fn grid_cell(x: f32, y: f32, width: f32, columns: usize, index: usize, height: f
     )
 }
 
+#[derive(Clone, Copy)]
 enum CardEvent {
     None,
     Select,
     Connect,
-    Files,
     Edit,
-    /// An item of the host's More menu.
+    /// An item of the host's context menu.
     More(usize),
 }
 
-/// A host's More menu: copy its ssh command, duplicate it, or move it to the top level or a
-/// group of `moves` (`(uid, path)`).
+/// The first items of a host's context menu, which the listing handles itself; the rest go to
+/// [`HostsView::host_menu_action`].
+const MENU_CONNECT: usize = 0;
+const MENU_SFTP: usize = 1;
+const MENU_EDIT: usize = 2;
+/// Where the items [`HostsView::host_menu_action`] handles start.
+const MENU_REST: usize = 3;
+
+/// A host's context menu (right click, or Shift+F10): connect, open its files, edit, copy its
+/// ssh command, duplicate it, or move it to the top level or a group of `moves`
+/// (`(uid, path)`).
 fn host_menu(moves: &[(String, String)]) -> Vec<String> {
     let mut items = vec![
+        "Connect".to_owned(),
+        "Open SFTP".to_owned(),
+        "Edit".to_owned(),
         "Copy ssh command".to_owned(),
         "Duplicate".to_owned(),
         "Move to the top level".to_owned(),
@@ -2054,55 +2122,19 @@ fn hint(value: &str, group: Option<&String>, example: &str) -> String {
     }
 }
 
-/// The More button of a host card or row and its menu; returns the item chosen.
-fn more_menu(ui: &mut Ui<'_>, id: Id, rect: Rect, menu: &[String]) -> Option<usize> {
-    let chosen = ui.menu_button(
-        id.with("more"),
-        rect,
-        "",
-        Some(icons::MORE),
-        Kind::Ghost,
-        menu,
-    );
-    ui.set_name(id.with("more"), "More actions");
-    ui.tooltip(id.with("more"), rect, "More actions");
-    chosen
-}
-
-/// A host's tile color, stable for its label.
-fn tile_color(label: &str) -> Color {
-    let mut hasher = DefaultHasher::new();
-    label.hash(&mut hasher);
-    #[allow(clippy::cast_possible_truncation)] // Only the low bits pick a color.
-    let index = (hasher.finish() % TILES.len() as u64) as usize;
-    TILES[index].into()
-}
-
-/// Up to two letters for a host's tile: the first letters of its first two words, or its
-/// first two letters.
-fn initials(label: &str) -> String {
-    let words: Vec<&str> = label
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let letters: String = match words.as_slice() {
-        [] => "?".into(),
-        [one] => one.chars().take(2).collect(),
-        [first, second, ..] => first
-            .chars()
-            .take(1)
-            .chain(second.chars().take(1))
-            .collect(),
-    };
-    letters.to_uppercase()
-}
-
-fn host_tile(ui: &mut Ui<'_>, rect: Rect, label: &str) {
-    let color = tile_color(label);
-    ui.gfx.fill_rect(rect, rect.w * 0.26, color);
-    let font = if rect.w >= 36.0 { BODY_STRONG } else { SMALL };
-    ui.gfx
-        .text(rect, &initials(label), font, Color::WHITE, Align::Center);
+/// The Edit button of a host card or row, faded in by `shown` (hovered, selected or focused);
+/// the rest of what can be done with a host is in its context menu. Returns whether it was
+/// clicked.
+fn edit_button(ui: &mut Ui<'_>, id: Id, rect: Rect, shown: f32) -> bool {
+    if shown <= 0.0 {
+        return false;
+    }
+    ui.push_layer(Layer::fade(shown));
+    let clicked = ui
+        .icon_button(id.with("edit"), rect, icons::EDIT, "Edit", false)
+        .clicked;
+    ui.pop_layer();
+    clicked
 }
 
 fn host_card(
@@ -2115,28 +2147,39 @@ fn host_card(
     let id = Id::new(("host", card.id));
     let response = ui.zone(id, rect, Role::ListItem, &card.label);
     let t = ui.theme;
-    let hovered = ui.hover_within(rect);
+    // The card stays lit while its context menu is open over it.
+    let hovered = ui.hover_within(rect) || ui.menu_open(id);
     let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
-    if hover > 0.0 {
+    let press = ui.ease(id.with("press"), if response.pressed { 1.0 } else { 0.0 });
+    let chosen = ui.animate(
+        id.with("selected"),
+        if selected { 1.0 } else { 0.0 },
+        Motion::BASE,
+    );
+    // A hovered card lifts a little on a soft shadow; pressing sets it down again.
+    let lift = hover * (1.0 - press);
+    let shape = rect.offset(0.0, -1.5 * lift);
+    if lift > 0.0 {
         ui.gfx
-            .shadow(rect, 10.0, 12.0, 4.0, t.shadow.alpha(hover * 0.6));
+            .shadow(shape, 12.0, 18.0, 6.0, t.shadow.alpha(lift * 0.5));
     }
-    ui.gfx
-        .fill_rect(rect, 10.0, t.surface.mix(t.hover, hover * 0.35));
-    let border = if selected {
-        t.accent
-    } else {
-        t.line.mix(t.line_strong, hover)
-    };
-    ui.gfx
-        .stroke_rect(rect, 10.0, if selected { 1.5 } else { 1.0 }, border);
+    let fill = t
+        .surface
+        .mix(t.hover, hover * 0.3)
+        .mix(t.selected, chosen * 0.6);
+    ui.gfx.fill_rect(shape, 12.0, fill);
+    let border = t.line.mix(t.line_strong, hover).mix(t.accent, chosen);
+    ui.gfx.stroke_rect(shape, 12.0, 1.0 + 0.5 * chosen, border);
     if response.focus_ring {
-        ui.focus_ring(rect, 10.0);
+        ui.focus_ring(shape, 12.0);
     }
-    let mut inner = rect.inset(space::M + 2.0, 0.0);
+    let mut inner = shape.inset(space::M + 2.0, 0.0);
     let tile = inner.take_left(40.0).centered(40.0, 40.0);
-    host_tile(ui, tile, &card.label);
+    os::tile(ui, tile, &card.label, card.os);
     inner.take_left(space::M);
+    // Kept for the Edit button whether it shows or not, so the text never moves under it.
+    let edit = inner.take_right(28.0).centered(28.0, 28.0);
+    inner.take_right(space::S);
     let mut event = if response.double_clicked {
         CardEvent::Connect
     } else if response.clicked {
@@ -2144,48 +2187,24 @@ fn host_card(
     } else {
         CardEvent::None
     };
-    // The buttons stay while the More menu is open: its backdrop covers the card.
-    if hovered || hover > 0.0 || selected || ui.menu_open(id.with("more")) {
-        let actions = inner.take_right(132.0);
-        let mut slots = actions;
-        let more = slots.take_right(30.0).centered(30.0, 30.0);
-        slots.take_right(4.0);
-        let connect = slots.take_right(30.0).centered(30.0, 30.0);
-        slots.take_right(4.0);
-        let files = slots.take_right(30.0).centered(30.0, 30.0);
-        slots.take_right(4.0);
-        let edit = slots.take_right(30.0).centered(30.0, 30.0);
-        if ui
-            .icon_button(id.with("edit"), edit, icons::EDIT, "Edit", false)
-            .clicked
-        {
-            event = CardEvent::Edit;
-        }
-        if ui
-            .icon_button(id.with("files"), files, icons::FOLDER, "Open SFTP", false)
-            .clicked
-        {
-            event = CardEvent::Files;
-        }
-        if ui
-            .icon_button(id.with("connect"), connect, icons::PLAY, "Connect", false)
-            .clicked
-        {
-            event = CardEvent::Connect;
-        }
-        if let Some(choice) = more_menu(ui, id, more, menu) {
-            event = CardEvent::More(choice);
-        }
-    } else if !card.tags.is_empty() {
-        let width = tags_width(ui, &card.tags, inner.w * 0.4);
-        let tags = inner.take_right(width);
-        draw_tags(ui, tags, &card.tags);
-        inner.take_right(space::S);
+    let focused = if response.focused { 1.0 } else { 0.0 };
+    if edit_button(ui, id, edit, hover.max(chosen).max(focused)) {
+        event = CardEvent::Edit;
     }
-    let name_line = Rect::new(inner.x, rect.y + 16.0, inner.w, 20.0);
-    let detail = Rect::new(inner.x, rect.y + 37.0, inner.w, 18.0);
+    if let Some(choice) = ui.context_menu(id, &response, menu) {
+        event = CardEvent::More(choice);
+    }
+    let name_line = Rect::new(inner.x, shape.y + 15.0, inner.w, 20.0);
+    let mut detail = Rect::new(inner.x, shape.y + 37.0, inner.w, 20.0);
     ui.gfx
         .text(name_line, &card.label, BODY_STRONG, t.text, Align::Start);
+    // The tags share the second line with the address, which keeps at least half of it.
+    let (count, width) = tags_fit(ui, &card.tags, detail.w * 0.5);
+    if width > 0.0 {
+        let tags = detail.take_right(width);
+        draw_tags(ui, tags, &card.tags, count);
+        detail.take_right(space::S);
+    }
     ui.gfx
         .text(detail, &card.detail, SMALL, t.text2, Align::Start);
     if response.hovered {
@@ -2194,29 +2213,75 @@ fn host_card(
     event
 }
 
-/// The width the first tags take, up to `max`.
-fn tags_width(ui: &mut Ui<'_>, tags: &[String], max: f32) -> f32 {
+/// Tags on cards and rows.
+const TAG: Font = Font::ui(11.0).weight(Weight::Medium);
+/// Height of a tag chip.
+const TAG_H: f32 = 18.0;
+/// Space between tag chips.
+const TAG_GAP: f32 = 4.0;
+
+fn tag_width(ui: &mut Ui<'_>, label: &str) -> f32 {
+    ui.gfx.measure(label, TAG).width + 14.0
+}
+
+/// How many of `tags` fit in `max` with a "+n" chip for the rest, and the width they take;
+/// nothing when not even that fits.
+fn tags_fit(ui: &mut Ui<'_>, tags: &[String], max: f32) -> (usize, f32) {
     let mut width = 0.0;
-    for tag in tags.iter().take(2) {
-        let chip = ui.gfx.measure(tag, SMALL).width + 2.0 * space::S + space::XS;
-        if width + chip > max {
+    let mut count = 0;
+    for (index, tag) in tags.iter().enumerate() {
+        let gap = if index > 0 { TAG_GAP } else { 0.0 };
+        let chip = tag_width(ui, tag) + gap;
+        let rest = tags.len() - index - 1;
+        let more = if rest > 0 {
+            tag_width(ui, &format!("+{rest}")) + TAG_GAP
+        } else {
+            0.0
+        };
+        if width + chip + more > max {
             break;
         }
         width += chip;
+        count += 1;
     }
-    width
+    let hidden = tags.len() - count;
+    if hidden > 0 {
+        let gap = if count > 0 { TAG_GAP } else { 0.0 };
+        let more = tag_width(ui, &format!("+{hidden}")) + gap;
+        if width + more > max {
+            return (0, 0.0);
+        }
+        width += more;
+    }
+    (count, width)
 }
 
-fn draw_tags(ui: &mut Ui<'_>, rect: Rect, tags: &[String]) {
+/// Draws the first `count` of `tags` as colored chips in `rect`, then a "+n" chip for the
+/// rest.
+fn draw_tags(ui: &mut Ui<'_>, rect: Rect, tags: &[String], count: usize) {
     let t = ui.theme;
     let mut x = rect.x;
-    for tag in tags.iter().take(2) {
-        let width = ui.gfx.measure(tag, SMALL).width + 2.0 * space::S;
-        if x + width > rect.r() + 0.5 {
-            break;
-        }
-        ui.chip(Point::new(x, rect.center().y - 10.0), tag, t.text2);
-        x += width + space::XS;
+    let y = rect.center().y - TAG_H / 2.0;
+    let hidden = tags.len() - count.min(tags.len());
+    let more = format!("+{hidden}");
+    let chips = tags
+        .iter()
+        .take(count)
+        .map(|tag| (tag.as_str(), Some(os::hue(tag))))
+        .chain((hidden > 0).then_some((more.as_str(), None)));
+    for (label, hue) in chips {
+        let width = tag_width(ui, label);
+        let chip = Rect::new(x, y, width, TAG_H);
+        let (fill, ink) = match hue {
+            Some(hue) => (
+                hue.alpha(if t.dark { 0.22 } else { 0.12 }),
+                hue.mix(t.text, if t.dark { 0.55 } else { 0.3 }),
+            ),
+            None => (t.hover, t.text2),
+        };
+        ui.gfx.fill_rect(chip, TAG_H / 2.0, fill);
+        ui.gfx.text(chip, label, TAG, ink, Align::Center);
+        x += width + TAG_GAP;
     }
 }
 
@@ -2277,37 +2342,45 @@ fn host_row(
     let id = Id::new(("host", card.id));
     let response = ui.zone(id, rect, Role::ListItem, &card.label);
     let t = ui.theme;
-    let hovered = ui.hover_within(rect);
+    let hovered = ui.hover_within(rect) || ui.menu_open(id);
     let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
-    let fill = if selected {
-        t.selected
-    } else {
-        t.hover.alpha(hover * 0.7)
-    };
+    let chosen = ui.animate(
+        id.with("selected"),
+        if selected { 1.0 } else { 0.0 },
+        Motion::BASE,
+    );
+    let fill = t.hover.alpha(hover * 0.7).mix(t.selected, chosen);
     ui.gfx.fill_rect(rect, 8.0, fill);
     if response.focus_ring {
         ui.focus_ring(rect, 8.0);
     }
     let [mut name, address, mut tags] = list_columns(rect);
-    let mut chosen = None;
-    if hovered || hover > 0.0 || selected || ui.menu_open(id.with("more")) {
-        let more = tags.take_right(30.0).centered(30.0, 30.0);
-        tags.take_right(space::S);
-        chosen = more_menu(ui, id, more, menu);
-    }
+    let edit = tags.take_right(28.0).centered(28.0, 28.0);
+    tags.take_right(space::S);
+    let focused = if response.focused { 1.0 } else { 0.0 };
+    let edited = edit_button(ui, id, edit, hover.max(chosen).max(focused));
+    let picked = ui.context_menu(id, &response, menu);
     let tile = name.take_left(28.0).centered(28.0, 28.0);
-    host_tile(ui, tile, &card.label);
+    os::tile(ui, tile, &card.label, card.os);
     name.take_left(space::M);
     ui.gfx
         .text(name, &card.label, BODY_STRONG, t.text, Align::Start);
     ui.gfx
         .text(address, &card.detail, BODY, t.text2, Align::Start);
-    draw_tags(ui, tags, &card.tags);
+    let (count, width) = tags_fit(ui, &card.tags, tags.w);
+    draw_tags(
+        ui,
+        Rect::new(tags.x, tags.y, width, tags.h),
+        &card.tags,
+        count,
+    );
     if response.hovered {
         ui.set_cursor(Cursor::Pointer);
     }
-    if let Some(choice) = chosen {
+    if let Some(choice) = picked {
         CardEvent::More(choice)
+    } else if edited {
+        CardEvent::Edit
     } else if response.double_clicked {
         CardEvent::Connect
     } else if response.clicked {
@@ -2470,14 +2543,6 @@ mod tests {
         for wrong in ["0", "65536", "-1", "ssh"] {
             assert!(port(wrong).is_err(), "{wrong}");
         }
-    }
-
-    #[test]
-    fn initials_take_two_words_or_two_letters() {
-        assert_eq!(initials("prod-db"), "PD");
-        assert_eq!(initials("web"), "WE");
-        assert_eq!(initials("cache 1 eu"), "C1");
-        assert_eq!(initials("--"), "?");
     }
 
     #[test]

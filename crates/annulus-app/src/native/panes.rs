@@ -409,6 +409,14 @@ impl Panes {
         self.all.iter().filter_map(Pane::status).max()
     }
 
+    /// The identification line of the first SSH server a pane reached (F-HOST-009).
+    #[must_use]
+    pub fn server(&self) -> Option<&str> {
+        self.all
+            .iter()
+            .find_map(|pane| pane.terminal.server.as_deref())
+    }
+
     /// Splits the focused pane, side by side when `across`, running the same program, and
     /// focuses the new pane. False when the tab already holds [`MAX_PANES`].
     pub fn split(&mut self, across: bool) -> bool {

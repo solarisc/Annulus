@@ -56,6 +56,13 @@ pub struct Host {
     /// `xterm-256color`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub term: String,
+    /// The server's OS, for its icon (F-HOST-009): `ubuntu`, `debian`, … (see
+    /// `annulus_ssh::os`), or empty while unknown. Older builds ignore it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub os: String,
+    /// `os` was chosen by hand: what the server says never replaces it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub os_by_hand: bool,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -201,6 +208,8 @@ mod tests {
             env: Vec::new(),
             startup: String::new(),
             term: String::new(),
+            os: String::new(),
+            os_by_hand: false,
         }
     }
 

@@ -237,6 +237,69 @@ icons! {
         Move(2.0, 2.75), Line(14.0, 2.75), Line(14.0, 10.75), Line(2.0, 10.75), Close,
         Move(8.0, 10.75), Line(8.0, 13.5), Move(5.25, 13.5), Line(10.75, 13.5),
     ];
+    // Server OS marks (F-HOST-009): our own simple line drawings that hint at each OS, drawn
+    // white on the OS's tile. None copies a project's logo.
+    /// Ubuntu: a ring of three.
+    OS_UBUNTU = 38, "os-ubuntu", [
+        Circle(8.0, 8.0, 4.0),
+        Dot(12.75, 8.0, 1.75), Dot(5.6, 12.15, 1.75), Dot(5.6, 3.85, 1.75),
+    ];
+    /// Debian: a swirl.
+    OS_DEBIAN = 39, "os-debian", [
+        Arc(8.5, 8.0, 5.0, -40.0, 230.0),
+        Arc(8.75, 8.25, 2.5, 230.0, 470.0),
+    ];
+    /// Raspberry Pi OS: a berry with two leaves.
+    OS_RASPBERRY = 40, "os-raspberry", [
+        Circle(6.0, 8.75, 2.25), Circle(10.0, 8.75, 2.25), Circle(8.0, 12.0, 2.25),
+        Move(8.0, 6.0), Line(5.25, 3.0), Move(8.0, 6.0), Line(10.75, 3.0),
+    ];
+    /// FreeBSD and NetBSD: a round head with horns.
+    OS_BSD = 41, "os-bsd", [
+        Circle(8.0, 9.25, 4.25),
+        Move(4.75, 6.5), Line(3.0, 2.5), Line(6.5, 5.0),
+        Move(11.25, 6.5), Line(13.0, 2.5), Line(9.5, 5.0),
+    ];
+    /// Windows: four panes.
+    OS_WINDOWS = 42, "os-windows", [
+        Move(2.5, 2.5), Line(7.25, 2.5), Line(7.25, 7.25), Line(2.5, 7.25), Close,
+        Move(8.75, 2.5), Line(13.5, 2.5), Line(13.5, 7.25), Line(8.75, 7.25), Close,
+        Move(2.5, 8.75), Line(7.25, 8.75), Line(7.25, 13.5), Line(2.5, 13.5), Close,
+        Move(8.75, 8.75), Line(13.5, 8.75), Line(13.5, 13.5), Line(8.75, 13.5), Close,
+    ];
+    /// Fedora: an f in a ring.
+    OS_FEDORA = 43, "os-fedora", [
+        Circle(8.0, 8.0, 5.75),
+        Move(8.0, 11.5), Line(8.0, 6.75), Arc(9.75, 6.75, 1.75, 180.0, 330.0),
+        Move(6.0, 8.75), Line(10.0, 8.75),
+    ];
+    /// Arch Linux: a peak with an arch beneath.
+    OS_ARCH = 44, "os-arch", [
+        Move(2.5, 13.5), Line(8.0, 2.5), Line(13.5, 13.5),
+        Arc(8.0, 13.5, 2.75, 180.0, 360.0),
+    ];
+    /// Alpine Linux: two mountains.
+    OS_ALPINE = 45, "os-alpine", [
+        Move(1.5, 12.5), Line(6.0, 5.0), Line(10.0, 11.0),
+        Move(8.0, 8.0), Line(10.75, 4.5), Line(14.5, 12.5), Line(1.5, 12.5),
+    ];
+    /// Any other Linux: a penguin.
+    OS_LINUX = 46, "os-linux", [
+        Circle(8.0, 10.25, 3.75), Circle(8.0, 4.5, 2.25),
+        Dot(7.25, 4.25, 0.5), Dot(8.75, 4.25, 0.5),
+        Move(5.0, 14.25), Line(6.75, 14.25), Move(9.25, 14.25), Line(11.0, 14.25),
+    ];
+    /// Routers and small devices (Dropbear): a box with antennas.
+    OS_ROUTER = 47, "os-router", [
+        Move(2.5, 9.0), Line(13.5, 9.0), Line(13.5, 13.5), Line(2.5, 13.5), Close,
+        Move(5.0, 9.0), Line(3.75, 3.0), Move(11.0, 9.0), Line(12.25, 3.0),
+        Dot(5.5, 11.25, 0.75), Dot(8.0, 11.25, 0.75),
+    ];
+    /// Switches and network gear (Cisco, MikroTik): a box with ports.
+    OS_NETWORK = 48, "os-network", [
+        Move(1.75, 5.0), Line(14.25, 5.0), Line(14.25, 11.0), Line(1.75, 11.0), Close,
+        Dot(4.5, 8.0, 0.75), Dot(7.0, 8.0, 0.75), Dot(9.5, 8.0, 0.75), Dot(12.0, 8.0, 0.75),
+    ];
 }
 
 /// The geometry of `id`, or `None` for an unknown id.

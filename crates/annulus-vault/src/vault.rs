@@ -395,6 +395,8 @@ impl Vault {
             env: Vec::new(),
             startup: String::new(),
             term: String::new(),
+            os: String::new(),
+            os_by_hand: false,
         }
     }
 

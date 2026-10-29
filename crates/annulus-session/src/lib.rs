@@ -50,6 +50,9 @@ pub enum SessionEvent {
     },
     /// The session could not start or connect; the message says why.
     Failed(String),
+    /// SSH: the shell opened on a server that identified itself with this line
+    /// ("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13"); it can name the OS (F-HOST-009).
+    Server(String),
 }
 
 /// Where SSH keeps its files.
@@ -715,6 +718,7 @@ struct SshLogin {
     term: String,
 }
 
+#[allow(clippy::too_many_lines)] // One session's life in order: connect, shell, then the loop.
 fn spawn_ssh(
     mut login: SshLogin,
     size: Size,
@@ -767,6 +771,9 @@ fn spawn_ssh(
                     }
                     () = closed(&mut input, &mut early) => return,
                 };
+                if let Some(id) = connection.server_id() {
+                    listener.send(SessionEvent::Server(id));
+                }
                 // The PTY holds the typed command until the shell reads it.
                 if let Some(startup) = login
                     .startup
