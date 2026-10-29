@@ -2477,7 +2477,10 @@ fn e2e_closing_terminals_sftp_and_forwards_leaves_nothing_on_the_server() {
 #[ignore = "needs the deployed sync server (ANNULUS_E2E_SYNC_URL)"]
 fn e2e_the_new_settings_create_a_sync_account_and_sync() {
     let url = std::env::var("ANNULUS_E2E_SYNC_URL").expect("ANNULUS_E2E_SYNC_URL");
-    let vault = fixture_vault("e2e-account", true);
+    // An account on a server needs a master password that is hard to guess.
+    let strong = "violet-anchor-pebble-tundra";
+    let mut vault = fixture_vault("e2e-account", true);
+    vault.change_password(strong).unwrap();
     let path = vault.path().to_path_buf();
     let mut app = NativeApp::new(Some(vault));
     app.vault_path = Some(path);
@@ -2495,7 +2498,7 @@ fn e2e_the_new_settings_create_a_sync_account_and_sync() {
         ("Server, e.g. https://sync.example.com", url.as_str()),
         ("Account name", name.as_str()),
         ("This device's name", "e2e device"),
-        ("This vault's master password", "pw"),
+        ("This vault's master password", strong),
     ] {
         let mut events = vec![
             Event::PointerMoved(zone_center(&output.zones, field)),
