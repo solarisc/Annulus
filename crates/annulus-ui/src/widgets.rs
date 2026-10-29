@@ -342,7 +342,7 @@ impl Ui<'_> {
                     KeyOutcome::Changed => changed = true,
                     KeyOutcome::Moved => {}
                     KeyOutcome::Submit => submitted = true,
-                    KeyOutcome::Copy(text) => self.state.clipboard_out = Some(text),
+                    KeyOutcome::Copy(text) => self.state.clipboard_out = Some((text, false)),
                     KeyOutcome::Ignored => leftover.push((key, modifiers)),
                 }
             }
@@ -529,7 +529,9 @@ impl Ui<'_> {
                     Typed::Key(key, modifiers) => {
                         match edit_key(buffer, &mut state, key, modifiers) {
                             KeyOutcome::Changed => changed = true,
-                            KeyOutcome::Copy(text) => self.state.clipboard_out = Some(text),
+                            KeyOutcome::Copy(text) => {
+                                self.state.clipboard_out = Some((text, false));
+                            }
                             KeyOutcome::Ignored => leftover.push((key, modifiers)),
                             KeyOutcome::Moved | KeyOutcome::Submit => {}
                         }

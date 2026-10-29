@@ -162,7 +162,7 @@ impl LockView {
             )
             .clicked
         {
-            ui.copy(self.key.to_string());
+            ui.copy_secret(self.key.as_str().to_owned());
         }
         column.take_top(space::L);
         let field = ui.text_field(

@@ -387,6 +387,9 @@ struct Anim {
     time: f64,
 }
 
+/// How long a secret copied with [`Ui::copy_secret`] stays on the clipboard.
+pub const SECRET_ON_CLIPBOARD: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What a finished frame asks of the window.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FrameOutput {
@@ -435,7 +438,8 @@ pub struct UiState {
     pub(crate) tooltip: Option<(String, Rect)>,
     edits: HashMap<Id, EditState>,
     pub(crate) popup: Option<Popup>,
-    pub(crate) clipboard_out: Option<String>,
+    /// Text to put on the clipboard, and whether it is a secret.
+    pub(crate) clipboard_out: Option<(String, bool)>,
     faults: Vec<String>,
     /// What assistive technology asked for since the last frame.
     requests: Vec<crate::access::Request>,
@@ -626,6 +630,12 @@ impl UiState {
 
     /// Text a field asked to copy (Ctrl+C / Ctrl+X); the window puts it on the clipboard.
     pub fn take_clipboard(&mut self) -> Option<String> {
+        self.take_copied().map(|(text, _)| text)
+    }
+
+    /// Like [`Self::take_clipboard`], with whether the text is a secret (see
+    /// [`Ui::copy_secret`]).
+    pub fn take_copied(&mut self) -> Option<(String, bool)> {
         self.clipboard_out.take()
     }
 
@@ -911,7 +921,14 @@ impl<'a> Ui<'a> {
 
     /// Puts `text` on the clipboard when the frame ends.
     pub fn copy(&mut self, text: String) {
-        self.state.clipboard_out = Some(text);
+        self.state.clipboard_out = Some((text, false));
+    }
+
+    /// Puts the secret `text` (a recovery key) on the clipboard when the frame ends: kept out
+    /// of clipboard history and the cloud clipboard where the OS allows, and cleared after
+    /// [`SECRET_ON_CLIPBOARD`] unless something else was copied since (SECURITY.md rule 2).
+    pub fn copy_secret(&mut self, text: String) {
+        self.state.clipboard_out = Some((text, true));
     }
 
     /// Asks for the cursor shown this frame.

@@ -5217,6 +5217,7 @@ dependencies = [
  "windows",
  "windows-numerics",
  "winit",
+ "zeroize",
 ]
 
 [[package]]

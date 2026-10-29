@@ -2456,6 +2456,17 @@ fn first_run_creates_the_vault_and_opens_it_only_after_the_recovery_key_is_confi
         output = drive(&mut app, &mut state, &[], clock());
     }
     assert!(app.vault.is_none(), "not open before the key is confirmed");
+    // Copying the key copies it as a secret: kept out of clipboard history, cleared later.
+    output = drive(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Copy the recovery key"),
+        clock(),
+    );
+    assert_eq!(
+        state.take_copied(),
+        Some((app.lock.recovery_key_for_tests(), true))
+    );
     // A wrong first group is refused.
     let events = type_into(
         &output,

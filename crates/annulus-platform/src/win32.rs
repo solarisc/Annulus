@@ -722,8 +722,8 @@ impl Host {
                 request = request.or(self.app.frame(&mut ui, maximized));
             }
             canvas.finish();
-            let output = self.state.end_frame();
-            publish_clipboard(&mut self.state);
+            let mut output = self.state.end_frame();
+            publish_clipboard(&mut self.state, &mut output);
             output
         };
         // SAFETY: as above.

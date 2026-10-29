@@ -11,9 +11,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::hash::{BuildHasher as _, RandomState};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use annulus_ui::kit::{Event, Id, Key, Modifiers, Role, Theme, Ui, UiState};
+use annulus_ui::kit::{self, Event, Id, Key, Modifiers, Role, Theme, Ui, UiState};
+use zeroize::Zeroizing;
 
 /// What the app asks of the window after a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,13 +77,97 @@ pub(crate) fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
-/// Puts the text the frame copied (Ctrl+C in a field) on the clipboard.
-pub(crate) fn publish_clipboard(state: &mut UiState) {
-    if let Some(text) = state.take_clipboard()
-        && let Ok(mut clipboard) = arboard::Clipboard::new()
-    {
-        let _ = clipboard.set_text(text);
+/// Puts the text the frame copied (Ctrl+C in a field) on the clipboard, and clears a secret
+/// copied earlier once its time is up; `output` then wakes the window for that.
+pub(crate) fn publish_clipboard(state: &mut UiState, output: &mut kit::FrameOutput) {
+    let now = Instant::now();
+    if let Some((text, secret)) = state.take_copied() {
+        let text = Zeroizing::new(text);
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let mut held = held_secret();
+            if secret {
+                if set_secret(&mut clipboard, &text).is_ok() {
+                    *held = Some(HeldSecret::new(&text, now));
+                }
+            } else if clipboard.set_text(text.as_str()).is_ok() {
+                // The secret is no longer what the clipboard holds.
+                *held = None;
+            }
+        }
     }
+    if let Some(left) = expire_clipboard_secret(now) {
+        output.repaint_after = Some(output.repaint_after.map_or(left, |after| after.min(left)));
+    }
+}
+
+/// A secret this app put on the clipboard. Only a hash of it is kept, to tell whether the
+/// clipboard still holds it.
+struct HeldSecret {
+    hasher: RandomState,
+    hash: u64,
+    until: Instant,
+}
+
+impl HeldSecret {
+    fn new(text: &str, now: Instant) -> Self {
+        let hasher = RandomState::new();
+        Self {
+            hash: hasher.hash_one(text),
+            hasher,
+            until: now + kit::SECRET_ON_CLIPBOARD,
+        }
+    }
+
+    /// Whether a clipboard holding `current` at `now` is cleared: the time is up and nothing
+    /// else was copied over the secret.
+    fn clears(&self, current: Option<&str>, now: Instant) -> bool {
+        now >= self.until && current.is_some_and(|text| self.hasher.hash_one(text) == self.hash)
+    }
+}
+
+static HELD: Mutex<Option<HeldSecret>> = Mutex::new(None);
+
+fn held_secret() -> std::sync::MutexGuard<'static, Option<HeldSecret>> {
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Clears the copied secret if its time is up at `now`; otherwise, how long it has left.
+fn expire_clipboard_secret(now: Instant) -> Option<std::time::Duration> {
+    let mut held = held_secret();
+    let secret = held.as_ref()?;
+    if now < secret.until {
+        return Some(secret.until - now);
+    }
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let current = clipboard.get_text().ok().map(Zeroizing::new);
+        if secret.clears(current.as_ref().map(|text| text.as_str()), now) {
+            let _ = clipboard.clear();
+        }
+    }
+    *held = None;
+    None
+}
+
+/// Copies `text` where clipboard managers and the cloud clipboard leave it out.
+fn set_secret(clipboard: &mut arboard::Clipboard, text: &str) -> Result<(), arboard::Error> {
+    let set = clipboard.set();
+    #[cfg(windows)]
+    let set = {
+        use arboard::SetExtWindows as _;
+        set.exclude_from_history().exclude_from_cloud()
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let set = {
+        use arboard::SetExtLinux as _;
+        set.exclude_from_history()
+    };
+    #[cfg(target_os = "macos")]
+    let set = {
+        use arboard::SetExtApple as _;
+        set.exclude_from_history()
+    };
+    set.text(text)
 }
 
 /// Whether a key press pastes: Ctrl+Shift+V and Shift+Insert anywhere, Ctrl+V only in a text
@@ -108,9 +195,15 @@ pub fn run(
     app: impl WindowApp + 'static,
 ) -> Result<(), WindowError> {
     #[cfg(windows)]
-    return crate::win32::run(title, size, Box::new(app));
+    let result = crate::win32::run(title, size, Box::new(app));
     #[cfg(not(windows))]
-    return portable::run(title, size, Box::new(app));
+    let result = portable::run(title, size, Box::new(app));
+    // A secret copied just before the window closed does not outlive it.
+    let closing = held_secret().as_ref().map(|secret| secret.until);
+    if let Some(until) = closing {
+        expire_clipboard_secret(until);
+    }
+    result
 }
 
 #[cfg(not(windows))]
@@ -256,8 +349,8 @@ mod portable {
                 let mut ui = Ui::new(&mut canvas, theme, &mut self.state, viewport);
                 self.app.frame(&mut ui, maximized)
             };
-            let output = self.state.end_frame();
-            publish_clipboard(&mut self.state);
+            let mut output = self.state.end_frame();
+            publish_clipboard(&mut self.state, &mut output);
             let focus = self.state.focus();
             let title = &self.title;
             shown
@@ -509,5 +602,24 @@ mod portable {
             WinitKey::Character(text) => kit::Key::Char(text.chars().next()?.to_ascii_lowercase()),
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copied_secret_is_cleared_after_its_time_unless_something_else_was_copied() {
+        let now = Instant::now();
+        let held = HeldSecret::new("ABCD-EFGH", now);
+        let later = now + kit::SECRET_ON_CLIPBOARD;
+        assert!(!held.clears(Some("ABCD-EFGH"), now), "not before its time");
+        assert!(held.clears(Some("ABCD-EFGH"), later));
+        assert!(
+            !held.clears(Some("a command the user copied"), later),
+            "what the user copied since stays"
+        );
+        assert!(!held.clears(None, later));
     }
 }
