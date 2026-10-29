@@ -69,7 +69,9 @@ pub fn action(
 pub fn row(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str, selected: bool) -> Response {
     let response = ui.zone(id, rect, Role::ListItem, label);
     let t = ui.theme;
-    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    // Still hovered on the row's buttons.
+    let hovered = ui.hover_within(rect);
+    let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
     let fill = if selected {
         t.selected
     } else {

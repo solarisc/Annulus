@@ -778,6 +778,22 @@ impl<'a> Ui<'a> {
             .is_some_and(|(pressed, button)| pressed == id && button == Button::Primary)
     }
 
+    /// Whether the pointer is on `rect` or on a zone inside it: a card stays hovered while
+    /// the pointer is on one of its buttons, which are zones of their own.
+    #[must_use]
+    pub fn hover_within(&self, rect: Rect) -> bool {
+        self.state
+            .hovered
+            .and_then(|id| self.state.zone(id))
+            .is_some_and(|zone| {
+                let inner = zone.rect;
+                inner.x >= rect.x - 0.5
+                    && inner.y >= rect.y - 0.5
+                    && inner.r() <= rect.r() + 0.5
+                    && inner.b() <= rect.b() + 0.5
+            })
+    }
+
     /// The pointer, if it is over the window.
     #[must_use]
     pub fn pointer(&self) -> Option<Point> {
@@ -1137,6 +1153,40 @@ mod tests {
             })
             .repaint
         );
+    }
+
+    #[test]
+    fn a_card_stays_hovered_while_the_pointer_is_on_its_button() {
+        const CARD: Rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 80.0,
+        };
+        const BUTTON: Rect = Rect {
+            x: 150.0,
+            y: 20.0,
+            w: 30.0,
+            h: 30.0,
+        };
+        fn draw(ui: &mut Ui<'_>) -> (bool, bool) {
+            let card = ui.zone(Id::new("card"), CARD, Role::ListItem, "card");
+            ui.zone(Id::new("button"), BUTTON, Role::Button, "button");
+            (card.hovered, ui.hover_within(CARD))
+        }
+        let mut state = UiState::default();
+        let mut within = (false, false);
+        frame(&mut state, &[], 0.0, |ui| within = draw(ui));
+        let on_button = [Event::PointerMoved(BUTTON.center())];
+        frame(&mut state, &on_button, 1.0, |ui| within = draw(ui));
+        assert_eq!(
+            within,
+            (false, true),
+            "the button, not the card, is hovered"
+        );
+        let outside = [Event::PointerMoved(Point::new(300.0, 300.0))];
+        frame(&mut state, &outside, 2.0, |ui| within = draw(ui));
+        assert_eq!(within, (false, false));
     }
 
     #[test]

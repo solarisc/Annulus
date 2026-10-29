@@ -3,7 +3,7 @@
 //! saved password and jump hosts. Shared by both UIs.
 
 use annulus_session::{Hop, Password, Program, SshFiles, Target, local_user};
-use annulus_vault::hosts::Host;
+use annulus_vault::hosts::{DEFAULT_PORT, Host};
 use annulus_vault::vault::Vault;
 
 /// The longest jump chain followed; a longer one (or a loop) stops there.
@@ -96,5 +96,79 @@ pub fn host(vault: &Vault, files: &SshFiles, host: &Host) -> Program {
             term: resolved.term,
         },
         None => Program::system_ssh(&resolved.target()),
+    }
+}
+
+/// An OpenSSH command line that reaches `host` (through its jump host, if it has one), with
+/// what it inherits from its groups, for pasting into another terminal (F-HOST-010). Saved
+/// passwords are never part of it.
+#[must_use]
+pub fn ssh_command(vault: &Vault, host: &Host) -> String {
+    let (host, _) = vault.resolve(host);
+    let jump = host
+        .jump_id
+        .and_then(|id| vault.hosts().iter().find(|candidate| candidate.id == id))
+        .map(|jump| vault.resolve(jump).0);
+    let mut parts = vec!["ssh".to_owned()];
+    if host.port() != DEFAULT_PORT {
+        parts.push(format!("-p {}", host.port()));
+    }
+    if let Some(jump) = jump {
+        parts.push(format!("-J {}", jump.target()));
+    }
+    let (user, address) = (host.username.trim(), host.address.trim());
+    parts.push(if user.is_empty() {
+        address.to_owned()
+    } else {
+        format!("{user}@{address}")
+    });
+    parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use annulus_vault::hosts::Secret;
+
+    use super::*;
+
+    #[test]
+    fn the_ssh_command_has_port_jump_and_user_but_never_a_password() {
+        let dir = std::env::temp_dir().join(format!("annulus-connect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (mut vault, _) = Vault::create(
+            dir.join("vault.anv"),
+            "pw",
+            annulus_vault::crypto::KdfParams {
+                memory_kib: 64,
+                iterations: 1,
+                parallelism: 1,
+            },
+        )
+        .unwrap();
+        let mut jump = vault.draft_host();
+        (jump.label, jump.address, jump.username) = (
+            "bastion".into(),
+            "bastion.example.com".into(),
+            "admin".into(),
+        );
+        vault.upsert_host(jump.clone()).unwrap();
+        let mut host = vault.draft_host();
+        (host.label, host.address, host.username) =
+            ("db".into(), "10.0.4.12".into(), "admin".into());
+        host.port = Some(2222);
+        host.jump_id = Some(jump.id);
+        host.password = Some(Secret::new("hunter2"));
+        vault.upsert_host(host.clone()).unwrap();
+        let command = ssh_command(&vault, &host);
+        assert_eq!(
+            command,
+            "ssh -p 2222 -J admin@bastion.example.com admin@10.0.4.12"
+        );
+        assert!(!command.contains("hunter2"));
+        host.username.clear();
+        (host.port, host.jump_id) = (Some(22), None);
+        assert_eq!(ssh_command(&vault, &host), "ssh 10.0.4.12");
     }
 }

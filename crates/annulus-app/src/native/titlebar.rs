@@ -239,7 +239,9 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
     let active = app.active == index;
     let response = ui.zone(id, rect, Role::Tab, &tab.title);
     let t = ui.theme;
-    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    // Still hovered on its close button.
+    let hovered = ui.hover_within(rect);
+    let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
     let fill = if active {
         t.surface
     } else {
@@ -284,7 +286,7 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
     };
     if tab.kind != TabKind::Vault {
         let close = inner.take_right(18.0).centered(18.0, 18.0);
-        if active || response.hovered || hover > 0.0 {
+        if active || hovered || hover > 0.0 {
             let close_id = id.with("close");
             let x = ui.zone(close_id, close, Role::Button, "Close tab");
             if x.hovered {

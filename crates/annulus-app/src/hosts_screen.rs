@@ -163,12 +163,7 @@ impl HostsScreen {
                 return Some(Request::Sftp(host.label.clone(), self.connect_host(host)));
             }
             RowAction::CopyCommand => {
-                let jump = host
-                    .jump_id
-                    .and_then(|id| self.vault.hosts().iter().find(|h| h.id == id))
-                    .map(|jump| self.vault.resolve(jump).0);
-                let resolved = self.vault.resolve(host).0;
-                ui.ctx().copy_text(ssh_command(&resolved, jump.as_ref()));
+                ui.ctx().copy_text(connect::ssh_command(&self.vault, host));
                 self.notice = Some(format!("Copied the ssh command for {}.", host.label));
             }
             RowAction::Duplicate => {
@@ -924,25 +919,6 @@ fn reconnect_row(ui: &mut Ui, host: &mut Host) {
     ui.end_row();
 }
 
-/// An OpenSSH command line that reaches `host` (through `jump`, if it has one), for pasting
-/// into another terminal (F-HOST-010). Saved passwords are never part of it.
-fn ssh_command(host: &Host, jump: Option<&Host>) -> String {
-    let mut parts = vec!["ssh".to_owned()];
-    if host.port() != DEFAULT_PORT {
-        parts.push(format!("-p {}", host.port()));
-    }
-    if let Some(jump) = jump {
-        parts.push(format!("-J {}", jump.target()));
-    }
-    let (user, address) = (host.username.trim(), host.address.trim());
-    parts.push(if user.is_empty() {
-        address.to_owned()
-    } else {
-        format!("{user}@{address}")
-    });
-    parts.join(" ")
-}
-
 /// One host in the list. `groups` are the `(uid, path)` choices of "Move to group".
 fn host_row(ui: &mut Ui, host: &Host, palette: &Palette, groups: &[(String, String)]) -> RowAction {
     let width = ui.available_width();
@@ -1398,24 +1374,6 @@ mod tests {
         host.no_reconnect = true;
         screen.vault.upsert_host(host.clone()).unwrap();
         assert!(!reconnects(&screen, &host));
-    }
-
-    #[test]
-    fn the_ssh_command_has_port_jump_and_user_but_never_a_password() {
-        let mut host = screen_with("cmd").vault.hosts()[0].clone();
-        host.password = Some(Secret::new("hunter2"));
-        let mut jump = host.clone();
-        jump.address = "bastion.example.com".into();
-        jump.port = Some(22);
-        let command = ssh_command(&host, Some(&jump));
-        assert_eq!(
-            command,
-            "ssh -p 2222 -J admin@bastion.example.com admin@10.0.4.12"
-        );
-        assert!(!command.contains("hunter2"));
-        host.username.clear();
-        host.port = Some(22);
-        assert_eq!(ssh_command(&host, None), "ssh 10.0.4.12");
     }
 
     #[test]

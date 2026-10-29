@@ -149,6 +149,15 @@ pub(crate) struct Popup {
 }
 
 impl Ui<'_> {
+    /// Whether the menu of the select or menu button `id` is open.
+    #[must_use]
+    pub fn menu_open(&self, id: Id) -> bool {
+        self.state
+            .popup
+            .as_ref()
+            .is_some_and(|popup| popup.owner == id)
+    }
+
     /// A button. `label` may be empty for an icon-only button; `name` is then its accessible
     /// name.
     pub fn button(

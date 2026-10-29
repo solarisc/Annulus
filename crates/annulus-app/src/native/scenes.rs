@@ -78,6 +78,8 @@ fn with_tabs(app: &mut NativeApp) {
             tab.status = status;
         }
     }
+    // The hosts grid, with the tabs above it.
+    app.active = 0;
 }
 
 fn section(app: &mut NativeApp, section: super::Section) {
@@ -197,6 +199,24 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: nothing,
         acts: &[Act::Click("chevron-down")],
+    },
+    Scene {
+        name: "hosts-more-menu",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Hover("prod-db"), Act::Click("more")],
+    },
+    Scene {
+        name: "hosts-list-more-menu",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: list_mode,
+        acts: &[Act::Hover("grafana"), Act::Click("more")],
     },
     Scene {
         name: "hosts-keyboard-focus",
@@ -680,6 +700,63 @@ fn click_on(output: &FrameOutput, name: &str) -> Vec<Event> {
         Event::PointerDown(Button::Primary),
         Event::PointerUp(Button::Primary),
     ]
+}
+
+#[test]
+fn a_hosts_more_menu_copies_its_ssh_command_and_duplicates_it() {
+    let mut app = NativeApp::new(Some(fixture_vault("more-menu", true)));
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    // Selecting the card shows its buttons, More among them.
+    output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 1.0);
+    output = step(&mut app, &mut state, &click_on(&output, "more"), 2.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Copy ssh command"),
+        3.0,
+    );
+    let copied = state.take_clipboard().unwrap();
+    assert!(
+        copied.starts_with("ssh ") && copied.contains("10.0.4.12"),
+        "{copied}"
+    );
+    output = step(&mut app, &mut state, &click_on(&output, "more"), 4.0);
+    step(&mut app, &mut state, &click_on(&output, "Duplicate"), 5.0);
+    let vault = app.vault.as_ref().unwrap();
+    let original = vault
+        .hosts()
+        .iter()
+        .find(|host| host.label == "prod-db")
+        .unwrap();
+    let copy = vault
+        .hosts()
+        .iter()
+        .find(|host| host.label == "prod-db copy")
+        .unwrap();
+    assert_ne!(copy.id, original.id);
+    assert_eq!(
+        (&copy.address, copy.port),
+        (&original.address, original.port)
+    );
+}
+
+#[test]
+fn a_hovered_cards_more_menu_stays_open_after_the_hover_fades() {
+    let mut app = NativeApp::new(Some(fixture_vault("more-stays", true)));
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let on_card = [Event::PointerMoved(zone_center(&output.zones, "prod-db"))];
+    output = step(&mut app, &mut state, &on_card, 1.0);
+    output = step(&mut app, &mut state, &click_on(&output, "more"), 2.0);
+    // The menu's backdrop now covers the card; well past any fade, the menu is still there.
+    for time in [2.5, 3.0, 4.0] {
+        output = step(&mut app, &mut state, &[], time);
+    }
+    assert!(
+        output.zones.iter().any(|zone| zone.label == "Duplicate"),
+        "the menu closed itself"
+    );
 }
 
 #[test]

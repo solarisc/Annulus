@@ -14,7 +14,7 @@ use annulus_vault::hosts::{Host, Secret};
 use annulus_vault::vault::Vault;
 use zeroize::Zeroizing;
 
-use crate::groups_view;
+use crate::{connect, groups_view};
 
 /// Width of the editor panel.
 const EDITOR_W: f32 = 392.0;
@@ -69,8 +69,10 @@ pub struct HostsView {
     pub group_editor: Option<GroupEditor>,
     /// The `ssh_config` import preview, while open.
     import: Option<crate::import_dialog::ImportPreview>,
-    /// The result of the last import, until the next.
+    /// The result of the last import, export or menu choice, until the next.
     notice: Option<String>,
+    /// A host's More menu choice this frame: the host and the item.
+    picked: Option<(u64, usize)>,
 }
 
 /// The host editor's draft.
@@ -271,10 +273,62 @@ impl HostsView {
             }
             return action;
         }
-        if let Some(listed) = self.listing(ui, main, &cards, &groups, vault) {
+        let moves = groups_view::choices(vault.groups(), None);
+        if let Some(listed) = self.listing(ui, main, &cards, &groups, vault, &host_menu(&moves)) {
             action = Some(listed);
         }
+        if let Some((id, choice)) = self.picked.take() {
+            self.host_menu_action(ui, vault, id, choice, &moves);
+        }
         action
+    }
+
+    /// Acts on a host's More menu choice: see [`host_menu`].
+    fn host_menu_action(
+        &mut self,
+        ui: &mut Ui<'_>,
+        vault: &mut Vault,
+        id: u64,
+        choice: usize,
+        moves: &[(String, String)],
+    ) {
+        let Some(host) = vault.hosts().iter().find(|host| host.id == id).cloned() else {
+            return;
+        };
+        self.notice = Some(match choice {
+            0 => {
+                ui.copy(connect::ssh_command(vault, &host));
+                format!("Copied the ssh command for {}.", host.label)
+            }
+            1 => {
+                let label = format!("{} copy", host.label);
+                let copy = Host {
+                    id: vault.draft_host().id,
+                    label: label.clone(),
+                    ..host
+                };
+                match vault.upsert_host(copy) {
+                    Ok(()) => format!("Added {label}."),
+                    Err(error) => format!("Could not duplicate: {error}"),
+                }
+            }
+            _ => {
+                let label = host.label.clone();
+                let group = choice
+                    .checked_sub(3)
+                    .and_then(|at| moves.get(at))
+                    .map(|(uid, path)| (uid.clone(), path.clone()));
+                let regrouped = Host {
+                    group: group.as_ref().map(|(uid, _)| uid.clone()),
+                    ..host
+                };
+                let place = group.map_or_else(|| "the top level".to_owned(), |(_, path)| path);
+                match vault.upsert_host(regrouped) {
+                    Ok(()) => format!("Moved {label} to {place}."),
+                    Err(error) => format!("Could not move: {error}"),
+                }
+            }
+        });
     }
 
     fn gather(&self, vault: &Vault) -> (Vec<Card>, Vec<GroupCard>) {
@@ -440,7 +494,11 @@ impl HostsView {
         {
             self.new_host(vault);
         }
-        let items = vec!["New group".to_owned(), "Import from ssh_config".to_owned()];
+        let items = vec![
+            "New group".to_owned(),
+            "Import from ssh_config".to_owned(),
+            "Copy hosts as ssh_config".to_owned(),
+        ];
         match ui.menu_button(
             Id::new("hosts.new.more"),
             more,
@@ -450,7 +508,16 @@ impl HostsView {
             &items,
         ) {
             Some(0) => self.new_group(vault),
-            Some(_) => action = Some(HostsAction::ImportSshConfig),
+            Some(1) => action = Some(HostsAction::ImportSshConfig),
+            Some(_) => {
+                let resolved: Vec<Host> = vault
+                    .hosts()
+                    .iter()
+                    .map(|host| vault.resolve(host).0)
+                    .collect();
+                ui.copy(annulus_import::ssh_config::export(&resolved));
+                self.notice = Some("Copied the hosts as an OpenSSH config (no passwords).".into());
+            }
             None => {}
         }
         if ui
@@ -543,6 +610,7 @@ impl HostsView {
         cards: &[Card],
         groups: &[GroupCard],
         vault: &Vault,
+        menu: &[String],
     ) -> Option<HostsAction> {
         let columns = grid_columns(rect.w);
         #[allow(clippy::cast_precision_loss)] // Column and row counts are small.
@@ -589,11 +657,12 @@ impl HostsView {
             Mode::Grid => {
                 for (index, card) in cards.iter().enumerate() {
                     let cell = grid_cell(rect.x, y, rect.w - 8.0, columns, index, CARD_H);
-                    match host_card(ui, cell, card, self.selected == Some(card.id)) {
+                    match host_card(ui, cell, card, self.selected == Some(card.id), menu) {
                         CardEvent::Select => self.selected = Some(card.id),
                         CardEvent::Connect => action = Some(HostsAction::Connect(card.id)),
                         CardEvent::Edit => self.edit_host(vault, card.id),
                         CardEvent::Files => action = Some(HostsAction::Sftp(card.id)),
+                        CardEvent::More(choice) => self.picked = Some((card.id, choice)),
                         CardEvent::None => {}
                     }
                 }
@@ -603,11 +672,12 @@ impl HostsView {
                 y += ROW_H - 12.0;
                 for card in cards {
                     let row = Rect::new(rect.x, y, rect.w - 8.0, ROW_H);
-                    match host_row(ui, row, card, self.selected == Some(card.id)) {
+                    match host_row(ui, row, card, self.selected == Some(card.id), menu) {
                         CardEvent::Select => self.selected = Some(card.id),
                         CardEvent::Connect => action = Some(HostsAction::Connect(card.id)),
                         CardEvent::Edit => self.edit_host(vault, card.id),
                         CardEvent::Files => action = Some(HostsAction::Sftp(card.id)),
+                        CardEvent::More(choice) => self.picked = Some((card.id, choice)),
                         CardEvent::None => {}
                     }
                     y += ROW_H + GAP;
@@ -1568,6 +1638,32 @@ enum CardEvent {
     Connect,
     Files,
     Edit,
+    /// An item of the host's More menu.
+    More(usize),
+}
+
+/// A host's More menu: copy its ssh command, duplicate it, or move it to the top level or a
+/// group of `moves` (`(uid, path)`).
+fn host_menu(moves: &[(String, String)]) -> Vec<String> {
+    let mut items = vec![
+        "Copy ssh command".to_owned(),
+        "Duplicate".to_owned(),
+        "Move to the top level".to_owned(),
+    ];
+    items.extend(moves.iter().map(|(_, path)| format!("Move to {path}")));
+    items
+}
+
+/// The More button of a host card or row and its menu; returns the item chosen.
+fn more_menu(ui: &mut Ui<'_>, id: Id, rect: Rect, menu: &[String]) -> Option<usize> {
+    ui.menu_button(
+        id.with("more"),
+        rect,
+        "",
+        Some(icons::MORE),
+        Kind::Ghost,
+        menu,
+    )
 }
 
 /// A host's tile color, stable for its label.
@@ -1606,11 +1702,18 @@ fn host_tile(ui: &mut Ui<'_>, rect: Rect, label: &str) {
         .text(rect, &initials(label), font, Color::WHITE, Align::Center);
 }
 
-fn host_card(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEvent {
+fn host_card(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    card: &Card,
+    selected: bool,
+    menu: &[String],
+) -> CardEvent {
     let id = Id::new(("host", card.id));
     let response = ui.zone(id, rect, Role::ListItem, &card.label);
     let t = ui.theme;
-    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    let hovered = ui.hover_within(rect);
+    let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
     if hover > 0.0 {
         ui.gfx
             .shadow(rect, 10.0, 12.0, 4.0, t.shadow.alpha(hover * 0.6));
@@ -1638,9 +1741,12 @@ fn host_card(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEv
     } else {
         CardEvent::None
     };
-    if response.hovered || hover > 0.0 || selected {
-        let actions = inner.take_right(98.0);
+    // The buttons stay while the More menu is open: its backdrop covers the card.
+    if hovered || hover > 0.0 || selected || ui.menu_open(id.with("more")) {
+        let actions = inner.take_right(132.0);
         let mut slots = actions;
+        let more = slots.take_right(30.0).centered(30.0, 30.0);
+        slots.take_right(4.0);
         let connect = slots.take_right(30.0).centered(30.0, 30.0);
         slots.take_right(4.0);
         let files = slots.take_right(30.0).centered(30.0, 30.0);
@@ -1663,6 +1769,9 @@ fn host_card(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEv
             .clicked
         {
             event = CardEvent::Connect;
+        }
+        if let Some(choice) = more_menu(ui, id, more, menu) {
+            event = CardEvent::More(choice);
         }
     } else if !card.tags.is_empty() {
         let width = tags_width(ui, &card.tags, inner.w * 0.4);
@@ -1726,11 +1835,18 @@ fn list_columns(rect: Rect) -> [Rect; 3] {
     [name, address, row]
 }
 
-fn host_row(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEvent {
+fn host_row(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    card: &Card,
+    selected: bool,
+    menu: &[String],
+) -> CardEvent {
     let id = Id::new(("host", card.id));
     let response = ui.zone(id, rect, Role::ListItem, &card.label);
     let t = ui.theme;
-    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    let hovered = ui.hover_within(rect);
+    let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
     let fill = if selected {
         t.selected
     } else {
@@ -1740,7 +1856,13 @@ fn host_row(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEve
     if response.focus_ring {
         ui.focus_ring(rect, 8.0);
     }
-    let [mut name, address, tags] = list_columns(rect);
+    let [mut name, address, mut tags] = list_columns(rect);
+    let mut chosen = None;
+    if hovered || hover > 0.0 || selected || ui.menu_open(id.with("more")) {
+        let more = tags.take_right(30.0).centered(30.0, 30.0);
+        tags.take_right(space::S);
+        chosen = more_menu(ui, id, more, menu);
+    }
     let tile = name.take_left(28.0).centered(28.0, 28.0);
     host_tile(ui, tile, &card.label);
     name.take_left(space::M);
@@ -1752,7 +1874,9 @@ fn host_row(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEve
     if response.hovered {
         ui.set_cursor(Cursor::Pointer);
     }
-    if response.double_clicked {
+    if let Some(choice) = chosen {
+        CardEvent::More(choice)
+    } else if response.double_clicked {
         CardEvent::Connect
     } else if response.clicked {
         CardEvent::Select
