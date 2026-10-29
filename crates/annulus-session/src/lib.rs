@@ -222,15 +222,19 @@ impl std::fmt::Debug for Password {
 
 impl Program {
     /// The system OpenSSH client for `target` (`user@host`, `host`, `user@host:port`), for
-    /// when Annulus's own client can't be used.
+    /// when Annulus's own client can't be used. The options come first and `--` ends them, so
+    /// a target such as `-oProxyCommand=…` (typed, imported or synced) is only ever a
+    /// destination, never an option that runs a command.
     #[must_use]
     pub fn system_ssh(target: &str) -> Self {
         let (destination, port) = split_port(target.trim());
-        let mut args = vec![destination.to_owned()];
+        let mut args = Vec::new();
         if let Some(port) = port {
             args.push("-p".into());
             args.push(port.to_owned());
         }
+        args.push("--".into());
+        args.push(destination.to_owned());
         Program::Command {
             program: "ssh".into(),
             args,
@@ -831,21 +835,35 @@ mod tests {
     fn system_ssh_targets_become_arguments() {
         assert_eq!(
             args(&Program::system_ssh("admin@prod-db")),
-            ["admin@prod-db"]
+            ["--", "admin@prod-db"]
         );
         assert_eq!(
             args(&Program::system_ssh(" admin@10.0.4.12:2222 ")),
-            ["admin@10.0.4.12", "-p", "2222"]
+            ["-p", "2222", "--", "admin@10.0.4.12"]
         );
         assert_eq!(
             args(&Program::system_ssh("[fe80::1]:22")),
-            ["fe80::1", "-p", "22"]
+            ["-p", "22", "--", "fe80::1"]
         );
-        assert_eq!(args(&Program::system_ssh("fe80::1")), ["fe80::1"]);
+        assert_eq!(args(&Program::system_ssh("fe80::1")), ["--", "fe80::1"]);
         assert_eq!(
             args(&Program::system_ssh("host:notaport")),
-            ["host:notaport"]
+            ["--", "host:notaport"]
         );
+    }
+
+    #[test]
+    fn a_target_that_looks_like_an_option_stays_a_destination() {
+        // `ssh -oProxyCommand=calc x` would run calc; after `--` it is only a host name.
+        let args = args(&Program::system_ssh("-oProxyCommand=calc x"));
+        let end = args.iter().position(|arg| arg == "--").unwrap();
+        assert!(
+            args[end + 1..]
+                .iter()
+                .all(|arg| arg.starts_with("-oProxyCommand")),
+            "{args:?}"
+        );
+        assert!(args[..end].iter().all(|arg| !arg.contains("ProxyCommand")));
     }
 
     fn wait_for(session: &Session, text: &str) -> bool {
