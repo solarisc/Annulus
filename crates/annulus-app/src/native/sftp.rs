@@ -1,15 +1,17 @@
 //! An SFTP tab in the new UI (UI-SPEC §4, F-SFTP-001…005): this computer on the left, the
 //! host on the right, transfers along the bottom. The host's listing filters by name, sorts
 //! by its column headers, and each entry's More menu downloads, renames, sets permissions,
-//! shows properties or deletes it (after a yes: it cannot be undone). The connection,
-//! listings and resumable transfers are `sftp_view::SftpTab`'s; this draws them.
+//! shows properties or deletes it (after a yes: it cannot be undone). A file dragged from one
+//! pane onto the other uploads or downloads it, and files dropped from the OS (Explorer,
+//! Finder, a file manager) upload to the host's folder shown. The connection, listings and
+//! resumable transfers are `sftp_view::SftpTab`'s; this draws them.
 
 use std::sync::atomic::Ordering;
 
 use annulus_config::tokens::space;
 use annulus_platform::window::Waker;
 use annulus_sftp::{Conflict, Entry, join, parent};
-use annulus_ui::gfx::{Align, Font, Rect};
+use annulus_ui::gfx::{Align, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Ui};
 use annulus_ui::widgets::{
@@ -24,6 +26,27 @@ use crate::sftp_view::{
 };
 
 const ROW: f32 = 30.0;
+
+/// What is being dragged from one pane to the other.
+#[derive(Clone)]
+enum Dragged {
+    /// A file on this computer, to upload.
+    Local(std::path::PathBuf),
+    /// An entry on the host, to download.
+    Remote(Entry),
+}
+
+impl Dragged {
+    fn name(&self) -> String {
+        match self {
+            Dragged::Local(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            Dragged::Remote(entry) => entry.name.clone(),
+        }
+    }
+}
 
 /// A rename or new folder being typed, on the host.
 enum Edit {
@@ -40,6 +63,10 @@ pub struct SftpView {
     edit_dir: String,
     remote_selected: Option<String>,
     local_selected: Option<String>,
+    /// A row being dragged this frame, and where the pointer is.
+    drag: Option<(Dragged, Point)>,
+    /// A row let go this frame, and where.
+    dropped: Option<(Dragged, Point)>,
     /// A card just opened: its first control takes the keyboard.
     focus_card: bool,
 }
@@ -55,6 +82,8 @@ impl SftpView {
             edit_dir: String::new(),
             remote_selected: None,
             local_selected: None,
+            drag: None,
+            dropped: None,
             focus_card: false,
         }
     }
@@ -120,6 +149,7 @@ impl SftpView {
             area.take_left(space::M);
             self.local_pane(ui, local);
             self.remote_pane(ui, area);
+            self.drag_and_drop(ui, local, area);
             if transfers_h > 0.0 {
                 self.transfers(ui, transfers.inset(0.0, 0.0).offset(0.0, 0.0));
             }
@@ -130,6 +160,44 @@ impl SftpView {
         {
             self.ask = None;
         }
+    }
+
+    /// Rows dragged between the panes, and files dropped from the OS: what was let go over
+    /// the other pane is uploaded or downloaded, and while it moves a label follows the
+    /// pointer and the pane it would land in lights up.
+    fn drag_and_drop(&mut self, ui: &mut Ui<'_>, local: Rect, remote: Rect) {
+        let t = ui.theme;
+        for path in ui.take_dropped_files() {
+            self.tab.upload(path);
+        }
+        if let Some((dragged, at)) = self.dropped.take() {
+            match dragged {
+                Dragged::Local(path) if remote.contains(at) => self.tab.upload(path),
+                Dragged::Remote(entry) if local.contains(at) => self.tab.download(&entry),
+                _ => {}
+            }
+        }
+        let Some((dragged, at)) = self.drag.take() else {
+            return;
+        };
+        let (target, words, icon) = match dragged {
+            Dragged::Local(_) => (remote, "Upload to the host", icons::UPLOAD),
+            Dragged::Remote(_) => (local, "Download here", icons::DOWNLOAD),
+        };
+        if target.contains(at) {
+            ui.gfx.stroke_rect(target, 12.0, 2.0, t.accent);
+        }
+        let label = format!("{}  \u{b7}  {words}", dragged.name());
+        let width = ui.gfx.measure(&label, SMALL).width + 16.0 + 3.0 * space::S;
+        let chip = Rect::new(at.x + 14.0, at.y + 10.0, width, 28.0);
+        ui.gfx.shadow(chip, 8.0, 12.0, 4.0, t.shadow);
+        ui.gfx.fill_rect(chip, 8.0, t.raised);
+        ui.gfx.stroke_rect(chip, 8.0, 1.0, t.line_strong);
+        let mut inner = chip.inset(space::S, 0.0);
+        ui.gfx
+            .icon(icon, inner.take_left(16.0).centered(14.0, 14.0), t.accent);
+        inner.take_left(space::S);
+        ui.gfx.text(inner, &label, SMALL, t.text, Align::Start);
     }
 
     /// The Delete, Permissions and Properties cards over the tab.
@@ -544,6 +612,16 @@ impl SftpView {
             if clicked {
                 self.local_selected = Some(entry.name.clone());
             }
+            let id = Id::new(("local", entry.name.as_str()));
+            if !entry.is_dir {
+                let path = self.tab.local.dir.join(&entry.name);
+                if let Some(at) = ui.drag_moved(id) {
+                    self.drag = Some((Dragged::Local(path.clone()), at));
+                }
+                if let Some(at) = ui.drag_released(id) {
+                    self.dropped = Some((Dragged::Local(path), at));
+                }
+            }
             if double && entry.is_dir {
                 open = Some(entry.name.clone());
             } else if (double && !entry.is_dir) || acted {
@@ -806,6 +884,15 @@ impl SftpView {
             if clicked {
                 self.remote_selected = Some(entry.name.clone());
             }
+            let id = Id::new(("remote", entry.name.as_str()));
+            if !entry.is_dir() {
+                if let Some(at) = ui.drag_moved(id) {
+                    self.drag = Some((Dragged::Remote(entry.clone()), at));
+                }
+                if let Some(at) = ui.drag_released(id) {
+                    self.dropped = Some((Dragged::Remote(entry.clone()), at));
+                }
+            }
             if double && entry.is_dir() {
                 open = Some(join(&cwd, &entry.name));
             } else if (double && !entry.is_dir()) || acted {
@@ -976,6 +1063,73 @@ mod tests {
             Event::PointerDown(Button::Primary),
             Event::PointerUp(Button::Primary),
         ]
+    }
+
+    /// Drags the row named `from` and lets it go over the row named `onto`.
+    fn drag(view: &mut SftpView, state: &mut UiState, from: &str, onto: &str, time: f64) {
+        use annulus_ui::kit::{Button, Event};
+        let zones = frame(view, state, &[], time);
+        let at = |name: &str| {
+            zones
+                .iter()
+                .find(|zone| zone.label == name)
+                .unwrap_or_else(|| panic!("no row {name:?}"))
+                .rect
+                .center()
+        };
+        let (start, end) = (at(from), at(onto));
+        let moving = [
+            Event::PointerMoved(start),
+            Event::PointerDown(Button::Primary),
+            Event::PointerMoved(end),
+        ];
+        frame(view, state, &moving, time + 0.1);
+        frame(
+            view,
+            state,
+            &[Event::PointerUp(Button::Primary)],
+            time + 0.2,
+        );
+    }
+
+    #[test]
+    fn a_file_dragged_onto_the_other_pane_is_uploaded_or_downloaded() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("drag"));
+        let mut state = UiState::default();
+        drag(&mut view, &mut state, "todo.txt", "README.md", 0.0);
+        let labels = |view: &SftpView| -> Vec<String> {
+            view.tab
+                .transfers
+                .iter()
+                .map(|transfer| transfer.label.clone())
+                .collect()
+        };
+        assert_eq!(labels(&view), ["\u{2191} todo.txt"], "local onto the host");
+        drag(&mut view, &mut state, "deploy.sh", "backup.tar.gz", 1.0);
+        assert_eq!(
+            labels(&view),
+            ["\u{2191} todo.txt", "\u{2193} deploy.sh"],
+            "the host's onto this computer"
+        );
+        // Let go over its own pane, nothing moves.
+        drag(&mut view, &mut state, "app.log", "README.md", 2.0);
+        assert_eq!(view.tab.transfers.len(), 2);
+    }
+
+    #[test]
+    fn files_dropped_from_the_os_upload_to_the_folder_shown() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("os-drop"));
+        let file = view.tab.local.dir.join("todo.txt");
+        let mut state = UiState::default();
+        frame(&mut view, &mut state, &[], 0.0);
+        frame(
+            &mut view,
+            &mut state,
+            &[annulus_ui::kit::Event::FilesDropped(vec![file])],
+            1.0,
+        );
+        assert_eq!(view.tab.transfers.len(), 1);
+        assert!(view.tab.transfers[0].upload);
     }
 
     #[test]

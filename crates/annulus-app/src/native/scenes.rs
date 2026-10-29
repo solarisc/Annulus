@@ -37,6 +37,9 @@ enum Act {
     Type(&'static str),
     /// Press a key.
     Press(Key, Modifiers),
+    /// Press the primary button on the zone with this name and keep it down (a drag starts;
+    /// a later `Hover` moves it).
+    Hold(&'static str),
 }
 
 struct Scene {
@@ -556,6 +559,15 @@ const SCENES: &[Scene] = &[
         acts: &[Act::Hover("deploy.sh")],
     },
     Scene {
+        name: "sftp-drag",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::Hold("todo.txt"), Act::Hover("README.md")],
+    },
+    Scene {
         name: "sftp-filtered",
         width: 1100,
         height: 720,
@@ -982,6 +994,10 @@ fn render(
             }
             Some(Act::Type(text)) => events.push(Event::Text((*text).to_owned())),
             Some(Act::Press(key, modifiers)) => events.push(Event::Key(*key, *modifiers)),
+            Some(Act::Hold(name)) => {
+                events.push(Event::PointerMoved(zone_center(&output.zones, name)));
+                events.push(Event::PointerDown(Button::Primary));
+            }
             None => break,
         }
     }

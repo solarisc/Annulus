@@ -512,6 +512,11 @@ mod portable {
                     self.pointer = None;
                     self.events.push(Event::PointerLeft);
                 }
+                // Files from Finder or a file manager (macOS and X11; winit has no file drops on
+                // Wayland yet), one event per file.
+                WindowEvent::DroppedFile(path) => {
+                    self.events.push(Event::FilesDropped(vec![path]));
+                }
                 WindowEvent::MouseInput { state, button, .. } => {
                     let button = match button {
                         MouseButton::Left => Button::Primary,

@@ -48,6 +48,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR,
     VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
+use windows::Win32::UI::Shell::{
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HTCAPTION,
@@ -56,12 +59,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostQuitMessage, RegisterClassExW, SM_CXPADDEDBORDER, SM_CYSIZEFRAME, SW_MAXIMIZE, SW_MINIMIZE,
     SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-    WM_CHAR, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
-    WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN,
-    WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_CHAR, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+    WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
+    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -197,6 +200,8 @@ pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(),
         let value = i32::from(dark);
         // DWMWA_USE_IMMERSIVE_DARK_MODE: dark borders and system menu.
         let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), (&raw const value).cast(), 4);
+        // Files dropped from Explorer arrive as WM_DROPFILES.
+        DragAcceptFiles(hwnd, true);
         // DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND: rounded corners on Windows 11 (Windows
         // 10 has no such attribute and ignores it).
         let round = 2_i32;
@@ -572,6 +577,28 @@ impl Host {
                     LRESULT(0)
                 }
                 WM_ERASEBKGND => LRESULT(1),
+                WM_DROPFILES => {
+                    let drop = HDROP(wparam.0 as *mut core::ffi::c_void);
+                    let mut at = POINT::default();
+                    let _ = DragQueryPoint(drop, &raw mut at);
+                    let mut paths = Vec::new();
+                    for index in 0..DragQueryFileW(drop, u32::MAX, None) {
+                        let length = DragQueryFileW(drop, index, None) as usize;
+                        let mut name = vec![0_u16; length + 1];
+                        let written = DragQueryFileW(drop, index, Some(&mut name)) as usize;
+                        paths.push(std::path::PathBuf::from(
+                            <std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(
+                                &name[..written.min(length)],
+                            ),
+                        ));
+                    }
+                    DragFinish(drop);
+                    #[allow(clippy::cast_precision_loss)] // Window coordinates are small.
+                    let point = Point::new(at.x as f32 / self.scale, at.y as f32 / self.scale);
+                    self.push(Event::PointerMoved(point));
+                    self.push(Event::FilesDropped(paths));
+                    LRESULT(0)
+                }
                 WM_SIZE => {
                     let mut client = RECT::default();
                     let _ = GetClientRect(hwnd, &raw mut client);

@@ -227,6 +227,9 @@ pub enum Event {
     Paste(String),
     /// The modifier keys held changed (so clicks know about Ctrl, Shift).
     Modifiers(Modifiers),
+    /// Files dropped on the window from the OS (Explorer, Finder, a file manager), at the
+    /// pointer's place.
+    FilesDropped(Vec<std::path::PathBuf>),
 }
 
 /// A key press or typed text, in arrival order.
@@ -417,6 +420,12 @@ pub struct UiState {
     modifiers: Modifiers,
     hovered: Option<Id>,
     pressed: Option<(Id, Button)>,
+    /// Where the pointer was when the button went down: moving far from it makes a drag.
+    pressed_at: Option<Point>,
+    /// A drag that ended this frame: the zone it started on and where it was let go.
+    drag_end: Option<(Id, Point)>,
+    /// Files dropped from the OS this frame.
+    dropped: Vec<std::path::PathBuf>,
     clicks: Vec<(Id, Button)>,
     double_clicks: Vec<Id>,
     last_click: Option<(Id, f64)>,
@@ -450,12 +459,17 @@ pub struct UiState {
 /// Two clicks on the same zone closer than this are a double click, in seconds.
 const DOUBLE_CLICK: f64 = 0.4;
 
+/// How far the pointer moves with the button down before a press becomes a drag, in DIPs.
+const DRAG_START: f32 = 6.0;
+
 impl UiState {
     /// Resolves this frame's input against the zones on screen. `time` is in seconds.
     pub fn begin_frame(&mut self, events: &[Event], time: f64) {
         self.time = time;
         self.clicks.clear();
         self.double_clicks.clear();
+        self.drag_end = None;
+        self.dropped.clear();
         self.activated = None;
         for request in std::mem::take(&mut self.requests) {
             match request {
@@ -495,31 +509,14 @@ impl UiState {
                 }
                 Event::PointerDown(button) => {
                     self.pressed = self.hovered.map(|id| (id, *button));
+                    self.pressed_at = self.pointer;
                     if *button == Button::Primary {
                         let target = self.hovered.and_then(|id| self.zone(id));
                         self.focus = target.filter(|z| z.role.focusable()).map(|z| z.id);
                         self.focus_ring = false;
                     }
                 }
-                Event::PointerUp(button) => {
-                    if let Some((id, pressed)) = self.pressed.take()
-                        && pressed == *button
-                        && self.hovered == Some(id)
-                    {
-                        self.clicks.push((id, *button));
-                        if *button == Button::Primary {
-                            if self
-                                .last_click
-                                .is_some_and(|(last, at)| last == id && time - at < DOUBLE_CLICK)
-                            {
-                                self.double_clicks.push(id);
-                                self.last_click = None;
-                            } else {
-                                self.last_click = Some((id, time));
-                            }
-                        }
-                    }
-                }
+                Event::PointerUp(button) => self.release(*button, time),
                 Event::Wheel { x, y } => {
                     self.wheel.0 += x;
                     self.wheel.1 += y;
@@ -551,8 +548,49 @@ impl UiState {
                 Event::Text(text) => self.typed.push(Typed::Text(text.clone())),
                 Event::Paste(text) => self.typed.push(Typed::Paste(text.clone())),
                 Event::Modifiers(modifiers) => self.modifiers = *modifiers,
+                Event::FilesDropped(paths) => self.dropped.extend(paths.iter().cloned()),
             }
         }
+    }
+
+    /// A button came up: a click on the zone it went down on, unless the pointer was dragged
+    /// away (then the drag ends there), and a double click when it is the second one.
+    fn release(&mut self, button: Button, time: f64) {
+        let dragged = self.dragged();
+        let Some((id, pressed)) = self.pressed.take() else {
+            return;
+        };
+        if pressed != button {
+            return;
+        }
+        if let Some(at) = dragged {
+            self.drag_end = Some((id, at));
+            return;
+        }
+        if self.hovered != Some(id) {
+            return;
+        }
+        self.clicks.push((id, button));
+        if button == Button::Primary {
+            if self
+                .last_click
+                .is_some_and(|(last, at)| last == id && time - at < DOUBLE_CLICK)
+            {
+                self.double_clicks.push(id);
+                self.last_click = None;
+            } else {
+                self.last_click = Some((id, time));
+            }
+        }
+    }
+
+    /// Where the pointer is, when the primary button is down and has moved past
+    /// [`DRAG_START`] since it went down.
+    fn dragged(&self) -> Option<Point> {
+        let (_, button) = self.pressed?;
+        let (from, to) = (self.pressed_at?, self.pointer?);
+        let far = (to.x - from.x).hypot(to.y - from.y) > DRAG_START;
+        (button == Button::Primary && far).then_some(to)
     }
 
     /// The pointer moved to `point` at `time`: what it is over, and since when.
@@ -904,6 +942,26 @@ impl<'a> Ui<'a> {
             .is_some_and(|(pressed, button)| pressed == id && button == Button::Primary)
     }
 
+    /// Where the pointer is while `id` is dragged: its press has moved far enough to be a
+    /// drag rather than a click.
+    #[must_use]
+    pub fn drag_moved(&self, id: Id) -> Option<Point> {
+        self.dragging(id).then(|| self.state.dragged()).flatten()
+    }
+
+    /// Where a drag that started on `id` was let go, in the frame it ended.
+    #[must_use]
+    pub fn drag_released(&self, id: Id) -> Option<Point> {
+        self.state
+            .drag_end
+            .and_then(|(from, at)| (from == id).then_some(at))
+    }
+
+    /// Takes the files dropped on the window from the OS this frame.
+    pub fn take_dropped_files(&mut self) -> Vec<std::path::PathBuf> {
+        std::mem::take(&mut self.state.dropped)
+    }
+
     /// Whether the pointer is on `rect` or on a zone inside it: a card stays hovered while
     /// the pointer is on one of its buttons, which are zones of their own.
     #[must_use]
@@ -1075,6 +1133,58 @@ mod tests {
             ui.zone(Id::new("a"), A, Role::Button, "A"),
             ui.zone(Id::new("b"), B, Role::Button, "B"),
         )
+    }
+
+    #[test]
+    fn a_press_that_moves_far_is_a_drag_not_a_click() {
+        let mut state = UiState::default();
+        let row = Id::new("row");
+        let mut seen = (false, None, None);
+        let mut run = |state: &mut UiState, events: &[Event], time: f64| {
+            frame(state, events, time, |ui| {
+                let response = ui.zone(row, A, Role::Button, "row");
+                seen = (response.clicked, ui.drag_moved(row), ui.drag_released(row));
+            });
+            seen
+        };
+        run(&mut state, &[], 0.0);
+        // A little wobble is still a click.
+        let wobble = [
+            Event::PointerMoved(Point::new(10.0, 10.0)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerMoved(Point::new(13.0, 11.0)),
+            Event::PointerUp(Button::Primary),
+        ];
+        assert_eq!(run(&mut state, &wobble, 1.0), (true, None, None));
+        // Farther, it is a drag: reported while it moves and where it is let go.
+        let down = [
+            Event::PointerMoved(Point::new(10.0, 10.0)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerMoved(Point::new(200.0, 150.0)),
+        ];
+        let (clicked, moved, _) = run(&mut state, &down, 2.0);
+        assert!(!clicked);
+        assert_eq!(moved, Some(Point::new(200.0, 150.0)));
+        let up = [Event::PointerUp(Button::Primary)];
+        assert_eq!(
+            run(&mut state, &up, 3.0),
+            (false, None, Some(Point::new(200.0, 150.0)))
+        );
+    }
+
+    #[test]
+    fn files_dropped_from_the_os_are_taken_once() {
+        let mut state = UiState::default();
+        let file = std::path::PathBuf::from("report.pdf");
+        let mut taken = (Vec::new(), Vec::new());
+        frame(
+            &mut state,
+            &[Event::FilesDropped(vec![file.clone()])],
+            0.0,
+            |ui| taken = (ui.take_dropped_files(), ui.take_dropped_files()),
+        );
+        assert_eq!(taken.0, [file]);
+        assert_eq!(taken.1, Vec::<std::path::PathBuf>::new());
     }
 
     #[test]
