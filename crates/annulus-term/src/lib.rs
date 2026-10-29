@@ -6,6 +6,7 @@
 
 pub mod find;
 pub mod keys;
+pub mod links;
 pub mod palette;
 pub mod select;
 pub mod snapshot;

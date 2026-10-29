@@ -19,6 +19,7 @@ use annulus_term::alacritty_terminal::term::{Term, TermMode};
 use annulus_term::alacritty_terminal::tty;
 use annulus_term::alacritty_terminal::vte::ansi::Processor;
 use annulus_term::find::{Find, Highlight};
+use annulus_term::links::{self, Link};
 use annulus_term::select::{self, SelectionKind};
 use annulus_term::{Palette, Screen, Size, config, snapshot};
 use zeroize::Zeroizing;
@@ -431,6 +432,12 @@ impl Session {
     /// The matches of `find` on screen.
     pub fn find_visible(&self, find: &mut Find) -> Vec<Highlight> {
         find.visible(&self.term.lock())
+    }
+
+    /// The link at screen cell (`row`, `column`), if any.
+    #[must_use]
+    pub fn link_at(&self, row: usize, column: usize) -> Option<Link> {
+        links::link_at(&self.term.lock(), row, column)
     }
 
     /// What the terminal shows now.

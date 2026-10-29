@@ -9,6 +9,7 @@ use annulus_term::alacritty_terminal::term::TermMode;
 use annulus_term::alacritty_terminal::vte::ansi::Rgb;
 use annulus_term::find::{Find, Highlight};
 use annulus_term::keys::{self, Key, Mods};
+use annulus_term::links;
 use annulus_term::select::SelectionKind;
 use annulus_term::{Screen, Size};
 
@@ -387,6 +388,28 @@ fn handle_mouse(response: &egui::Response, session: &Session, origin: Pos2, cell
         ((pointer.y - origin.y) / cell.y).max(0.0) as usize,
         ((pointer.x - origin.x) / cell.x).max(0.0) as usize,
     );
+    // Ctrl+click (Cmd+click on macOS) opens a link; holding the key shows where it points.
+    if response.hovered()
+        && response.ctx.input(|input| input.modifiers.command)
+        && let Some(link) = session.link_at(row, column)
+    {
+        let openable = links::allowed(&link.url);
+        response.ctx.set_cursor_icon(if openable {
+            egui::CursorIcon::PointingHand
+        } else {
+            egui::CursorIcon::NotAllowed
+        });
+        let hint = if openable {
+            format!("Open {}", link.url)
+        } else {
+            format!("{} (this kind of link is not opened)", link.url)
+        };
+        response.clone().on_hover_text(hint);
+        if response.clicked() && openable {
+            response.ctx.open_url(egui::OpenUrl::new_tab(link.url));
+        }
+        return;
+    }
     if response.triple_clicked() {
         session.select_start(row, column, SelectionKind::Lines);
         session.select_to(row, column);
