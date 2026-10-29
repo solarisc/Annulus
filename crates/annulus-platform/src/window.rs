@@ -300,6 +300,9 @@ mod portable {
     /// The band along the window's edges that resizes it, in DIPs.
     const EDGE: f32 = 5.0;
 
+    /// The time between two frames of an animation: 60 per second.
+    const ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+
     /// The resize direction of the window edge under `point`, if any.
     fn edge_at(window: &Window, point: Point) -> Option<ResizeDirection> {
         if window.is_maximized() {
@@ -343,6 +346,7 @@ mod portable {
                 return;
             };
             let events = std::mem::take(&mut self.events);
+            let began = Instant::now();
             let time = self.started.elapsed().as_secs_f64();
             self.state.begin_frame(&events, time);
             #[allow(clippy::cast_precision_loss)] // Window sizes fit in f32.
@@ -398,10 +402,14 @@ mod portable {
                 Some(WindowRequest::Close) => event_loop.exit(),
                 None => {}
             }
-            if output.repaint {
-                shown.window.request_redraw();
-            }
-            self.wake_at = output.repaint_after.map(|after| Instant::now() + after);
+            // softbuffer does not wait for the display, so an animation's frames are paced
+            // here: the next one a frame's time after this one began, not at once.
+            let next = output.repaint.then(|| began + ANIMATION_FRAME);
+            let later = output.repaint_after.map(|after| Instant::now() + after);
+            self.wake_at = match (next, later) {
+                (Some(next), Some(later)) => Some(next.min(later)),
+                (next, later) => next.or(later),
+            };
         }
     }
 

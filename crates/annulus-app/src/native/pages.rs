@@ -3,6 +3,7 @@
 //! looks like one product.
 
 use annulus_config::tokens::space;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::IconId;
 use annulus_ui::kit::{Cursor, Id, Response, Role, Ui};
@@ -59,7 +60,7 @@ pub fn action(
     icon: Option<IconId>,
     kind: Kind,
 ) -> bool {
-    let width = button_width(ui.gfx, label, icon);
+    let width = button_width(&mut ui.gfx, label, icon);
     let rect = actions.take_right(width);
     actions.take_right(space::S);
     ui.button(Id::new(id), rect, label, icon, kind).clicked

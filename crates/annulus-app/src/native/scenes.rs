@@ -1005,6 +1005,12 @@ fn render(
     // Settle: hover fades and focus glows finish.
     let (output, png) = frame(&[], time + 1.0, true);
     faults.extend(output.faults.iter().cloned());
+    // Once settled, nothing asks for frames (P-06): an animation that never ends would keep
+    // the CPU busy while the window sits idle.
+    let (idle, _) = frame(&[], time + 2.0, false);
+    if idle.repaint {
+        faults.push("still asks for frames two seconds after the last input".into());
+    }
     faults.extend(layout_faults(&output.zones, viewport));
     faults.extend(tab_order_faults(&output.zones));
     // Two zones with one id would take each other's input and screen-reader node.

@@ -5,6 +5,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use annulus_config::tokens::{TILES, space};
 use annulus_session::Target;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
@@ -567,7 +568,7 @@ impl HostsView {
         let toggle = row.take_right(72.0);
         let tags = tagged.then(|| {
             row.take_right(space::S);
-            let width = button_width(ui.gfx, "Tags", Some(icons::TAG));
+            let width = button_width(&mut ui.gfx, "Tags", Some(icons::TAG));
             row.take_right(width).centered(width, CONTROL)
         });
         let title = ui.gfx.measure("Hosts", TITLE).width;
@@ -630,8 +631,8 @@ impl HostsView {
     fn toolbar(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) -> Option<HostsAction> {
         let mut row = rect;
         let mut action = None;
-        let new_w = button_width(ui.gfx, "New host", Some(icons::PLUS));
-        let term_w = button_width(ui.gfx, "Terminal", Some(icons::TERMINAL));
+        let new_w = button_width(&mut ui.gfx, "New host", Some(icons::PLUS));
+        let term_w = button_width(&mut ui.gfx, "Terminal", Some(icons::TERMINAL));
         // Labels go when the search box would get too narrow; icons stay.
         let compact = row.w - (new_w + CONTROL + term_w + 3.0 * space::S) < 240.0;
         let (new_label, term_label) = if compact {
@@ -758,7 +759,7 @@ impl HostsView {
             }
         }
         if !self.tags.is_empty() {
-            let clear = place(button_width(ui.gfx, "Clear", None));
+            let clear = place(button_width(&mut ui.gfx, "Clear", None));
             if ui
                 .button(
                     Id::new("hosts.tags.clear"),
@@ -785,8 +786,8 @@ impl HostsView {
                         1 => format!("Delete \u{201c}{only}\u{201d} from 1 host"),
                         n => format!("Delete \u{201c}{only}\u{201d} from {n} hosts"),
                     };
-                    let cancel = place(button_width(ui.gfx, "Cancel", None));
-                    let yes = place(button_width(ui.gfx, &label, None));
+                    let cancel = place(button_width(&mut ui.gfx, "Cancel", None));
+                    let yes = place(button_width(&mut ui.gfx, &label, None));
                     if ui
                         .button(
                             Id::new("hosts.untag.cancel"),
@@ -809,7 +810,7 @@ impl HostsView {
                 }
                 Some((_, true)) => {}
                 _ => {
-                    let ask = place(button_width(ui.gfx, "Delete tag\u{2026}", None));
+                    let ask = place(button_width(&mut ui.gfx, "Delete tag\u{2026}", None));
                     if ui
                         .button(
                             Id::new("hosts.untag"),
@@ -871,8 +872,8 @@ impl HostsView {
         );
         column.take_top(space::L);
         let buttons = column.take_top(CONTROL);
-        let new_w = button_width(ui.gfx, "New host", Some(icons::PLUS));
-        let import_w = button_width(ui.gfx, "Import ssh_config", Some(icons::DOWNLOAD));
+        let new_w = button_width(&mut ui.gfx, "New host", Some(icons::PLUS));
+        let import_w = button_width(&mut ui.gfx, "Import ssh_config", Some(icons::DOWNLOAD));
         let total = new_w + space::S + import_w;
         let mut line = buttons.centered(total, CONTROL);
         let new = line.take_left(new_w);
@@ -1241,14 +1242,14 @@ impl HostsView {
         ui.pop_clip();
 
         let mut buttons = footer.inset(space::XL, (footer.h - CONTROL) / 2.0);
-        let save_w = button_width(ui.gfx, "Save", None).max(88.0);
+        let save_w = button_width(&mut ui.gfx, "Save", None).max(88.0);
         let save = buttons.take_right(save_w);
         buttons.take_right(space::S);
-        let cancel_w = button_width(ui.gfx, "Cancel", None);
+        let cancel_w = button_width(&mut ui.gfx, "Cancel", None);
         let cancel = buttons.take_right(cancel_w);
         let mut saved = false;
         if !editor.is_new {
-            let delete_w = button_width(ui.gfx, "Delete", Some(icons::TRASH));
+            let delete_w = button_width(&mut ui.gfx, "Delete", Some(icons::TRASH));
             let delete = Rect::new(footer.x + space::XL, cancel.y, delete_w, CONTROL);
             if ui
                 .button(
@@ -1439,9 +1440,9 @@ impl HostsView {
             .map(|(entry, _)| entry)
             .collect();
         let label = format!("Import {}", chosen.len());
-        let import = buttons.take_right(button_width(ui.gfx, &label, None).max(100.0));
+        let import = buttons.take_right(button_width(&mut ui.gfx, &label, None).max(100.0));
         buttons.take_right(space::S);
-        let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+        let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
         let go = ui
             .button(Id::new("import.go"), import, &label, None, Kind::Primary)
             .clicked
@@ -1489,9 +1490,9 @@ impl HostsView {
             .hosts()
             .iter()
             .any(|host| host.group.is_some() && host.group == self.group)
-            .then(|| row.take_right(button_width(ui.gfx, "Connect all", Some(icons::PLAY))));
+            .then(|| row.take_right(button_width(&mut ui.gfx, "Connect all", Some(icons::PLAY))));
         let mut go = None;
-        let all_w = button_width(ui.gfx, "All hosts", None);
+        let all_w = button_width(&mut ui.gfx, "All hosts", None);
         if ui
             .button(
                 Id::new("crumb.all"),
@@ -1507,7 +1508,7 @@ impl HostsView {
         for (index, (uid, name)) in chain.iter().enumerate() {
             let chevron = row.take_left(16.0).centered(12.0, 12.0);
             ui.gfx.icon(icons::CHEVRON_RIGHT, chevron, t.text3);
-            let width = button_width(ui.gfx, name, None);
+            let width = button_width(&mut ui.gfx, name, None);
             let slot = row.take_left(width);
             let last = index + 1 == chain.len();
             let kind = if last { Kind::Secondary } else { Kind::Ghost };
@@ -1731,8 +1732,8 @@ impl HostsView {
         let mut buttons = footer.inset(space::XL, (footer.h - CONTROL) / 2.0);
         let mut done = false;
         if editor.confirm_delete {
-            let up_w = button_width(ui.gfx, "Move its hosts up", None);
-            let all_w = button_width(ui.gfx, "Delete its hosts too", None);
+            let up_w = button_width(&mut ui.gfx, "Move its hosts up", None);
+            let all_w = button_width(&mut ui.gfx, "Delete its hosts too", None);
             let up = buttons.take_left(up_w);
             buttons.take_left(space::S);
             let all = buttons.take_left(all_w);
@@ -1773,11 +1774,11 @@ impl HostsView {
                 }
             }
         } else {
-            let save = buttons.take_right(button_width(ui.gfx, "Save", None).max(88.0));
+            let save = buttons.take_right(button_width(&mut ui.gfx, "Save", None).max(88.0));
             buttons.take_right(space::S);
-            let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+            let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
             if !editor.is_new {
-                let delete_w = button_width(ui.gfx, "Delete", Some(icons::TRASH));
+                let delete_w = button_width(&mut ui.gfx, "Delete", Some(icons::TRASH));
                 let delete = Rect::new(footer.x + space::XL, cancel.y, delete_w, CONTROL);
                 if ui
                     .button(
@@ -2387,7 +2388,7 @@ fn no_results(ui: &mut Ui<'_>, rect: Rect, query: &str, can_save: bool) -> bool 
         return false;
     }
     column.take_top(space::L);
-    let width = button_width(ui.gfx, "Save as host", Some(icons::PLUS));
+    let width = button_width(&mut ui.gfx, "Save as host", Some(icons::PLUS));
     let save = column.take_top(CONTROL).centered(width, CONTROL);
     ui.button(
         Id::new("hosts.save-target"),

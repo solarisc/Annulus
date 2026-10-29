@@ -16,6 +16,7 @@ use annulus_term::find::Find;
 use annulus_term::keys::{self, Mods};
 use annulus_term::select::SelectionKind;
 use annulus_term::{Palette, Size};
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Typed, Ui};
@@ -318,7 +319,7 @@ impl LiveTerminal {
         row.take_right(4.0);
         let previous = row.take_right(28.0);
         row.take_right(space::S);
-        let case = row.take_right(button_width(ui.gfx, "Aa", None));
+        let case = row.take_right(button_width(&mut ui.gfx, "Aa", None));
         row.take_right(space::S);
         let field_id = id.with("find");
         if find.focus {
@@ -638,11 +639,11 @@ impl LiveTerminal {
         );
         column.take_top(space::L);
         let mut row = column.take_top(CONTROL);
-        let paste = row.take_right(button_width(ui.gfx, "Paste", None).max(80.0));
+        let paste = row.take_right(button_width(&mut ui.gfx, "Paste", None).max(80.0));
         row.take_right(space::S);
-        let one = row.take_right(button_width(ui.gfx, "Paste as one line", None));
+        let one = row.take_right(button_width(&mut ui.gfx, "Paste as one line", None));
         row.take_right(space::S);
-        let cancel = row.take_right(button_width(ui.gfx, "Cancel", None));
+        let cancel = row.take_right(button_width(&mut ui.gfx, "Cancel", None));
         let mut choice = None;
         // Drawn left to right, so Tab follows the eye.
         if ui
@@ -748,7 +749,7 @@ impl LiveTerminal {
             (None, true) => "Reconnect",
             (None, false) => "Start again",
         };
-        let again = inner.take_right(button_width(ui.gfx, again_label, Some(icons::SYNC)));
+        let again = inner.take_right(button_width(&mut ui.gfx, again_label, Some(icons::SYNC)));
         let again = again.centered(again.w, 30.0);
         inner.take_right(space::S);
         let second = if waiting.is_some() {
@@ -759,7 +760,7 @@ impl LiveTerminal {
             None
         };
         let second_rect = second.map(|label| {
-            let slot = inner.take_right(button_width(ui.gfx, label, None));
+            let slot = inner.take_right(button_width(&mut ui.gfx, label, None));
             inner.take_right(space::S);
             slot.centered(slot.w, 30.0)
         });

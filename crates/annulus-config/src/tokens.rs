@@ -223,8 +223,18 @@ pub mod metrics {
     pub const FOCUS_RING_WIDTH: f32 = 2.0;
 }
 
-/// Duration of panel and popover animations, in milliseconds. Zero under reduced motion.
-pub const MOTION_MS: u32 = 120;
+/// Animation durations in milliseconds (UI-SPEC §8 Motion). Nothing animates under reduced
+/// motion.
+pub mod motion {
+    /// Hover, press and focus feedback, small fades.
+    pub const FAST: u32 = 120;
+    /// Panels, menus, page and tab changes.
+    pub const BASE: u32 = 200;
+    /// Large surfaces: dialogs, the New Tab page, a list filling in.
+    pub const SLOW: u32 = 280;
+    /// Each further row of a list that fills in starts this much later.
+    pub const STAGGER: u32 = 24;
+}
 
 #[cfg(test)]
 mod tests {

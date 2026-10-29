@@ -3,6 +3,7 @@
 //! the buttons, by their zone ids ([`DRAG`], [`MINIMIZE`], [`MAXIMIZE`], [`CLOSE`]).
 
 use annulus_config::tokens::space;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Role, Ui};

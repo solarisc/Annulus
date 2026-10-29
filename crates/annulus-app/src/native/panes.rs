@@ -6,6 +6,7 @@ use annulus_config::tokens::space;
 use annulus_platform::window::Waker;
 use annulus_session::Program;
 use annulus_term::Palette;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Role, Theme, Ui};

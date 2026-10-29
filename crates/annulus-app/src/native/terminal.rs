@@ -3,6 +3,7 @@
 //! text runs of one color and weight each, and the cursor.
 
 use annulus_term::snapshot::{Cell, Screen};
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Color, Font, Point, Rect, Weight};
 use annulus_ui::kit::Ui;
 

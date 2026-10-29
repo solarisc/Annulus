@@ -10,6 +10,7 @@ use annulus_session::profiles::Profile;
 use annulus_session::{Program, SshFiles};
 use annulus_ssh::keys::{self, KeyKind, KeyPair};
 use annulus_ssh::known::{self, KnownHost};
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
@@ -96,10 +97,10 @@ fn row_buttons(
 /// delete; returns `Some(true)` to delete, `Some(false)` to keep, and the rest of the row.
 fn confirm_delete(ui: &mut Ui<'_>, row: Rect, id: Id, delete: &str) -> (Option<bool>, Rect) {
     let mut remainder = row.inset(space::M, 0.0);
-    let delete_w = button_width(ui.gfx, delete, None);
+    let delete_w = button_width(&mut ui.gfx, delete, None);
     let delete_rect = remainder.take_right(delete_w).centered(delete_w, 30.0);
     remainder.take_right(space::S);
-    let cancel_w = button_width(ui.gfx, "Cancel", None);
+    let cancel_w = button_width(&mut ui.gfx, "Cancel", None);
     let cancel = remainder.take_right(cancel_w).centered(cancel_w, 30.0);
     let mut answer = None;
     // Drawn left to right, so Tab follows the eye.
@@ -231,9 +232,14 @@ impl KeychainView {
             Some(count),
             "Keys sync with your vault, encrypted. Hosts without one use ~/.ssh.",
         );
-        let generate = actions.take_right(button_width(ui.gfx, "Generate key", Some(icons::PLUS)));
+        let generate =
+            actions.take_right(button_width(&mut ui.gfx, "Generate key", Some(icons::PLUS)));
         actions.take_right(space::S);
-        let import = actions.take_right(button_width(ui.gfx, "Import key", Some(icons::DOWNLOAD)));
+        let import = actions.take_right(button_width(
+            &mut ui.gfx,
+            "Import key",
+            Some(icons::DOWNLOAD),
+        ));
         // Drawn left to right, so Tab follows the eye.
         if ui
             .button(
@@ -362,9 +368,9 @@ impl KeychainView {
                 } else {
                     "Generate".to_owned()
                 };
-                let go = buttons.take_right(button_width(ui.gfx, &go_label, None).max(96.0));
+                let go = buttons.take_right(button_width(&mut ui.gfx, &go_label, None).max(96.0));
                 buttons.take_right(space::S);
-                let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+                let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
                 close |= ui
                     .button(Id::new("key.cancel"), cancel, "Cancel", None, Kind::Ghost)
                     .clicked
@@ -416,9 +422,9 @@ impl KeychainView {
                 );
                 card.take_top(space::S);
                 let mut line = card.take_top(CONTROL);
-                let go = line.take_right(button_width(ui.gfx, "Import", None).max(96.0));
+                let go = line.take_right(button_width(&mut ui.gfx, "Import", None).max(96.0));
                 line.take_right(space::S);
-                let cancel = line.take_right(button_width(ui.gfx, "Cancel", None));
+                let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
                 line.take_right(space::M);
                 let passphrase_field = ui.text_field(
                     Id::new("import.passphrase"),
@@ -538,9 +544,9 @@ impl KeychainView {
         } else {
             "Install"
         };
-        let go = line.take_right(button_width(ui.gfx, "Installing\u{2026}", None));
+        let go = line.take_right(button_width(&mut ui.gfx, "Installing\u{2026}", None));
         line.take_right(space::S);
-        let cancel = line.take_right(button_width(ui.gfx, "Cancel", None));
+        let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
         line.take_right(space::M);
         let names: Vec<String> = hosts.iter().map(|(_, label)| label.clone()).collect();
         let at = install
@@ -765,9 +771,9 @@ impl SnippetsView {
             1 => "Run on 1 host".to_owned(),
             n => format!("Run on {n} hosts"),
         };
-        let go = line.take_right(button_width(ui.gfx, &go_label, Some(icons::PLAY)));
+        let go = line.take_right(button_width(&mut ui.gfx, &go_label, Some(icons::PLAY)));
         line.take_right(space::S);
-        let cancel = line.take_right(button_width(ui.gfx, "Cancel", None));
+        let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
         line.take_right(space::M);
         let t = ui.theme;
         if full {
@@ -1637,7 +1643,7 @@ pub fn settings(
     );
     let row_h = 58.0;
     let content =
-        5.0 * (18.0 + space::S + space::XL + 2.0 * space::S) + 7.0 * row_h + account_h + space::XL;
+        5.0 * (18.0 + space::S + space::XL + 2.0 * space::S) + 8.0 * row_h + account_h + space::XL;
     let offset = ui.scroll_view(Id::new("settings.scroll"), area, content);
     ui.push_clip(area);
     let mut column = Rect::new(area.x, area.y - offset, area.w - 12.0, content);
@@ -1648,7 +1654,7 @@ pub fn settings(
         column.take_top(drawn_h + space::XL);
     }
 
-    let mut card = pages::card(ui, &mut column, "Appearance", row_h + 2.0 * space::S);
+    let mut card = pages::card(ui, &mut column, "Appearance", 2.0 * row_h + 2.0 * space::S);
     let control = pages::setting(
         ui,
         card.take_top(row_h),
@@ -1669,6 +1675,25 @@ pub fn settings(
         at,
     ) {
         settings.theme = modes[chosen];
+        changed = true;
+    }
+    pages::divider(ui, card.y, card);
+    let control = pages::setting(
+        ui,
+        card.take_top(row_h),
+        "Reduce motion",
+        "Changes happen at once, without animating.",
+        60.0,
+    );
+    if ui
+        .switch(
+            Id::new("settings.motion"),
+            control,
+            &mut settings.reduce_motion,
+            "Reduce motion",
+        )
+        .clicked
+    {
         changed = true;
     }
 

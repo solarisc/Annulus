@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use annulus_config::tokens::space;
 use annulus_platform::window::Waker;
 use annulus_sftp::{Conflict, Entry, join, parent};
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Ui};
@@ -254,9 +255,10 @@ impl SftpView {
                 };
                 ui.gfx
                     .text(column.take_top(20.0), warning, SMALL, t.text2, Align::Start);
-                let delete = buttons.take_right(button_width(ui.gfx, "Delete", None).max(88.0));
+                let delete =
+                    buttons.take_right(button_width(&mut ui.gfx, "Delete", None).max(88.0));
                 buttons.take_right(space::S);
-                let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+                let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
                 if focus {
                     // The safe choice has the keyboard.
                     ui.state.set_focus(Some(Id::new("sftp.card.cancel")), true);
@@ -329,9 +331,9 @@ impl SftpView {
                         Align::Start,
                     );
                 }
-                let set = buttons.take_right(button_width(ui.gfx, "Set", None).max(88.0));
+                let set = buttons.take_right(button_width(&mut ui.gfx, "Set", None).max(88.0));
                 buttons.take_right(space::S);
-                let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+                let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
                 close |= ui
                     .button(
                         Id::new("sftp.card.cancel"),
@@ -364,7 +366,7 @@ impl SftpView {
                     ui.gfx.text(label, fact, SMALL, t.text2, Align::Start);
                     ui.gfx.text(line, value, BODY, t.text, Align::Start);
                 }
-                let done = buttons.take_right(button_width(ui.gfx, "Close", None).max(88.0));
+                let done = buttons.take_right(button_width(&mut ui.gfx, "Close", None).max(88.0));
                 if focus {
                     ui.state.set_focus(Some(Id::new("sftp.card.close")), true);
                 }
@@ -649,8 +651,8 @@ impl SftpView {
         bar.take_left(4.0);
         let refresh = bar.take_left(CONTROL);
         bar.take_left(4.0);
-        let folder_w = button_width(ui.gfx, "New folder", Some(icons::PLUS));
-        let hidden_w = button_width(ui.gfx, "Hidden files", None);
+        let folder_w = button_width(&mut ui.gfx, "New folder", Some(icons::PLUS));
+        let hidden_w = button_width(&mut ui.gfx, "Hidden files", None);
         // A narrow pane keeps New folder as an icon, so neither button is cut off.
         let roomy = bar.w >= folder_w + hidden_w + space::S;
         let new_folder = bar.take_left(if roomy { folder_w } else { CONTROL });

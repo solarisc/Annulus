@@ -8,4 +8,5 @@ pub mod access;
 pub mod gfx;
 pub mod icons;
 pub mod kit;
+pub mod motion;
 pub mod widgets;

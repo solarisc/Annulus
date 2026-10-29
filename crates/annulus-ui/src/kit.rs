@@ -7,9 +7,10 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use annulus_config::tokens::{Appearance, MOTION_MS, Palette};
+use annulus_config::tokens::{Appearance, Palette};
 
 use crate::gfx::{Canvas, Color, Point, Rect};
+use crate::motion::{FRAME, Layer, Layers, Motion, Spring, Tween};
 use crate::widgets::{EditState, Popup};
 
 /// Identifies a zone across frames.
@@ -382,14 +383,6 @@ pub struct Response {
     pub focus_ring: bool,
 }
 
-/// An animated value moving toward a target.
-#[derive(Clone, Copy, Debug)]
-struct Anim {
-    value: f32,
-    target: f32,
-    time: f64,
-}
-
 /// How long a secret copied with [`Ui::copy_secret`] stays on the clipboard.
 pub const SECRET_ON_CLIPBOARD: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -436,7 +429,10 @@ pub struct UiState {
     input_seen: bool,
     wheel: (f32, f32),
     time: f64,
-    anims: HashMap<Id, Anim>,
+    /// The time of the frame before this one.
+    prev_time: f64,
+    tweens: HashMap<Id, Tween>,
+    springs: HashMap<Id, Spring>,
     scroll: HashMap<Id, f32>,
     repaint: bool,
     repaint_after: Option<std::time::Duration>,
@@ -465,6 +461,7 @@ const DRAG_START: f32 = 6.0;
 impl UiState {
     /// Resolves this frame's input against the zones on screen. `time` is in seconds.
     pub fn begin_frame(&mut self, events: &[Event], time: f64) {
+        self.prev_time = self.time;
         self.time = time;
         self.clicks.clear();
         self.double_clicks.clear();
@@ -754,8 +751,8 @@ fn activates(role: Role, key: Key) -> bool {
 
 /// One frame being drawn: the canvas, the theme and the toolkit state.
 pub struct Ui<'a> {
-    /// Where everything is drawn.
-    pub gfx: &'a mut dyn Canvas,
+    /// Where everything is drawn, through the layers pushed.
+    pub gfx: Layers<'a>,
     /// The colors.
     pub theme: Theme,
     /// State across frames.
@@ -775,7 +772,7 @@ impl<'a> Ui<'a> {
         viewport: Rect,
     ) -> Self {
         Self {
-            gfx,
+            gfx: Layers::new(gfx),
             theme,
             state,
             clips: Vec::new(),
@@ -786,7 +783,11 @@ impl<'a> Ui<'a> {
     /// Registers an interactive zone and reports what input did to it. A zone clipped out of
     /// sight takes no input.
     pub fn zone(&mut self, id: Id, rect: Rect, role: Role, label: &str) -> Response {
-        let visible = self.clips.last().map_or(rect, |clip| rect.intersect(clip));
+        let screen = self.gfx.to_screen(rect);
+        let visible = self
+            .clips
+            .last()
+            .map_or(screen, |clip| screen.intersect(clip));
         if visible.w <= 0.0 || visible.h <= 0.0 {
             return Response {
                 rect,
@@ -834,7 +835,7 @@ impl<'a> Ui<'a> {
         }
         let rested = self.state.time - self.state.hovered_since;
         if keyboard || rested >= DELAY {
-            self.state.tooltip = Some((text.to_owned(), rect));
+            self.state.tooltip = Some((text.to_owned(), self.gfx.to_screen(rect)));
         } else {
             self.request_repaint_after(std::time::Duration::from_secs_f64(DELAY - rested));
         }
@@ -872,9 +873,10 @@ impl<'a> Ui<'a> {
 
     /// Clips drawing and zones to `rect` (inside any clip already active).
     pub fn push_clip(&mut self, rect: Rect) {
+        let rect = self.gfx.to_screen(rect);
         let rect = self.clips.last().map_or(rect, |clip| rect.intersect(clip));
         self.clips.push(rect);
-        self.gfx.push_clip(rect);
+        self.gfx.push_screen_clip(rect);
     }
 
     /// Ends the innermost clip.
@@ -909,6 +911,7 @@ impl<'a> Ui<'a> {
 
     /// Takes the vertical wheel movement of this frame if the pointer is over `rect`.
     pub fn take_wheel(&mut self, rect: Rect) -> f32 {
+        let rect = self.gfx.to_screen(rect);
         if self.state.pointer.is_some_and(|point| rect.contains(point)) {
             std::mem::take(&mut self.state.wheel.1)
         } else {
@@ -966,6 +969,7 @@ impl<'a> Ui<'a> {
     /// the pointer is on one of its buttons, which are zones of their own.
     #[must_use]
     pub fn hover_within(&self, rect: Rect) -> bool {
+        let rect = self.gfx.to_screen(rect);
         self.state
             .hovered
             .and_then(|id| self.state.zone(id))
@@ -1046,42 +1050,116 @@ impl<'a> Ui<'a> {
         self.state.scroll.insert(id, offset);
     }
 
-    /// A value easing toward `target` over the motion duration (UI-SPEC §8), for hover fades
-    /// and panel slides; it jumps straight there under reduced motion.
+    /// A value easing toward `target` in the quick feedback motion (hover and press fades):
+    /// [`Self::animate`] with [`Motion::FAST`].
     pub fn ease(&mut self, id: Id, target: f32) -> f32 {
+        self.animate(id, target, Motion::FAST)
+    }
+
+    /// A value moving toward `target` along `motion`. When the target changes, the move starts
+    /// from wherever the value is, so a change of mind mid-way never jumps. Under reduced motion
+    /// it is at the target at once. Frames are asked for until it arrives.
+    pub fn animate(&mut self, id: Id, target: f32, motion: Motion) -> f32 {
         let now = self.state.time;
-        let reduce = self.state.reduce_motion;
-        let anim = self.state.anims.entry(id).or_insert(Anim {
-            value: target,
-            target,
-            time: now,
-        });
-        if reduce {
-            anim.value = target;
-        } else {
-            #[allow(clippy::cast_possible_truncation)] // Frame gaps are small.
-            let elapsed = (now - anim.time) as f32;
-            let step = elapsed * 1000.0 / f32::from(u16::try_from(MOTION_MS).unwrap_or(120));
-            let distance = target - anim.value;
-            if distance.abs() <= step.max(0.0) {
-                anim.value = target;
-            } else {
-                anim.value += distance.signum() * step;
-            }
+        if self.state.reduce_motion {
+            self.state.tweens.insert(id, Tween::at(target, now));
+            return target;
         }
-        anim.target = target;
-        anim.time = now;
-        let value = anim.value;
-        if (value - target).abs() > f32::EPSILON {
+        let tween = self
+            .state
+            .tweens
+            .entry(id)
+            .or_insert_with(|| Tween::at(target, now));
+        if (tween.to - target).abs() > f32::EPSILON {
+            let (current, _) = tween.sample(now);
+            // The change arrived between the frame before and this one.
+            let since = (now - tween.seen).clamp(0.0, FRAME);
+            *tween = Tween {
+                from: current,
+                to: target,
+                start: now - since,
+                motion,
+                seen: now,
+            };
+        }
+        tween.seen = now;
+        let (value, moving) = tween.sample(now);
+        if moving {
             self.state.repaint = true;
         }
-        // Ease out: fast at first, settling softly.
-        let t = value.clamp(0.0, 1.0);
-        if (0.0..=1.0).contains(&target) {
-            1.0 - (1.0 - t) * (1.0 - t)
-        } else {
-            value
+        value
+    }
+
+    /// 0.0 to 1.0 as something appears (`open`) or goes; keep drawing it while above 0.0 so it
+    /// can leave as smoothly as it came.
+    pub fn presence(&mut self, id: Id, open: bool, motion: Motion) -> f32 {
+        self.animate(id, if open { 1.0 } else { 0.0 }, motion)
+            .max(0.0)
+    }
+
+    /// 0.0 to 1.0 from the frame `id` is first drawn after not being drawn the frame before:
+    /// a page, a row or a card playing its entrance each time it appears.
+    pub fn entrance(&mut self, id: Id, motion: Motion) -> f32 {
+        let now = self.state.time;
+        let fresh = self
+            .state
+            .tweens
+            .get(&id)
+            .is_none_or(|tween| tween.seen + 1e-9 < self.state.prev_time);
+        if fresh && !self.state.reduce_motion {
+            self.state.tweens.insert(
+                id,
+                Tween {
+                    from: 0.0,
+                    to: 1.0,
+                    start: now - FRAME,
+                    motion,
+                    seen: now,
+                },
+            );
         }
+        self.animate(id, 1.0, motion)
+    }
+
+    /// A position following `target` on a spring: it glides there, and keeps its speed when
+    /// the target moves again (a dragged tab's neighbours, a sliding selection). The first time
+    /// `id` is asked for, it starts at the target.
+    pub fn spring(&mut self, id: Id, target: f32) -> f32 {
+        let now = self.state.time;
+        let spring = self
+            .state
+            .springs
+            .entry(id)
+            .or_insert_with(|| Spring::at(target, now));
+        if self.state.reduce_motion {
+            *spring = Spring::at(target, now);
+            return target;
+        }
+        // Not drawn for a while: it starts where it belongs.
+        if spring.seen + 1e-9 < self.state.prev_time {
+            *spring = Spring::at(target, now);
+        }
+        if spring.advance(target, now) {
+            self.state.repaint = true;
+        }
+        spring.value
+    }
+
+    /// Draws everything until the matching [`Self::pop_layer`] moved, scaled and faded by
+    /// `layer`; zones registered meanwhile move with it.
+    pub fn push_layer(&mut self, layer: Layer) {
+        self.gfx.push(layer);
+    }
+
+    /// Ends the innermost layer.
+    pub fn pop_layer(&mut self) {
+        self.gfx.pop();
+    }
+
+    /// How many layers are pushed (an overlay draws only once all are popped).
+    #[must_use]
+    pub fn layer_depth(&self) -> usize {
+        self.gfx.depth()
     }
 
     /// Draws the focus ring around `rect` (UI-SPEC §8: accent, 2 px, offset 2 px).
@@ -1480,6 +1558,129 @@ mod tests {
         state.reduce_motion = true;
         frame(&mut state, &[], 0.31, |ui| value = ui.ease(id, 0.0));
         assert!(value.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_change_of_mind_mid_way_moves_on_from_where_the_value_is() {
+        let mut state = UiState::default();
+        let id = Id::new("slide");
+        let mut value = 0.0;
+        frame(&mut state, &[], 0.0, |ui| {
+            value = ui.animate(id, 0.0, Motion::BASE);
+        });
+        frame(&mut state, &[], 0.1, |ui| {
+            value = ui.animate(id, 100.0, Motion::BASE);
+        });
+        assert!(value > 0.0 && value < 100.0, "{value}");
+        let mut turned = 0.0;
+        frame(&mut state, &[], 0.15, |ui| {
+            turned = ui.animate(id, 0.0, Motion::BASE);
+        });
+        assert!(
+            turned > 0.0 && turned < 100.0,
+            "no jump to either end: {turned}"
+        );
+        let mut later = 0.0;
+        frame(&mut state, &[], 0.2, |ui| {
+            later = ui.animate(id, 0.0, Motion::BASE);
+        });
+        assert!(later < turned, "now on its way back: {turned} then {later}");
+        let output = frame(&mut state, &[], 1.0, |ui| {
+            value = ui.animate(id, 0.0, Motion::BASE);
+        });
+        assert!(value.abs() < f32::EPSILON && !output.repaint);
+    }
+
+    #[test]
+    fn an_entrance_plays_each_time_something_appears_again() {
+        let mut state = UiState::default();
+        let id = Id::new("page");
+        let mut shown = 0.0;
+        frame(&mut state, &[], 0.0, |ui| {
+            shown = ui.entrance(id, Motion::BASE);
+        });
+        assert!(shown < 0.5, "{shown}");
+        frame(&mut state, &[], 1.0, |ui| {
+            shown = ui.entrance(id, Motion::BASE);
+        });
+        assert!((shown - 1.0).abs() < f32::EPSILON);
+        // Gone for a frame, then back: it plays again.
+        frame(&mut state, &[], 2.0, |_| {});
+        frame(&mut state, &[], 3.0, |ui| {
+            shown = ui.entrance(id, Motion::BASE);
+        });
+        assert!(shown < 0.5, "{shown}");
+    }
+
+    #[test]
+    fn a_zone_inside_a_moved_layer_is_hit_where_it_is_drawn() {
+        let mut state = UiState::default();
+        let draw = |ui: &mut Ui<'_>| {
+            ui.push_layer(Layer::NONE.shifted(200.0, 0.0));
+            let response = ui.zone(Id::new("a"), A, Role::Button, "A");
+            ui.pop_layer();
+            response.hovered
+        };
+        frame(&mut state, &[], 0.0, |ui| {
+            draw(ui);
+        });
+        let mut hovered = (false, false);
+        // Where it would be without the layer: nothing there.
+        frame(
+            &mut state,
+            &[Event::PointerMoved(Point::new(10.0, 10.0))],
+            0.1,
+            |ui| hovered.0 = draw(ui),
+        );
+        frame(
+            &mut state,
+            &[Event::PointerMoved(Point::new(210.0, 10.0))],
+            0.2,
+            |ui| hovered.1 = draw(ui),
+        );
+        assert_eq!(hovered, (false, true));
+    }
+
+    #[test]
+    fn reduced_motion_puts_every_animation_at_its_end_at_once() {
+        let mut state = UiState {
+            reduce_motion: true,
+            ..UiState::default()
+        };
+        let (fade, slide) = (Id::new("fade"), Id::new("slide"));
+        frame(&mut state, &[], 0.0, |ui| {
+            ui.animate(fade, 0.0, Motion::SLOW);
+            ui.spring(slide, 0.0);
+        });
+        let mut values = (0.0, 0.0, 0.0);
+        let output = frame(&mut state, &[], 0.01, |ui| {
+            values = (
+                ui.animate(fade, 1.0, Motion::SLOW),
+                ui.spring(slide, 300.0),
+                ui.entrance(Id::new("new"), Motion::SLOW),
+            );
+        });
+        assert_eq!(values, (1.0, 300.0, 1.0));
+        assert!(!output.repaint);
+    }
+
+    #[test]
+    fn a_spring_glides_to_a_new_place_and_then_stops_asking_for_frames() {
+        let mut state = UiState::default();
+        let id = Id::new("tab.x");
+        let mut x = 0.0;
+        frame(&mut state, &[], 0.0, |ui| x = ui.spring(id, 10.0));
+        assert!((x - 10.0).abs() < f32::EPSILON, "starts where it belongs");
+        let output = frame(&mut state, &[], 0.016, |ui| x = ui.spring(id, 110.0));
+        assert!(x > 10.0 && x < 110.0 && output.repaint, "{x}");
+        let mut time = 0.016;
+        let mut output = output;
+        while output.repaint {
+            time += 0.016;
+            output = frame(&mut state, &[], time, |ui| x = ui.spring(id, 110.0));
+            assert!(time < 1.0, "settles");
+        }
+        assert!((x - 110.0).abs() < f32::EPSILON);
     }
 
     #[test]

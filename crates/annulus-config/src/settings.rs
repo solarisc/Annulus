@@ -33,6 +33,8 @@ pub struct Settings {
     pub restore_tabs: bool,
     /// The terminal tabs open at the last save, kept while `restore_tabs` is on.
     pub open_tabs: Vec<OpenTab>,
+    /// No animations: everything changes at once (UI-SPEC §8).
+    pub reduce_motion: bool,
 }
 
 /// A terminal tab to reopen: what it ran, never what it showed.
@@ -55,6 +57,7 @@ impl Default for Settings {
             record_logs: false,
             restore_tabs: false,
             open_tabs: Vec::new(),
+            reduce_motion: false,
         }
     }
 }
@@ -109,6 +112,7 @@ mod tests {
             record_logs: true,
             restore_tabs: true,
             open_tabs: vec![OpenTab::Local("bash".into()), OpenTab::Host(7)],
+            reduce_motion: true,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

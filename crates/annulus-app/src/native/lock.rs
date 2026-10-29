@@ -2,6 +2,7 @@
 //! Password fields edit zeroizing buffers and are wiped once handed over.
 
 use annulus_config::tokens::space;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
@@ -395,7 +396,7 @@ impl LockView {
             } else {
                 "Forgot the password? Use the recovery key"
             };
-            let width = annulus_ui::widgets::button_width(ui.gfx, link, None);
+            let width = annulus_ui::widgets::button_width(&mut ui.gfx, link, None);
             let row = column.take_top(CONTROL);
             let at = row.centered(width.min(row.w), CONTROL);
             if ui

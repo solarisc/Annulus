@@ -221,7 +221,7 @@ impl Ui<'_> {
         if response.focus_ring {
             self.focus_ring(rect, radius::SMALL + 2.0);
         }
-        let content = button_width(self.gfx, label, icon) - 2.0 * space::M;
+        let content = button_width(&mut self.gfx, label, icon) - 2.0 * space::M;
         let mut inner = rect.centered(content.min(rect.w - 2.0 * space::S), rect.h);
         if let Some(icon) = icon {
             let slot = inner.take_left(16.0);
@@ -367,7 +367,7 @@ impl Ui<'_> {
             && let Some(pointer) = self.pointer()
         {
             let x = pointer.x - inner.x + state.scroll;
-            let at = offset_at(self.gfx, &shown, font, x);
+            let at = offset_at(&mut self.gfx, &shown, font, x);
             let at = from_shown(content, buffer.is_secret(), at);
             state.cursor = at;
             if !state.dragging {
@@ -581,7 +581,7 @@ impl Ui<'_> {
                 + from_shown(
                     line,
                     secret,
-                    offset_at(self.gfx, &shown, font, pointer.x - inner.x),
+                    offset_at(&mut self.gfx, &shown, font, pointer.x - inner.x),
                 );
             state.cursor = at;
             if !state.dragging {
@@ -802,6 +802,7 @@ impl Ui<'_> {
         }
         if response.clicked {
             let open = self.state.popup.as_ref().is_some_and(|p| p.owner == id);
+            let anchor = self.gfx.to_screen(anchor);
             self.state.popup = (!open).then(|| Popup {
                 owner: id,
                 anchor,
@@ -968,9 +969,10 @@ impl Ui<'_> {
     /// while the content is taller than the view. Returns the content offset to draw at.
     pub fn scroll_view(&mut self, id: Id, rect: Rect, content_height: f32) -> f32 {
         let max = (content_height - rect.h).max(0.0);
-        let mut offset = self.scroll_offset(id) - self.take_wheel(rect);
-        offset = offset.clamp(0.0, max);
-        self.set_scroll_offset(id, offset);
+        let target = (self.scroll_offset(id) - self.take_wheel(rect)).clamp(0.0, max);
+        self.set_scroll_offset(id, target);
+        // The content glides to where the wheel or the keyboard sent it.
+        let offset = self.spring(id.with("glide"), target).clamp(0.0, max);
         if max > 0.0 {
             let t = self.theme;
             let track = Rect::new(rect.r() - 6.0, rect.y + 2.0, 4.0, rect.h - 4.0);

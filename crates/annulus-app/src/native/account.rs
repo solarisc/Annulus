@@ -6,6 +6,7 @@ use std::path::Path;
 use annulus_config::tokens::space;
 use annulus_sync::account;
 use annulus_sync::http::HttpServer;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Ui};
@@ -40,7 +41,7 @@ fn push_button(
     kind: Kind,
     enabled: bool,
 ) -> bool {
-    let width = button_width(ui.gfx, label, None);
+    let width = button_width(&mut ui.gfx, label, None);
     let rect = row.take_left(width);
     row.take_left(space::S);
     let kind = if enabled { kind } else { Kind::Ghost };
@@ -263,7 +264,7 @@ impl AccountView {
                         device.name.clone()
                     };
                     if !device.current {
-                        let out = line.take_right(button_width(ui.gfx, "Sign out", None));
+                        let out = line.take_right(button_width(&mut ui.gfx, "Sign out", None));
                         if ui
                             .button(
                                 Id::new(("account.revoke", device.id)),
@@ -293,7 +294,7 @@ impl AccountView {
                 while let Some(name) = sync.deleted_name(index) {
                     inner.take_top(space::S);
                     let mut line = inner.take_top(28.0);
-                    let again = line.take_right(button_width(ui.gfx, "Restore", None));
+                    let again = line.take_right(button_width(&mut ui.gfx, "Restore", None));
                     if ui
                         .button(
                             Id::new(("account.restore", index)),
@@ -389,7 +390,7 @@ impl AccountView {
             1000.0,
         );
         let mut row = inner.take_top(CONTROL);
-        let change = row.take_right(button_width(ui.gfx, "Change", None));
+        let change = row.take_right(button_width(&mut ui.gfx, "Change", None));
         ui.gfx.text(
             row,
             "Unlocks this vault, and your account when you sync.",

@@ -4,6 +4,7 @@
 use annulus_config::tokens::space;
 use annulus_session::{Answers, HostKeyQuestion, SessionEvent};
 use annulus_ssh::Trust;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Ui};
@@ -92,9 +93,9 @@ pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answer
             );
             column.take_top(space::L);
             let mut row = column.take_top(CONTROL);
-            let trust_w = button_width(ui.gfx, "Trust and connect", None);
-            let once_w = button_width(ui.gfx, "Connect once", None);
-            let cancel_w = button_width(ui.gfx, "Cancel", None);
+            let trust_w = button_width(&mut ui.gfx, "Trust and connect", None);
+            let once_w = button_width(&mut ui.gfx, "Connect once", None);
+            let cancel_w = button_width(&mut ui.gfx, "Cancel", None);
             let cancel = row.take_left(cancel_w);
             let trust = row.take_right(trust_w);
             row.take_right(space::S);
@@ -166,9 +167,9 @@ pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answer
             }
             column.take_top(space::XL);
             let mut row = column.take_top(CONTROL);
-            let connect = row.take_right(button_width(ui.gfx, "Connect", None).max(96.0));
+            let connect = row.take_right(button_width(&mut ui.gfx, "Connect", None).max(96.0));
             row.take_right(space::S);
-            let cancel = row.take_right(button_width(ui.gfx, "Cancel", None));
+            let cancel = row.take_right(button_width(&mut ui.gfx, "Cancel", None));
             if ui
                 .button(id.with("ask.cancel"), cancel, "Cancel", None, Kind::Ghost)
                 .clicked

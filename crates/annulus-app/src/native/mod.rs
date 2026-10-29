@@ -25,6 +25,7 @@ use annulus_platform::window::{Waker, WindowApp, WindowError, WindowRequest, run
 use annulus_session::profiles::{self, Profile};
 use annulus_session::{Program, SshFiles};
 use annulus_term::Emulator;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
@@ -820,6 +821,7 @@ impl NativeApp {
     /// Draws one frame. Returns what the window itself must do.
     #[allow(clippy::too_many_lines)] // The window top to bottom: title bar, then the tab in front.
     pub fn frame(&mut self, ui: &mut Ui<'_>) -> Option<WindowAction> {
+        ui.state.reduce_motion = self.settings.reduce_motion;
         let t = ui.theme;
         let mut area = ui.viewport;
         ui.gfx.fill_rect(area, 0.0, t.chrome);

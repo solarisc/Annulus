@@ -3,6 +3,7 @@
 //! palette (`command_palette`).
 
 use annulus_config::tokens::space;
+use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
