@@ -7,9 +7,9 @@
 
 use std::ops::{BitOr, BitOrAssign};
 
-use crate::display_list::DisplayList;
-use crate::geometry::Rect;
-use crate::style::{Position, Style};
+use crate::display_list::{DisplayList, Op};
+use crate::geometry::{Color, Rect};
+use crate::style::Style;
 use crate::widget::Widget;
 
 /// A handle to a node. It stays valid until the node is removed, and never refers to another
@@ -97,6 +97,12 @@ pub struct Tree {
     /// Area that must be repainted, collected from nodes marked [`Dirty::PAINT`] and from
     /// nodes that moved or disappeared.
     damage: Rect,
+    /// The node keyboard input goes to.
+    pub(crate) focused: Option<NodeId>,
+    /// Whether the focus ring shows: after keyboard navigation, not after a click.
+    pub(crate) focus_visible: bool,
+    /// The node that handled a pointer press and receives pointer events until release.
+    pub(crate) captured: Option<NodeId>,
 }
 
 impl Tree {
@@ -111,6 +117,9 @@ impl Tree {
                 generation: 0,
             },
             damage: Rect::default(),
+            focused: None,
+            focus_visible: false,
+            captured: None,
         };
         tree.root = tree.allocate(root, None);
         tree
@@ -315,14 +324,10 @@ impl Tree {
         node.dirty = Dirty(node.dirty.0 & !Dirty::PAINT.0);
         node.widget.paint(node.bounds, list);
         let (bounds, clips) = (node.bounds, node.style.scroll);
-        let children = node.children.clone();
-        let is_overlay = |tree: &Self, child: NodeId| {
-            tree.node(child)
-                .is_some_and(|child| matches!(child.style.position, Position::Overlay { .. }))
-        };
-        let (overlays, flow): (Vec<NodeId>, Vec<NodeId>) = children
-            .into_iter()
-            .partition(|child| is_overlay(self, *child));
+        if self.focus_visible && self.focused == Some(id) {
+            list.push(focus_ring(bounds));
+        }
+        let (overlays, flow) = self.split_children(id);
         if clips {
             list.clip(bounds, |list| {
                 for child in flow {
@@ -401,11 +406,26 @@ impl Tree {
     }
 }
 
+/// The ring drawn around the focused widget after keyboard navigation (UI-SPEC §Accessibility).
+fn focus_ring(bounds: Rect) -> Op {
+    const WIDTH: f32 = 2.0;
+    Op::Border {
+        rect: Rect::new(
+            bounds.origin.x - WIDTH,
+            bounds.origin.y - WIDTH,
+            bounds.size.width + 2.0 * WIDTH,
+            bounds.size.height + 2.0 * WIDTH,
+        ),
+        radius: WIDTH,
+        width: WIDTH,
+        // TODO: take the color from the focus-ring design token.
+        color: Color::rgb(0x3B, 0x82, 0xF6),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display_list::Op;
-    use crate::geometry::Color;
 
     /// Paints one rectangle whose color encodes `tag`, so tests can read paint order.
     struct Swatch(u8);

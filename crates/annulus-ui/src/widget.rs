@@ -3,6 +3,7 @@
 
 use crate::display_list::DisplayList;
 use crate::geometry::{Rect, Size};
+use crate::input::{Event, Handled};
 
 /// The behavior of one node in the tree. Widgets hold only their own visual state; the view
 /// models in `annulus-app` own app state (DESIGN §7.2).
@@ -20,4 +21,15 @@ pub trait Widget {
 
     /// Appends this widget's own drawing (not its children's) for the given bounds.
     fn paint(&self, bounds: Rect, list: &mut DisplayList);
+
+    /// Whether Tab and clicks can focus this widget.
+    fn focusable(&self) -> bool {
+        false
+    }
+
+    /// Reacts to an event routed to this node. Unhandled events bubble to the parent.
+    fn handle(&mut self, event: &Event) -> Handled {
+        let _ = event;
+        Handled::No
+    }
 }

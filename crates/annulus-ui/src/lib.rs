@@ -6,13 +6,16 @@
 
 pub mod display_list;
 pub mod geometry;
+pub mod input;
 mod layout;
+mod routing;
 pub mod style;
 pub mod tree;
 pub mod widget;
 
 pub use display_list::{DisplayList, Op};
 pub use geometry::{Color, Point, Rect, Size};
+pub use input::{Button, Event, Handled, Key, Modifiers};
 pub use style::{Align, Axis, Edges, Justify, Length, Position, Style};
 pub use tree::{Dirty, NodeId, Tree, TreeError};
 pub use widget::Widget;
