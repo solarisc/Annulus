@@ -9,7 +9,7 @@ use annulus_ui::gfx::{Align, Color, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
-use annulus_ui::widgets::{BODY_MEDIUM, SMALL};
+use annulus_ui::widgets::BODY_MEDIUM;
 
 use super::{FIXED_TABS, NativeApp, SyncBadge, TabKind, WindowAction};
 use crate::terminal_view::TabStatus;
@@ -65,11 +65,6 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     }
 
     row.take_right(space::S);
-    // Reserved now, drawn after the tabs: Tab follows the drawing order.
-    let sync = app.sync_badge();
-    let badge_w = badge_width(ui, &sync);
-    let badge = Rect::new(row.r() - badge_w, row.center().y - 12.0, badge_w, 24.0);
-    row.take_right(badge_w + space::S);
 
     row.take_left(space::M + 2.0);
     let mark = row.take_left(20.0).centered(20.0, 20.0);
@@ -87,8 +82,17 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     // Where each tab belongs, left to right. Tabs glide to their places (a tab closed, moved
     // or renamed), but take clicks in them, so what is clicked never moves under the pointer.
     let mut slots: Vec<Rect> = Vec::with_capacity(shown);
+    // The Vault tab holds the sync mark too, while the vault syncs with a server.
+    let syncs = app.sync_badge() != SyncBadge::Local;
     let wanted: Vec<f32> = (0..shown)
-        .map(|index| tab_width(ui, &app.tabs[index].title, app.tabs[index].kind))
+        .map(|index| {
+            let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind);
+            if index == 0 && syncs {
+                width + CLOUD_W
+            } else {
+                width
+            }
+        })
         .collect();
     // Too many sessions for the strip: they share it evenly, down to a narrowest width,
     // rather than the last one shrinking to nothing.
@@ -146,6 +150,11 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
             TabEvent::Close | TabEvent::Menu(0) => close_tab = Some(index),
             TabEvent::Menu(1) => close_others = Some((app.tabs[index].uid, true)),
             TabEvent::Menu(_) => close_others = Some((app.tabs[index].uid, false)),
+            TabEvent::Sync => {
+                app.active = 0;
+                app.section = super::Section::Settings;
+                app.settings_view.page = super::settings::Page::Account;
+            }
             TabEvent::None => {}
         }
     }
@@ -176,7 +185,6 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
             app.open_new_tab();
         }
     }
-    sync_badge(ui, badge, &sync);
     if let Some(index) = close_tab {
         app.close_tab(index);
     }
@@ -378,6 +386,8 @@ enum TabEvent {
     Close,
     /// An item of the tab's context menu, [`TAB_MENU`].
     Menu(usize),
+    /// The Vault tab's sync mark: the account in Settings.
+    Sync,
 }
 
 /// A session tab's context menu (right click, or Shift+F10).
@@ -473,6 +483,15 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     } else {
         TabEvent::None
     };
+    if tab.kind == TabKind::Vault {
+        let sync = app.sync_badge();
+        if sync != SyncBadge::Local {
+            let mark = inner.take_right(CLOUD_W - 4.0).centered(22.0, 22.0);
+            if sync_mark(ui, mark, &sync, ink) {
+                event = TabEvent::Sync;
+            }
+        }
+    }
     if !tab.fixed() {
         let close = inner.take_right(18.0).centered(18.0, 18.0);
         let shown = lit.max(hover);
@@ -514,40 +533,66 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     event
 }
 
-/// The sync badge's words and color; `None` for a local vault, which shows none.
-fn badge_label(ui: &Ui<'_>, sync: &SyncBadge) -> Option<(String, Color)> {
-    let t = ui.theme;
+/// Room the sync mark takes in the Vault tab.
+const CLOUD_W: f32 = 26.0;
+
+/// What the sync mark says about `sync`: its name and tooltip.
+fn sync_words(sync: &SyncBadge) -> (&'static str, String) {
     match sync {
-        SyncBadge::Local => None,
-        SyncBadge::Synced => Some(("Synced".to_owned(), t.ok)),
-        SyncBadge::Pending(count) => Some((format!("Syncing {count}"), t.warn)),
-        SyncBadge::Failed => Some(("Sync failed".to_owned(), t.error)),
+        SyncBadge::Local => (
+            "On this device only",
+            "The vault is on this device only".into(),
+        ),
+        SyncBadge::Synced => ("Synced", "Synced with your server: up to date".into()),
+        SyncBadge::Pending(count) => (
+            "Syncing",
+            format!(
+                "Syncing: {count} change{} to send",
+                if *count == 1 { "" } else { "s" }
+            ),
+        ),
+        SyncBadge::Failed => (
+            "Sync failed",
+            "Sync failed: it tries again by itself".into(),
+        ),
     }
 }
 
-/// The width the sync badge takes.
-fn badge_width(ui: &mut Ui<'_>, sync: &SyncBadge) -> f32 {
-    badge_label(ui, sync).map_or(0.0, |(label, _)| {
-        ui.gfx.measure(&label, SMALL).width + 8.0 + 6.0 + 2.0 * space::S + 4.0
-    })
-}
-
-/// Draws the sync badge into `rect`.
-fn sync_badge(ui: &mut Ui<'_>, rect: Rect, sync: &SyncBadge) {
+/// The vault's one sync mark, in its tab: a quiet cloud while all is synced, a small dot on
+/// it that breathes while changes go out, a red one when a round failed. Its tooltip says
+/// which; clicking it opens the account in Settings. Returns whether it was clicked.
+fn sync_mark(ui: &mut Ui<'_>, rect: Rect, sync: &SyncBadge, ink: Color) -> bool {
     let t = ui.theme;
-    let Some((label, color)) = badge_label(ui, sync) else {
-        return;
-    };
     let id = Id::new("titlebar.sync");
-    let response = ui.zone(id, rect, Role::Button, &label);
-    ui.gfx.fill_rect(
-        rect,
-        12.0,
-        color.alpha(if response.hovered { 0.2 } else { 0.12 }),
-    );
-    let mut inner = rect.inset(space::S + 2.0, 0.0);
-    let dot = inner.take_left(8.0);
-    ui.gfx.fill_circle(dot.center(), 3.5, color);
-    inner.take_left(6.0);
-    ui.gfx.text(inner, &label, SMALL, t.text, Align::Start);
+    let (name, tip) = sync_words(sync);
+    let response = ui.zone(id, rect, Role::Button, name);
+    ui.tooltip(id, rect, &tip);
+    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    ui.gfx.fill_rect(rect, 6.0, t.hover.alpha(hover));
+    if response.focus_ring {
+        ui.focus_ring(rect, 6.0);
+    }
+    let cloud = rect.centered(16.0, 16.0);
+    let color = match sync {
+        SyncBadge::Failed => t.error,
+        _ => ink.mix(t.text, hover),
+    };
+    ui.gfx.icon(icons::CLOUD, cloud, color);
+    let dot = Point::new(cloud.r() - 1.5, cloud.b() - 3.5);
+    match sync {
+        SyncBadge::Pending(_) => {
+            // Breathing: changes are on their way.
+            #[allow(clippy::cast_possible_truncation)] // A phase for drawing.
+            let phase = ((ui.time() * 3.0).sin() * 0.5 + 0.5) as f32;
+            ui.gfx
+                .fill_circle(dot, 3.0, t.accent.alpha(0.45 + 0.55 * phase));
+            ui.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        SyncBadge::Failed => ui.gfx.fill_circle(dot, 3.0, t.error),
+        SyncBadge::Synced | SyncBadge::Local => {}
+    }
+    if response.hovered {
+        ui.set_cursor(Cursor::Pointer);
+    }
+    response.clicked
 }

@@ -538,8 +538,8 @@ impl SftpView {
     ) -> (bool, bool, bool, Option<usize>) {
         let t = ui.theme;
         let response = ui.zone(id, row, Role::ListItem, name);
-        // Still hovered on its own buttons, and while its menu is open.
-        let hover = ui.hover_within(row) || ui.menu_open(id.with("more"));
+        // Still hovered on its own buttons, and while one of its menus is open.
+        let hover = ui.hover_within(row) || ui.menu_open(id.with("more")) || ui.menu_open(id);
         if selected {
             ui.gfx.fill_rect(row, 6.0, t.selected);
         } else if hover {
@@ -591,6 +591,12 @@ impl SftpView {
                 ui.set_name(id.with("more"), "More actions");
                 ui.tooltip(id.with("more"), more, "More actions");
             }
+        }
+        // The same menu on a right click, or Shift+F10 on the row.
+        if !menu.is_empty()
+            && let Some(choice) = ui.context_menu(id, &response, menu)
+        {
+            chosen = Some(choice);
         }
         (response.clicked, response.double_clicked, acted, chosen)
     }
@@ -648,7 +654,13 @@ impl SftpView {
                 human_size(entry.size)
             };
             let modified = entry.modified.map(format_time).unwrap_or_default();
-            let (clicked, double, acted, _) = Self::file_row(
+            // A folder opens or goes up whole; a file goes up.
+            let menu: Vec<String> = if entry.is_dir {
+                vec!["Open".into(), "Upload to the host".into()]
+            } else {
+                vec!["Upload to the host".into()]
+            };
+            let (clicked, double, mut acted, chosen) = Self::file_row(
                 ui,
                 Id::new(("local", entry.name.as_str())),
                 row,
@@ -657,10 +669,16 @@ impl SftpView {
                 &modified,
                 self.local_selected.as_deref() == Some(entry.name.as_str()),
                 (icons::UPLOAD, "Upload to the host"),
-                &[],
+                &menu,
             );
             if clicked {
                 self.local_selected = Some(entry.name.clone());
+            }
+            let mut double = double;
+            match chosen {
+                Some(0) if entry.is_dir => double = true,
+                Some(_) => acted = true,
+                None => {}
             }
             // A file or a whole folder.
             let id = Id::new(("local", entry.name.as_str()));
@@ -1301,6 +1319,8 @@ mod tests {
         let viewport = Rect::new(0.0, 0.0, 1100.0, 680.0);
         let mut ui = Ui::new(&mut canvas, Theme::new(Appearance::Dark), state, viewport);
         view.draw(&mut ui, viewport, None);
+        // Menus are drawn over everything, as the window does.
+        ui.overlays();
         state.end_frame().zones
     }
 
@@ -1373,6 +1393,50 @@ mod tests {
         // And one from the host comes down whole.
         drag(&mut view, &mut state, "config", "todo.txt", 4.0);
         assert_eq!(labels(&view)[3], "\u{2193} config/");
+    }
+
+    #[test]
+    fn a_right_click_on_a_file_opens_its_menu_in_either_pane() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("right-click"));
+        let mut state = UiState::default();
+        let zones = frame(&mut view, &mut state, &[], 0.0);
+        let right_click = |zones: &[annulus_ui::kit::Zone], name: &str| {
+            let at = zones
+                .iter()
+                .find(|zone| zone.label == name)
+                .unwrap()
+                .rect
+                .center();
+            vec![
+                annulus_ui::kit::Event::PointerMoved(at),
+                annulus_ui::kit::Event::PointerDown(annulus_ui::kit::Button::Secondary),
+                annulus_ui::kit::Event::PointerUp(annulus_ui::kit::Button::Secondary),
+            ]
+        };
+        let items = |zones: &[annulus_ui::kit::Zone]| -> Vec<String> {
+            zones
+                .iter()
+                .filter(|zone| zone.role == Role::MenuItem)
+                .map(|zone| zone.label.clone())
+                .collect()
+        };
+        // On the host: its whole menu.
+        let zones = frame(&mut view, &mut state, &right_click(&zones, "app.log"), 1.0);
+        let menu = items(&zones);
+        assert!(menu.contains(&"Download".to_owned()) && menu.contains(&"Rename".to_owned()));
+        // Choosing from it acts like the More menu: Download starts the download.
+        let zones = frame(&mut view, &mut state, &click(&zones, "Download"), 2.0);
+        assert_eq!(view.tab.transfers.len(), 1);
+        // On this computer: a file goes up.
+        let zones = frame(&mut view, &mut state, &right_click(&zones, "todo.txt"), 3.0);
+        assert_eq!(items(&zones), ["Upload to the host"]);
+        frame(
+            &mut view,
+            &mut state,
+            &click(&zones, "Upload to the host"),
+            4.0,
+        );
+        assert_eq!(view.tab.transfers.len(), 2);
     }
 
     #[test]

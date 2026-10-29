@@ -248,6 +248,13 @@ icons! {
         Dot(4.5, 6.75, 0.6), Dot(7.0, 6.75, 0.6), Dot(9.5, 6.75, 0.6), Dot(12.0, 6.75, 0.6),
         Move(5.0, 9.5), Line(11.0, 9.5),
     ];
+    /// The vault's sync with its server: a cloud of three lobes on a flat base.
+    CLOUD = 53, "cloud", [
+        Arc(5.25, 9.5, 2.75, 90.0, 235.0),
+        Arc(8.5, 7.5, 3.5, 200.0, 335.0),
+        Arc(11.5, 9.75, 2.5, 265.0, 450.0),
+        Move(5.25, 12.25), Line(11.5, 12.25),
+    ];
     /// Sessions and time.
     CLOCK = 52, "clock", [
         Circle(8.0, 8.0, 5.75),

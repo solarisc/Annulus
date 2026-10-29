@@ -3393,6 +3393,44 @@ fn closing_a_background_tab_keeps_the_front_tab() {
 }
 
 #[test]
+fn a_log_is_deleted_only_after_a_yes() {
+    let mut app = NativeApp::new(Some(fixture_vault("delete-log", true)));
+    app.section = super::Section::Logs;
+    let logs = |app: &NativeApp| app.vault.as_ref().unwrap().logs().len();
+    assert_eq!(logs(&app), 2);
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let output = step(
+        &mut app,
+        &mut state,
+        &right_click_on(&output, "prod-db"),
+        1.0,
+    );
+    let output = step(&mut app, &mut state, &click_on(&output, "Delete"), 2.0);
+    assert_eq!(logs(&app), 2, "asked first, nothing gone yet");
+    // Cancel keeps it.
+    let output = step(&mut app, &mut state, &click_on(&output, "Cancel"), 3.0);
+    assert_eq!(logs(&app), 2);
+    // From its row's button this time, and yes.
+    let output = step(
+        &mut app,
+        &mut state,
+        &click_within(&output, "prod-db", "Delete"),
+        4.0,
+    );
+    step(&mut app, &mut state, &click_on(&output, "Delete log"), 5.0);
+    assert_eq!(logs(&app), 1);
+    assert!(
+        app.vault
+            .as_ref()
+            .unwrap()
+            .logs()
+            .iter()
+            .all(|log| log.title != "prod-db")
+    );
+}
+
+#[test]
 fn many_tabs_share_the_strip_and_none_shrinks_to_nothing() {
     let mut app = NativeApp::new(Some(fixture_vault("many-tabs", false)));
     for index in 0..6 {

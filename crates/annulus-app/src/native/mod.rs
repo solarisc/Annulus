@@ -34,7 +34,7 @@ use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
 use annulus_ui::motion::{Layer, Motion};
-use annulus_ui::widgets::{BODY, BODY_MEDIUM, Kind, SMALL};
+use annulus_ui::widgets::{BODY, BODY_MEDIUM, Kind};
 use annulus_vault::vault::Vault;
 
 use crate::connect;
@@ -1320,11 +1320,6 @@ impl NativeApp {
         for (section, row) in rows {
             self.nav_item(ui, row, section, compact);
         }
-        if !compact {
-            let status = footer.take_bottom(52.0).inset(0.0, space::XS);
-            let badge = self.sync_badge();
-            vault_status(ui, status, self.vault.is_some(), &badge);
-        }
     }
 
     fn nav_item(&mut self, ui: &mut Ui<'_>, rect: Rect, section: Section, compact: bool) {
@@ -1434,38 +1429,6 @@ fn panel_filled(ui: &mut Ui<'_>, rect: Rect, fill: Color) -> Rect {
 const PANEL_GAP: f32 = 8.0;
 /// The content panel's corner radius.
 const PANEL_RADIUS: f32 = 12.0;
-
-/// The lock state and sync badge above Settings.
-fn vault_status(ui: &mut Ui<'_>, rect: Rect, unlocked: bool, sync: &SyncBadge) {
-    let t = ui.theme;
-    ui.gfx.fill_rect(rect, 8.0, t.surface.alpha(0.6));
-    ui.gfx.stroke_rect(rect, 8.0, 1.0, t.line);
-    let mut inner = rect.inset(space::M, 0.0);
-    let icon = inner.take_left(16.0).centered(16.0, 16.0);
-    let (title, detail, dot) = match (unlocked, sync) {
-        (false, _) => ("Vault locked", "Unlock to see your hosts", t.text3),
-        (true, SyncBadge::Local) => ("Local vault", "On this device only", t.text3),
-        (true, SyncBadge::Synced) => ("Synced", "Up to date", t.ok),
-        (true, SyncBadge::Pending(_)) => ("Syncing", "Sending changes", t.warn),
-        (true, SyncBadge::Failed) => ("Sync failed", "Retrying", t.error),
-    };
-    let glyph = match (unlocked, sync) {
-        (false, _) => icons::LOCK,
-        (true, SyncBadge::Local) => icons::DEVICE,
-        (true, _) => icons::SYNC,
-    };
-    ui.gfx.icon(glyph, icon, t.text2);
-    inner.take_left(space::M - 2.0);
-    let top = Rect::new(inner.x, inner.y + 8.0, inner.w - 10.0, 18.0);
-    let bottom = Rect::new(inner.x, inner.y + 25.0, inner.w, 16.0);
-    ui.gfx.text(top, title, BODY_MEDIUM, t.text, Align::Start);
-    ui.gfx.text(bottom, detail, SMALL, t.text2, Align::Start);
-    ui.gfx.fill_circle(
-        annulus_ui::gfx::Point::new(inner.r() - 4.0, top.center().y),
-        3.5,
-        dot,
-    );
-}
 
 impl Drop for NativeApp {
     /// The window closed: sessions still open keep their logs too, as when their tab closes
