@@ -27,6 +27,8 @@ pub const TITLE: Font = Font::ui(20.0).weight(Weight::Semibold);
 
 /// Height of buttons and fields.
 pub const CONTROL: f32 = metrics::CONTROL_HEIGHT;
+/// Height of one menu entry.
+const MENU_ITEM: f32 = 30.0;
 
 /// How a button looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +240,7 @@ impl Ui<'_> {
     }
 
     /// A single-line text field editing `buffer`.
+    #[allow(clippy::too_many_lines)] // Input, scrolling and drawing of one field, in order.
     pub fn text_field(
         &mut self,
         id: Id,
@@ -569,9 +572,8 @@ impl Ui<'_> {
             self.state.popup = None;
             return;
         }
-        const ITEM: f32 = 30.0;
         #[allow(clippy::cast_precision_loss)] // Menus are short.
-        let height = popup.items.len() as f32 * ITEM + 8.0;
+        let height = popup.items.len() as f32 * MENU_ITEM + 8.0;
         let below = popup.anchor.b() + 4.0;
         let y = if below + height > self.viewport.b() - 8.0 {
             (popup.anchor.y - 4.0 - height).max(8.0)
@@ -589,7 +591,7 @@ impl Ui<'_> {
         self.gfx.stroke_rect(menu, radius::MEDIUM, 1.0, t.line);
         let mut rows = menu.inset(4.0, 4.0);
         for (index, item) in popup.items.iter().enumerate() {
-            let row = rows.take_top(ITEM);
+            let row = rows.take_top(MENU_ITEM);
             let id = popup.owner.with(("item", index));
             let response = self.zone(id, row, Role::MenuItem, item);
             if response.hovered || response.focus_ring {

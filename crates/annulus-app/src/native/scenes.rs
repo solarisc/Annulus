@@ -254,11 +254,13 @@ fn zone_center(zones: &[Zone], name: &str) -> Point {
         .iter()
         .rev()
         .find(|zone| zone.label == name)
-        .map(|zone| zone.rect.center())
-        .unwrap_or_else(|| {
-            let names: Vec<&str> = zones.iter().map(|zone| zone.label.as_str()).collect();
-            panic!("no zone named {name:?}; zones: {names:?}")
-        })
+        .map_or_else(
+            || {
+                let names: Vec<&str> = zones.iter().map(|zone| zone.label.as_str()).collect();
+                panic!("no zone named {name:?}; zones: {names:?}")
+            },
+            |zone| zone.rect.center(),
+        )
 }
 
 /// Partial overlaps between interactive zones (one fully inside another is fine: a button
@@ -328,7 +330,11 @@ fn render(
     (scene.setup)(&mut app);
     let theme = Theme::new(appearance);
     let mut state = UiState::default();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Scene sizes.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )] // Scene sizes.
     let size = (
         (scene.width as f32 * scene.scale).round() as u32,
         (scene.height as f32 * scene.scale).round() as u32,
@@ -428,7 +434,10 @@ fn the_lint_catches_partial_overlaps_but_not_nesting() {
     let inner = zone("inner", Rect::new(10.0, 10.0, 10.0, 10.0));
     let across = zone("across", Rect::new(40.0, 0.0, 20.0, 20.0));
     let outside = zone("outside", Rect::new(90.0, 90.0, 20.0, 20.0));
-    assert!(layout_faults(&[card.clone(), inner], viewport).is_empty());
+    assert_eq!(
+        layout_faults(&[card.clone(), inner], viewport),
+        Vec::<String>::new()
+    );
     assert_eq!(
         layout_faults(&[card.clone(), across.clone()], viewport).len(),
         1
@@ -439,5 +448,8 @@ fn the_lint_catches_partial_overlaps_but_not_nesting() {
         role: Role::Backdrop,
         ..zone("backdrop", viewport)
     };
-    assert!(layout_faults(&[card, backdrop, across], viewport).is_empty());
+    assert_eq!(
+        layout_faults(&[card, backdrop, across], viewport),
+        Vec::<String>::new()
+    );
 }

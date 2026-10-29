@@ -131,6 +131,7 @@ pub enum Key {
 
 /// Modifier keys held during an event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // One flag per modifier key.
 pub struct Modifiers {
     /// Control.
     pub ctrl: bool,
@@ -319,6 +320,7 @@ impl Theme {
 
 /// What one zone did this frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Independent facts about one zone.
 pub struct Response {
     /// The zone's rectangle.
     pub rect: Rect,

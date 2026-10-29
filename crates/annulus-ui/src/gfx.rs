@@ -135,6 +135,7 @@ impl Rect {
     }
 
     /// Cuts `h` off the top and returns it.
+    #[allow(clippy::return_self_not_must_use)] // Often called just to skip space.
     pub fn take_top(&mut self, h: f32) -> Rect {
         let h = h.min(self.h);
         let top = Rect::new(self.x, self.y, self.w, h);
@@ -144,6 +145,7 @@ impl Rect {
     }
 
     /// Cuts `h` off the bottom and returns it.
+    #[allow(clippy::return_self_not_must_use)] // Often called just to skip space.
     pub fn take_bottom(&mut self, h: f32) -> Rect {
         let h = h.min(self.h);
         self.h -= h;
@@ -151,6 +153,7 @@ impl Rect {
     }
 
     /// Cuts `w` off the left and returns it.
+    #[allow(clippy::return_self_not_must_use)] // Often called just to skip space.
     pub fn take_left(&mut self, w: f32) -> Rect {
         let w = w.min(self.w);
         let left = Rect::new(self.x, self.y, w, self.h);
@@ -160,6 +163,7 @@ impl Rect {
     }
 
     /// Cuts `w` off the right and returns it.
+    #[allow(clippy::return_self_not_must_use)] // Often called just to skip space.
     pub fn take_right(&mut self, w: f32) -> Rect {
         let w = w.min(self.w);
         self.w -= w;
@@ -435,10 +439,10 @@ pub trait Canvas {
 
 /// `text`, or as much of it as fits in `width` followed by an ellipsis.
 pub fn fit<C: Canvas + ?Sized>(canvas: &mut C, text: &str, font: Font, width: f32) -> String {
+    const ELLIPSIS: &str = "\u{2026}";
     if canvas.measure(text, font).width <= width + 0.5 {
         return text.to_owned();
     }
-    const ELLIPSIS: &str = "\u{2026}";
     let ends: Vec<usize> = text
         .char_indices()
         .map(|(index, _)| index)

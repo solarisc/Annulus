@@ -199,8 +199,10 @@ mod portable {
             self.text = Some(canvas.into_text_engine());
             let edge = self.pointer.and_then(|point| edge_at(&shown.window, point));
             shown.window.set_cursor(match (edge, output.cursor) {
-                (Some(ResizeDirection::East | ResizeDirection::West), _) => CursorIcon::EwResize,
-                (Some(ResizeDirection::North | ResizeDirection::South), _) => CursorIcon::NsResize,
+                (Some(ResizeDirection::East | ResizeDirection::West), _)
+                | (None, Cursor::ResizeHorizontal) => CursorIcon::EwResize,
+                (Some(ResizeDirection::North | ResizeDirection::South), _)
+                | (None, Cursor::ResizeVertical) => CursorIcon::NsResize,
                 (Some(ResizeDirection::NorthWest | ResizeDirection::SouthEast), _) => {
                     CursorIcon::NwseResize
                 }
@@ -208,8 +210,6 @@ mod portable {
                 (None, Cursor::Default) => CursorIcon::Default,
                 (None, Cursor::Pointer) => CursorIcon::Pointer,
                 (None, Cursor::Text) => CursorIcon::Text,
-                (None, Cursor::ResizeHorizontal) => CursorIcon::EwResize,
-                (None, Cursor::ResizeVertical) => CursorIcon::NsResize,
             });
             match request {
                 Some(WindowRequest::Minimize) => shown.window.set_minimized(true),

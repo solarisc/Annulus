@@ -92,6 +92,7 @@ impl TextEngine {
 
     /// Draws one line of `text` with its line box's top-left at `origin` (device pixels), at
     /// `size` device pixels, inside `clip` (device pixels).
+    #[allow(clippy::too_many_arguments)] // One glyph run's every input.
     pub(crate) fn draw(
         &mut self,
         target: &mut Pixmap,

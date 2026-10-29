@@ -124,8 +124,8 @@ impl Editor {
     /// The host as edited, or why it cannot be saved.
     fn build(&self) -> Result<Host, String> {
         let mut host = self.host.clone();
-        host.label = self.label.trim().to_owned();
-        host.address = self.address.trim().to_owned();
+        self.label.trim().clone_into(&mut host.label);
+        self.address.trim().clone_into(&mut host.address);
         if host.address.is_empty() {
             return Err("Enter an address".into());
         }
@@ -147,7 +147,7 @@ impl Editor {
             .filter(|tag| !tag.is_empty())
             .map(str::to_owned)
             .collect();
-        host.username = self.username.trim().to_owned();
+        self.username.trim().clone_into(&mut host.username);
         if !self.password.is_empty() {
             host.password = Some(Secret::new(self.password.as_str()));
         }
@@ -155,8 +155,8 @@ impl Editor {
         host.jump_id = self.jump;
         host.proxy = (!self.proxy.trim().is_empty()).then(|| Secret::new(self.proxy.trim()));
         host.env = groups_view::parse_env(&self.env)?;
-        host.startup = self.startup.trim().to_owned();
-        host.term = self.term.trim().to_owned();
+        self.startup.trim().clone_into(&mut host.startup);
+        self.term.trim().clone_into(&mut host.term);
         host.no_reconnect = !self.reconnect;
         Ok(host)
     }
@@ -209,9 +209,7 @@ impl HostsView {
                 self.editor_panel(ui, panel, vault);
             }
         }
-        let Some(vault) = vault else {
-            return None;
-        };
+        let vault = vault?;
         let (cards, groups) = self.gather(vault);
         let mut main = area.inset(PAD, 0.0);
         main.take_top(space::XL);
@@ -581,6 +579,7 @@ impl HostsView {
         action
     }
 
+    #[allow(clippy::too_many_lines)] // One panel, top to bottom: header, form, footer.
     fn editor_panel(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) {
         let t = ui.theme;
         let Some(editor) = self.editor.as_mut() else {
@@ -1115,10 +1114,10 @@ fn host_card(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEv
         draw_tags(ui, tags, &card.tags);
         inner.take_right(space::S);
     }
-    let title = Rect::new(inner.x, rect.y + 16.0, inner.w, 20.0);
+    let name_line = Rect::new(inner.x, rect.y + 16.0, inner.w, 20.0);
     let detail = Rect::new(inner.x, rect.y + 37.0, inner.w, 18.0);
     ui.gfx
-        .text(title, &card.label, BODY_STRONG, t.text, Align::Start);
+        .text(name_line, &card.label, BODY_STRONG, t.text, Align::Start);
     ui.gfx
         .text(detail, &card.detail, SMALL, t.text2, Align::Start);
     if response.hovered {
@@ -1227,10 +1226,10 @@ fn group_card(ui: &mut Ui<'_>, rect: Rect, group: &GroupCard) -> bool {
     let chevron = inner.take_right(16.0).centered(14.0, 14.0);
     ui.gfx
         .icon(icons::CHEVRON_RIGHT, chevron, t.text3.mix(t.text2, hover));
-    let title = Rect::new(inner.x, rect.y + 11.0, inner.w, 20.0);
+    let name_line = Rect::new(inner.x, rect.y + 11.0, inner.w, 20.0);
     let detail = Rect::new(inner.x, rect.y + 31.0, inner.w, 18.0);
     ui.gfx
-        .text(title, &group.name, BODY_STRONG, t.text, Align::Start);
+        .text(name_line, &group.name, BODY_STRONG, t.text, Align::Start);
     ui.gfx
         .text(detail, &group.holds, SMALL, t.text2, Align::Start);
     if response.hovered {

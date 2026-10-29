@@ -142,7 +142,7 @@ fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str)
         ),
         Glyph::Maximize => {
             ui.gfx
-                .stroke_rect(Rect::new(c.x - s, c.y - s, 2.0 * s, 2.0 * s), 1.5, 1.0, ink)
+                .stroke_rect(Rect::new(c.x - s, c.y - s, 2.0 * s, 2.0 * s), 1.5, 1.0, ink);
         }
         Glyph::Restore => {
             ui.gfx.stroke_rect(

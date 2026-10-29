@@ -6,6 +6,16 @@
 use annulus_vault::crypto::KdfParams;
 use annulus_vault::vault::Vault;
 
+/// A made-up host: label, address, user, port, tags and the index of its group.
+type Fixture = (
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<u16>,
+    &'static [&'static str],
+    Option<usize>,
+);
+
 /// A vault in a fresh temporary folder, with made-up hosts and groups when `populated`. Its
 /// key derivation is cheap: it holds nothing real.
 ///
@@ -32,7 +42,7 @@ pub fn fixture_vault(name: &str, populated: bool) -> Vault {
         group_uids.push(group.uid.clone());
         vault.upsert_group(group).expect("a temporary vault");
     }
-    let hosts: [(&str, &str, &str, Option<u16>, &[&str], Option<usize>); 14] = [
+    let hosts: [Fixture; 14] = [
         (
             "prod-db",
             "10.0.4.12",

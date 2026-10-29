@@ -6,6 +6,8 @@
 //! [ADR-0017]: ../../../docs/adr/0017-native-ui.md
 
 #![allow(unsafe_code)]
+// The bindings take raw pointers to locals that outlive each call.
+#![allow(clippy::borrow_as_ptr)]
 
 use std::collections::HashMap;
 

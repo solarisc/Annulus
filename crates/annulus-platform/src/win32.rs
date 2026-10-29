@@ -1,13 +1,15 @@
 //! The Windows window ([ADR-0017] decision 4): one Win32 window whose client area covers the
 //! caption, so the title bar is ours to draw, while Windows keeps the borders, resizing,
 //! Aero Snap, the shadow and (on Windows 11) Snap Layouts over our maximize button. Frames
-//! are drawn by Direct2D with ClearType text, only when input arrives or the app asks
+//! are drawn by Direct2D with `ClearType` text, only when input arrives or the app asks
 //! (P-06). This settles it: our own Win32 window, not winit, on Windows.
 //!
 //!
 //! [ADR-0017]: ../../../docs/adr/0017-native-ui.md
 
 #![allow(unsafe_code)]
+// The bindings take raw pointers to locals that outlive each call.
+#![allow(clippy::borrow_as_ptr)]
 
 use std::time::Instant;
 
@@ -58,7 +60,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::d2d::{D2d, D2dCanvas};
 
-/// WM_MOUSELEAVE, which the bindings file under UI::Controls.
+/// `WM_MOUSELEAVE`, which the bindings file under `UI::Controls`.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 use crate::window::{WindowApp, WindowError, WindowRequest};
 
@@ -158,7 +160,7 @@ struct Host {
     /// Client size in DIPs.
     size: (f32, f32),
     started: Instant,
-    /// Asked Windows for WM_MOUSELEAVE.
+    /// Asked Windows for `WM_MOUSELEAVE`.
     tracking: bool,
     /// Drawing a frame; messages sent during it do not draw again.
     painting: bool,
@@ -183,6 +185,17 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
         }
         (*host).handle(message, wparam, lparam)
     }
+}
+
+/// A hit-test answer as a window procedure result.
+fn hit(code: u32) -> LRESULT {
+    LRESULT(isize::try_from(code).unwrap_or_default())
+}
+
+/// A `WPARAM` as the signed word the 16-bit halves are read from.
+#[allow(clippy::cast_possible_wrap)] // Reinterpreting the bits is the point.
+fn signed(value: usize) -> isize {
+    value as isize
 }
 
 /// The low and high 16 bits of a message parameter, sign-extended (mouse coordinates).
@@ -242,8 +255,11 @@ impl Host {
     }
 
     fn modifiers() -> Modifiers {
-        // SAFETY: GetKeyState only reads this thread's keyboard state.
-        let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+        let down = |key: VIRTUAL_KEY| {
+            // SAFETY: GetKeyState only reads this thread's keyboard state.
+            let state = unsafe { GetKeyState(i32::from(key.0)) };
+            state < 0
+        };
         Modifiers {
             ctrl: down(VK_CONTROL),
             shift: down(VK_SHIFT),
@@ -253,10 +269,10 @@ impl Host {
     }
 
     #[allow(clippy::too_many_lines)] // One match over the window's messages.
-    unsafe fn handle(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    fn handle(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         let hwnd = self.hwnd;
-        // SAFETY (whole function): called from `wndproc` on the window's thread with the
-        // message's own parameters.
+        // SAFETY: called from `wndproc` on the window's thread with the message's own
+        // parameters; pointer parameters are those the message documents.
         unsafe {
             match message {
                 WM_NCCALCSIZE if wparam.0 != 0 => {
@@ -274,7 +290,7 @@ impl Host {
                 }
                 WM_NCHITTEST => {
                     let default = DefWindowProcW(hwnd, message, wparam, lparam);
-                    if default.0 != HTCLIENT as isize {
+                    if default != hit(HTCLIENT) {
                         return default;
                     }
                     let mut screen = POINT {
@@ -296,17 +312,17 @@ impl Host {
                             } else {
                                 HTTOP
                             };
-                            return LRESULT(code as isize);
+                            return hit(code);
                         }
                     }
                     let zone = self.zone_at(point);
                     if zone == Some(self.app.maximize_zone()) {
-                        return LRESULT(HTMAXBUTTON as isize);
+                        return hit(HTMAXBUTTON);
                     }
                     if zone == Some(self.app.drag_zone()) {
-                        return LRESULT(HTCAPTION as isize);
+                        return hit(HTCAPTION);
                     }
-                    LRESULT(HTCLIENT as isize)
+                    hit(HTCLIENT)
                 }
                 WM_NCACTIVATE => {
                     self.invalidate();
@@ -316,7 +332,7 @@ impl Host {
                 // Over the maximize button Windows sends non-client messages (that is what
                 // makes Snap Layouts appear); hand them to the app as ordinary pointer input.
                 WM_NCMOUSEMOVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK | WM_NCLBUTTONUP
-                    if wparam.0 == HTMAXBUTTON as usize =>
+                    if u32::try_from(wparam.0) == Ok(HTMAXBUTTON) =>
                 {
                     let mut screen = POINT {
                         x: low(lparam.0),
@@ -398,7 +414,7 @@ impl Host {
                 }
                 WM_MOUSEWHEEL => {
                     #[allow(clippy::cast_precision_loss)] // Wheel deltas are small.
-                    let notches = high(wparam.0 as isize) as f32 / 120.0;
+                    let notches = high(signed(wparam.0)) as f32 / 120.0;
                     self.push(Event::Wheel {
                         x: 0.0,
                         y: notches * 48.0,
@@ -426,7 +442,7 @@ impl Host {
                     }
                     LRESULT(0)
                 }
-                WM_SETCURSOR if u32::from(low(lparam.0) as u16) == HTCLIENT => {
+                WM_SETCURSOR if u32::try_from(lparam.0 & 0xFFFF) == Ok(HTCLIENT) => {
                     let shape = match self.cursor {
                         Cursor::Default => IDC_ARROW,
                         Cursor::Pointer => IDC_HAND,
@@ -475,7 +491,7 @@ impl Host {
                 }
                 WM_DPICHANGED => {
                     #[allow(clippy::cast_precision_loss)] // DPI values are small.
-                    let dpi = high(wparam.0 as isize).max(96) as f32;
+                    let dpi = high(signed(wparam.0)).max(96) as f32;
                     self.scale = dpi / 96.0;
                     if let Some(target) = &self.target {
                         target.SetDpi(dpi, dpi);
@@ -636,7 +652,7 @@ fn map_key(key: VIRTUAL_KEY) -> Option<kit::Key> {
         VK_OEM_COMMA => Key::Char(','),
         VK_OEM_MINUS => Key::Char('-'),
         VK_OEM_PLUS => Key::Char('='),
-        VIRTUAL_KEY(code @ 0x30..=0x39) | VIRTUAL_KEY(code @ 0x41..=0x5A) => {
+        VIRTUAL_KEY(code @ (0x30..=0x39 | 0x41..=0x5A)) => {
             Key::Char(char::from(u8::try_from(code).ok()?).to_ascii_lowercase())
         }
         VIRTUAL_KEY(code) if (VK_F1.0..=VK_F24.0).contains(&code) => {
