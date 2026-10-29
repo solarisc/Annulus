@@ -1908,6 +1908,166 @@ fn e2e_the_new_keychain_installs_a_key_on_a_real_host() {
     );
 }
 
+/// How many SSH sessions `host`'s user has on the server, counted over one more connection
+/// (the count includes it, the same way every time). Host-key questions are trusted.
+fn sessions_on(app: &NativeApp, host_id: u64) -> usize {
+    let vault = app.vault.as_ref().unwrap();
+    let host = vault
+        .hosts()
+        .iter()
+        .find(|host| host.id == host_id)
+        .unwrap();
+    let user = host.username.clone();
+    let mut task = crate::ssh_task::SshTask::exec(
+        crate::connect::host(vault, &app.ssh_files, host),
+        format!("pgrep -fc '^sshd: {user}' || true"),
+        || {},
+    );
+    let started = std::time::Instant::now();
+    loop {
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "the count never came back"
+        );
+        while let Some(event) = task.question() {
+            if let annulus_session::SessionEvent::HostKey(_) = event {
+                task.answers().host_key(true);
+            }
+        }
+        if let Some(outcome) = task.outcome() {
+            let exec = outcome.unwrap();
+            return String::from_utf8_lossy(&exec.output)
+                .trim()
+                .parse()
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// End to end on test VM 1: a terminal tab, an SFTP tab and a port forward opened through the
+/// app, then closed the way a user closes them (the tab's close, the rule's switch), leave
+/// nothing behind: the server is back to the sessions it had, and the forwarded port is free.
+#[test]
+#[ignore = "needs the test servers"]
+#[allow(clippy::too_many_lines)] // Open four connections, check them, close them, check again.
+fn e2e_closing_terminals_sftp_and_forwards_leaves_nothing_on_the_server() {
+    use std::io::Read as _;
+    let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+    let mut vault = fixture_vault("e2e-cleanup", false);
+    let login = annulus_ssh::keys::import(
+        &std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap(),
+        None,
+    )
+    .unwrap();
+    let login = crate::keychain_screen::stored(&vault, "e2e", &login);
+    let key_id = login.id;
+    vault.upsert_key(login).unwrap();
+    let mut host = vault.draft_host();
+    host.label = "test-1".into();
+    host.address = var("ANNULUS_E2E_VM1");
+    host.username = var("ANNULUS_E2E_USER");
+    host.key_id = Some(key_id);
+    let host_id = host.id;
+    vault.upsert_host(host).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut rule = vault.draft_forward(host_id);
+    rule.label = "ssh through test-1".into();
+    rule.kind = annulus_vault::forwards::ForwardKind::Local;
+    rule.bind_port = port;
+    rule.destination_host = "127.0.0.1".into();
+    rule.destination_port = 22;
+    vault.upsert_forward(rule).unwrap();
+    let mut app = NativeApp::new(Some(vault));
+    let dir = std::env::temp_dir().join(format!("annulus-e2e-cleanup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.ssh_files.known_hosts = dir.join("known_hosts");
+    app.ssh_files.key_dir = None;
+    let before = sessions_on(&app, host_id);
+    let mut state = UiState::default();
+    let started = std::time::Instant::now();
+    let clock = || started.elapsed().as_secs_f64();
+    // A terminal, split into two panes, and an SFTP tab.
+    app.act(super::hosts::HostsAction::Connect(host_id));
+    for _ in 0..3 {
+        drive(&mut app, &mut state, &[], clock());
+    }
+    let split = [Event::Key(Key::Char('d'), Modifiers::CTRL_SHIFT)];
+    drive(&mut app, &mut state, &split, clock());
+    app.act(super::hosts::HostsAction::Sftp(host_id));
+    for _ in 0..3 {
+        drive(&mut app, &mut state, &[], clock());
+    }
+    // The forward, switched on from its row, carries a connection to the server's sshd.
+    app.active = 0;
+    app.section = super::Section::PortForwarding;
+    let mut output = step(&mut app, &mut state, &[], clock());
+    step(
+        &mut app,
+        &mut state,
+        &click_within(&output, "ssh through test-1", "Run this rule"),
+        clock(),
+    );
+    let banner = loop {
+        assert!(clock() < 60.0, "the forward never answered");
+        drive(&mut app, &mut state, &[], clock());
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = [0_u8; 8];
+            if stream.read_exact(&mut bytes).is_ok() {
+                break String::from_utf8_lossy(&bytes).into_owned();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    assert!(banner.starts_with("SSH-2.0"), "{banner:?}");
+    // Every one of them shows on the server: two panes, the files tab and the forward.
+    let during = loop {
+        drive(&mut app, &mut state, &[], clock());
+        let count = sessions_on(&app, host_id);
+        if count >= before + 4 || clock() > 60.0 {
+            break count;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    };
+    assert!(
+        during >= before + 4,
+        "{during} sessions while open, {before} before"
+    );
+    // Closed as a user closes them.
+    output = step(&mut app, &mut state, &[], clock());
+    step(
+        &mut app,
+        &mut state,
+        &click_within(&output, "ssh through test-1", "Run this rule"),
+        clock(),
+    );
+    while app.tabs.len() > 1 {
+        app.close_tab(app.tabs.len() - 1);
+        drive(&mut app, &mut state, &[], clock());
+    }
+    loop {
+        drive(&mut app, &mut state, &[], clock());
+        let count = sessions_on(&app, host_id);
+        let free = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        if count == before && free {
+            break;
+        }
+        assert!(
+            clock() < 120.0,
+            "after closing: {count} sessions on the server (before: {before}), port free: {free}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 /// End to end through the deployed sync server: the new UI's Settings create an account
 /// from typed input (server, name, the vault's password) and the vault syncs to it.
 #[test]

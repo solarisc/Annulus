@@ -319,6 +319,8 @@ impl EventListener for Listener {
 enum SshInput {
     Data(Vec<u8>),
     Resize(Size),
+    /// The tab or pane was closed: end the session and its connection.
+    Close,
 }
 
 /// How input reaches the program.
@@ -657,9 +659,15 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Dropping the SSH input sender ends that session's thread; the PTY loop needs a word.
-        if let Backend::Pty(pty) = &self.backend {
-            let _ = pty.send(Msg::Shutdown);
+        // Both need a word: the terminal's reply hook holds a sender of the SSH input too, so
+        // the channel never closes by itself and the connection would outlive its tab.
+        match &self.backend {
+            Backend::Pty(pty) => {
+                let _ = pty.send(Msg::Shutdown);
+            }
+            Backend::Ssh(input) => {
+                let _ = input.send(SshInput::Close);
+            }
         }
     }
 }
@@ -752,7 +760,7 @@ fn spawn_ssh(
                                 let _ = shell.resize(columns, rows).await;
                             }
                             // The tab was closed.
-                            None => return,
+                            Some(SshInput::Close) | None => return,
                         },
                     }
                 }
