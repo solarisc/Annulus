@@ -698,7 +698,13 @@ mod tests {
         let mut screen = screen_with("rc");
         let mut host = screen.vault.hosts()[0].clone();
         let reconnects = |screen: &HostsScreen, host: &Host| {
-            matches!(screen.connect_host(host), Program::Ssh { reconnect: true, .. })
+            matches!(
+                screen.connect_host(host),
+                Program::Ssh {
+                    reconnect: true,
+                    ..
+                }
+            )
         };
         assert!(reconnects(&screen, &host), "on by default");
         host.no_reconnect = true;

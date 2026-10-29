@@ -20,6 +20,12 @@ pub struct SshDialogs {
 }
 
 impl SshDialogs {
+    /// Whether a question is waiting for the user.
+    #[must_use]
+    pub fn is_asking(&self) -> bool {
+        self.question.is_some()
+    }
+
     /// Takes the event if it is a question; returns it otherwise.
     pub fn take(&mut self, event: SessionEvent) -> Option<SessionEvent> {
         match event {

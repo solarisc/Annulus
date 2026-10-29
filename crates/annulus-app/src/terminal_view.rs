@@ -13,6 +13,9 @@ use annulus_term::links;
 use annulus_term::select::SelectionKind;
 use annulus_term::{Screen, Size};
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::ssh_dialogs::SshDialogs;
 
 /// Smallest and largest terminal font size.
@@ -29,6 +32,29 @@ pub enum PaneRequest {
     OpenSftp,
     /// Show the snippet panel.
     Snippets,
+}
+
+/// What a tab's status dot says (F-APP-002), least to most urgent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TabStatus {
+    /// Output arrived while the tab was not shown.
+    Unread,
+    /// A question (host key, password) waits for an answer.
+    Input,
+    /// The session failed or its connection dropped.
+    Error,
+}
+
+impl TabStatus {
+    /// The tooltip and accessible name of the dot.
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            TabStatus::Unread => "New output",
+            TabStatus::Input => "Waiting for your answer",
+            TabStatus::Error => "Disconnected or failed",
+        }
+    }
 }
 
 /// One terminal tab.
@@ -57,6 +83,8 @@ pub struct TerminalTab {
     carry: Option<String>,
     /// When the current session started (egui time), to tell a fresh drop from a retry.
     started: f64,
+    /// Set by the session when it has something new to draw; cleared when drawn.
+    unread: Arc<AtomicBool>,
 }
 
 /// Tries before an automatic reconnect gives up and shows the error.
@@ -96,7 +124,27 @@ impl TerminalTab {
             tries: 0,
             carry: None,
             started: 0.0,
+            unread: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The status dot for this pane, if any.
+    #[must_use]
+    pub fn status(&self) -> Option<TabStatus> {
+        if self.failed.is_some() || self.lost.is_some() {
+            Some(TabStatus::Error)
+        } else if self.dialogs.is_asking() {
+            Some(TabStatus::Input)
+        } else if self.unread.load(Ordering::Relaxed) {
+            Some(TabStatus::Unread)
+        } else {
+            None
+        }
+    }
+
+    /// Takes in the session's news while the tab is not shown, so its dot stays current.
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        self.drain_events(ctx);
     }
 
     /// The connection dropped (or a reconnect failed): schedules the next try, or gives up
@@ -202,9 +250,13 @@ impl TerminalTab {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Cell sizes are small.
         let (cell_w, cell_h) = (cell.x.ceil() as u16, cell.y.ceil() as u16);
 
+        // Shown now, so nothing here is unread.
+        self.unread.store(false, Ordering::Relaxed);
         if self.session.is_none() && self.failed.is_none() {
             let ctx = ui.ctx().clone();
+            let unread = self.unread.clone();
             match Session::spawn(&self.program, size, cell_w, cell_h, move || {
+                unread.store(true, Ordering::Relaxed);
                 ctx.request_repaint();
             }) {
                 Ok(session) => {
@@ -822,6 +874,22 @@ fn map_key(key: EguiKey, ctrl: bool) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dot_shows_the_most_urgent_state() {
+        let mut tab = TerminalTab::new("web", Program::system_ssh("web"));
+        assert_eq!(tab.status(), None);
+        tab.unread.store(true, Ordering::Relaxed);
+        assert_eq!(tab.status(), Some(TabStatus::Unread));
+        tab.dialogs.take(SessionEvent::Password {
+            user: "me".into(),
+            host: "web".into(),
+        });
+        assert_eq!(tab.status(), Some(TabStatus::Input));
+        tab.lost = Some(1.0);
+        assert_eq!(tab.status(), Some(TabStatus::Error));
+        assert!(TabStatus::Error > TabStatus::Input && TabStatus::Input > TabStatus::Unread);
+    }
 
     #[test]
     fn reconnects_back_off_up_to_half_a_minute() {

@@ -51,6 +51,19 @@ impl Panes {
             .map_or("Terminal", |pane| pane.title.as_str())
     }
 
+    /// The most urgent status dot of any pane.
+    #[must_use]
+    pub fn status(&self) -> Option<crate::terminal_view::TabStatus> {
+        self.list.iter().filter_map(TerminalTab::status).max()
+    }
+
+    /// Takes in every pane's news while the tab is not shown.
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        for pane in &mut self.list {
+            pane.poll(ctx);
+        }
+    }
+
     /// The pane that has the keyboard.
     pub fn focused_mut(&mut self) -> Option<&mut TerminalTab> {
         self.list.get_mut(self.focused)

@@ -18,7 +18,7 @@ use crate::password_screen::PasswordScreen;
 use crate::sftp_view::SftpTab;
 use crate::snippets_screen::{self, SnippetsScreen};
 use crate::sync_screen::SyncScreen;
-use crate::terminal_view::{FONT_SIZES, PaneRequest};
+use crate::terminal_view::{FONT_SIZES, PaneRequest, TabStatus};
 use annulus_config::settings::{DEFAULT_FONT_SIZE, Settings};
 use annulus_session::profiles::{self, Profile};
 use annulus_term::themes;
@@ -92,6 +92,15 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// The tab's status dot (F-APP-002).
+    #[must_use]
+    pub fn status(&self) -> Option<TabStatus> {
+        match self {
+            Tab::Terminal(panes) => panes.status(),
+            Tab::Vault | Tab::Sftp(_) => None,
+        }
+    }
+
     /// The title shown in the strip.
     #[must_use]
     pub fn title(&self) -> &str {
@@ -403,6 +412,13 @@ impl Shell {
             .options_mut(|options| options.zoom_with_keyboard = false);
         self.shortcuts(ui);
         self.auto_lock(ui.ctx());
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            if let Tab::Terminal(panes) = tab
+                && index != self.active_tab
+            {
+                panes.poll(ui.ctx());
+            }
+        }
         egui::Panel::top("tabs").show(ui, |ui| self.tab_strip(ui));
         let palette = self.palette();
         let vault_path = self.data_dir.join(VAULT_FILE);
@@ -560,8 +576,12 @@ impl Shell {
         let mut close = None;
         let mut select = None;
         let mut new_local: Option<Option<usize>> = None;
+        let palette = self.palette();
         ui.horizontal(|ui| {
             for (index, tab) in self.tabs.iter().enumerate() {
+                if let Some(status) = tab.status() {
+                    status_dot(ui, status, &palette);
+                }
                 let response = ui.selectable_label(index == self.active_tab, tab.title());
                 if response.clicked() {
                     select = Some(index);
@@ -800,6 +820,21 @@ impl Shell {
             self.password.ui(ui, &palette, hosts);
         }
     }
+}
+
+/// A tab's status dot: colour plus a tooltip and an accessible name, so it never relies on
+/// colour alone (UI-SPEC §Accessibility).
+fn status_dot(ui: &mut Ui, status: TabStatus, palette: &Palette) {
+    let color = match status {
+        TabStatus::Unread => palette.accent,
+        TabStatus::Input => palette.status_warn,
+        TabStatus::Error => palette.status_error,
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), 4.0, theme::color(color));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, status.describe()));
+    response.on_hover_text(status.describe());
 }
 
 /// Whether `idle` seconds have reached the `timeout`.
