@@ -96,6 +96,8 @@ struct Device {
     records: HashMap<String, (u64, Option<Item>)>,
     /// When each deletion held was made.
     deleted_at: HashMap<String, u64>,
+    /// The clock time of the last version taken from or pushed to the server, per record.
+    seen: HashMap<String, u64>,
     pending: HashMap<String, Outgoing>,
 }
 
@@ -184,6 +186,7 @@ impl Replica for Device {
                 if change.item.is_none() {
                     self.deleted_at.insert(id.to_owned(), change.hlc);
                 }
+                self.seen.insert(id.to_owned(), change.hlc);
                 change.item
             }
             None => self.records.get(id).and_then(|(_, item)| item.clone()),
@@ -193,6 +196,7 @@ impl Replica for Device {
 
     fn apply(&mut self, id: &str, seq: u64, hlc: u64, item: Option<Item>) {
         self.pending.remove(id);
+        self.seen.insert(id.to_owned(), hlc);
         if item.is_none() {
             self.deleted_at.insert(id.to_owned(), hlc);
         }
@@ -217,6 +221,10 @@ impl Replica for Device {
                 item.hlc = hlc;
             }
         }
+    }
+
+    fn seen_time(&self, id: &str) -> Option<u64> {
+        self.seen.get(id).copied()
     }
 
     fn held_time(&self, id: &str) -> Option<u64> {
@@ -443,6 +451,58 @@ fn an_old_version_served_again_is_not_applied_and_the_newer_goes_back() {
         Some("new address"),
         "the newer copy went back over the old one"
     );
+}
+
+#[test]
+fn a_pending_deletion_is_not_undone_by_an_old_version_served_again() {
+    let server = server();
+    let (a_id, b_id) = account(&server);
+    let (mut a, mut b) = (Device::default(), Device::default());
+    a.edit("r1", "v1", 10);
+    run(&server, a_id, &mut a);
+    let last = seal(&Item {
+        kind: 1,
+        hlc: 10,
+        body: b"v1".to_vec(),
+    });
+    run(&server, b_id, &mut b);
+    // b deletes offline; meanwhile the server serves r1's same old version again.
+    b.delete("r1", 20);
+    let replay = Change {
+        id: "r1".into(),
+        base: a.version("r1"),
+        ciphertext: last,
+        deleted: false,
+    };
+    server.push(a_id, &[replay]).unwrap();
+    run(&server, b_id, &mut b);
+    assert_eq!(b.body("r1"), None, "the deletion stands");
+    run(&server, a_id, &mut a);
+    assert_eq!(a.body("r1"), None, "and reaches the other device");
+}
+
+#[test]
+fn a_record_behind_a_made_up_deletion_is_not_stuck() {
+    let server = server();
+    let (a_id, b_id) = account(&server);
+    let (mut a, mut b) = (Device::default(), Device::default());
+    a.edit("r1", "v1", 10);
+    run(&server, a_id, &mut a);
+    run(&server, b_id, &mut b);
+    let forged = Change {
+        id: "r1".into(),
+        base: a.version("r1"),
+        ciphertext: Vec::new(),
+        deleted: true,
+    };
+    server.push(a_id, &[forged]).unwrap();
+    run(&server, b_id, &mut b);
+    // b's copy went back over the made-up deletion, so an edit of it still pushes.
+    b.edit("r1", "v2", 30);
+    let report = run(&server, b_id, &mut b);
+    assert_eq!(b.pending.len(), 0, "{report:?}");
+    run(&server, a_id, &mut a);
+    assert_eq!(a.body("r1").as_deref(), Some("v2"));
 }
 
 #[test]

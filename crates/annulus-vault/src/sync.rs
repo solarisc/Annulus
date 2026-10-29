@@ -70,6 +70,10 @@ pub struct Entry {
     pub deleted: bool,
     /// When it last changed.
     pub hlc: u64,
+    /// The clock time of the last version taken from the server or pushed to it: anything
+    /// the server serves at or before it is not news (a replay), even with an edit pending.
+    #[serde(default)]
+    pub seen: u64,
     /// A rule whose host has not arrived yet: the host's sync id, to link once it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaits: Option<String>,
@@ -186,6 +190,7 @@ impl SyncState {
             dirty: true,
             deleted: false,
             hlc,
+            seen: 0,
             awaits: None,
             awaits_jump: None,
         });
@@ -454,7 +459,15 @@ impl SyncCopy {
         if let Some(entry) = self.state.entries.get_mut(id) {
             entry.base = seq;
             entry.dirty = false;
+            entry.seen = entry.seen.max(entry.hlc);
         }
+    }
+
+    /// The clock time of the last version of `id` this device took from the server or
+    /// pushed to it.
+    #[must_use]
+    pub fn seen_time(&self, id: &str) -> Option<u64> {
+        self.state.entries.get(id).map(|entry| entry.seen)
     }
 
     /// Whether `key_file` (an account's, from sign-in) opens with `password` to this vault's
@@ -654,6 +667,7 @@ impl SyncCopy {
                 dirty: false,
                 deleted: false,
                 hlc,
+                seen: hlc,
                 awaits,
                 awaits_jump,
             },
@@ -709,6 +723,7 @@ impl SyncCopy {
             entry.dirty = false;
             entry.base = seq;
             entry.hlc = entry.hlc.max(hlc);
+            entry.seen = entry.seen.max(hlc);
         }
     }
 
@@ -958,6 +973,7 @@ mod tests {
                     dirty: true,
                     deleted: false,
                     hlc: 1,
+                    seen: 0,
                     awaits: None,
                     awaits_jump: None,
                 },

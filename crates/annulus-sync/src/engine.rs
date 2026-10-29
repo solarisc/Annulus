@@ -114,6 +114,9 @@ pub trait Replica {
     fn renew(&mut self, id: &str, after: u64);
     /// When the copy of `id` held here (a record or its deletion) was made; `None` if none.
     fn held_time(&self, id: &str) -> Option<u64>;
+    /// The clock time of the last version of `id` taken from the server or pushed to it;
+    /// `None` (or 0) if none.
+    fn seen_time(&self, id: &str) -> Option<u64>;
     /// A clock time of this device, newer than `after`.
     fn next_time(&mut self, after: u64) -> u64;
     /// The server's version `seq` of `id` is older than the copy held here: that copy is
@@ -185,8 +188,13 @@ fn pull(
         if record.seq <= replica.version(&record.id) {
             continue;
         }
-        // What a record is comes from its sealed content, never from the server's flag.
+        // What a record is comes from its sealed content, never from the server's flag. An
+        // unsealed one is passed over, and the copy held here goes back over it, so the
+        // record does not stay stuck behind a version this device will never take.
         if record.ciphertext.is_empty() {
+            if replica.held_time(&record.id).is_some() {
+                replica.reassert(&record.id, record.seq);
+            }
             continue;
         }
         let item = replica.open(&record.id, &record.ciphertext)?;
@@ -195,6 +203,17 @@ fn pull(
         let local = pending.iter().find(|change| change.id == record.id);
         if local.is_none() && replica.held_time(&record.id).is_some_and(|held| hlc < held) {
             replica.reassert(&record.id, record.seq);
+            continue;
+        }
+        // A version this device already took or pushed, served again while an edit (or a
+        // deletion) is pending here: not news, so the pending change goes over it.
+        if local.is_some()
+            && replica
+                .seen_time(&record.id)
+                .is_some_and(|seen| hlc <= seen)
+        {
+            replica.rebase(&record.id, record.seq);
+            report.pulled += 1;
             continue;
         }
         match (local, remote) {
@@ -337,6 +356,11 @@ pub fn restore(
     version: &annulus_proto::Record,
 ) -> Result<(), SyncError> {
     let mut item = replica.open(id, &version.ciphertext)?;
+    if item.body.is_empty() {
+        return Err(SyncError::Transport(
+            "that version is a deletion; there is nothing in it to bring back".into(),
+        ));
+    }
     // Bringing it back is a new edit: newer than the deletion, or other devices would take
     // it for an old copy served again.
     item.hlc = replica.next_time(replica.held_time(id).unwrap_or(0));

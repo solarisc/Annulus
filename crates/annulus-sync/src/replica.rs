@@ -77,6 +77,10 @@ impl Replica for VaultReplica {
         self.0.held_time(id)
     }
 
+    fn seen_time(&self, id: &str) -> Option<u64> {
+        self.0.seen_time(id)
+    }
+
     fn next_time(&mut self, after: u64) -> u64 {
         self.0.next_time(after)
     }

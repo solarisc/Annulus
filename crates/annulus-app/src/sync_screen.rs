@@ -509,6 +509,13 @@ impl SyncScreen {
             if !Vault::password_opens(&key_file, &password) {
                 return Done::Failed("That is not this vault's master password.".into());
             }
+            // The server will hold a record of it that a thief could guess against offline.
+            if !annulus_vault::strength::estimate(&password).is_strong() {
+                return Done::Failed(
+                    "This master password is too easy to guess to put an account on a server. Change it under Master password first."
+                        .into(),
+                );
+            }
             let connect = HttpServer::new(&server, None).map(|http| http.pinned(pin.as_deref()));
             let result = connect.and_then(|mut http| {
                 account::register_with_invite(
@@ -638,6 +645,10 @@ fn load_trash(account: &SyncAccount, copy: &SyncCopy) -> Result<Vec<TrashItem>, 
         let Ok((kind, _, body)) = copy.open(&id, &version.ciphertext) else {
             continue;
         };
+        // A deletion flagged as a version by the server holds nothing to bring back.
+        if body.is_empty() {
+            continue;
+        }
         items.push(TrashItem {
             name: SyncCopy::describe(kind, &body),
             id,
