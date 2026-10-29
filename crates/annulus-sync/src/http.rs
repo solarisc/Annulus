@@ -10,9 +10,9 @@ use serde::de::DeserializeOwned;
 use ureq::Agent;
 use ureq::tls::{TlsConfig, TlsProvider};
 use annulus_proto::{
-    Change, Changes, Devices, Failure, LoginFinish, LoginStart, LoginStartResponse,
-    PROTOCOL_VERSION, Push, PushResult, RegisterFinish, RegisterStart, RegisterStartResponse,
-    Revoke, Session, VERSION_HEADER, decode, encode, path,
+    Change, Changes, Devices, Failure, History, LoginFinish, LoginStart, LoginStartResponse,
+    PROTOCOL_VERSION, Push, PushResult, Record, RegisterFinish, RegisterStart,
+    RegisterStartResponse, Revoke, Session, VERSION_HEADER, decode, encode, path,
 };
 
 use crate::account::Auth;
@@ -111,6 +111,15 @@ impl HttpServer {
     /// Unreachable or signed out.
     pub fn devices(&self) -> Result<Devices, SyncError> {
         self.request(path::DEVICES, None)
+    }
+
+    /// Earlier versions of record `id`, newest first.
+    ///
+    /// # Errors
+    /// Unreachable or signed out.
+    pub fn history(&self, id: &str) -> Result<Vec<Record>, SyncError> {
+        let history: History = self.request(&format!("{}?id={id}", path::HISTORY), None)?;
+        Ok(history.records)
     }
 
     /// Signs `device` out.

@@ -383,6 +383,40 @@ impl SyncCopy {
         }
     }
 
+    /// Records deleted after reaching the server: their sync ids and kinds, for the trash.
+    #[must_use]
+    pub fn deleted(&self) -> Vec<(String, u8)> {
+        self.state
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.deleted && entry.base > 0)
+            .map(|(id, entry)| (id.clone(), entry.kind))
+            .collect()
+    }
+
+    /// A short name for an entity body of `kind` (its label), for lists such as the trash.
+    #[must_use]
+    pub fn describe(kind: u8, body: &[u8]) -> String {
+        #[derive(Deserialize)]
+        struct Labelled {
+            #[serde(default)]
+            label: String,
+            #[serde(default)]
+            rule: Option<PortForward>,
+        }
+        let name = serde_json::from_slice::<Labelled>(body)
+            .map(|labelled| labelled.rule.map_or(labelled.label, |rule| rule.label))
+            .unwrap_or_default();
+        let what = match kind {
+            kind::HOST => "Host",
+            kind::FORWARD => "Port forward",
+            kind::KEY => "Key",
+            kind::SNIPPET => "Snippet",
+            _ => "Item",
+        };
+        format!("{what} {name}")
+    }
+
     /// Whether clock time `hlc` was made on this device.
     #[must_use]
     pub fn own_time(&self, hlc: u64) -> bool {

@@ -256,3 +256,32 @@ fn push(
     }
     Ok(result.conflicts.is_empty())
 }
+
+/// Brings back an earlier `version` of record `id` (from its history, e.g. a deleted host):
+/// it is pushed as the newest version, so every device gets it back, and applied here.
+///
+/// # Errors
+/// Unreachable, the version cannot be decrypted, or the record changed meanwhile (pull and
+/// try again).
+pub fn restore(
+    transport: &mut impl Transport,
+    replica: &mut impl Replica,
+    id: &str,
+    version: &annulus_proto::Record,
+) -> Result<(), SyncError> {
+    let item = replica.open(id, &version.ciphertext)?;
+    let change = Change {
+        id: id.to_owned(),
+        base: replica.version(id),
+        ciphertext: version.ciphertext.clone(),
+        deleted: false,
+    };
+    let result = transport.push(&[change])?;
+    let Some(&(_, seq)) = result.accepted.first() else {
+        return Err(SyncError::Transport(
+            "it changed on another device meanwhile; sync and try again".into(),
+        ));
+    };
+    replica.apply(id, seq, Some(item));
+    Ok(())
+}

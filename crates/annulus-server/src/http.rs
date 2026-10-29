@@ -14,8 +14,8 @@ use axum::routing::{get, post};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use annulus_proto::{
-    Failure, LoginFinish, LoginStart, PROTOCOL_VERSION, Push, RegisterFinish, RegisterStart,
-    Revoke, VERSION_HEADER, decode, encode, path,
+    Failure, History, LoginFinish, LoginStart, PROTOCOL_VERSION, Push, RegisterFinish,
+    RegisterStart, Revoke, VERSION_HEADER, decode, encode, path,
 };
 
 use crate::store::{Caller, Server, ServerError};
@@ -51,6 +51,7 @@ fn router(server: Arc<Server>) -> Router {
         .route(path::LOGIN_START, post(login_start))
         .route(path::LOGIN_FINISH, post(login_finish))
         .route(path::RECORDS, get(pull).post(push))
+        .route(path::HISTORY, get(history))
         .route(path::DEVICES, get(devices))
         .route(path::REVOKE, post(revoke))
         .with_state(server)
@@ -193,6 +194,32 @@ async fn pull(
         Some(since) => reply(server.pull(caller, since)),
         None => failure(StatusCode::BAD_REQUEST, "since must be a number"),
     }
+}
+
+async fn history(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let caller = match caller(&server, &headers) {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    let id = query
+        .as_deref()
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("id="))
+        .unwrap_or_default();
+    if id.is_empty() || id.len() > 128 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return failure(StatusCode::BAD_REQUEST, "id must be a record id");
+    }
+    reply(
+        server
+            .history(caller, id)
+            .map(|records| History { records }),
+    )
 }
 
 async fn devices(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {

@@ -11,7 +11,7 @@ use eframe::egui::{self, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
 use annulus_proto::Device;
 use annulus_sync::account;
-use annulus_sync::engine::{Report, SyncError, sync};
+use annulus_sync::engine::{Report, SyncError, restore as restore_item, sync};
 use annulus_sync::http::HttpServer;
 use annulus_sync::replica::VaultReplica;
 use annulus_ui::secret::{SecretText, secret_field};
@@ -41,6 +41,10 @@ enum Done {
     Synced(Box<SyncCopy>, Result<Report, SyncError>),
     /// The device list.
     Devices(Result<Vec<Device>, SyncError>),
+    /// Deleted items that can be restored.
+    Trash(Result<Vec<TrashItem>, SyncError>),
+    /// A restore finished; the copy holds the restored item.
+    Restored(Box<SyncCopy>, Result<(), SyncError>),
     /// A step failed before anything changed.
     Failed(String),
 }
@@ -54,6 +58,7 @@ pub struct SyncScreen {
     work: Option<(String, Receiver<Done>)>,
     message: Option<(bool, String)>,
     devices: Vec<Device>,
+    trash: Vec<TrashItem>,
     /// When the last round started, in the clock of `Pace::now`.
     last_round: f64,
     /// When a local change was first seen unpushed.
@@ -73,6 +78,7 @@ impl Default for SyncScreen {
             work: None,
             message: None,
             devices: Vec::new(),
+            trash: Vec::new(),
             last_round: f64::NEG_INFINITY,
             dirty_since: None,
         }
@@ -226,6 +232,31 @@ impl SyncScreen {
                         format!("Sync failed: {error}. It retries automatically."),
                     ));
                 }
+            },
+            Done::Trash(result) => match result {
+                Ok(items) => {
+                    self.message = items
+                        .is_empty()
+                        .then(|| (false, "Nothing deleted to restore.".to_owned()));
+                    self.trash = items;
+                }
+                Err(error) => self.message = Some((true, error.to_string())),
+            },
+            Done::Restored(copy, result) => match result {
+                Ok(()) => {
+                    self.message = Some(match hosts.vault_mut().commit_sync(*copy) {
+                        Ok(true) => (
+                            false,
+                            "Restored. Other devices get it at their next sync.".into(),
+                        ),
+                        Ok(false) => (
+                            false,
+                            "Restored on the server; it arrives here at the next sync.".into(),
+                        ),
+                        Err(error) => (true, error.to_string()),
+                    });
+                }
+                Err(error) => self.message = Some((true, format!("Could not restore: {error}"))),
             },
             Done::Devices(result) => match result {
                 Ok(devices) => self.devices = devices,
@@ -443,6 +474,31 @@ impl SyncScreen {
         });
     }
 
+    /// The deleted items with their Restore buttons.
+    fn trash_ui(&mut self, ui: &mut Ui, account: &SyncAccount, hosts: &HostsScreen) {
+        let mut restore = None;
+        for (index, item) in self.trash.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(&item.name);
+                if ui.small_button("Restore").clicked() {
+                    restore = Some(index);
+                }
+            });
+        }
+        if let Some(index) = restore {
+            let item = self.trash.remove(index);
+            let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+            let copy = hosts.vault().sync_copy();
+            self.start(ui.ctx(), "Restoring", move || {
+                let mut replica = VaultReplica(copy);
+                let result = HttpServer::new(&server, Some(token)).and_then(|mut http| {
+                    restore_item(&mut http, &mut replica, &item.id, &item.version)
+                });
+                Done::Restored(Box::new(replica.0), result)
+            });
+        }
+    }
+
     fn signed_in_ui(
         &mut self,
         ui: &mut Ui,
@@ -486,8 +542,20 @@ impl SyncScreen {
                     )
                 });
             }
+            if ui
+                .add_enabled(self.work.is_none(), egui::Button::new("Deleted items"))
+                .on_hover_text("Restore hosts, keys, rules and snippets deleted on any device")
+                .clicked()
+            {
+                let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+                let copy = hosts.vault().sync_copy();
+                self.start(ui.ctx(), "Loading deleted items", move || {
+                    Done::Trash(load_trash(&server, token, &copy))
+                });
+            }
             if ui.button("Sign out").clicked() {
                 self.devices.clear();
+                self.trash.clear();
                 self.message = Some(match hosts.vault_mut().set_sync_account(None) {
                     Ok(()) => (
                         false,
@@ -497,6 +565,7 @@ impl SyncScreen {
                 });
             }
         });
+        self.trash_ui(ui, account, hosts);
         let mut revoke = None;
         for device in &self.devices {
             ui.horizontal(|ui| {
@@ -531,6 +600,38 @@ impl SyncScreen {
             });
         }
     }
+}
+
+/// A deleted item and the version to bring back.
+struct TrashItem {
+    id: String,
+    name: String,
+    version: annulus_proto::Record,
+}
+
+/// The deleted items of `copy`, each with its last version from the server's history.
+fn load_trash(server: &str, token: String, copy: &SyncCopy) -> Result<Vec<TrashItem>, SyncError> {
+    let http = HttpServer::new(server, Some(token))?;
+    let mut items = Vec::new();
+    for (id, _) in copy.deleted() {
+        let Some(version) = http
+            .history(&id)?
+            .into_iter()
+            .find(|version| !version.deleted)
+        else {
+            continue;
+        };
+        let Ok((kind, _, body)) = copy.open(&id, &version.ciphertext) else {
+            continue;
+        };
+        items.push(TrashItem {
+            name: SyncCopy::describe(kind, &body),
+            id,
+            version,
+        });
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(items)
 }
 
 /// One sync round on a worker thread.

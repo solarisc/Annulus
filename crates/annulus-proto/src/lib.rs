@@ -39,6 +39,8 @@ pub mod path {
     pub const LOGIN_FINISH: &str = "/v1/login/finish";
     /// Pull with `GET ?since=<seq>`, push with `POST` ([`super::Push`]).
     pub const RECORDS: &str = "/v1/records";
+    /// Earlier versions of one record, `GET ?id=<record id>` ([`super::History`]).
+    pub const HISTORY: &str = "/v1/records/history";
     /// The account's devices ([`super::Devices`]).
     pub const DEVICES: &str = "/v1/devices";
     /// Revokes a device ([`super::Revoke`]).
@@ -197,6 +199,13 @@ pub struct Changes {
     pub records: Vec<Record>,
     /// The newest sequence number on the server; the client's next cursor.
     pub latest: u64,
+}
+
+/// `GET /v1/records/history?id=…`: earlier versions of a record, newest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct History {
+    /// The versions, newest first.
+    pub records: Vec<Record>,
 }
 
 /// One device of the account.

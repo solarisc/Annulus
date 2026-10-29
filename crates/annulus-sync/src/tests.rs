@@ -387,6 +387,13 @@ fn a_full_round_over_http_then_a_revoked_device_is_refused() {
     sync(&mut phone, &mut phone_copy).unwrap();
     assert_eq!(phone_copy.body("r1").as_deref(), Some("prod-db"));
     assert_eq!(laptop.devices().unwrap().devices.len(), 2);
+    device.edit("r1", "edited", 20);
+    sync(&mut laptop, &mut device).unwrap();
+    assert_eq!(
+        laptop.history("r1").unwrap().len(),
+        1,
+        "the first version is in history"
+    );
 
     laptop.revoke(phone_session.device).unwrap();
     assert!(matches!(
@@ -544,6 +551,49 @@ mod vaults {
         // Both survive a lock and unlock with their sync state.
         let reopened = Vault::unlock(&desktop_path, "pw").unwrap();
         assert_eq!(reopened.sync_state().cursor, desktop.sync_state().cursor);
+    }
+
+    #[test]
+    fn a_deleted_host_comes_back_from_the_trash_on_every_device() {
+        let server = server();
+        let (a_token, b_token) = tokens(&server);
+        let (a_id, b_id) = (
+            server.authenticate(&a_token).unwrap(),
+            server.authenticate(&b_token).unwrap(),
+        );
+        let (mut laptop, _) = Vault::create(temp("trash-a"), "pw", CHEAP_KDF).unwrap();
+        let mut host = laptop.draft_host();
+        host.label = "old-db".into();
+        host.address = "10.0.0.9".into();
+        laptop.upsert_host(host).unwrap();
+        round(&server, a_id, &mut laptop);
+        let mut desktop =
+            Vault::join(temp("trash-b"), &laptop.key_file_bytes(), "pw", account(2)).unwrap();
+        round(&server, b_id, &mut desktop);
+        let id = laptop.hosts()[0].id;
+        laptop.remove_host(id).unwrap();
+        round(&server, a_id, &mut laptop);
+        round(&server, b_id, &mut desktop);
+        assert_eq!(desktop.hosts(), []);
+
+        // The trash lists it by name, from its last version in the server's history.
+        let mut replica = VaultReplica(laptop.sync_copy());
+        let (sync_id, kind) = replica.0.deleted()[0].clone();
+        let versions = server.history(a_id, &sync_id).unwrap();
+        let (_, _, body) = replica.0.open(&sync_id, &versions[0].ciphertext).unwrap();
+        assert_eq!(
+            annulus_vault::sync::SyncCopy::describe(kind, &body),
+            "Host old-db"
+        );
+        let mut direct = Direct {
+            server: &server,
+            caller: Some(a_id),
+        };
+        crate::engine::restore(&mut direct, &mut replica, &sync_id, &versions[0]).unwrap();
+        assert!(laptop.commit_sync(replica.0).unwrap());
+        assert_eq!(laptop.hosts()[0].label, "old-db");
+        round(&server, b_id, &mut desktop);
+        assert_eq!(desktop.hosts()[0].address, "10.0.0.9");
     }
 
     #[test]
