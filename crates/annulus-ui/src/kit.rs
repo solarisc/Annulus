@@ -761,6 +761,14 @@ impl<'a> Ui<'a> {
             .find(|zone| zone.id == id)
     }
 
+    /// Gives zone `id` the accessible name `name` (an icon-only button: "More actions"
+    /// rather than its icon's name).
+    pub fn set_name(&mut self, id: Id, name: &str) {
+        if let Some(zone) = self.drawn(id) {
+            name.clone_into(&mut zone.label);
+        }
+    }
+
     /// Tells assistive technology that zone `id` (a check box or switch) is on or off.
     pub fn set_toggled(&mut self, id: Id, on: bool) {
         if let Some(zone) = self.drawn(id) {

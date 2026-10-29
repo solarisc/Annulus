@@ -499,14 +499,16 @@ impl HostsView {
             "Import from ssh_config".to_owned(),
             "Copy hosts as ssh_config".to_owned(),
         ];
-        match ui.menu_button(
+        let chosen = ui.menu_button(
             Id::new("hosts.new.more"),
             more,
             "",
             Some(icons::CHEVRON_DOWN),
             Kind::Primary,
             &items,
-        ) {
+        );
+        ui.set_name(Id::new("hosts.new.more"), "More ways to add hosts");
+        match chosen {
             Some(0) => self.new_group(vault),
             Some(1) => action = Some(HostsAction::ImportSshConfig),
             Some(_) => {
@@ -1656,14 +1658,16 @@ fn host_menu(moves: &[(String, String)]) -> Vec<String> {
 
 /// The More button of a host card or row and its menu; returns the item chosen.
 fn more_menu(ui: &mut Ui<'_>, id: Id, rect: Rect, menu: &[String]) -> Option<usize> {
-    ui.menu_button(
+    let chosen = ui.menu_button(
         id.with("more"),
         rect,
         "",
         Some(icons::MORE),
         Kind::Ghost,
         menu,
-    )
+    );
+    ui.set_name(id.with("more"), "More actions");
+    chosen
 }
 
 /// A host's tile color, stable for its label.

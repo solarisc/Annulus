@@ -202,7 +202,7 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: nothing,
-        acts: &[Act::Click("chevron-down")],
+        acts: &[Act::Click("More ways to add hosts")],
     },
     Scene {
         name: "hosts-more-menu",
@@ -211,7 +211,7 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: nothing,
-        acts: &[Act::Hover("prod-db"), Act::Click("more")],
+        acts: &[Act::Hover("prod-db"), Act::Click("More actions")],
     },
     Scene {
         name: "hosts-list-more-menu",
@@ -220,7 +220,7 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: list_mode,
-        acts: &[Act::Hover("grafana"), Act::Click("more")],
+        acts: &[Act::Hover("grafana"), Act::Click("More actions")],
     },
     Scene {
         name: "hosts-keyboard-focus",
@@ -366,7 +366,7 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: sftp,
-        acts: &[Act::Click("deploy.sh"), Act::Click("more")],
+        acts: &[Act::Click("deploy.sh"), Act::Click("More actions")],
     },
     Scene {
         name: "sftp-delete",
@@ -389,7 +389,7 @@ const SCENES: &[Scene] = &[
         setup: sftp,
         acts: &[
             Act::Click("deploy.sh"),
-            Act::Click("more"),
+            Act::Click("More actions"),
             Act::Click("Permissions\u{2026}"),
         ],
     },
@@ -402,7 +402,7 @@ const SCENES: &[Scene] = &[
         setup: sftp,
         acts: &[
             Act::Click("app.log"),
-            Act::Click("more"),
+            Act::Click("More actions"),
             Act::Click("Properties"),
         ],
     },
@@ -843,7 +843,12 @@ fn a_hosts_more_menu_copies_its_ssh_command_and_duplicates_it() {
     let mut output = step(&mut app, &mut state, &[], 0.0);
     // Selecting the card shows its buttons, More among them.
     output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 1.0);
-    output = step(&mut app, &mut state, &click_on(&output, "more"), 2.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "More actions"),
+        2.0,
+    );
     output = step(
         &mut app,
         &mut state,
@@ -855,7 +860,12 @@ fn a_hosts_more_menu_copies_its_ssh_command_and_duplicates_it() {
         copied.starts_with("ssh ") && copied.contains("10.0.4.12"),
         "{copied}"
     );
-    output = step(&mut app, &mut state, &click_on(&output, "more"), 4.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "More actions"),
+        4.0,
+    );
     step(&mut app, &mut state, &click_on(&output, "Duplicate"), 5.0);
     let vault = app.vault.as_ref().unwrap();
     let original = vault
@@ -882,7 +892,12 @@ fn a_hovered_cards_more_menu_stays_open_after_the_hover_fades() {
     let mut output = step(&mut app, &mut state, &[], 0.0);
     let on_card = [Event::PointerMoved(zone_center(&output.zones, "prod-db"))];
     output = step(&mut app, &mut state, &on_card, 1.0);
-    output = step(&mut app, &mut state, &click_on(&output, "more"), 2.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "More actions"),
+        2.0,
+    );
     // The menu's backdrop now covers the card; well past any fade, the menu is still there.
     for time in [2.5, 3.0, 4.0] {
         output = step(&mut app, &mut state, &[], time);
@@ -990,7 +1005,12 @@ fn deleting_on_the_host_asks_first() {
     assert!(output.zones.iter().any(|zone| zone.label == "deploy.sh"));
     // The More menu's Delete asks the same.
     output = step(&mut app, &mut state, &click_on(&output, "deploy.sh"), 4.0);
-    output = step(&mut app, &mut state, &click_on(&output, "more"), 5.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "More actions"),
+        5.0,
+    );
     output = step(&mut app, &mut state, &click_on(&output, "Delete"), 6.0);
     assert!(card_up(&output), "the menu asks too");
     output = step(&mut app, &mut state, &click_on(&output, "Cancel"), 7.0);
@@ -1309,7 +1329,7 @@ fn tab_crosses_the_hosts_toolbar_left_to_right() {
         at("Settings"),
         at("Search hosts, or type user@host:port to connect"),
         at("New host"),
-        at("chevron-down"),
+        at("More ways to add hosts"),
         at("Terminal"),
         at("Homelab"),
     ];

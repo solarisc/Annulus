@@ -462,6 +462,7 @@ impl SftpView {
                     Kind::Ghost,
                     menu,
                 );
+                ui.set_name(id.with("more"), "More actions");
             }
         }
         (response.clicked, response.double_clicked, acted, chosen)
