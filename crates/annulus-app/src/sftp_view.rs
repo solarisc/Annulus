@@ -13,6 +13,7 @@ use annulus_session::{Answers, Hop, SessionEvent, SshFiles, Target};
 use annulus_sftp::{Conflict, Entry, Kind, Outcome, Sftp, join, parent};
 use annulus_ui::{icons, theme};
 
+use crate::local_pane::{LocalAction, LocalPane};
 use crate::ssh_dialogs::SshDialogs;
 
 /// What the tab asks the connection thread to do.
@@ -257,7 +258,8 @@ pub struct SftpTab {
     transfers: Vec<Transfer>,
     next_id: u64,
     dialog: Option<Dialog>,
-    downloads: PathBuf,
+    /// The local folder beside the remote one; downloads land in it.
+    local: LocalPane,
 }
 
 impl SftpTab {
@@ -284,7 +286,7 @@ impl SftpTab {
             transfers: Vec::new(),
             next_id: 0,
             dialog: None,
-            downloads: downloads_dir(),
+            local: LocalPane::new(downloads_dir()),
         }
     }
 
@@ -376,16 +378,20 @@ impl SftpTab {
                 }
                 Reply::Finished { id, result } => {
                     let done = matches!(result, Ok(Outcome::Done { .. }));
+                    let mut upload = None;
                     if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) {
                         transfer.state = match result {
                             Ok(Outcome::Done { to, .. }) => TransferState::Done(to),
                             Ok(Outcome::Skipped) => TransferState::Skipped,
                             Err(message) => TransferState::Failed(message),
                         };
-                        // A finished upload shows up in the listing.
-                        if done && transfer.upload {
-                            self.reload();
-                        }
+                        upload = Some(transfer.upload);
+                    }
+                    // A finished transfer shows up in the listing on its receiving side.
+                    match upload {
+                        Some(true) if done => self.reload(),
+                        Some(false) if done => self.local.refresh(self.show_hidden),
+                        _ => {}
                     }
                 }
                 Reply::Changed { error } => {
@@ -419,7 +425,7 @@ impl SftpTab {
     fn download(&mut self, entry: &Entry) {
         let Some(cwd) = self.cwd.clone() else { return };
         let remote = join(&cwd, &entry.name);
-        let (to, conflict) = (self.downloads.clone(), self.conflict);
+        let (to, conflict) = (self.local.dir.clone(), self.conflict);
         self.start_transfer(format!("\u{2193} {}", entry.name), false, |id, cancel| {
             Command::Download {
                 id,
@@ -486,6 +492,15 @@ impl SftpTab {
             .resizable(true)
             .default_size(140.0)
             .show(ui, |ui| self.transfers_ui(ui, palette));
+        let hidden = self.show_hidden;
+        let action = egui::Panel::left("sftp-local")
+            .resizable(true)
+            .default_size(ui.available_width() / 2.0)
+            .show(ui, |ui| self.local.ui(ui, palette, hidden))
+            .inner;
+        if let Some(LocalAction::Upload(path)) = action {
+            self.upload(path);
+        }
         egui::CentralPanel::default().show(ui, |ui| self.listing(ui, palette));
         self.dialog_ui(ui.ctx());
     }
@@ -681,7 +696,7 @@ impl SftpTab {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Transfers").strong());
             ui.label(
-                RichText::new(format!("Downloads go to {}", self.downloads.display()))
+                RichText::new(format!("Downloads go to {}", self.local.dir.display()))
                     .size(text::SECONDARY)
                     .color(theme::color(palette.text_secondary)),
             );
@@ -827,7 +842,7 @@ fn downloads_dir() -> PathBuf {
 }
 
 /// `1536` → `1.5 KiB`.
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes;
     let mut unit = 0;

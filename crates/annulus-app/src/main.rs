@@ -10,6 +10,7 @@ mod hosts_screen;
 mod import_dialog;
 mod keychain_screen;
 mod known_hosts_screen;
+mod local_pane;
 mod lock_screen;
 mod logs_screen;
 mod panes;
