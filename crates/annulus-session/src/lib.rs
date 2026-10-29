@@ -37,6 +37,8 @@ pub enum SessionEvent {
     Bell,
     /// The program exited or the connection closed; the tab shows its last output.
     Exited,
+    /// SSH: the connection dropped without the program exiting (F-SSH-009).
+    Lost,
     /// SSH: the server's key is new. Answer with [`Answers::host_key`].
     HostKey(HostKeyQuestion),
     /// SSH: a password is needed for `user@host`. Answer with [`Answers::password`].
@@ -555,6 +557,14 @@ impl Session {
         links::link_at(&self.term.lock(), row, column)
     }
 
+    /// Shows `text` in the terminal as if the program had printed it: the output of an
+    /// earlier connection, kept across a reconnect (F-SSH-009).
+    pub fn show(&self, text: &str) {
+        let text = text.replace('\n', "\r\n");
+        Processor::<annulus_term::alacritty_terminal::vte::ansi::StdSyncHandler>::new()
+            .advance(&mut *self.term.lock(), text.as_bytes());
+    }
+
     /// The whole text of the session, scrollback included, for a session log.
     #[must_use]
     pub fn transcript(&self) -> String {
@@ -671,12 +681,13 @@ fn spawn_ssh(
                                 parser.advance(&mut *term.lock(), &bytes);
                                 (listener.wake)();
                             }
-                            Output::Closed => return listener.send(SessionEvent::Exited),
+                            Output::Exited => return listener.send(SessionEvent::Exited),
+                            Output::Lost => return listener.send(SessionEvent::Lost),
                         },
                         message = input.recv() => match message {
                             Some(SshInput::Data(bytes)) => {
                                 if shell.write(&bytes).await.is_err() {
-                                    return listener.send(SessionEvent::Exited);
+                                    return listener.send(SessionEvent::Lost);
                                 }
                             }
                             Some(SshInput::Resize(size)) => {

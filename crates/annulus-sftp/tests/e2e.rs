@@ -128,7 +128,7 @@ async fn run(connection: &Connection, command: &str) -> String {
             .expect("shell answered");
         match next {
             Output::Data(bytes) => out.push_str(&String::from_utf8_lossy(&bytes)),
-            Output::Closed => break,
+            Output::Exited | Output::Lost => break,
         }
         if out.contains("__done__") {
             break;
@@ -463,4 +463,33 @@ async fn a_generated_keychain_key_logs_in_once_installed() {
         &format!("sed -i '/{}/d' ~/.ssh/authorized_keys", "annulus-e2e"),
     )
     .await;
+}
+
+/// Reads a shell until it ends.
+async fn end_of(shell: &mut annulus_ssh::Shell) -> Output {
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(20), shell.next())
+            .await
+            .expect("shell ended");
+        if !matches!(next, Output::Data(_)) {
+            return next;
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs the test servers"]
+async fn an_exit_ends_the_session_but_a_killed_server_is_a_lost_connection() {
+    let env = env();
+    let connection = with_key(&env, &env.vm1, "end").await;
+    let mut shell = connection.shell(80, 24).await.unwrap();
+    shell.write(b"exit 3\n").await.unwrap();
+    assert_eq!(end_of(&mut shell).await, Output::Exited);
+
+    // The shell's parent is this login's sshd: killing it drops the TCP connection with no
+    // exit status, as a network failure would (F-SSH-009).
+    let connection = with_key(&env, &env.vm1, "end").await;
+    let mut shell = connection.shell(80, 24).await.unwrap();
+    shell.write(b"kill -9 $PPID\n").await.unwrap();
+    assert_eq!(end_of(&mut shell).await, Output::Lost);
 }

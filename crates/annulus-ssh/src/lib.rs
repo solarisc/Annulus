@@ -479,7 +479,10 @@ impl Connection {
             .request_pty(true, "xterm-256color", columns, rows, 0, 0, &[])
             .await?;
         channel.request_shell(true).await?;
-        Ok(Shell { channel })
+        Ok(Shell {
+            channel,
+            exited: false,
+        })
     }
 
     /// Opens the `sftp` subsystem and returns its byte stream, for `annulus-sftp`.
@@ -498,6 +501,8 @@ impl Connection {
 /// An interactive shell channel.
 pub struct Shell {
     channel: Channel<Msg>,
+    /// The server reported the program's exit status (or the signal that ended it).
+    exited: bool,
 }
 
 /// What came from the shell.
@@ -505,8 +510,10 @@ pub struct Shell {
 pub enum Output {
     /// Bytes for the terminal (stdout and stderr interleaved, as a PTY does).
     Data(Vec<u8>),
-    /// The remote program exited or the channel closed.
-    Closed,
+    /// The remote program exited (the server sent its exit status): a normal end.
+    Exited,
+    /// The channel ended without an exit status: the connection dropped (F-SSH-009).
+    Lost,
 }
 
 impl Shell {
@@ -517,7 +524,17 @@ impl Shell {
                 Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
                     return Output::Data(data.to_vec());
                 }
-                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Output::Closed,
+                Some(ChannelMsg::ExitStatus { .. } | ChannelMsg::ExitSignal { .. }) => {
+                    self.exited = true;
+                }
+                // OpenSSH sends EOF before the exit status; the close comes last.
+                Some(ChannelMsg::Close) | None => {
+                    return if self.exited {
+                        Output::Exited
+                    } else {
+                        Output::Lost
+                    };
+                }
                 Some(_) => {}
             }
         }

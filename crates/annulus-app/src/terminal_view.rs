@@ -49,6 +49,30 @@ pub struct TerminalTab {
     sent: Vec<Vec<u8>>,
     /// A context-menu choice for the tab or window to act on.
     request: Option<PaneRequest>,
+    /// The connection dropped: the egui time of the next automatic try (F-SSH-009).
+    lost: Option<f64>,
+    /// Automatic tries in this run of drops.
+    tries: u32,
+    /// Earlier output to show again once the next session starts.
+    carry: Option<String>,
+    /// When the current session started (egui time), to tell a fresh drop from a retry.
+    started: f64,
+}
+
+/// Tries before an automatic reconnect gives up and shows the error.
+const RECONNECT_TRIES: u32 = 8;
+
+/// Seconds to wait before automatic reconnect `attempt` (1-based): 1, 2, 4 … up to 30.
+fn backoff(attempt: u32) -> f64 {
+    f64::from(1_u32 << attempt.saturating_sub(1).min(5)).min(30.0)
+}
+
+/// The earlier output with a line that marks where the new connection begins.
+fn carried(transcript: &str) -> String {
+    format!(
+        "{}\n\u{2500}\u{2500} reconnected \u{2500}\u{2500}\n",
+        transcript.trim_end()
+    )
 }
 
 impl TerminalTab {
@@ -68,7 +92,28 @@ impl TerminalTab {
             finished: None,
             sent: Vec::new(),
             request: None,
+            lost: None,
+            tries: 0,
+            carry: None,
+            started: 0.0,
         }
+    }
+
+    /// The connection dropped (or a reconnect failed): schedules the next try, or gives up
+    /// after [`RECONNECT_TRIES`]. A drop a minute after the last connect starts a new run.
+    fn schedule_reconnect(&mut self, now: f64, failure: Option<String>) {
+        if failure.is_none() && now - self.started >= 60.0 {
+            self.tries = 0;
+        }
+        self.tries += 1;
+        if self.tries > RECONNECT_TRIES {
+            self.tries = 0;
+            self.lost = None;
+            self.failed = Some(failure.unwrap_or_else(|| "The connection keeps dropping.".into()));
+            return;
+        }
+        self.exited = true;
+        self.lost = Some(now + backoff(self.tries));
     }
 
     /// Applies what the session reported since the last frame.
@@ -83,7 +128,14 @@ impl TerminalTab {
                 SessionEvent::Title(title) if !title.trim().is_empty() => self.title = title,
                 SessionEvent::Exited => {
                     self.exited = true;
+                    (self.lost, self.tries) = (None, 0);
                     self.finished = self.transcript();
+                }
+                SessionEvent::Lost => {
+                    if self.tries == 0 {
+                        self.finished = self.transcript();
+                    }
+                    self.schedule_reconnect(ctx.input(|input| input.time), None);
                 }
                 // A bell asks for attention (the taskbar flashes) instead of making a sound.
                 SessionEvent::Bell => {
@@ -93,6 +145,10 @@ impl TerminalTab {
                 }
                 SessionEvent::HostKey(_) | SessionEvent::Password { .. } => {
                     self.dialogs.take(event);
+                }
+                // A reconnect that fails waits and tries again.
+                SessionEvent::Failed(message) if self.tries > 0 => {
+                    self.schedule_reconnect(ctx.input(|input| input.time), Some(message));
                 }
                 SessionEvent::Failed(message) => self.failed = Some(message),
                 SessionEvent::Title(_) => {}
@@ -140,8 +196,12 @@ impl TerminalTab {
                 ctx.request_repaint();
             }) {
                 Ok(session) => {
+                    if let Some(text) = self.carry.take() {
+                        session.show(&text);
+                    }
                     self.session = Some(session);
                     self.size = Some((size, cell_w, cell_h));
+                    self.started = ui.input(|input| input.time);
                 }
                 Err(error) => self.failed = Some(format!("Could not start the session: {error}")),
             }
@@ -183,14 +243,10 @@ impl TerminalTab {
             response.request_focus();
             self.focused_once = true;
         }
-        // A finished session starts again on Enter (an SSH tab reconnects).
-        if self.exited
-            && response.has_focus()
-            && ui.input(|input| input.key_pressed(EguiKey::Enter))
-        {
-            self.restart();
+        if self.ended_ui(ui, &response) {
             return;
         }
+        let Some(session) = &self.session else { return };
         if response.has_focus() {
             keep_keys(ui, id);
             if !prompting {
@@ -218,7 +274,43 @@ impl TerminalTab {
             paint_matches(ui, area.min, cell, &session.find_visible(search));
         }
         if self.exited {
-            paint_ended(ui, area.min, cell, size.rows, font);
+            let note = self.ended_note(ui.input(|input| input.time));
+            paint_ended(ui, area.min, cell, size.rows, font, &note);
+        }
+    }
+
+    /// A finished session starts again on Enter (an SSH tab reconnects); a dropped one also
+    /// on its own when its time comes, and Escape stops that. True when it restarted.
+    fn ended_ui(&mut self, ui: &Ui, response: &egui::Response) -> bool {
+        if self.exited && response.has_focus() {
+            if ui.input(|input| input.key_pressed(EguiKey::Enter)) {
+                self.restart();
+                return true;
+            }
+            if ui.input(|input| input.key_pressed(EguiKey::Escape)) {
+                (self.lost, self.tries) = (None, 0);
+            }
+        }
+        if let Some(at) = self.lost {
+            let now = ui.input(|input| input.time);
+            if now >= at {
+                self.restart();
+                return true;
+            }
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(at - now));
+        }
+        false
+    }
+
+    /// The line shown under a session that ended or dropped.
+    fn ended_note(&self, now: f64) -> String {
+        match self.lost {
+            Some(at) => format!(
+                "[connection lost \u{2014} reconnecting in {:.0} s; Enter now, Esc to stop]",
+                (at - now).max(0.0).ceil()
+            ),
+            None => "[session ended \u{2014} press Enter to start it again]".to_owned(),
         }
     }
 
@@ -265,8 +357,15 @@ impl TerminalTab {
         &self.program
     }
 
-    /// Starts the program again in this tab: a reconnect for SSH, a new shell otherwise.
+    /// Starts the program again in this tab: a reconnect for SSH (which keeps the earlier
+    /// output above a separator), a new shell otherwise.
     fn restart(&mut self) {
+        if matches!(self.program, Program::Ssh { .. })
+            && let Some(text) = self.transcript()
+        {
+            self.carry = Some(carried(&text));
+        }
+        self.lost = None;
         self.session = None;
         self.failed = None;
         self.exited = false;
@@ -415,15 +514,10 @@ fn paint_matches(ui: &Ui, origin: Pos2, cell: Vec2, highlights: &[Highlight]) {
 
 /// The line that says the session ended, on the last row.
 #[allow(clippy::cast_precision_loss)] // Row counts are small.
-fn paint_ended(ui: &Ui, origin: Pos2, cell: Vec2, rows: usize, font: FontId) {
+fn paint_ended(ui: &Ui, origin: Pos2, cell: Vec2, rows: usize, font: FontId, note: &str) {
     let at = origin + Vec2::new(4.0, cell.y * (rows.saturating_sub(1)) as f32);
-    ui.painter().text(
-        at,
-        egui::Align2::LEFT_TOP,
-        "[session ended \u{2014} press Enter to start it again]",
-        font,
-        Color32::GRAY,
-    );
+    ui.painter()
+        .text(at, egui::Align2::LEFT_TOP, note, font, Color32::GRAY);
 }
 
 /// The right-click menu of a terminal (UI-SPEC: Copy, Paste, Find, Split, Snippets, Open
@@ -716,6 +810,46 @@ fn map_key(key: EguiKey, ctrl: bool) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnects_back_off_up_to_half_a_minute() {
+        let waits: Vec<f64> = (1..=8).map(backoff).collect();
+        assert_eq!(waits, [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0]);
+    }
+
+    #[test]
+    fn a_dropped_connection_retries_then_gives_up_with_the_error() {
+        let mut tab = TerminalTab::new("web", Program::system_ssh("web"));
+        tab.started = 100.0;
+        tab.schedule_reconnect(500.0, None);
+        assert_eq!((tab.lost, tab.tries), (Some(501.0), 1));
+        tab.restart();
+        assert_eq!(tab.lost, None, "a try clears the timer");
+        for _ in 2..=RECONNECT_TRIES {
+            tab.schedule_reconnect(600.0, Some("refused".into()));
+        }
+        assert_eq!(tab.lost, Some(630.0));
+        tab.schedule_reconnect(700.0, Some("refused".into()));
+        assert_eq!((tab.lost, tab.tries), (None, 0));
+        assert_eq!(tab.failed.as_deref(), Some("refused"));
+    }
+
+    #[test]
+    fn a_drop_long_after_connecting_starts_the_backoff_over() {
+        let mut tab = TerminalTab::new("web", Program::system_ssh("web"));
+        tab.tries = 5;
+        tab.started = 100.0;
+        tab.schedule_reconnect(200.0, None);
+        assert_eq!((tab.lost, tab.tries), (Some(201.0), 1));
+    }
+
+    #[test]
+    fn kept_output_ends_with_a_reconnected_line() {
+        assert_eq!(
+            carried("$ ls\nfile\n\n"),
+            "$ ls\nfile\n\u{2500}\u{2500} reconnected \u{2500}\u{2500}\n"
+        );
+    }
 
     #[test]
     fn bracketed_paste_wraps_and_cannot_be_escaped() {

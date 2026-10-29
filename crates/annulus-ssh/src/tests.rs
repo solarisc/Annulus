@@ -222,7 +222,16 @@ impl server::Handler for TestServer {
         if self.quiet.lock().unwrap().contains(&channel) {
             return Ok(());
         }
-        session.data(channel, data.to_vec())
+        match data {
+            b"exit\r" => {
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)
+            }
+            // The connection drops without a word, as when the network goes away.
+            b"drop\r" => Err(russh::Error::Disconnect),
+            _ => session.data(channel, data.to_vec()),
+        }
     }
 }
 
@@ -325,6 +334,31 @@ async fn first_connection_asks_to_trust_the_key_then_the_shell_echoes() {
             .unwrap()
             .contains("ssh-ed25519")
     );
+}
+
+/// Reads past data until the shell ends.
+async fn end_of(shell: &mut crate::Shell) -> Output {
+    loop {
+        match shell.next().await {
+            Output::Data(_) => {}
+            end => return end,
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_exit_is_told_apart_from_a_dropped_connection() {
+    for (typed, expected) in [("exit\r", Output::Exited), ("drop\r", Output::Lost)] {
+        let port = serve(new_key()).await;
+        let path = known_hosts(&format!("end-{}", expected == Output::Lost));
+        let script = Script::new(true, &["secret"]);
+        let connection = connect(&target(port, "alice"), &path, None, &[], script)
+            .await
+            .unwrap();
+        let mut shell = connection.shell(80, 24).await.unwrap();
+        shell.write(typed.as_bytes()).await.unwrap();
+        assert_eq!(end_of(&mut shell).await, expected, "after {typed:?}");
+    }
 }
 
 #[tokio::test]
