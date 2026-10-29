@@ -8,6 +8,7 @@ use crate::geometry::Point;
 use crate::input::{Event, Handled, Key};
 use crate::style::Position;
 use crate::tree::{Dirty, NodeId, Tree};
+use crate::widget::Widget;
 
 impl Tree {
     /// The focused node, if it still exists.
@@ -25,7 +26,7 @@ impl Tree {
     /// Moves focus to `id` (or clears it). `visible` shows the focus ring, as after keyboard
     /// navigation. A node that is gone or not focusable clears focus instead.
     pub fn set_focus(&mut self, id: Option<NodeId>, visible: bool) {
-        let target = id.filter(|id| self.widget(*id).is_some_and(|widget| widget.focusable()));
+        let target = id.filter(|id| self.widget(*id).is_some_and(Widget::focusable));
         for changed in [self.focused, target].into_iter().flatten() {
             // Old and new focus repaint their ring; a stale id is simply skipped.
             let _ = self.mark_dirty(changed, Dirty::PAINT);
@@ -130,7 +131,7 @@ impl Tree {
     fn focusable_ancestor_or_self(&self, start: NodeId) -> Option<NodeId> {
         let mut current = Some(start);
         while let Some(id) = current {
-            if self.widget(id).is_some_and(|widget| widget.focusable()) {
+            if self.widget(id).is_some_and(Widget::focusable) {
                 return Some(id);
             }
             current = self.parent(id);
@@ -142,7 +143,7 @@ impl Tree {
         let order: Vec<NodeId> = self
             .paint_order()
             .into_iter()
-            .filter(|id| self.widget(*id).is_some_and(|widget| widget.focusable()))
+            .filter(|id| self.widget(*id).is_some_and(Widget::focusable))
             .collect();
         let current = self
             .focused()
@@ -185,10 +186,10 @@ impl Tree {
             return Some(hit);
         }
         let clipped = self.style(id).is_some_and(|style| style.scroll);
-        if !clipped || bounds.contains(point) {
-            if let Some(hit) = flow.iter().rev().find_map(|child| self.hit(*child, point)) {
-                return Some(hit);
-            }
+        if (!clipped || bounds.contains(point))
+            && let Some(hit) = flow.iter().rev().find_map(|child| self.hit(*child, point))
+        {
+            return Some(hit);
         }
         bounds.contains(point).then_some(id)
     }

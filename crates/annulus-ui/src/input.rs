@@ -15,6 +15,7 @@ pub enum Button {
 }
 
 /// Modifier keys held during an event.
+#[allow(clippy::struct_excessive_bools)] // One flag per physical modifier key, as the OS reports them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
     /// Shift.
