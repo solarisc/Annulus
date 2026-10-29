@@ -327,6 +327,25 @@ async fn sftp_round_trip_with_conflicts() {
     .await
     .unwrap();
 
+    sftp.remove(&dir).await.unwrap();
+    assert!(sftp.list(&dir).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "needs the test servers"]
+async fn folders_go_up_and_come_back_whole() {
+    let env = env();
+    let connection = with_key(&env, &env.vm1, "sftp-tree").await;
+    let sftp = Sftp::open(&connection).await.unwrap();
+    let home = sftp.home().await.unwrap();
+    let dir = format!("{home}/annulus-e2e-tree");
+    let _ = sftp.remove(&dir).await;
+    sftp.create_dir(&dir).await.unwrap();
+    let local = known_hosts("sftp-tree-local")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mut progress = |_: u64, _: u64| true;
     // A folder dropped on the host goes with everything in it.
     std::fs::create_dir_all(local.join("site/assets")).unwrap();
     std::fs::write(local.join("site/index.html"), b"<html>").unwrap();
