@@ -5,8 +5,10 @@ use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Appearance, Palette, ThemeMode, space, text};
 use annulus_session::{Program, SshFiles};
 use annulus_ui::{icons, theme};
+use annulus_vault::vault::Vault;
 
 use crate::hosts_screen::{HostsScreen, Request};
+use crate::lock_screen::LockScreen;
 use crate::terminal_view::{DEFAULT_FONT_SIZE, FONT_SIZES, TerminalTab};
 
 /// A section of the vault's left navigation (F-APP-003).
@@ -96,12 +98,18 @@ pub struct Shell {
     pub section: Section,
     /// The light/dark choice from Settings.
     pub theme_mode: ThemeMode,
-    /// The Hosts screen.
-    pub hosts: HostsScreen,
+    /// The Hosts screen, while the vault is unlocked.
+    pub hosts: Option<HostsScreen>,
+    /// Setup or unlock, while the vault is locked.
+    lock: LockScreen,
+    data_dir: std::path::PathBuf,
     /// Terminal font size in points, shared by all terminal tabs.
     pub font_size: f32,
     applied: Option<Appearance>,
 }
+
+/// The vault's file name in the data folder.
+const VAULT_FILE: &str = "vault.anv";
 
 impl Shell {
     /// A window whose saved data lives in `data_dir`.
@@ -112,13 +120,9 @@ impl Shell {
             active_tab: 0,
             section: Section::Hosts,
             theme_mode: ThemeMode::System,
-            hosts: HostsScreen::open(
-                data_dir.join("hosts.json"),
-                SshFiles {
-                    known_hosts: data_dir.join("known_hosts"),
-                    key_dir: directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".ssh")),
-                },
-            ),
+            hosts: None,
+            lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
+            data_dir: data_dir.to_path_buf(),
             font_size: DEFAULT_FONT_SIZE,
             applied: None,
         }
@@ -185,16 +189,38 @@ impl Shell {
         }
     }
 
+    /// Shows the hosts of a just-unlocked vault, first moving in any plain host file from
+    /// earlier builds.
+    fn unlocked(&mut self, mut vault: Vault) {
+        // A damaged or unreadable plain file is kept as it is; the vault opens regardless.
+        let _ = vault.import_plain_hosts(&self.data_dir.join("hosts.json"));
+        let files = SshFiles {
+            known_hosts: self.data_dir.join("known_hosts"),
+            key_dir: directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".ssh")),
+        };
+        self.hosts = Some(HostsScreen::new(vault, files));
+    }
+
+    /// Locks the vault: its keys and decrypted hosts are dropped (F-SEC-004).
+    pub fn lock_vault(&mut self) {
+        self.hosts = None;
+        self.lock = LockScreen::new(&self.data_dir.join(VAULT_FILE));
+    }
+
     /// App shortcuts use Ctrl+Shift so plain Ctrl+letter stays with the shell (UI-SPEC §7).
     fn shortcuts(&mut self, ui: &Ui) {
         let command = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
-        let (new_tab, close_tab, next_tab) = ui.input_mut(|input| {
+        let (new_tab, close_tab, next_tab, lock) = ui.input_mut(|input| {
             (
                 input.consume_key(command, egui::Key::T),
                 input.consume_key(command, egui::Key::W),
                 input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab),
+                input.consume_key(command, egui::Key::L),
             )
         });
+        if lock {
+            self.lock_vault();
+        }
         if new_tab {
             self.open_terminal("Local", Program::DefaultShell);
         }
@@ -325,8 +351,14 @@ impl Shell {
         match self.section {
             Section::Hosts => {
                 let palette = self.palette();
-                if let Some(Request::Open(title, program)) = self.hosts.ui(ui, &palette) {
-                    self.open_terminal(title, program);
+                if let Some(hosts) = &mut self.hosts {
+                    if let Some(Request::Open(title, program)) = hosts.ui(ui, &palette) {
+                        self.open_terminal(title, program);
+                    }
+                } else if let Some(vault) =
+                    self.lock.ui(ui, &self.data_dir.join(VAULT_FILE), &palette)
+                {
+                    self.unlocked(vault);
                 }
             }
             Section::Settings => self.settings(ui),

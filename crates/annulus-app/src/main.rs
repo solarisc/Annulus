@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod hosts_screen;
+mod lock_screen;
 mod shell;
 mod terminal_view;
 

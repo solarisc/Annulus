@@ -14,6 +14,11 @@ publish = false
 [workspace.dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1.0.104"
+argon2 = "0.6.0"
+chacha20poly1305 = "0.11.0"
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+sha2 = "0.11.1"
 # Only to turn on prebuilt NASM objects on Windows, so builds need no NASM (ADR-0004).
 aws-lc-rs = { version = "1.16.2", features = ["prebuilt-nasm"] }
 rand = "0.10"

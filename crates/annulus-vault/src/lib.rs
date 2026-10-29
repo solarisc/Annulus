@@ -4,4 +4,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod crypto;
 pub mod hosts;
+pub mod vault;

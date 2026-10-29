@@ -1,11 +1,13 @@
-//! The Hosts screen (F-HOST-001, F-HOST-005, F-APP-006): saved hosts filtered by the search
-//! field, quick connect from the same field, and the host editor in a right side panel.
+//! The Hosts screen (F-HOST-001, F-HOST-005, F-APP-006): saved hosts from the unlocked
+//! vault, filtered by the search field, quick connect from the same field, and the host
+//! editor in a right side panel.
 
 use eframe::egui::{self, Align, Button, Layout, RichText, Sense, Ui};
 use annulus_config::tokens::{Palette, space, text};
 use annulus_session::{Program, SshFiles, Target, local_user};
 use annulus_ui::{icons, theme};
-use annulus_vault::hosts::{DEFAULT_PORT, Host, HostStore};
+use annulus_vault::hosts::{DEFAULT_PORT, Host};
+use annulus_vault::vault::Vault;
 
 /// Something the screen asks the shell to do.
 pub enum Request {
@@ -22,21 +24,20 @@ struct Draft {
     is_new: bool,
 }
 
-/// The Hosts screen's state.
+/// The Hosts screen's state, over an unlocked vault.
 pub struct HostsScreen {
-    store: Result<HostStore, String>,
+    vault: Vault,
     search: String,
     editor: Option<Draft>,
     ssh_files: SshFiles,
 }
 
 impl HostsScreen {
-    /// Opens the host list kept at `path`; connections use `ssh_files`.
+    /// The screen for `vault`; connections use `ssh_files`.
     #[must_use]
-    pub fn open(path: std::path::PathBuf, ssh_files: SshFiles) -> Self {
-        let store = HostStore::open(path).map_err(|error| error.to_string());
+    pub fn new(vault: Vault, ssh_files: SshFiles) -> Self {
         Self {
-            store,
+            vault,
             search: String::new(),
             editor: None,
             ssh_files,
@@ -62,7 +63,7 @@ impl HostsScreen {
             egui::Panel::right("host-editor")
                 .resizable(false)
                 .exact_size(340.0)
-                .show(ui, |ui| self.editor_ui(ui));
+                .show(ui, |ui| self.editor_ui(ui, palette));
         }
         ui.add_space(space::S);
         ui.horizontal(|ui| {
@@ -84,11 +85,8 @@ impl HostsScreen {
                 request = Some(Request::Open("Local".into(), Program::DefaultShell));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let can_add = self.store.is_ok();
-                if ui.add_enabled(can_add, Button::new("New host")).clicked()
-                    && let Ok(store) = &self.store
-                {
-                    let host = store.draft();
+                if ui.button("New host").clicked() {
+                    let host = self.vault.draft_host();
                     self.editor = Some(Draft {
                         port: host.port.to_string(),
                         tags: String::new(),
@@ -101,20 +99,8 @@ impl HostsScreen {
         });
         ui.add_space(space::M);
 
-        let store = match &self.store {
-            Ok(store) => store,
-            Err(error) => {
-                ui.colored_label(
-                    theme::color(palette.status_error),
-                    format!(
-                        "Saved hosts could not be loaded ({error}). The file was left untouched."
-                    ),
-                );
-                return request;
-            }
-        };
-        let matches: Vec<Host> = store.search(&self.search).cloned().collect();
-        if store.hosts().is_empty() {
+        let matches: Vec<Host> = self.vault.search(&self.search).cloned().collect();
+        if self.vault.hosts().is_empty() {
             empty(
                 ui,
                 palette,
@@ -136,7 +122,7 @@ impl HostsScreen {
             for host in &matches {
                 match host_row(ui, host, palette) {
                     RowAction::Connect => {
-                        request = Some(Request::Open(host.label.clone(), self.ssh(&host.target())));
+                        request = Some(Request::Open(host.label.clone(), self.ssh(&host.target())))
                     }
                     RowAction::Edit => {
                         self.editor = Some(Draft {
@@ -155,20 +141,20 @@ impl HostsScreen {
     }
 
     /// A query that names a saved host (by label, case-insensitively) connects to it;
-    /// anything else is an `ssh` target.
+    /// anything else is an SSH target.
     fn quick_connect(&self, query: &str) -> Request {
-        if let Ok(store) = &self.store
-            && let Some(host) = store
-                .hosts()
-                .iter()
-                .find(|host| host.label.eq_ignore_ascii_case(query))
+        if let Some(host) = self
+            .vault
+            .hosts()
+            .iter()
+            .find(|host| host.label.eq_ignore_ascii_case(query))
         {
             return Request::Open(host.label.clone(), self.ssh(&host.target()));
         }
         Request::Open(query.to_owned(), self.ssh(query))
     }
 
-    fn editor_ui(&mut self, ui: &mut Ui) {
+    fn editor_ui(&mut self, ui: &mut Ui, palette: &Palette) {
         let Some(draft) = &mut self.editor else {
             return;
         };
@@ -204,7 +190,7 @@ impl HostsScreen {
             });
         if let Some(problem) = &draft.problem {
             ui.add_space(space::S);
-            ui.colored_label(egui::Color32::from_rgb(0xE8, 0x64, 0x5D), problem);
+            ui.colored_label(theme::color(palette.status_error), problem);
         }
         ui.add_space(space::M);
         let (mut save, mut delete, mut cancel) = (false, false, false);
@@ -213,9 +199,7 @@ impl HostsScreen {
             cancel = ui.button("Cancel").clicked();
             if !draft.is_new {
                 delete = ui
-                    .button(
-                        RichText::new("Delete").color(egui::Color32::from_rgb(0xE8, 0x64, 0x5D)),
-                    )
+                    .button(RichText::new("Delete").color(theme::color(palette.status_error)))
                     .clicked();
             }
         });
@@ -224,10 +208,12 @@ impl HostsScreen {
             self.editor = None;
         } else if delete {
             let id = draft.host.id;
-            if let Ok(store) = &mut self.store {
-                match store.remove(id) {
-                    Ok(()) => self.editor = None,
-                    Err(error) => draft.problem = Some(format!("Could not delete: {error}")),
+            match self.vault.remove_host(id) {
+                Ok(()) => self.editor = None,
+                Err(error) => {
+                    if let Some(draft) = &mut self.editor {
+                        draft.problem = Some(format!("Could not delete: {error}"));
+                    }
                 }
             }
         } else if save {
@@ -236,7 +222,7 @@ impl HostsScreen {
     }
 
     fn save(&mut self) {
-        let (Some(draft), Ok(store)) = (&mut self.editor, &mut self.store) else {
+        let Some(draft) = &mut self.editor else {
             return;
         };
         let port = draft.port.trim();
@@ -258,9 +244,14 @@ impl HostsScreen {
             draft.problem = Some(problem.to_owned());
             return;
         }
-        match store.upsert(draft.host.clone()) {
+        let host = draft.host.clone();
+        match self.vault.upsert_host(host) {
             Ok(()) => self.editor = None,
-            Err(error) => draft.problem = Some(format!("Could not save: {error}")),
+            Err(error) => {
+                if let Some(draft) = &mut self.editor {
+                    draft.problem = Some(format!("Could not save: {error}"));
+                }
+            }
         }
     }
 }
@@ -340,26 +331,33 @@ fn empty(ui: &mut Ui, palette: &Palette, title: &str, detail: &str) {
 
 #[cfg(test)]
 mod tests {
+    use annulus_vault::crypto::KdfParams;
+
     use super::*;
 
     fn screen_with(label: &str) -> HostsScreen {
         let dir =
             std::env::temp_dir().join(format!("annulus-app-test-{}-{label}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let files = SshFiles {
-            known_hosts: dir.join("known_hosts"),
-            key_dir: None,
+        let cheap = KdfParams {
+            memory_kib: 64,
+            iterations: 1,
+            parallelism: 1,
         };
-        let mut screen = HostsScreen::open(dir.join("hosts.json"), files);
-        if let Ok(store) = &mut screen.store {
-            let mut host = store.draft();
-            host.label = label.into();
-            host.address = "10.0.4.12".into();
-            host.username = "admin".into();
-            host.port = 2222;
-            store.upsert(host).unwrap();
-        }
-        screen
+        let (mut vault, _) = Vault::create(dir.join("vault.anv"), "pw", cheap).unwrap();
+        let mut host = vault.draft_host();
+        host.label = label.into();
+        host.address = "10.0.4.12".into();
+        host.username = "admin".into();
+        host.port = 2222;
+        vault.upsert_host(host).unwrap();
+        HostsScreen::new(
+            vault,
+            SshFiles {
+                known_hosts: dir.join("known_hosts"),
+                key_dir: None,
+            },
+        )
     }
 
     fn opened(request: &Request) -> (&str, String) {
@@ -375,9 +373,8 @@ mod tests {
     #[test]
     fn quick_connect_to_a_saved_label_uses_its_details() {
         let screen = screen_with("prod-db");
-        let request = screen.quick_connect("PROD-DB");
         assert_eq!(
-            opened(&request),
+            opened(&screen.quick_connect("PROD-DB")),
             ("prod-db", "admin@10.0.4.12:2222".to_owned())
         );
     }
@@ -385,9 +382,8 @@ mod tests {
     #[test]
     fn quick_connect_to_anything_else_is_an_ssh_target() {
         let screen = screen_with("prod-db2");
-        let request = screen.quick_connect("root@other:22");
         assert_eq!(
-            opened(&request),
+            opened(&screen.quick_connect("root@other:22")),
             ("root@other:22", "root@other:22".to_owned())
         );
     }

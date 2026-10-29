@@ -2,7 +2,7 @@
 //! host-key trust and change detection, password retries, and an echoing shell.
 
 // The test server implements russh's async trait; some handlers have nothing to await.
-#![allow(clippy::unused_async)]
+#![allow(clippy::unused_async_trait_impl)]
 
 use std::sync::Mutex;
 

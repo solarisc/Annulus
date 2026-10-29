@@ -1,8 +1,7 @@
-//! Saved hosts (F-HOST-001, F-HOST-005): the connection details of each SSH target, a
-//! search across them, and their file on disk. No secrets live here: passwords and keys
-//! belong to the keychain and the encrypted vault.
+//! Saved hosts (F-HOST-001, F-HOST-005): the connection details of each SSH target and the
+//! search across them. They are stored in the encrypted vault ([`crate::vault`]).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -93,13 +92,13 @@ impl Host {
     }
 }
 
-/// Why the host file could not be read or written.
+/// Why an old plain host file could not be read.
 #[derive(Debug, thiserror::Error)]
-pub enum StoreError {
+pub enum PlainFileError {
     /// The file system refused.
     #[error("host file: {0}")]
     Io(#[from] std::io::Error),
-    /// The file is not a host list (it is kept, never overwritten, so nothing is lost).
+    /// The file is not a host list (it is kept, never overwritten).
     #[error("host file is damaged: {0}")]
     Damaged(#[from] serde_json::Error),
 }
@@ -110,113 +109,17 @@ struct HostFile {
     hosts: Vec<Host>,
 }
 
-/// The saved hosts and where they are kept.
-#[derive(Debug)]
-pub struct HostStore {
-    path: PathBuf,
-    hosts: Vec<Host>,
-}
-
-impl HostStore {
-    /// Loads the hosts saved at `path`; a missing file is an empty list.
-    ///
-    /// # Errors
-    /// [`StoreError::Damaged`] if the file exists but can't be read as a host list; it is
-    /// left untouched so the user's data is never silently lost.
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
-        let path = path.into();
-        let hosts = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<HostFile>(&bytes)?.hosts,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Self { path, hosts })
+/// Reads the plain host file of earlier builds (before the encrypted vault) for import; a
+/// missing file is an empty list.
+///
+/// # Errors
+/// The file exists but cannot be read as a host list.
+pub fn load_plain(path: &Path) -> Result<Vec<Host>, PlainFileError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice::<HostFile>(&bytes)?.hosts),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
     }
-
-    /// All hosts, sorted by label.
-    #[must_use]
-    pub fn hosts(&self) -> &[Host] {
-        &self.hosts
-    }
-
-    /// The hosts matching `query`, sorted by label.
-    pub fn search<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a Host> + 'a {
-        self.hosts.iter().filter(move |host| host.matches(query))
-    }
-
-    /// The host with `id`.
-    #[must_use]
-    pub fn get(&self, id: u64) -> Option<&Host> {
-        self.hosts.iter().find(|host| host.id == id)
-    }
-
-    /// A new, unsaved host with a fresh id.
-    #[must_use]
-    pub fn draft(&self) -> Host {
-        let id = self
-            .hosts
-            .iter()
-            .map(|host| host.id)
-            .max()
-            .map_or(1, |max| max + 1);
-        Host {
-            id,
-            label: String::new(),
-            address: String::new(),
-            port: DEFAULT_PORT,
-            username: String::new(),
-            tags: Vec::new(),
-        }
-    }
-
-    /// Adds `host` or replaces the one with its id, then saves.
-    ///
-    /// # Errors
-    /// Writing the file failed; the list in memory is unchanged.
-    pub fn upsert(&mut self, host: Host) -> Result<(), StoreError> {
-        let mut next = self.hosts.clone();
-        match next.iter_mut().find(|existing| existing.id == host.id) {
-            Some(existing) => *existing = host,
-            None => next.push(host),
-        }
-        next.sort_by_key(|host| host.label.to_lowercase());
-        save(&self.path, &next)?;
-        self.hosts = next;
-        Ok(())
-    }
-
-    /// Deletes the host with `id`, then saves.
-    ///
-    /// # Errors
-    /// Writing the file failed; the list in memory is unchanged.
-    pub fn remove(&mut self, id: u64) -> Result<(), StoreError> {
-        let next: Vec<Host> = self
-            .hosts
-            .iter()
-            .filter(|host| host.id != id)
-            .cloned()
-            .collect();
-        save(&self.path, &next)?;
-        self.hosts = next;
-        Ok(())
-    }
-}
-
-/// Writes the list to a temporary file and renames it over the old one, so a crash mid-write
-/// never leaves a half-written host file.
-fn save(path: &Path, hosts: &[Host]) -> Result<(), StoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = HostFile {
-        version: 1,
-        hosts: hosts.to_vec(),
-    };
-    let bytes = serde_json::to_vec_pretty(&file)?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)?;
-    std::fs::rename(&temporary, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -232,12 +135,6 @@ mod tests {
             username: username.into(),
             tags: Vec::new(),
         }
-    }
-
-    fn temp_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("annulus-test-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir.join("hosts.json")
     }
 
     #[test]
@@ -276,41 +173,11 @@ mod tests {
     }
 
     #[test]
-    fn hosts_survive_a_restart_sorted_and_deletable() {
-        let path = temp_path("roundtrip");
-        let mut store = HostStore::open(&path).unwrap();
-        let mut web = store.draft();
-        web.label = "web".into();
-        web.address = "web.example".into();
-        store.upsert(web).unwrap();
-        let mut db = store.draft();
-        db.label = "db".into();
-        db.address = "db.example".into();
-        let db_id = db.id;
-        store.upsert(db).unwrap();
-
-        let reopened = HostStore::open(&path).unwrap();
-        let labels: Vec<_> = reopened
-            .hosts()
-            .iter()
-            .map(|host| host.label.as_str())
-            .collect();
-        assert_eq!(labels, ["db", "web"]);
-
-        let mut store = reopened;
-        store.remove(db_id).unwrap();
-        assert_eq!(HostStore::open(&path).unwrap().hosts().len(), 1);
-    }
-
-    #[test]
-    fn a_damaged_file_is_reported_and_left_alone() {
-        let path = temp_path("damaged");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"{ not json").unwrap();
-        assert!(matches!(
-            HostStore::open(&path),
-            Err(StoreError::Damaged(_))
-        ));
-        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+    fn a_missing_plain_file_is_an_empty_list() {
+        assert!(
+            load_plain(Path::new("does-not-exist/hosts.json"))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
