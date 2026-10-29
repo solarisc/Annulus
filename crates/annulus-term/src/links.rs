@@ -73,6 +73,40 @@ pub fn link_at<T>(term: &Term<T>, row: usize, column: usize) -> Option<Link> {
     })
 }
 
+/// Every link on the screen, top to bottom, each once: OSC 8 targets and plain URLs. For
+/// keyboard access, where there is no mouse to point at one.
+#[must_use]
+pub fn visible_links<T>(term: &Term<T>) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut add = |url: String| {
+        if !found.contains(&url) {
+            found.push(url);
+        }
+    };
+    let offset = term.grid().display_offset();
+    let (rows, columns) = (term.screen_lines(), term.columns());
+    for row in 0..rows {
+        for column in 0..columns {
+            let point = viewport_to_point(offset, Point::new(row, Column(column)));
+            if let Some(hyperlink) = term.grid()[point].hyperlink() {
+                add(hyperlink.uri().to_owned());
+            }
+        }
+    }
+    if let Ok(mut regex) = RegexSearch::new(URL) {
+        let start = term.line_search_left(viewport_to_point(offset, Point::new(0, Column(0))));
+        let end = term.line_search_right(viewport_to_point(
+            offset,
+            Point::new(rows.saturating_sub(1), Column(columns.saturating_sub(1))),
+        ));
+        for found in RegexIter::new(start, end, Direction::Right, term, &mut regex) {
+            let text = term.bounds_to_string(*found.start(), *found.end());
+            add(trim_trailing(text.trim_end()).to_owned());
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +151,22 @@ mod tests {
             link_at(term, 1, after),
             None,
             "the trimmed period is not part of it"
+        );
+    }
+
+    #[test]
+    fn every_link_on_screen_is_listed_once_in_order() {
+        let mut emulator = emulator_with(
+            "a https://one.example/x. and \x1b]8;;https://real.example/\x1b\\here\x1b]8;;\x1b\\\r\nhttps://one.example/x again, mailto:me@example.com",
+        );
+        let links = visible_links(emulator.term_mut());
+        assert_eq!(
+            links,
+            [
+                "https://real.example/",
+                "https://one.example/x",
+                "mailto:me@example.com"
+            ]
         );
     }
 

@@ -127,6 +127,8 @@ pub struct TerminalTab {
     drawn: Arc<AtomicBool>,
     /// Broadcast input from another pane does not reach this one.
     pub skip_broadcast: bool,
+    /// The links on screen, listed for the keyboard (Ctrl+Shift+O) while open.
+    link_list: Option<Vec<String>>,
 }
 
 /// Tries before an automatic reconnect gives up and shows the error.
@@ -169,6 +171,7 @@ impl TerminalTab {
             unread: Arc::new(AtomicBool::new(false)),
             drawn: Arc::new(AtomicBool::new(false)),
             skip_broadcast: false,
+            link_list: None,
         }
     }
 
@@ -298,6 +301,46 @@ impl TerminalTab {
         }
     }
 
+    /// Ctrl+Shift+O lists the links on screen; Tab and Enter open one, Escape closes.
+    fn links_ui(&mut self, ui: &Ui) {
+        let open = ui.input_mut(|input| {
+            input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, EguiKey::O)
+        });
+        if open && let Some(session) = &self.session {
+            self.link_list = Some(session.visible_links());
+        }
+        let Some(list) = &self.link_list else {
+            return;
+        };
+        let mut close =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, EguiKey::Escape));
+        egui::Window::new("Links on screen")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                if list.is_empty() {
+                    ui.label("No links on screen.");
+                }
+                for (index, url) in list.iter().enumerate() {
+                    let openable = links::allowed(url);
+                    let button = ui.add_enabled(openable, egui::Button::new(url.as_str()));
+                    if index == 0 && open {
+                        button.request_focus();
+                    }
+                    if button.clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        close = true;
+                    }
+                }
+                close |= ui.button("Close").clicked();
+            });
+        if close {
+            self.link_list = None;
+            self.focused_once = false;
+        }
+    }
+
     /// Opens the find bar on Ctrl+Shift+F and draws it while open.
     fn find_bar(&mut self, ui: &mut Ui) {
         let open = ui.input_mut(|input| {
@@ -323,6 +366,7 @@ impl TerminalTab {
             ui.fonts_mut(|fonts| fonts.row_height(&font)).max(1.0),
         );
         self.find_bar(ui);
+        self.links_ui(ui);
         let area = ui.available_rect_before_wrap();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Floored, small.
         let size = Size::new(

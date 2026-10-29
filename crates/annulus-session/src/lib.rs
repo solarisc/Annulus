@@ -569,6 +569,12 @@ impl Session {
         links::link_at(&self.term.lock(), row, column)
     }
 
+    /// Every link on the screen, top to bottom, once each.
+    #[must_use]
+    pub fn visible_links(&self) -> Vec<String> {
+        links::visible_links(&self.term.lock())
+    }
+
     /// Shows `text` in the terminal as if the program had printed it: the output of an
     /// earlier connection, kept across a reconnect (F-SSH-009).
     pub fn show(&self, text: &str) {
