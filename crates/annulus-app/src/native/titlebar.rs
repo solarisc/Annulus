@@ -90,7 +90,7 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     }
     row.take_left(space::XS);
     let plus = row.take_left(30.0).centered(30.0, 30.0);
-    if ui
+    let new_tab = ui
         .icon_button(
             Id::new("tab.new"),
             plus,
@@ -98,8 +98,9 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
             "New terminal tab",
             false,
         )
-        .clicked
-    {
+        .clicked;
+    ui.tooltip(Id::new("tab.new"), plus, "New terminal tab (Ctrl+Shift+T)");
+    if new_tab {
         app.open_local();
     }
     sync_badge(ui, badge, &sync);
@@ -122,6 +123,7 @@ enum Glyph {
 /// A window button: a thin glyph, a soft fill on hover, red for close.
 fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str) -> bool {
     let response = ui.zone(id, rect, Role::WindowButton, name);
+    ui.tooltip(id, rect, name);
     let t = ui.theme;
     let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
     let close = matches!(glyph, Glyph::Close);
@@ -294,6 +296,7 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
         if active || hovered || hover > 0.0 {
             let close_id = id.with("close");
             let x = ui.zone(close_id, close, Role::Button, "Close tab");
+            ui.tooltip(close_id, close, "Close tab (Ctrl+Shift+W)");
             if x.hovered {
                 ui.gfx.fill_rect(close, 4.0, t.hover);
             }

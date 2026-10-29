@@ -463,6 +463,7 @@ impl SftpView {
                     menu,
                 );
                 ui.set_name(id.with("more"), "More actions");
+                ui.tooltip(id.with("more"), more, "More actions");
             }
         }
         (response.clicked, response.double_clicked, acted, chosen)

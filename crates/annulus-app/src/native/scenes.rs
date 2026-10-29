@@ -321,6 +321,15 @@ const SCENES: &[Scene] = &[
         ],
     },
     Scene {
+        name: "tooltip",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Hover("New terminal tab")],
+    },
+    Scene {
         name: "hosts-keyboard-focus",
         width: 1100,
         height: 720,

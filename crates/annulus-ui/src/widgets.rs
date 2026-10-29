@@ -264,6 +264,7 @@ impl Ui<'_> {
             t.text2.mix(t.text, hover)
         };
         self.gfx.icon(icon, rect.centered(16.0, 16.0), ink);
+        self.tooltip(id, rect, name);
         response
     }
 
@@ -814,6 +815,7 @@ impl Ui<'_> {
     /// Draws what floats above the frame: the open menu. Call after everything else.
     pub fn overlays(&mut self) {
         let Some(popup) = self.state.popup.clone() else {
+            self.draw_tooltip();
             return;
         };
         if self.key(Key::Escape, Modifiers::NONE) {
@@ -906,6 +908,31 @@ impl Ui<'_> {
             }
         }
         self.pop_clip();
+    }
+
+    /// The tooltip asked for this frame: under its control, or above it at the window's
+    /// bottom, inside the window.
+    fn draw_tooltip(&mut self) {
+        let Some((text, anchor)) = self.state.tooltip.take() else {
+            return;
+        };
+        let t = self.theme;
+        let size = self.gfx.measure(&text, SMALL);
+        let (width, height) = (size.width + 2.0 * space::S, size.height + 8.0);
+        let below = anchor.b() + 6.0;
+        let top = if below + height > self.viewport.b() - 4.0 {
+            anchor.y - 6.0 - height
+        } else {
+            below
+        };
+        let left = (anchor.center().x - width / 2.0)
+            .min(self.viewport.r() - width - 4.0)
+            .max(self.viewport.x + 4.0);
+        let tip = Rect::new(left, top, width, height);
+        self.gfx.shadow(tip, radius::SMALL, 10.0, 3.0, t.shadow);
+        self.gfx.fill_rect(tip, radius::SMALL, t.raised);
+        self.gfx.stroke_rect(tip, radius::SMALL, 1.0, t.line_strong);
+        self.gfx.text(tip, &text, SMALL, t.text, Align::Center);
     }
 
     /// A small uppercase label above a group of rows.
@@ -1462,6 +1489,39 @@ mod tests {
             menu.iter().any(|zone| zone.label == "host-25"),
             "opened at the choice"
         );
+    }
+
+    #[test]
+    fn an_icon_button_says_what_it_does_after_a_rest_or_on_keyboard_focus() {
+        let mut state = UiState::default();
+        let id = Id::new("edit");
+        let rect = Rect::new(20.0, 20.0, 30.0, 30.0);
+        let drawn = |state: &mut UiState, events: &[Event], time: f64| {
+            let mut canvas = Recorder::default();
+            state.begin_frame(events, time);
+            let mut ui = Ui::new(
+                &mut canvas,
+                Theme::new(Appearance::Dark),
+                state,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+            );
+            ui.icon_button(id, rect, crate::icons::EDIT, "Edit host", false);
+            ui.overlays();
+            state.end_frame();
+            canvas.texts.iter().any(|(_, text)| text == "Edit host")
+        };
+        drawn(&mut state, &[], 0.0);
+        assert!(
+            !drawn(&mut state, &[Event::PointerMoved(rect.center())], 1.0),
+            "not at once"
+        );
+        assert!(drawn(&mut state, &[], 1.7), "after a rest");
+        assert!(
+            !drawn(&mut state, &[Event::PointerLeft], 2.0),
+            "gone when the pointer goes"
+        );
+        state.set_focus(Some(id), true);
+        assert!(drawn(&mut state, &[], 2.1), "on keyboard focus at once");
     }
 
     #[test]

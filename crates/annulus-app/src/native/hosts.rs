@@ -606,6 +606,11 @@ impl HostsView {
             &items,
         );
         ui.set_name(Id::new("hosts.new.more"), "More ways to add hosts");
+        ui.tooltip(
+            Id::new("hosts.new.more"),
+            more,
+            "New group, import or export",
+        );
         match chosen {
             Some(0) => self.new_group(vault),
             Some(1) => action = Some(HostsAction::ImportSshConfig),
@@ -1836,6 +1841,7 @@ fn more_menu(ui: &mut Ui<'_>, id: Id, rect: Rect, menu: &[String]) -> Option<usi
         menu,
     );
     ui.set_name(id.with("more"), "More actions");
+    ui.tooltip(id.with("more"), rect, "More actions");
     chosen
 }
 

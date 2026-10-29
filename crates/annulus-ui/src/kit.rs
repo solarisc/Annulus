@@ -429,6 +429,10 @@ pub struct UiState {
     repaint: bool,
     repaint_after: Option<std::time::Duration>,
     cursor: Cursor,
+    /// When the zone under the pointer became the one under it.
+    hovered_since: f64,
+    /// The tooltip to draw over this frame: its text and the control it explains.
+    pub(crate) tooltip: Option<(String, Rect)>,
     edits: HashMap<Id, EditState>,
     pub(crate) popup: Option<Popup>,
     pub(crate) clipboard_out: Option<String>,
@@ -477,12 +481,10 @@ impl UiState {
         });
         self.repaint_after = None;
         self.cursor = Cursor::Default;
+        self.tooltip = None;
         for event in events {
             match event {
-                Event::PointerMoved(point) => {
-                    self.pointer = Some(*point);
-                    self.hovered = self.hit(*point);
-                }
+                Event::PointerMoved(point) => self.move_pointer(*point, time),
                 Event::PointerLeft => {
                     self.pointer = None;
                     self.hovered = None;
@@ -549,6 +551,16 @@ impl UiState {
         }
     }
 
+    /// The pointer moved to `point` at `time`: what it is over, and since when.
+    fn move_pointer(&mut self, point: Point, time: f64) {
+        self.pointer = Some(point);
+        let hovered = self.hit(point);
+        if hovered != self.hovered {
+            self.hovered = hovered;
+            self.hovered_since = time;
+        }
+    }
+
     /// Queues what assistive technology asked for (a screen reader's click or focus move);
     /// the next frame does it, as the same input from the keyboard would.
     pub fn request(&mut self, request: crate::access::Request) {
@@ -562,6 +574,7 @@ impl UiState {
         let hovered = self.pointer.and_then(|point| self.hit(point));
         if hovered != self.hovered {
             self.hovered = hovered;
+            self.hovered_since = self.time;
             self.repaint = true;
         }
         if let Some(id) = self.focus
@@ -759,6 +772,24 @@ impl<'a> Ui<'a> {
             .iter_mut()
             .rev()
             .find(|zone| zone.id == id)
+    }
+
+    /// Shows `text` by zone `id` at `rect` once the pointer has rested on it for a moment, or
+    /// at once while the keyboard's focus ring is on it (an icon-only control says what it
+    /// does). Drawn over everything by [`Ui::overlays`].
+    pub fn tooltip(&mut self, id: Id, rect: Rect, text: &str) {
+        const DELAY: f64 = 0.6;
+        let keyboard = self.state.focus == Some(id) && self.state.focus_ring;
+        let pointer = self.state.hovered == Some(id) && self.state.pressed.is_none();
+        if !keyboard && !pointer {
+            return;
+        }
+        let rested = self.state.time - self.state.hovered_since;
+        if keyboard || rested >= DELAY {
+            self.state.tooltip = Some((text.to_owned(), rect));
+        } else {
+            self.request_repaint_after(std::time::Duration::from_secs_f64(DELAY - rested));
+        }
     }
 
     /// Gives zone `id` the accessible name `name` (an icon-only button: "More actions"
