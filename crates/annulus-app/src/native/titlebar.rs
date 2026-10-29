@@ -100,16 +100,13 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         )
         .clicked
     {
-        app.open("Local", annulus_session::Program::DefaultShell);
+        app.open_local();
     }
     sync_badge(ui, badge, &sync);
     if let Some(index) = close_tab
         && index > 0
     {
-        app.tabs.remove(index);
-        if app.active >= index {
-            app.active = app.active.saturating_sub(1);
-        }
+        app.close_tab(index);
     }
     action
 }

@@ -207,10 +207,35 @@ impl Panes {
         }
     }
 
-    /// Closes the focused pane; `false` when it is the last (the tab closes instead).
-    pub fn close_focused(&mut self) -> bool {
+    /// Every pane's title and transcript, for logs when the tab closes.
+    #[must_use]
+    pub fn transcripts(&self) -> Vec<(String, String)> {
+        self.terminals
+            .iter()
+            .filter_map(|(_, pane)| {
+                let text = pane.transcript()?;
+                Some((pane.title.clone().unwrap_or_default(), text))
+            })
+            .collect()
+    }
+
+    /// Types `bytes` into the focused pane (a snippet from the side panel).
+    pub fn write_focused(&self, bytes: &[u8]) {
+        if let Some(pane) = self.focused_pane() {
+            pane.write(bytes);
+        }
+    }
+
+    /// Closes the focused pane; `false` when it is the last (the tab closes instead). The
+    /// closed pane's transcript goes to `closed`.
+    pub fn close_focused(&mut self, closed: &mut Vec<(String, String)>) -> bool {
         if self.terminals.len() < 2 || !self.tree.remove(self.focused) {
             return false;
+        }
+        if let Some(pane) = self.focused_pane()
+            && let Some(text) = pane.transcript()
+        {
+            closed.push((pane.title.clone().unwrap_or_default(), text));
         }
         self.terminals.retain(|(id, _)| *id != self.focused);
         let mut order = Vec::new();

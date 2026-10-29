@@ -845,3 +845,77 @@ fn first_run_creates_the_vault_and_opens_it_only_after_the_recovery_key_is_confi
     drive(&mut app, &mut state, &confirm(&output), clock());
     assert!(app.vault.is_some());
 }
+
+#[test]
+fn closing_a_tab_saves_its_log_only_when_logging_is_on() {
+    for record in [false, true] {
+        let mut app = NativeApp::new(Some(fixture_vault(&format!("logs-{record}"), false)));
+        app.settings.record_logs = record;
+        let program = if cfg!(windows) {
+            annulus_session::Program::Command {
+                program: "cmd.exe".into(),
+                args: vec!["/q".into(), "/k".into(), "echo annulus-log-line".into()],
+            }
+        } else {
+            annulus_session::Program::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "echo annulus-log-line; exec sh".into()],
+            }
+        };
+        app.open("Shell", program);
+        let mut state = UiState::default();
+        let started = std::time::Instant::now();
+        let mut seen = false;
+        while !seen {
+            assert!(
+                started.elapsed().as_secs() < 20,
+                "the shell printed nothing"
+            );
+            drive(&mut app, &mut state, &[], started.elapsed().as_secs_f64());
+            seen = app
+                .tabs
+                .last()
+                .and_then(|tab| match &tab.terminal {
+                    Some(super::TermView::Live(panes)) => Some(panes.transcripts()),
+                    _ => None,
+                })
+                .is_some_and(|logs| {
+                    logs.iter()
+                        .any(|(_, text)| text.contains("annulus-log-line"))
+                });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        app.close_tab(app.tabs.len() - 1);
+        let logs = app.vault.as_ref().unwrap().logs();
+        assert_eq!(
+            logs.iter().any(|log| log.text.contains("annulus-log-line")),
+            record,
+            "record_logs = {record}"
+        );
+    }
+}
+
+#[test]
+fn open_tabs_are_remembered_and_reopened_at_the_next_start() {
+    let mut app = NativeApp::new(Some(fixture_vault("restore", true)));
+    app.settings.restore_tabs = true;
+    let host = app.vault.as_ref().unwrap().hosts()[0].id;
+    app.act(super::hosts::HostsAction::Connect(host));
+    let mut state = UiState::default();
+    drive(&mut app, &mut state, &[], 0.0);
+    assert!(
+        app.settings
+            .open_tabs
+            .contains(&annulus_config::settings::OpenTab::Host(host))
+    );
+    // The next start: a host tab waits for the vault, then reconnects.
+    let mut next = NativeApp::new(None);
+    let tabs = app.settings.open_tabs.clone();
+    next.reopen(&tabs);
+    assert_eq!(next.pending_hosts, [host]);
+    next.vault = app.vault.take();
+    drive(&mut next, &mut state, &[], 1.0);
+    drive(&mut next, &mut state, &[], 2.0);
+    assert!(next.pending_hosts.is_empty());
+    assert_eq!(next.tabs.len(), 2, "the host's tab is open again");
+}

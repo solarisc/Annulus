@@ -67,6 +67,10 @@ pub struct HostsView {
     pub editor: Option<Editor>,
     /// The group editor, while open.
     pub group_editor: Option<GroupEditor>,
+    /// The `ssh_config` import preview, while open.
+    import: Option<crate::import_dialog::ImportPreview>,
+    /// The result of the last import, until the next.
+    notice: Option<String>,
 }
 
 /// The host editor's draft.
@@ -212,6 +216,13 @@ impl HostsView {
             .then(|| area.take_right(EDITOR_W.min(area.w * 0.6)));
         let vault = vault?;
         action = self.listing_area(ui, area, vault).or(action);
+        if action == Some(HostsAction::ImportSshConfig) {
+            action = None;
+            match crate::import_dialog::ImportPreview::load(vault) {
+                Ok(preview) => self.import = Some(preview),
+                Err(problem) => self.notice = Some(problem),
+            }
+        }
         if let Some(panel) = panel {
             if self.group_editor.is_some() {
                 self.group_panel(ui, panel, vault);
@@ -219,6 +230,7 @@ impl HostsView {
                 self.editor_panel(ui, panel, vault);
             }
         }
+        self.import_card(ui, rect, vault);
         action
     }
 
@@ -239,6 +251,12 @@ impl HostsView {
             action = Some(toolbar);
         }
         main.take_top(space::L);
+        if let Some(notice) = &self.notice {
+            let t = ui.theme;
+            ui.gfx
+                .text(main.take_top(20.0), notice, SMALL, t.text2, Align::Start);
+            main.take_top(space::S);
+        }
         if self.group.is_some() && self.query.trim().is_empty() {
             self.breadcrumb(ui, main.take_top(CONTROL), vault);
             main.take_top(space::M);
@@ -956,6 +974,107 @@ impl HostsView {
         if let Ok(group) = vault.draft_group(self.group.clone()) {
             self.editor = None;
             self.group_editor = Some(GroupEditor::new(group, true));
+        }
+    }
+
+    /// The `ssh_config` import, over the screen.
+    fn import_card(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) {
+        let Some(preview) = self.import.as_mut() else {
+            return;
+        };
+        let t = ui.theme;
+        ui.gfx.fill_rect(rect, 0.0, t.scrim);
+        ui.zone(Id::new("import.backdrop"), rect, Role::Backdrop, "");
+        #[allow(clippy::cast_precision_loss)] // A config holds dozens of hosts.
+        let list_h = (preview.rows.len() as f32 * 36.0).min(320.0);
+        let card = rect.centered(rect.w.min(560.0), list_h + 170.0);
+        ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
+        ui.gfx.fill_rect(card, 14.0, t.raised);
+        ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
+        let mut column = card.inset(space::XL, space::XL);
+        ui.strict_text(
+            column.take_top(24.0),
+            "Import from OpenSSH config",
+            HEADING,
+            t.text,
+            Align::Start,
+        );
+        ui.gfx.text(
+            column.take_top(20.0),
+            "Choose the hosts to add. ProxyJump becomes a jump host when that host comes too.",
+            SMALL,
+            t.text2,
+            Align::Start,
+        );
+        column.take_top(space::M);
+        let list = column.take_top(list_h);
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let offset = ui.scroll_view(
+            Id::new("import.scroll"),
+            list,
+            preview.rows.len() as f32 * 36.0,
+        );
+        ui.push_clip(list);
+        for (index, (entry, selected)) in preview.rows.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // As above.
+            let y = list.y - offset + index as f32 * 36.0;
+            let mut row = Rect::new(list.x, y, list.w - 10.0, 32.0);
+            let mut detail = format!("{}:{}", entry.address, entry.port);
+            if let Some(user) = &entry.user {
+                detail = format!("{user}@{detail}");
+            }
+            if let Some(jump) = &entry.proxy_jump {
+                detail.push_str(" via ");
+                detail.push_str(jump);
+            }
+            if preview.existing.contains(&entry.alias.to_lowercase()) {
+                detail.push_str(" \u{b7} already saved");
+            }
+            let text = row.take_right(row.w * 0.55);
+            ui.checkbox(Id::new(("import", index)), row, selected, &entry.alias);
+            ui.gfx.text(text, &detail, SMALL, t.text2, Align::Start);
+        }
+        ui.pop_clip();
+        column.take_top(space::L);
+        let mut buttons = column.take_top(CONTROL);
+        let chosen: Vec<&annulus_import::ssh_config::Found> = preview
+            .rows
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(entry, _)| entry)
+            .collect();
+        let label = format!("Import {}", chosen.len());
+        let import = buttons.take_right(button_width(ui.gfx, &label, None).max(100.0));
+        buttons.take_right(space::S);
+        let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+        let go = ui
+            .button(Id::new("import.go"), import, &label, None, Kind::Primary)
+            .clicked
+            && !chosen.is_empty();
+        let mut close = ui
+            .button(
+                Id::new("import.cancel"),
+                cancel,
+                "Cancel",
+                None,
+                Kind::Ghost,
+            )
+            .clicked
+            || ui.key(Key::Escape, Modifiers::NONE);
+        if go {
+            let (hosts, rules) = crate::import_dialog::entities(&chosen);
+            self.notice = Some(match vault.adopt(&hosts, &rules, &[], &[], &[]) {
+                Ok(()) => format!(
+                    "Imported {} host(s) and {} forward(s).",
+                    hosts.len(),
+                    rules.len()
+                ),
+                Err(error) => format!("Nothing was imported: {error}"),
+            });
+            close = true;
+        }
+        if close {
+            self.import = None;
         }
     }
 

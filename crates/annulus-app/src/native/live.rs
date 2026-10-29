@@ -79,6 +79,12 @@ impl LiveTerminal {
         self.program.clone()
     }
 
+    /// What the session showed, for its log; `None` if it never started.
+    #[must_use]
+    pub fn transcript(&self) -> Option<String> {
+        self.session.as_ref().map(Session::transcript)
+    }
+
     /// Sends bytes typed in another pane (broadcast input).
     pub fn write(&self, bytes: &[u8]) {
         if let Some(session) = &self.session {

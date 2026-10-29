@@ -549,6 +549,8 @@ pub struct ForwardsView {
     draft: Option<Draft>,
     /// Questions rules' connections are waiting on, by rule.
     asks: HashMap<u64, Ask>,
+    /// The rules marked to start with the vault were started.
+    auto_started: bool,
 }
 
 const KINDS: [(&str, ForwardKind); 3] = [
@@ -573,6 +575,61 @@ fn describe(rule: &PortForward, host: &str) -> String {
 }
 
 impl ForwardsView {
+    /// Starts rule `id` through its host.
+    fn start_rule(&mut self, id: u64, vault: &Vault, files: &SshFiles, waker: Option<&Waker>) {
+        let Some(rule) = vault.forwards().iter().find(|rule| rule.id == id).cloned() else {
+            return;
+        };
+        let Some(host) = vault.hosts().iter().find(|host| host.id == rule.host_id) else {
+            return;
+        };
+        let program = connect::host(vault, files, host);
+        let waker = waker.cloned();
+        let running = start(&rule, program, move || {
+            if let Some(waker) = &waker {
+                waker();
+            }
+        });
+        self.running.insert(id, running);
+    }
+
+    /// Starts the rules marked to start when the vault unlocks, once (F-FWD-004).
+    pub fn auto_start(&mut self, vault: &Vault, files: &SshFiles, waker: Option<&Waker>) {
+        if std::mem::replace(&mut self.auto_started, true) {
+            return;
+        }
+        let ids: Vec<u64> = vault
+            .forwards()
+            .iter()
+            .filter(|rule| rule.auto_start)
+            .map(|rule| rule.id)
+            .collect();
+        for id in ids {
+            self.start_rule(id, vault, files, waker);
+        }
+    }
+
+    /// Starts the rules marked to start with `host_id`'s terminal that are not running.
+    pub fn host_opened(
+        &mut self,
+        host_id: u64,
+        vault: &Vault,
+        files: &SshFiles,
+        waker: Option<&Waker>,
+    ) {
+        let ids: Vec<u64> = vault
+            .forwards()
+            .iter()
+            .filter(|rule| {
+                rule.with_host && rule.host_id == host_id && !self.running.contains_key(&rule.id)
+            })
+            .map(|rule| rule.id)
+            .collect();
+        for id in ids {
+            self.start_rule(id, vault, files, waker);
+        }
+    }
+
     /// Draws the screen; switching a rule on starts it through its host.
     #[allow(clippy::too_many_lines)] // Header, editor and list, top to bottom.
     pub fn draw(
@@ -637,7 +694,7 @@ impl ForwardsView {
                 ui,
                 &mut area,
                 "New rule",
-                3.0 * CONTROL + 4.0 * space::M + 4.0,
+                4.0 * CONTROL + 5.0 * space::M + 4.0,
             );
             card.take_top(space::S);
             let mut line = card.take_top(CONTROL);
@@ -692,6 +749,21 @@ impl ForwardsView {
                     },
                 );
             }
+            card.take_top(space::S);
+            let mut line = card.take_top(CONTROL);
+            let first = line.take_left(line.w / 2.0);
+            ui.checkbox(
+                Id::new("forward.auto"),
+                first,
+                &mut draft.rule.auto_start,
+                "Start when the vault unlocks",
+            );
+            ui.checkbox(
+                Id::new("forward.with"),
+                line,
+                &mut draft.rule.with_host,
+                "Start with the host's terminal",
+            );
             card.take_top(space::S);
             let mut line = card.take_top(CONTROL);
             let save = line.take_right(88.0);
@@ -833,24 +905,11 @@ impl ForwardsView {
             }
         });
         for (id, on) in toggles {
-            if !on {
+            if on {
+                self.start_rule(id, vault, files, waker);
+            } else {
                 self.running.remove(&id);
-                continue;
             }
-            let Some(rule) = vault.forwards().iter().find(|rule| rule.id == id).cloned() else {
-                continue;
-            };
-            let Some(host) = vault.hosts().iter().find(|host| host.id == rule.host_id) else {
-                continue;
-            };
-            let program = connect::host(vault, files, host);
-            let waker = waker.cloned();
-            let running = start(&rule, program, move || {
-                if let Some(waker) = &waker {
-                    waker();
-                }
-            });
-            self.running.insert(id, running);
         }
         if let Some(id) = remove {
             self.running.remove(&id);
@@ -1065,4 +1124,94 @@ pub fn settings(
     }
     ui.pop_clip();
     (changed, drawn_h)
+}
+
+/// The snippet panel beside a terminal (Ctrl+Shift+.): search, then Paste types a snippet
+/// into the focused pane and Run types it with Enter. Returns the bytes to type.
+pub fn snippet_panel(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    search: &mut String,
+    snippets: &[Snippet],
+) -> Option<Vec<u8>> {
+    let t = ui.theme;
+    ui.gfx.fill_rect(rect, 0.0, t.chrome);
+    ui.gfx
+        .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
+    let mut column = rect.inset(space::M, space::M);
+    ui.section_label(column.take_top(18.0), "Snippets");
+    column.take_top(space::S);
+    ui.text_field(
+        Id::new("panel.search"),
+        column.take_top(CONTROL),
+        search,
+        FieldStyle {
+            placeholder: "Search snippets",
+            icon: Some(icons::SEARCH),
+            ..FieldStyle::default()
+        },
+    );
+    column.take_top(space::S);
+    let query = search.trim().to_lowercase();
+    let shown: Vec<&Snippet> = snippets
+        .iter()
+        .filter(|s| {
+            query.is_empty()
+                || s.label.to_lowercase().contains(&query)
+                || s.script.to_lowercase().contains(&query)
+        })
+        .collect();
+    if shown.is_empty() {
+        ui.gfx.text(
+            column.take_top(20.0),
+            "No snippets match.",
+            SMALL,
+            t.text2,
+            Align::Start,
+        );
+        return None;
+    }
+    let mut out = None;
+    for snippet in shown {
+        if column.h < 52.0 {
+            break;
+        }
+        let card = column.take_top(52.0);
+        column.take_top(space::XS);
+        let id = Id::new(("panel.snippet", snippet.id));
+        pages::row(ui, id, card, &snippet.label, false);
+        let mut inner = card.inset(space::M, 0.0);
+        let run = inner.take_right(28.0).centered(28.0, 28.0);
+        inner.take_right(2.0);
+        let paste = inner.take_right(28.0).centered(28.0, 28.0);
+        let first = snippet.script.lines().next().unwrap_or_default();
+        pages::two_lines(ui, inner, &snippet.label, first, true);
+        if ui
+            .icon_button(
+                id.with("paste"),
+                paste,
+                icons::CODE,
+                "Type into the terminal",
+                false,
+            )
+            .clicked
+        {
+            out = Some(snippet.script.clone().into_bytes());
+        }
+        if ui
+            .icon_button(
+                id.with("run"),
+                run,
+                icons::PLAY,
+                "Run in the terminal",
+                false,
+            )
+            .clicked
+        {
+            let mut text = snippet.script.replace('\n', "\r");
+            text.push('\r');
+            out = Some(text.into_bytes());
+        }
+    }
+    out
 }

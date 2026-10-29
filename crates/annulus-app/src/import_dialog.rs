@@ -11,8 +11,8 @@ use annulus_vault::vault::Vault;
 
 /// The preview window.
 pub struct ImportPreview {
-    rows: Vec<(Found, bool)>,
-    existing: Vec<String>,
+    pub(crate) rows: Vec<(Found, bool)>,
+    pub(crate) existing: Vec<String>,
 }
 
 /// The hosts and rules to import, with temporary ids that `Vault::adopt` renumbers.

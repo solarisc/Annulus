@@ -19,7 +19,7 @@ mod sftp;
 mod terminal;
 mod titlebar;
 
-use annulus_config::settings::Settings;
+use annulus_config::settings::{OpenTab, Settings};
 use annulus_config::tokens::{Appearance, ThemeMode, space};
 use annulus_platform::window::{Waker, WindowApp, WindowError, WindowRequest, run};
 use annulus_session::profiles::{self, Profile};
@@ -125,6 +125,8 @@ pub struct Tab {
     pub terminal: Option<TermView>,
     /// The files of an SFTP tab.
     pub sftp: Option<Box<sftp::SftpView>>,
+    /// What to reopen at the next start (F-APP-008).
+    pub origin: Option<OpenTab>,
 }
 
 /// What a terminal tab shows.
@@ -181,8 +183,12 @@ pub struct NativeApp {
     pub ssh_files: SshFiles,
     /// Repaints the window from a session's thread.
     pub waker: Option<Waker>,
-    /// Terminal tabs to open after this frame: title and program.
-    opens: Vec<(String, Program)>,
+    /// Terminal tabs to open after this frame: title, program and where it came from.
+    opens: Vec<(String, Program, Option<OpenTab>)>,
+    /// Host tabs to reopen once the vault is unlocked.
+    pending_hosts: Vec<u64>,
+    /// The snippet panel beside terminals (Ctrl+Shift+.), and its search.
+    snippet_panel: Option<String>,
     /// The device settings, and where they are saved (`None` in the preview).
     pub settings: Settings,
     settings_path: Option<std::path::PathBuf>,
@@ -216,6 +222,7 @@ impl NativeApp {
                 status: None,
                 terminal: None,
                 sftp: None,
+                origin: None,
             }],
             active: 0,
             section: Section::Hosts,
@@ -230,6 +237,8 @@ impl NativeApp {
             },
             waker: None,
             opens: Vec::new(),
+            pending_hosts: Vec::new(),
+            snippet_panel: None,
             settings: Settings::default(),
             settings_path: None,
             profiles: profiles::detect(),
@@ -256,6 +265,7 @@ impl NativeApp {
             status: None,
             terminal: Some(view),
             sftp: None,
+            origin: None,
         });
         self.next_uid += 1;
         self.active = self.tabs.len() - 1;
@@ -263,16 +273,78 @@ impl NativeApp {
 
     /// Opens a live terminal tab running `program` after this frame.
     pub fn open(&mut self, title: impl Into<String>, program: Program) {
-        self.opens.push((title.into(), program));
+        self.opens.push((title.into(), program, None));
+    }
+
+    /// Closes tab `index` (never the vault), saving its sessions' logs when logging is on.
+    pub fn close_tab(&mut self, index: usize) {
+        if index == 0 || index >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(index);
+        if let Some(TermView::Live(panes)) = &tab.terminal {
+            self.save_logs(panes.transcripts());
+        }
+        if self.active >= index {
+            self.active = self.active.saturating_sub(1);
+        }
+    }
+
+    /// Keeps finished sessions' text in the vault, encrypted (F-LOG-001).
+    fn save_logs(&mut self, logs: Vec<(String, String)>) {
+        if !self.settings.record_logs {
+            return;
+        }
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
+        let now = crate::sync_screen::now_secs();
+        for (title, text) in logs {
+            if !text.trim().is_empty() {
+                let _ = vault.add_log(&title, &text, now);
+            }
+        }
+    }
+
+    /// Reopens the tabs of the last run (Settings, Reopen my tabs): local shells now, saved
+    /// hosts once the vault is unlocked.
+    pub fn reopen(&mut self, tabs: &[OpenTab]) {
+        for tab in tabs {
+            match tab {
+                OpenTab::Local(name) => self.open_profile(Some(name.as_str())),
+                OpenTab::Host(id) => self.pending_hosts.push(*id),
+            }
+        }
+    }
+
+    /// The tabs to reopen next time, saved when they change.
+    fn remember_tabs(&mut self) {
+        if !self.settings.restore_tabs {
+            return;
+        }
+        let open: Vec<OpenTab> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.origin.clone())
+            .collect();
+        if open != self.settings.open_tabs {
+            self.settings.open_tabs = open;
+            if let Some(path) = &self.settings_path {
+                let _ = self.settings.save(path);
+            }
+        }
     }
 
     /// Opens the default local shell (Settings, Local shells).
-    fn open_local(&mut self) {
-        let profile = self
-            .settings
-            .default_profile
-            .as_ref()
-            .and_then(|name| self.profiles.iter().find(|profile| &profile.name == name))
+    pub fn open_local(&mut self) {
+        let name = self.settings.default_profile.clone();
+        self.open_profile(name.as_deref());
+    }
+
+    /// Opens local shell profile `name`, or the first one found.
+    fn open_profile(&mut self, name: Option<&str>) {
+        let profile = name
+            .and_then(|name| self.profiles.iter().find(|profile| profile.name == name))
             .or_else(|| self.profiles.first());
         let (title, program) =
             profile.map_or(("Local".to_owned(), Program::DefaultShell), |profile| {
@@ -284,7 +356,8 @@ impl NativeApp {
                     },
                 )
             });
-        self.open(title, program);
+        self.opens
+            .push((title.clone(), program, Some(OpenTab::Local(title))));
     }
 
     /// Split, close, broadcast and move between panes of the terminal tab in front
@@ -296,15 +369,20 @@ impl NativeApp {
         };
         let uid = tab.uid;
         let Some(TermView::Live(panes)) = tab.terminal.as_mut() else {
-            if close && self.active > 0 {
-                self.tabs.remove(self.active);
-                self.active -= 1;
+            if close {
+                let index = self.active;
+                self.close_tab(index);
             }
             return;
         };
-        if close && !panes.close_focused() {
-            self.tabs.remove(self.active);
-            self.active -= 1;
+        let mut closed = Vec::new();
+        if close && !panes.close_focused(&mut closed) {
+            let index = self.active;
+            self.close_tab(index);
+            return;
+        }
+        if !closed.is_empty() {
+            self.save_logs(closed);
             return;
         }
         if ui.key(Key::Char('d'), Modifiers::CTRL_SHIFT) {
@@ -440,7 +518,9 @@ impl NativeApp {
                 };
                 let program = connect::host(vault, &self.ssh_files, host);
                 let title = host.label.clone();
-                self.open(title, program);
+                self.forwards
+                    .host_opened(id, vault, &self.ssh_files, self.waker.as_ref());
+                self.opens.push((title, program, Some(OpenTab::Host(id))));
             }
             hosts::HostsAction::QuickConnect(target) => {
                 let program = connect::quick(&target, &self.ssh_files);
@@ -468,6 +548,7 @@ impl NativeApp {
                     status: None,
                     terminal: None,
                     sftp: Some(Box::new(sftp::SftpView::new(tab))),
+                    origin: None,
                 });
                 self.next_uid += 1;
                 self.active = self.tabs.len() - 1;
@@ -549,6 +630,14 @@ impl NativeApp {
         let Some(vault) = self.vault.as_mut() else {
             return;
         };
+        self.forwards
+            .auto_start(vault, &self.ssh_files, self.waker.as_ref());
+        for id in std::mem::take(&mut self.pending_hosts) {
+            self.act(hosts::HostsAction::Connect(id));
+        }
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
         if let Some(path) = self.vault_path.clone() {
             let pace = FramePace::new(ui, self.waker.clone());
             if self.sync.tick(&pace, vault, &path) {
@@ -584,6 +673,7 @@ impl NativeApp {
     }
 
     /// Draws one frame. Returns what the window itself must do.
+    #[allow(clippy::too_many_lines)] // The window top to bottom: title bar, then the tab in front.
     pub fn frame(&mut self, ui: &mut Ui<'_>) -> Option<WindowAction> {
         let t = ui.theme;
         let mut area = ui.viewport;
@@ -639,7 +729,27 @@ impl NativeApp {
                 palette.background.b,
                 255,
             );
+            let mut area = area;
+            if ui.key(Key::Char('.'), Modifiers::CTRL_SHIFT) {
+                self.snippet_panel = match self.snippet_panel.take() {
+                    Some(_) => None,
+                    None => Some(String::new()),
+                };
+            }
+            let side = self.snippet_panel.is_some().then(|| area.take_right(300.0));
             let content = panel_filled(ui, area, background);
+            if let (Some(side), Some(search), TermView::Live(panes)) =
+                (side, self.snippet_panel.as_mut(), &*view)
+            {
+                let snippets = self
+                    .vault
+                    .as_ref()
+                    .map(|vault| vault.snippets().to_vec())
+                    .unwrap_or_default();
+                if let Some(bytes) = screens::snippet_panel(ui, side, search, &snippets) {
+                    panes.write_focused(&bytes);
+                }
+            }
             match view {
                 TermView::Replay(emulator) => {
                     let inner = content.inset(space::L, space::M);
@@ -669,15 +779,19 @@ impl NativeApp {
                 tab.status = panes.status();
             }
         }
-        for (title, program) in std::mem::take(&mut self.opens) {
+        for (title, program, origin) in std::mem::take(&mut self.opens) {
             self.push_terminal(
                 title,
                 TermView::Live(Box::new(panes::Panes::new(live::LiveTerminal::new(
                     program,
                 )))),
             );
+            if let Some(tab) = self.tabs.last_mut() {
+                tab.origin = origin;
+            }
             ui.request_repaint();
         }
+        self.remember_tabs();
         action
     }
 
@@ -958,6 +1072,10 @@ pub fn run_native(light: bool, data_dir: &std::path::Path) -> Result<(), WindowE
     let settings_path = data_dir.join("settings.json");
     app.settings = Settings::load(&settings_path);
     app.settings_path = Some(settings_path);
+    if app.settings.restore_tabs {
+        let tabs = app.settings.open_tabs.clone();
+        app.reopen(&tabs);
+    }
     let _ = std::fs::create_dir_all(data_dir);
     run(
         "Annulus",
