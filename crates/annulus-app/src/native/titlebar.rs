@@ -103,13 +103,18 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
                 Id::new("tab.new"),
                 plus,
                 icons::PLUS,
-                "New terminal tab",
+                "New connection",
                 false,
             )
             .clicked;
-        ui.tooltip(Id::new("tab.new"), plus, "New terminal tab (Ctrl+Shift+T)");
+        ui.tooltip(
+            Id::new("tab.new"),
+            plus,
+            "Connect to a saved host (Ctrl+Shift+T: a local terminal)",
+        );
+        // The saved hosts, with the search ready: type a name and press Enter.
         if new_tab {
-            app.open_local();
+            app.show_hosts(ui);
         }
     }
     sync_badge(ui, badge, &sync);

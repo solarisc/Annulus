@@ -338,7 +338,7 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: nothing,
-        acts: &[Act::Hover("New terminal tab")],
+        acts: &[Act::Hover("New connection")],
     },
     Scene {
         name: "hosts-keyboard-focus",
@@ -1896,6 +1896,36 @@ fn the_lock_screen_takes_the_password_without_a_click() {
 }
 
 #[test]
+fn the_plus_button_opens_the_saved_hosts_ready_to_search() {
+    let mut app = NativeApp::new(Some(fixture_vault("plus-hosts", true)));
+    replay(&mut app, "build");
+    app.section = super::Section::Settings;
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    assert_eq!(app.active, 1, "a terminal in front");
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "New connection"),
+        1.0,
+    );
+    assert_eq!(app.active, 0, "the vault");
+    assert_eq!(app.section, super::Section::Hosts);
+    assert_eq!(
+        state.focus(),
+        Some(annulus_ui::kit::Id::new("hosts.search"))
+    );
+    // Typing a saved host's name and Enter connects to it.
+    let typed = [
+        Event::Text("prod-db".into()),
+        Event::Key(Key::Enter, Modifiers::NONE),
+    ];
+    step(&mut app, &mut state, &typed, 2.0);
+    step(&mut app, &mut state, &[], 3.0);
+    assert!(titles(&app).contains(&"prod-db"), "{:?}", titles(&app));
+}
+
+#[test]
 fn escape_with_the_palette_open_closes_only_the_palette() {
     let mut app = NativeApp::new(Some(fixture_vault("palette-escape", true)));
     let mut state = UiState::default();
@@ -2048,7 +2078,7 @@ fn a_locked_vault_hides_every_open_tab_and_the_palette() {
         .collect();
     assert!(!names.contains(&"web-1 session"), "{names:?}");
     assert!(
-        !names.contains(&"New terminal tab"),
+        !names.contains(&"New connection"),
         "no new tab while locked"
     );
     for keys in [

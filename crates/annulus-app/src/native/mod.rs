@@ -376,6 +376,15 @@ impl NativeApp {
         }
     }
 
+    /// Shows the vault's saved hosts with the search field taking the keyboard, to connect
+    /// to one by typing its name (the tab strip's + button).
+    pub fn show_hosts(&mut self, ui: &mut Ui<'_>) {
+        self.active = 0;
+        self.section = Section::Hosts;
+        self.hosts.editor = None;
+        ui.state.set_focus(Some(Id::new("hosts.search")), false);
+    }
+
     /// Opens the default local shell (Settings, Local shells).
     pub fn open_local(&mut self) {
         let name = self.settings.default_profile.clone();

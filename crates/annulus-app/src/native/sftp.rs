@@ -650,8 +650,10 @@ impl SftpView {
         let refresh = bar.take_left(CONTROL);
         bar.take_left(4.0);
         let folder_w = button_width(ui.gfx, "New folder", Some(icons::PLUS));
-        let new_folder = bar.take_left(folder_w);
         let hidden_w = button_width(ui.gfx, "Hidden files", None);
+        // A narrow pane keeps New folder as an icon, so neither button is cut off.
+        let roomy = bar.w >= folder_w + hidden_w + space::S;
+        let new_folder = bar.take_left(if roomy { folder_w } else { CONTROL });
         let hidden = bar.take_right(hidden_w);
         if ui
             .icon_button(
@@ -677,8 +679,8 @@ impl SftpView {
         {
             self.tab.reload();
         }
-        if ui
-            .button(
+        let make = if roomy {
+            ui.button(
                 Id::new("sftp.mkdir"),
                 new_folder,
                 "New folder",
@@ -686,7 +688,20 @@ impl SftpView {
                 Kind::Ghost,
             )
             .clicked
-        {
+        } else {
+            let clicked = ui
+                .icon_button(
+                    Id::new("sftp.mkdir"),
+                    new_folder,
+                    icons::PLUS,
+                    "New folder",
+                    false,
+                )
+                .clicked;
+            ui.tooltip(Id::new("sftp.mkdir"), new_folder, "New folder");
+            clicked
+        };
+        if make {
             self.edit = Some(Edit::NewFolder(String::new()));
             self.edit_dir.clone_from(&cwd);
         }
