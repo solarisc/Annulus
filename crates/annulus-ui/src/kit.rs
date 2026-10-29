@@ -40,6 +40,9 @@ impl Id {
 pub enum Role {
     /// Activates something.
     Button,
+    /// Minimize, maximize and close: clickable and named, but never in the Tab order, like
+    /// the OS's own window buttons.
+    WindowButton,
     /// One tab of a tab strip or navigation.
     Tab,
     /// Single-line text input.
@@ -64,7 +67,10 @@ impl Role {
     /// Whether Tab can move focus to a zone with this role.
     #[must_use]
     pub fn focusable(self) -> bool {
-        !matches!(self, Role::ScrollView | Role::Backdrop | Role::Splitter)
+        !matches!(
+            self,
+            Role::ScrollView | Role::Backdrop | Role::Splitter | Role::WindowButton
+        )
     }
 }
 
@@ -579,7 +585,11 @@ fn activates(role: Role, key: Key) -> bool {
     match role {
         Role::Button | Role::Tab | Role::ListItem | Role::MenuItem | Role::ComboBox => true,
         Role::CheckBox => key == Key::Space,
-        Role::TextInput | Role::ScrollView | Role::Splitter | Role::Backdrop => false,
+        Role::TextInput
+        | Role::ScrollView
+        | Role::Splitter
+        | Role::Backdrop
+        | Role::WindowButton => false,
     }
 }
 
@@ -899,6 +909,34 @@ mod tests {
             |ui| seen = two_buttons(ui),
         );
         assert!(seen.0.clicked && !seen.1.clicked);
+    }
+
+    #[test]
+    fn window_buttons_click_but_are_skipped_by_tab() {
+        let mut state = UiState::default();
+        let draw = |ui: &mut Ui<'_>| {
+            let close = ui.zone(Id::new("close"), A, Role::WindowButton, "Close");
+            let field = ui.zone(Id::new("field"), B, Role::TextInput, "Search");
+            (close, field)
+        };
+        frame(&mut state, &[], 0.0, |ui| {
+            draw(ui);
+        });
+        let mut seen = (Response::default(), Response::default());
+        frame(
+            &mut state,
+            &[Event::Key(Key::Tab, Modifiers::NONE)],
+            0.1,
+            |ui| seen = draw(ui),
+        );
+        assert!(seen.1.focused && !seen.0.focused);
+        let click = [
+            Event::PointerMoved(Point::new(5.0, 5.0)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ];
+        frame(&mut state, &click, 0.2, |ui| seen = draw(ui));
+        assert!(seen.0.clicked);
     }
 
     #[test]

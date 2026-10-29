@@ -5,6 +5,7 @@
 
 pub mod demo;
 pub mod hosts;
+pub mod lock;
 #[cfg(test)]
 mod scenes;
 mod terminal;
@@ -148,6 +149,10 @@ pub struct NativeApp {
     pub hosts: hosts::HostsView,
     /// The window is maximized (the maximize button shows "restore").
     pub maximized: bool,
+    /// The lock screen, shown while there is no unlocked vault.
+    pub lock: lock::LockView,
+    /// Where the vault file lives; `None` for the preview's throwaway vault.
+    pub vault_path: Option<std::path::PathBuf>,
 }
 
 impl NativeApp {
@@ -166,6 +171,36 @@ impl NativeApp {
             vault,
             hosts: hosts::HostsView::default(),
             maximized: false,
+            lock: lock::LockView::new(lock::Mode::Unlock),
+            vault_path: None,
+        }
+    }
+
+    /// Creates or unlocks the vault as the lock screen asked.
+    fn open_vault(&mut self, action: lock::LockAction) {
+        let Some(path) = self.vault_path.clone() else {
+            self.lock.error = Some("This preview has no vault file.".into());
+            return;
+        };
+        let opened = match action {
+            lock::LockAction::Create(password) => {
+                Vault::create(path, &password, annulus_vault::crypto::KdfParams::DEFAULT)
+                    .map(|(vault, _)| vault)
+            }
+            lock::LockAction::Unlock { secret, recovery } => {
+                if recovery {
+                    Vault::recover(path, &secret)
+                } else {
+                    Vault::unlock(path, &secret)
+                }
+            }
+        };
+        match opened {
+            Ok(vault) => self.vault = Some(vault),
+            Err(annulus_vault::vault::VaultError::WrongPassword) => {
+                self.lock.error = Some("Wrong password.".into());
+            }
+            Err(error) => self.lock.error = Some(format!("Could not open the vault: {error}")),
         }
     }
 
@@ -197,11 +232,17 @@ impl NativeApp {
             let nav = area.take_left(if compact { NAV_COMPACT_W } else { NAV_W });
             self.navigation(ui, nav, compact);
             let content = panel(ui, area);
-            match self.section {
-                Section::Hosts => {
-                    self.hosts.draw(ui, content, self.vault.as_mut());
+            if self.vault.is_none() {
+                if let Some(action) = self.lock.draw(ui, content) {
+                    self.open_vault(action);
                 }
-                other => placeholder(ui, content, other.title()),
+            } else {
+                match self.section {
+                    Section::Hosts => {
+                        self.hosts.draw(ui, content, self.vault.as_mut());
+                    }
+                    other => placeholder(ui, content, other.title()),
+                }
             }
         } else if let Some(emulator) = self
             .tabs

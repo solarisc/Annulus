@@ -115,7 +115,7 @@ enum Glyph {
 
 /// A window button: a thin glyph, a soft fill on hover, red for close.
 fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str) -> bool {
-    let response = ui.zone(id, rect, Role::Button, name);
+    let response = ui.zone(id, rect, Role::WindowButton, name);
     let t = ui.theme;
     let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
     let close = matches!(glyph, Glyph::Close);

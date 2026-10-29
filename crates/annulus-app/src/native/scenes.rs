@@ -82,6 +82,15 @@ fn with_tabs(app: &mut NativeApp) {
     }
 }
 
+fn locked(app: &mut NativeApp) {
+    app.vault = None;
+}
+
+fn first_run(app: &mut NativeApp) {
+    app.vault = None;
+    app.lock = super::lock::LockView::new(super::lock::Mode::Setup);
+}
+
 fn terminal_tab(app: &mut NativeApp) {
     with_tabs(app);
     app.active = 1;
@@ -176,6 +185,30 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: nothing,
         acts: &[],
+    },
+    Scene {
+        name: "lock",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: false,
+        setup: locked,
+        acts: &[],
+    },
+    Scene {
+        name: "lock-setup-error",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: false,
+        setup: first_run,
+        acts: &[
+            Act::Click("Master password (10+ characters)"),
+            Act::Type("short"),
+            Act::Click("Type it again"),
+            Act::Type("short"),
+            Act::Click("Create vault"),
+        ],
     },
     Scene {
         name: "terminal",
