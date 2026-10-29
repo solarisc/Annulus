@@ -7,6 +7,7 @@ use eframe::egui::{
 use annulus_session::{Program, Session, SessionEvent};
 use annulus_term::alacritty_terminal::term::TermMode;
 use annulus_term::alacritty_terminal::vte::ansi::Rgb;
+use annulus_term::find::{Find, Highlight};
 use annulus_term::keys::{self, Key, Mods};
 use annulus_term::select::SelectionKind;
 use annulus_term::{Screen, Size};
@@ -30,6 +31,7 @@ pub struct TerminalTab {
     size: Option<(Size, u16, u16)>,
     focused_once: bool,
     dialogs: SshDialogs,
+    find: Option<FindBar>,
 }
 
 impl TerminalTab {
@@ -45,6 +47,7 @@ impl TerminalTab {
             size: None,
             focused_once: false,
             dialogs: SshDialogs::default(),
+            find: None,
         }
     }
 
@@ -74,6 +77,23 @@ impl TerminalTab {
         }
     }
 
+    /// Opens the find bar on Ctrl+Shift+F and draws it while open.
+    fn find_bar(&mut self, ui: &mut Ui) {
+        let open = ui.input_mut(|input| {
+            input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, EguiKey::F)
+        });
+        if open {
+            self.find.get_or_insert_with(FindBar::default).focus = true;
+        }
+        if let (Some(bar), Some(session)) = (&mut self.find, &self.session)
+            && bar.ui(ui, session)
+        {
+            self.find = None;
+            // The keyboard goes back to the terminal.
+            self.focused_once = false;
+        }
+    }
+
     /// Draws the tab and handles its input.
     pub fn ui(&mut self, ui: &mut Ui, font_size: f32) {
         let font = FontId::monospace(font_size);
@@ -81,6 +101,7 @@ impl TerminalTab {
             ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M')).max(1.0),
             ui.fonts_mut(|fonts| fonts.row_height(&font)).max(1.0),
         );
+        self.find_bar(ui);
         let area = ui.available_rect_before_wrap();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Floored, small.
         let size = Size::new(
@@ -162,6 +183,9 @@ impl TerminalTab {
             &font,
             response.has_focus(),
         );
+        if let Some(search) = self.find.as_mut().and_then(|bar| bar.search.as_mut()) {
+            paint_matches(ui, area.min, cell, &session.find_visible(search));
+        }
         if self.exited {
             #[allow(clippy::cast_precision_loss)] // Row counts are small.
             let at = area.min + Vec2::new(4.0, cell.y * (size.rows.saturating_sub(1)) as f32);
@@ -181,6 +205,105 @@ impl TerminalTab {
             Some(session) => self.dialogs.show(ctx, session.answers()),
             None => false,
         }
+    }
+}
+
+/// The find bar over a terminal (F-TERM-007), opened with Ctrl+Shift+F.
+#[derive(Default)]
+struct FindBar {
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+    search: Option<Find>,
+    /// Why the query is not a valid regex, or that nothing matches.
+    message: Option<String>,
+    /// Move the keyboard to the query field on the next frame.
+    focus: bool,
+}
+
+impl FindBar {
+    /// Draws the bar and runs its actions; true when it was closed.
+    fn ui(&mut self, ui: &mut Ui, session: &Session) -> bool {
+        let mut closed = false;
+        let mut step = None;
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.query)
+                    .hint_text("Find")
+                    .desired_width(240.0),
+            );
+            if std::mem::take(&mut self.focus) {
+                field.request_focus();
+            }
+            let mut changed = field.changed();
+            changed |= ui.checkbox(&mut self.regex, "Regex").changed();
+            changed |= ui
+                .checkbox(&mut self.case_sensitive, "Match case")
+                .changed();
+            if changed {
+                self.rebuild();
+            }
+            if field.lost_focus() && ui.input(|input| input.key_pressed(EguiKey::Enter)) {
+                step = Some(!ui.input(|input| input.modifiers.shift));
+                self.focus = true;
+            }
+            if ui
+                .button("Previous")
+                .on_hover_text("Older text (Enter)")
+                .clicked()
+            {
+                step = Some(true);
+            }
+            if ui
+                .button("Next")
+                .on_hover_text("Newer text (Shift+Enter)")
+                .clicked()
+            {
+                step = Some(false);
+            }
+            if ui.button("Close").clicked() || ui.input(|input| input.key_pressed(EguiKey::Escape))
+            {
+                closed = true;
+            }
+            if let Some(message) = &self.message {
+                ui.label(message);
+            }
+        });
+        if let (Some(backwards), Some(search)) = (step, self.search.as_mut()) {
+            self.message = (!session.find_step(search, backwards)).then(|| "No matches".to_owned());
+        }
+        closed
+    }
+
+    fn rebuild(&mut self) {
+        self.search = None;
+        self.message = None;
+        if self.query.is_empty() {
+            return;
+        }
+        match Find::new(&self.query, self.regex, self.case_sensitive) {
+            Ok(search) => self.search = Some(search),
+            Err(error) => self.message = Some(format!("Not a valid regex: {error}")),
+        }
+    }
+}
+
+/// Tints the cells of each match; the current one stronger.
+#[allow(clippy::cast_precision_loss)] // Grid coordinates are small.
+fn paint_matches(ui: &Ui, origin: Pos2, cell: Vec2, highlights: &[Highlight]) {
+    for highlight in highlights {
+        let min = origin
+            + Vec2::new(
+                cell.x * highlight.start as f32,
+                cell.y * highlight.row as f32,
+            );
+        let width = cell.x * (highlight.end + 1 - highlight.start) as f32;
+        let alpha = if highlight.current { 150 } else { 70 };
+        ui.painter().rect_filled(
+            Rect::from_min_size(min, Vec2::new(width, cell.y)),
+            0.0,
+            Color32::from_rgba_unmultiplied(0xF2, 0xC1, 0x4E, alpha),
+        );
     }
 }
 

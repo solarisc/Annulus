@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod find;
 pub mod keys;
 pub mod palette;
 pub mod select;

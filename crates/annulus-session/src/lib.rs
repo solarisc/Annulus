@@ -18,6 +18,7 @@ use annulus_term::alacritty_terminal::sync::FairMutex;
 use annulus_term::alacritty_terminal::term::{Term, TermMode};
 use annulus_term::alacritty_terminal::tty;
 use annulus_term::alacritty_terminal::vte::ansi::Processor;
+use annulus_term::find::{Find, Highlight};
 use annulus_term::select::{self, SelectionKind};
 use annulus_term::{Palette, Screen, Size, config, snapshot};
 use zeroize::Zeroizing;
@@ -419,6 +420,17 @@ impl Session {
     /// Jumps the view back to the newest output, as typing does.
     pub fn scroll_to_bottom(&self) {
         self.term.lock().scroll_display(Scroll::Bottom);
+    }
+
+    /// Steps `find` to its next match (older text when `backwards`) and scrolls it into
+    /// view; false when nothing matches.
+    pub fn find_step(&self, find: &mut Find, backwards: bool) -> bool {
+        find.step(&mut self.term.lock(), backwards).is_some()
+    }
+
+    /// The matches of `find` on screen.
+    pub fn find_visible(&self, find: &mut Find) -> Vec<Highlight> {
+        find.visible(&self.term.lock())
     }
 
     /// What the terminal shows now.
