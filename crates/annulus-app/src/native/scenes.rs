@@ -916,6 +916,6 @@ fn open_tabs_are_remembered_and_reopened_at_the_next_start() {
     next.vault = app.vault.take();
     drive(&mut next, &mut state, &[], 1.0);
     drive(&mut next, &mut state, &[], 2.0);
-    assert!(next.pending_hosts.is_empty());
+    assert_eq!(next.pending_hosts, Vec::<u64>::new());
     assert_eq!(next.tabs.len(), 2, "the host's tab is open again");
 }
