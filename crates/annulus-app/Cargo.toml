@@ -19,6 +19,7 @@ annulus-config = { path = "../annulus-config" }
 annulus-session = { path = "../annulus-session" }
 annulus-sftp = { path = "../annulus-sftp" }
 annulus-ssh = { path = "../annulus-ssh" }
+annulus-import = { path = "../annulus-import" }
 annulus-proto = { path = "../annulus-proto" }
 annulus-sync = { path = "../annulus-sync" }
 annulus-term = { path = "../annulus-term" }

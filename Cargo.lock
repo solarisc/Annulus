@@ -5704,6 +5704,7 @@ dependencies = [
  "eframe",
  "tokio",
  "annulus-config",
+ "annulus-import",
  "annulus-proto",
  "annulus-session",
  "annulus-sftp",
@@ -5722,6 +5723,9 @@ version = "0.0.0"
 [[package]]
 name = "annulus-import"
 version = "0.0.0"
+dependencies = [
+ "annulus-vault",
+]
 
 [[package]]
 name = "annulus-platform"

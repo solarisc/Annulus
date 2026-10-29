@@ -10,6 +10,8 @@ use annulus_ui::{icons, theme};
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
 
+use crate::import_dialog::ImportPreview;
+
 /// Something the screen asks the shell to do.
 pub enum Request {
     /// Open a terminal tab titled `.0` running `.1`.
@@ -37,6 +39,9 @@ pub struct HostsScreen {
     search: String,
     editor: Option<Draft>,
     ssh_files: SshFiles,
+    import: Option<ImportPreview>,
+    /// The result of the last import or export, shown under the toolbar.
+    notice: Option<String>,
 }
 
 impl HostsScreen {
@@ -48,6 +53,8 @@ impl HostsScreen {
             search: String::new(),
             editor: None,
             ssh_files,
+            import: None,
+            notice: None,
         }
     }
 
@@ -72,6 +79,38 @@ impl HostsScreen {
     /// The program that connects to a saved host, with its saved password.
     pub fn connect_host(&self, host: &Host) -> Program {
         self.ssh_with(&host.target(), host.password.as_ref())
+    }
+
+    /// The import and export buttons for `ssh_config` (F-IMP-001, F-IMP-003).
+    fn import_export_buttons(&mut self, ui: &mut Ui) {
+        if ui
+            .button("Copy as ssh_config")
+            .on_hover_text("Hosts as an OpenSSH config, without passwords")
+            .clicked()
+        {
+            ui.ctx()
+                .copy_text(annulus_import::ssh_config::export(self.vault.hosts()));
+            self.notice = Some("Copied the hosts as an OpenSSH config (no passwords).".into());
+        }
+        if ui.button("Import ssh_config").clicked() {
+            match ImportPreview::load(&self.vault) {
+                Ok(preview) => self.import = Some(preview),
+                Err(message) => self.notice = Some(message),
+            }
+        }
+    }
+
+    /// The import preview window, and the last import or export result.
+    fn import_preview(&mut self, ui: &mut Ui, palette: &Palette) {
+        if let Some(preview) = &mut self.import
+            && let Some(message) = preview.ui(ui.ctx(), &mut self.vault)
+        {
+            self.import = None;
+            self.notice = (!message.is_empty()).then_some(message);
+        }
+        if let Some(notice) = &self.notice {
+            ui.label(RichText::new(notice).color(theme::color(palette.text_secondary)));
+        }
     }
 
     /// The unlocked vault.
@@ -120,6 +159,7 @@ impl HostsScreen {
                 request = Some(Request::Open("Local".into(), Program::DefaultShell));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                self.import_export_buttons(ui);
                 if ui.button("New host").clicked() {
                     let host = self.vault.draft_host();
                     self.editor = Some(Draft {
@@ -134,6 +174,7 @@ impl HostsScreen {
                 }
             });
         });
+        self.import_preview(ui, palette);
         ui.add_space(space::M);
 
         let matches: Vec<Host> = self.vault.search(&self.search).cloned().collect();
