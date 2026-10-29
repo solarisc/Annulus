@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod command_palette;
 mod forwards_screen;
 mod groups_view;
 mod hosts_screen;

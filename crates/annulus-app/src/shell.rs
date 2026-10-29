@@ -7,6 +7,7 @@ use annulus_session::{Program, SshFiles};
 use annulus_ui::{icons, theme};
 use annulus_vault::vault::Vault;
 
+use crate::command_palette::{Action, CommandPalette, Item, Outcome};
 use crate::forwards_screen::ForwardsScreen;
 use crate::hosts_screen::{HostsScreen, Request};
 use crate::keychain_screen::KeychainScreen;
@@ -164,6 +165,8 @@ pub struct Shell {
     restore_tabs: bool,
     /// Host tabs to reopen once the vault is unlocked.
     pending_hosts: Vec<u64>,
+    /// The command palette, while open (Ctrl+Shift+K).
+    command_palette: Option<CommandPalette>,
 }
 
 /// The device settings' file name in the data folder.
@@ -204,6 +207,7 @@ impl Shell {
             record_logs: settings.record_logs,
             restore_tabs: settings.restore_tabs,
             pending_hosts: Vec::new(),
+            command_palette: None,
             saved: settings.clone(),
             profiles: profiles::detect(),
         }
@@ -243,6 +247,104 @@ impl Shell {
             self.set_origin(OpenTab::Host(id));
         }
         self.active_tab = 0;
+    }
+
+    /// Everything the command palette offers: saved hosts first, then the open tabs,
+    /// snippets and commands.
+    fn palette_items(&self) -> Vec<Item> {
+        let mut items = Vec::new();
+        if let Some(hosts) = &self.hosts {
+            items.extend(hosts.vault().hosts().iter().map(|host| Item {
+                label: host.label.clone(),
+                kind: "Host",
+                action: Action::Connect(host.id),
+            }));
+        }
+        items.extend(
+            self.tabs
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(index, tab)| Item {
+                    label: tab.title().to_owned(),
+                    kind: "Tab",
+                    action: Action::Tab(index),
+                }),
+        );
+        if let Some(hosts) = &self.hosts {
+            items.extend(hosts.vault().snippets().iter().map(|snippet| Item {
+                label: snippet.label.clone(),
+                kind: "Snippet (pastes into the terminal)",
+                action: Action::Snippet(snippet.id),
+            }));
+        }
+        for (label, action) in [
+            ("New local terminal", Action::NewLocal),
+            ("Lock the vault", Action::Lock),
+            ("Settings", Action::Settings),
+        ] {
+            items.push(Item {
+                label: label.into(),
+                kind: "Command",
+                action,
+            });
+        }
+        items
+    }
+
+    /// Draws the palette while open and does what was chosen.
+    fn palette_ui(&mut self, ctx: &egui::Context) {
+        if self.command_palette.is_none() {
+            return;
+        }
+        let list = self.palette_items();
+        let Some(palette) = &mut self.command_palette else {
+            return;
+        };
+        match palette.ui(ctx, &list) {
+            Outcome::Open => {}
+            Outcome::Closed => self.command_palette = None,
+            Outcome::Chosen(action) => {
+                self.command_palette = None;
+                self.run_action(action);
+            }
+        }
+    }
+
+    /// Does what a palette item says.
+    fn run_action(&mut self, action: Action) {
+        match action {
+            Action::Connect(id) => {
+                let Some(hosts) = &mut self.hosts else { return };
+                let Some(host) = hosts.vault().hosts().iter().find(|h| h.id == id).cloned() else {
+                    return;
+                };
+                let program = hosts.connect_host(&host);
+                hosts.mark_opened(id);
+                self.open_terminal(host.label, program);
+                self.set_origin(OpenTab::Host(id));
+            }
+            Action::Tab(index) if index < self.tabs.len() => self.active_tab = index,
+            Action::Tab(_) => {}
+            Action::Snippet(id) => {
+                let snippet = self
+                    .hosts
+                    .as_ref()
+                    .and_then(|hosts| hosts.vault().snippets().iter().find(|s| s.id == id))
+                    .cloned();
+                if let (Some(snippet), Some(Tab::Terminal(panes))) =
+                    (snippet, self.tabs.get_mut(self.active_tab))
+                {
+                    panes.send_snippet(&snippet, false);
+                }
+            }
+            Action::NewLocal => self.open_local(None),
+            Action::Lock => self.lock_vault(),
+            Action::Settings => {
+                self.active_tab = 0;
+                self.section = Section::Settings;
+            }
+        }
     }
 
     /// Opens one tab with a pane for each `(title, program)` (a multi-host snippet run).
@@ -498,6 +600,7 @@ impl Shell {
             .options_mut(|options| options.zoom_with_keyboard = false);
         self.shortcuts(ui);
         self.auto_lock(ui.ctx());
+        self.palette_ui(&ui.ctx().clone());
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             if let Tab::Terminal(panes) = tab
                 && index != self.active_tab
@@ -596,6 +699,12 @@ impl Shell {
                 input.consume_key(command, egui::Key::Period),
             )
         });
+        if ui.input_mut(|input| input.consume_key(command, egui::Key::K)) {
+            self.command_palette = match self.command_palette.take() {
+                Some(_) => None,
+                None => Some(CommandPalette::default()),
+            };
+        }
         self.pane_shortcuts(ui);
         if snippets {
             self.snippet_panel = match self.snippet_panel.take() {
@@ -1021,6 +1130,31 @@ mod tests {
             ..settings
         };
         assert_eq!(Shell::new(&dir).reopened(&off).tabs.len(), 1);
+    }
+
+    #[test]
+    fn the_palette_lists_tabs_and_commands_and_runs_them() {
+        let dir = std::env::temp_dir().join(format!("annulus-palette-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut shell = Shell::new(&dir);
+        shell.open_terminal("build", Program::DefaultShell);
+        shell.active_tab = 0;
+        let items = shell.palette_items();
+        let kinds: Vec<(&str, &str)> = items.iter().map(|i| (i.label.as_str(), i.kind)).collect();
+        assert_eq!(
+            kinds[0],
+            ("build", "Tab"),
+            "locked: no hosts, the tabs come first"
+        );
+        assert!(kinds.contains(&("Settings", "Command")));
+        shell.run_action(Action::Tab(1));
+        assert_eq!(shell.active_tab, 1);
+        shell.run_action(Action::Settings);
+        assert_eq!((shell.active_tab, shell.section), (0, Section::Settings));
+        let before = shell.tabs.len();
+        shell.run_action(Action::NewLocal);
+        assert_eq!(shell.tabs.len(), before + 1);
     }
 
     #[test]

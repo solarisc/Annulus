@@ -266,6 +266,12 @@ impl HostsScreen {
         self.opened.take()
     }
 
+    /// Notes that a terminal to `id` was opened elsewhere (the palette), for rules that
+    /// start with it.
+    pub fn mark_opened(&mut self, id: u64) {
+        self.opened = Some(id);
+    }
+
     /// The saved host a terminal was just opened to, without taking it.
     #[must_use]
     pub fn opened_host(&self) -> Option<u64> {
