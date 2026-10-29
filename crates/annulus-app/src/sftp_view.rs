@@ -283,6 +283,9 @@ struct Transfer {
     cancel: Arc<AtomicBool>,
     /// How to start it again.
     recipe: Recipe,
+    /// When this run's first progress came, and how much was done then (a resumed run
+    /// starts above zero), for its speed.
+    since: Option<(std::time::Instant, u64)>,
 }
 
 /// What a transfer copies, so Retry can send it again.
@@ -486,6 +489,9 @@ impl SftpTab {
                 }
                 Reply::Progress { id, done, total } => {
                     if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) {
+                        transfer
+                            .since
+                            .get_or_insert((std::time::Instant::now(), done));
                         transfer.done = done;
                         transfer.total = total;
                     }
@@ -529,6 +535,7 @@ impl SftpTab {
             state: TransferState::Running,
             cancel,
             recipe,
+            since: None,
         });
         self.send(command);
     }
@@ -540,6 +547,7 @@ impl SftpTab {
         };
         transfer.cancel = Arc::new(AtomicBool::new(false));
         transfer.state = TransferState::Running;
+        transfer.since = None;
         let command = transfer.recipe.command(id, transfer.cancel.clone());
         self.send(command);
     }
@@ -838,6 +846,14 @@ impl SftpTab {
                                     human_size(transfer.total)
                                 ),
                             ));
+                            if let Some((at, from)) = transfer.since {
+                                let rate = pace(
+                                    transfer.done.saturating_sub(from),
+                                    transfer.total.saturating_sub(transfer.done),
+                                    at.elapsed().as_secs_f64(),
+                                );
+                                ui.label(RichText::new(rate).size(text::SECONDARY));
+                            }
                             if ui.button("Cancel").clicked() {
                                 transfer.cancel.store(true, Ordering::Relaxed);
                             }
@@ -963,6 +979,30 @@ fn downloads_dir() -> PathBuf {
                 .or_else(|| Some(dirs.home_dir().to_path_buf()))
         })
         .unwrap_or_else(std::env::temp_dir)
+}
+
+/// "12.3 MiB/s · 0:42 left" from `moved` bytes in `seconds` with `left` bytes to go;
+/// empty until there is a second's worth to measure.
+fn pace(moved: u64, left: u64, seconds: f64) -> String {
+    if seconds < 1.0 || moved == 0 {
+        return String::new();
+    }
+    #[allow(clippy::cast_precision_loss)] // A rate for display.
+    let per_second = moved as f64 / seconds;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Positive, display.
+    let rate = per_second as u64;
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let eta = (left as f64 / per_second).ceil() as u64;
+    let eta = if eta >= 3600 {
+        format!("{}:{:02}:{:02}", eta / 3600, eta / 60 % 60, eta % 60)
+    } else {
+        format!("{}:{:02}", eta / 60, eta % 60)
+    };
+    format!("{}/s \u{b7} {eta} left", human_size(rate))
 }
 
 /// `1536` → `1.5 KiB`.
@@ -1118,6 +1158,20 @@ mod tests {
             150_000_000
         );
         remote_shell("rm -f ~/annulus-retry.bin");
+    }
+
+    #[test]
+    fn the_pace_shows_speed_and_time_left_once_measurable() {
+        assert_eq!(pace(1024, 1024, 0.5), "", "under a second: no guess yet");
+        assert_eq!(pace(0, 1024, 3.0), "");
+        assert_eq!(
+            pace(10 * 1024 * 1024, 30 * 1024 * 1024, 2.0),
+            "5.0 MiB/s \u{b7} 0:06 left"
+        );
+        assert_eq!(
+            pace(1024, 1024 * 4000, 1.0),
+            "1.0 KiB/s \u{b7} 1:06:40 left"
+        );
     }
 
     #[test]
