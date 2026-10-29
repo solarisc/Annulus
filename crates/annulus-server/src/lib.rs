@@ -15,7 +15,7 @@ mod http;
 mod store;
 
 pub use http::router;
-pub use store::{Caller, Server, ServerError, Signups};
+pub use store::{AccountInfo, Caller, Server, ServerError, Signups};
 
 #[cfg(test)]
 mod tests;

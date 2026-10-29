@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum.workspace = true
+axum-server.workspace = true
 getrandom.workspace = true
 opaque-ke.workspace = true
 opaque-rand.workspace = true

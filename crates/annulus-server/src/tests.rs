@@ -220,6 +220,37 @@ fn a_revoked_device_is_signed_out_at_once() {
 }
 
 #[test]
+fn the_admin_sees_sizes_deletes_accounts_and_takes_backups() {
+    let server = server(Signups::Open);
+    let ana = caller(&server, &register(&server, "ana", "pw").unwrap().token);
+    register(&server, "bob", "pw").unwrap();
+    server.push(ana, &[change("r1", 0, b"12345")]).unwrap();
+    let accounts = server.accounts().unwrap();
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(
+        (
+            accounts[0].name.as_str(),
+            accounts[0].records,
+            accounts[0].bytes
+        ),
+        ("ana", 1, 5)
+    );
+
+    let backup =
+        std::env::temp_dir().join(format!("annulus-server-backup-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&backup);
+    server.backup(&backup).unwrap();
+    let restored = Server::open(&backup, Signups::Closed).unwrap();
+    assert_eq!(restored.accounts().unwrap().len(), 2);
+    // The copy keeps the OPAQUE keys, so existing accounts can still sign in.
+    assert!(login(&restored, "ana", "pw").is_ok());
+
+    assert!(server.delete_account("bob").unwrap());
+    assert!(!server.delete_account("bob").unwrap());
+    assert!(login(&server, "bob", "pw").is_err());
+}
+
+#[test]
 fn history_keeps_the_last_twenty_versions() {
     let server = server(Signups::Open);
     let me = caller(&server, &register(&server, "ana", "pw").unwrap().token);

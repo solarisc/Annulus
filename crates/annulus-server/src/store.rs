@@ -85,6 +85,19 @@ pub struct Server {
     failures: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
+/// One account as the admin sees it: no record contents, which the server cannot read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountInfo {
+    /// The account name.
+    pub name: String,
+    /// Signed-in devices.
+    pub devices: u64,
+    /// Records, not counting tombstones.
+    pub records: u64,
+    /// Ciphertext stored, history included.
+    pub bytes: u64,
+}
+
 /// The account and device a token belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Caller {
@@ -572,6 +585,58 @@ impl Server {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Devices { devices })
+    }
+
+    /// Every account with its device count, record count and stored bytes, for the admin.
+    ///
+    /// # Errors
+    /// The database failed.
+    pub fn accounts(&self) -> Result<Vec<AccountInfo>, ServerError> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT a.name,
+                    (SELECT COUNT(*) FROM devices d WHERE d.account = a.id),
+                    (SELECT COUNT(*) FROM records r WHERE r.account = a.id AND r.deleted = 0),
+                    (SELECT COALESCE(SUM(LENGTH(r.ciphertext)), 0) FROM records r WHERE r.account = a.id)
+                  + (SELECT COALESCE(SUM(LENGTH(h.ciphertext)), 0) FROM history h WHERE h.account = a.id)
+             FROM accounts a ORDER BY a.name",
+        )?;
+        let accounts = statement
+            .query_map([], |row| {
+                let count = |value: i64| u64::try_from(value).unwrap_or(0);
+                Ok(AccountInfo {
+                    name: row.get(0)?,
+                    devices: count(row.get(1)?),
+                    records: count(row.get(2)?),
+                    bytes: count(row.get(3)?),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(accounts)
+    }
+
+    /// Deletes an account with its devices, records and history. Returns false if there
+    /// was no such account.
+    ///
+    /// # Errors
+    /// The database failed.
+    pub fn delete_account(&self, name: &str) -> Result<bool, ServerError> {
+        Ok(self
+            .db()?
+            .execute("DELETE FROM accounts WHERE name = ?1", [name])?
+            > 0)
+    }
+
+    /// Writes a consistent copy of the database to `path` while the server runs.
+    ///
+    /// # Errors
+    /// `path` exists or cannot be written.
+    pub fn backup(&self, path: &Path) -> Result<(), ServerError> {
+        let target = path
+            .to_str()
+            .ok_or_else(|| ServerError::BadRequest("backup path".into()))?;
+        self.db()?.execute("VACUUM INTO ?1", [target])?;
+        Ok(())
     }
 
     /// Signs a device of the caller's account out; its token stops working at once.
