@@ -24,4 +24,5 @@ zeroize.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
+russh-sftp.workspace = true
 tokio.workspace = true

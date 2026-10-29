@@ -7,7 +7,9 @@
 
 mod hosts_screen;
 mod lock_screen;
+mod sftp_view;
 mod shell;
+mod ssh_dialogs;
 mod terminal_view;
 
 use std::process::ExitCode;

@@ -1,9 +1,11 @@
 //! Target parsing, and whole connections against an in-process russh server on localhost:
-//! host-key trust and change detection, password retries, and an echoing shell.
+//! host-key trust and change detection, password retries, an echoing shell, and the SFTP
+//! subsystem.
 
 // The test server implements russh's async trait; some handlers have nothing to await.
 #![allow(clippy::unused_async_trait_impl)]
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use russh::keys::{Algorithm, PrivateKey};
@@ -47,9 +49,37 @@ fn targets_parse_with_defaults() {
     assert_eq!(parse("a b"), None);
 }
 
-/// Accepts alice/secret, opens shells that greet and echo.
-#[derive(Clone)]
-struct TestServer;
+/// Accepts alice/secret, opens shells that greet and echo, and serves an SFTP subsystem
+/// that only answers `realpath`.
+#[derive(Clone, Default)]
+struct TestServer {
+    /// Open channels not yet claimed by a shell or the SFTP subsystem.
+    channels: Arc<Mutex<HashMap<ChannelId, ServerChannel<ServerMsg>>>>,
+    /// Channels speaking SFTP; their data is not echoed.
+    sftp: Arc<Mutex<HashSet<ChannelId>>>,
+}
+
+/// Answers `realpath` with `/home/alice`; everything else is unsupported.
+struct HomeOnly;
+
+impl russh_sftp::server::Handler for HomeOnly {
+    type Error = russh_sftp::protocol::StatusCode;
+
+    fn unimplemented(&self) -> Self::Error {
+        russh_sftp::protocol::StatusCode::OpUnsupported
+    }
+
+    async fn realpath(
+        &mut self,
+        id: u32,
+        _path: String,
+    ) -> Result<russh_sftp::protocol::Name, Self::Error> {
+        Ok(russh_sftp::protocol::Name {
+            id,
+            files: vec![russh_sftp::protocol::File::dummy("/home/alice")],
+        })
+    }
+}
 
 impl server::Handler for TestServer {
     type Error = russh::Error;
@@ -64,10 +94,11 @@ impl server::Handler for TestServer {
 
     async fn channel_open_session(
         &mut self,
-        _channel: ServerChannel<ServerMsg>,
+        channel: ServerChannel<ServerMsg>,
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.channels.lock().unwrap().insert(channel.id(), channel);
         reply.accept().await;
         Ok(())
     }
@@ -92,8 +123,27 @@ impl server::Handler for TestServer {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.channels.lock().unwrap().remove(&channel);
         session.channel_success(channel)?;
         session.data(channel, b"welcome\r\n".to_vec())
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let claimed = self.channels.lock().unwrap().remove(&channel);
+        match claimed {
+            Some(stream) if name == "sftp" => {
+                self.sftp.lock().unwrap().insert(channel);
+                session.channel_success(channel)?;
+                russh_sftp::server::run(stream.into_stream(), HomeOnly).await;
+                Ok(())
+            }
+            _ => session.channel_failure(channel),
+        }
     }
 
     async fn data(
@@ -102,6 +152,9 @@ impl server::Handler for TestServer {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.sftp.lock().unwrap().contains(&channel) {
+            return Ok(());
+        }
         session.data(channel, data.to_vec())
     }
 }
@@ -116,7 +169,7 @@ async fn serve(key: PrivateKey) -> u16 {
     });
     tokio::spawn(async move {
         if let Ok((stream, _)) = listener.accept().await
-            && let Ok(running) = server::run_stream(config, stream, TestServer).await
+            && let Ok(running) = server::run_stream(config, stream, TestServer::default()).await
         {
             let _ = running.await;
         }
@@ -205,6 +258,18 @@ async fn first_connection_asks_to_trust_the_key_then_the_shell_echoes() {
             .unwrap()
             .contains("ssh-ed25519")
     );
+}
+
+#[tokio::test]
+async fn the_sftp_subsystem_opens_on_a_connection() {
+    let port = serve(new_key()).await;
+    let script = Script::new(true, &["secret"]);
+    let connection = connect(&target(port, "alice"), &known_hosts("sftp"), None, script)
+        .await
+        .unwrap();
+    let stream = connection.sftp_stream().await.unwrap();
+    let sftp = russh_sftp::client::SftpSession::new(stream).await.unwrap();
+    assert_eq!(sftp.canonicalize(".").await.unwrap(), "/home/alice");
 }
 
 #[tokio::test]

@@ -4,14 +4,14 @@
 use eframe::egui::{
     self, Color32, EventFilter, FontId, Key as EguiKey, Pos2, Rect, Sense, Ui, Vec2,
 };
-use annulus_session::{HostKeyQuestion, Program, Session, SessionEvent};
+use annulus_session::{Program, Session, SessionEvent};
 use annulus_term::alacritty_terminal::term::TermMode;
 use annulus_term::alacritty_terminal::vte::ansi::Rgb;
 use annulus_term::keys::{self, Key, Mods};
 use annulus_term::select::SelectionKind;
 use annulus_term::{Screen, Size};
-use annulus_ui::secret::{SecretText, secret_field};
-use zeroize::Zeroizing;
+
+use crate::ssh_dialogs::SshDialogs;
 
 /// Default font size of terminal text, in points.
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -29,11 +29,7 @@ pub struct TerminalTab {
     exited: bool,
     size: Option<(Size, u16, u16)>,
     focused_once: bool,
-    /// An unknown host key waiting for the user's decision.
-    host_key: Option<HostKeyQuestion>,
-    /// A password request (user, host) waiting for the user.
-    password_for: Option<(String, String)>,
-    password: SecretText,
+    dialogs: SshDialogs,
 }
 
 impl TerminalTab {
@@ -48,9 +44,7 @@ impl TerminalTab {
             exited: false,
             size: None,
             focused_once: false,
-            host_key: None,
-            password_for: None,
-            password: SecretText::new(),
+            dialogs: SshDialogs::default(),
         }
     }
 
@@ -71,8 +65,9 @@ impl TerminalTab {
                         egui::UserAttentionType::Informational,
                     ));
                 }
-                SessionEvent::HostKey(question) => self.host_key = Some(question),
-                SessionEvent::Password { user, host } => self.password_for = Some((user, host)),
+                SessionEvent::HostKey(_) | SessionEvent::Password { .. } => {
+                    self.dialogs.take(event);
+                }
                 SessionEvent::Failed(message) => self.failed = Some(message),
                 SessionEvent::Title(_) => {}
             }
@@ -179,80 +174,13 @@ impl TerminalTab {
             );
         }
     }
-}
 
-impl TerminalTab {
-    /// Shows the host-key and password dialogs while the session waits for them. Returns
-    /// whether one is open (the terminal then takes no keys).
+    /// Shows a pending SSH question; true while one is open.
     fn prompts(&mut self, ctx: &egui::Context) -> bool {
-        let Some(session) = &self.session else {
-            return false;
-        };
-        if let Some(question) = self.host_key.clone() {
-            let mut answer = None;
-            egui::Window::new("Unknown host")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.label(format!(
-                        "This is the first connection to {}.",
-                        question.host
-                    ));
-                    ui.label("Check that the fingerprint matches the server before trusting it:");
-                    ui.add_space(6.0);
-                    ui.monospace(format!("{}  {}", question.algorithm, question.fingerprint));
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Trust and connect").clicked() {
-                            answer = Some(true);
-                        }
-                        if ui.button("Cancel").clicked()
-                            || ui.input(|input| input.key_pressed(EguiKey::Escape))
-                        {
-                            answer = Some(false);
-                        }
-                    });
-                });
-            if let Some(trust) = answer {
-                session.answer_host_key(trust);
-                self.host_key = None;
-            }
-            return true;
+        match &self.session {
+            Some(session) => self.dialogs.show(ctx, session.answers()),
+            None => false,
         }
-        if let Some((user, host)) = self.password_for.clone() {
-            let mut submit = None;
-            egui::Window::new("Password")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.label(format!("Password for {user}@{host}"));
-                    let field = secret_field(ui, &mut self.password, "Password");
-                    field.request_focus();
-                    ui.horizontal(|ui| {
-                        let enter = field.lost_focus()
-                            && ui.input(|input| input.key_pressed(EguiKey::Enter));
-                        if ui.button("Connect").clicked() || enter {
-                            submit = Some(true);
-                        }
-                        if ui.button("Cancel").clicked()
-                            || ui.input(|input| input.key_pressed(EguiKey::Escape))
-                        {
-                            submit = Some(false);
-                        }
-                    });
-                });
-            if let Some(connect) = submit {
-                let password = connect.then(|| Zeroizing::new(self.password.expose().to_owned()));
-                // The field's copy is wiped either way; the session gets its own zeroizing copy.
-                egui::TextBuffer::clear(&mut self.password);
-                session.answer_password(password);
-                self.password_for = None;
-            }
-            return true;
-        }
-        false
     }
 }
 

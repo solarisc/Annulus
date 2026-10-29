@@ -14,6 +14,8 @@ use annulus_vault::vault::Vault;
 pub enum Request {
     /// Open a terminal tab titled `.0` running `.1`.
     Open(String, Program),
+    /// Open an SFTP tab titled `.0` for the SSH connection in `.1`.
+    Sftp(String, Program),
 }
 
 /// The editor's working copy; fields are text until saved.
@@ -141,6 +143,9 @@ impl HostsScreen {
                 match host_row(ui, host, palette) {
                     RowAction::Connect => {
                         request = Some(Request::Open(host.label.clone(), self.connect_host(host)));
+                    }
+                    RowAction::Sftp => {
+                        request = Some(Request::Sftp(host.label.clone(), self.connect_host(host)));
                     }
                     RowAction::Edit => {
                         self.editor = Some(Draft {
@@ -304,6 +309,7 @@ impl HostsScreen {
 enum RowAction {
     None,
     Connect,
+    Sftp,
     Edit,
 }
 
@@ -352,6 +358,14 @@ fn host_row(ui: &mut Ui, host: &Host, palette: &Palette) -> RowAction {
     );
     if ui.put(edit_rect, Button::new("Edit")).clicked() {
         return RowAction::Edit;
+    }
+    let sftp_rect = edit_rect.translate(egui::vec2(-68.0, 0.0));
+    if ui
+        .put(sftp_rect, Button::new("SFTP"))
+        .on_hover_text("Browse this host's files")
+        .clicked()
+    {
+        return RowAction::Sftp;
     }
     if response.clicked()
         || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
@@ -411,7 +425,7 @@ mod tests {
                 title.as_str(),
                 format!("{}@{}:{}", target.user, target.host, target.port),
             ),
-            Request::Open(title, _) => (title.as_str(), String::new()),
+            Request::Open(title, _) | Request::Sftp(title, _) => (title.as_str(), String::new()),
         }
     }
 
@@ -432,7 +446,7 @@ mod tests {
         screen.vault.upsert_host(host).unwrap();
         let password_of = |request: Request| match request {
             Request::Open(_, Program::Ssh { password, .. }) => password,
-            Request::Open(..) => None,
+            Request::Open(..) | Request::Sftp(..) => None,
         };
         assert_eq!(
             password_of(screen.quick_connect("db-pw")),

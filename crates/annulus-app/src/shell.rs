@@ -9,6 +9,7 @@ use annulus_vault::vault::Vault;
 
 use crate::hosts_screen::{HostsScreen, Request};
 use crate::lock_screen::LockScreen;
+use crate::sftp_view::SftpTab;
 use crate::terminal_view::{DEFAULT_FONT_SIZE, FONT_SIZES, TerminalTab};
 
 /// A section of the vault's left navigation (F-APP-003).
@@ -75,6 +76,8 @@ pub enum Tab {
     Vault,
     /// A terminal: a local shell or an SSH session.
     Terminal(Box<TerminalTab>),
+    /// A file browser on a host.
+    Sftp(Box<SftpTab>),
 }
 
 impl Tab {
@@ -84,6 +87,7 @@ impl Tab {
         match self {
             Tab::Vault => "Vault",
             Tab::Terminal(terminal) => &terminal.title,
+            Tab::Sftp(sftp) => &sftp.title,
         }
     }
 }
@@ -143,6 +147,21 @@ impl Shell {
         self.active_tab = self.tabs.len() - 1;
     }
 
+    /// Opens an SFTP tab titled `title` for the SSH connection `program`, in front.
+    pub fn open_sftp(&mut self, title: impl Into<String>, program: Program) {
+        let title = title.into();
+        let tab = match program {
+            Program::Ssh {
+                target,
+                files,
+                password,
+            } => SftpTab::new(title, target, files, password),
+            _ => SftpTab::unavailable(title, "SFTP needs a host Annulus can connect to itself."),
+        };
+        self.tabs.push(Tab::Sftp(Box::new(tab)));
+        self.active_tab = self.tabs.len() - 1;
+    }
+
     /// Closes tab `index`; the vault tab cannot be closed. The tab to its left comes forward
     /// if the closed tab was in front or before it.
     pub fn close_tab(&mut self, index: usize) {
@@ -181,6 +200,7 @@ impl Shell {
         self.shortcuts(ui);
         self.auto_lock(ui.ctx());
         egui::Panel::top("tabs").show(ui, |ui| self.tab_strip(ui));
+        let palette = self.palette();
         if matches!(self.tabs.get(self.active_tab), Some(Tab::Vault)) {
             egui::Panel::left("vault-nav")
                 .resizable(false)
@@ -193,6 +213,8 @@ impl Shell {
             egui::CentralPanel::default()
                 .frame(frame)
                 .show(ui, |ui| terminal.ui(ui, font_size));
+        } else if let Some(Tab::Sftp(sftp)) = self.tabs.get_mut(self.active_tab) {
+            egui::CentralPanel::default().show(ui, |ui| sftp.ui(ui, &palette));
         }
     }
 
@@ -359,8 +381,10 @@ impl Shell {
             Section::Hosts => {
                 let palette = self.palette();
                 if let Some(hosts) = &mut self.hosts {
-                    if let Some(Request::Open(title, program)) = hosts.ui(ui, &palette) {
-                        self.open_terminal(title, program);
+                    match hosts.ui(ui, &palette) {
+                        Some(Request::Open(title, program)) => self.open_terminal(title, program),
+                        Some(Request::Sftp(title, program)) => self.open_sftp(title, program),
+                        None => {}
                     }
                 } else if let Some(vault) =
                     self.lock.ui(ui, &self.data_dir.join(VAULT_FILE), &palette)

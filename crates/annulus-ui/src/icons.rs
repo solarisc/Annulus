@@ -103,6 +103,11 @@ icons! {
         Move(3.4, 3.4), Line(4.8, 4.8), Move(11.2, 11.2), Line(12.6, 12.6),
         Move(12.6, 3.4), Line(11.2, 4.8), Move(4.8, 11.2), Line(3.4, 12.6),
     ];
+    /// SFTP files.
+    FILE = 15, "file", [
+        Move(3.5, 1.5), Line(9.5, 1.5), Line(12.5, 4.5), Line(12.5, 14.5), Line(3.5, 14.5), Close,
+        Move(9.5, 1.5), Line(9.5, 4.5), Line(12.5, 4.5),
+    ];
 }
 
 /// The geometry of `id`, or `None` for an unknown id.

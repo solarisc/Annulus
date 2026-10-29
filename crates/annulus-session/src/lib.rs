@@ -33,9 +33,9 @@ pub enum SessionEvent {
     Bell,
     /// The program exited or the connection closed; the tab shows its last output.
     Exited,
-    /// SSH: the server's key is new. Answer with [`Session::answer_host_key`].
+    /// SSH: the server's key is new. Answer with [`Answers::host_key`].
     HostKey(HostKeyQuestion),
-    /// SSH: a password is needed for `user@host`. Answer with [`Session::answer_password`].
+    /// SSH: a password is needed for `user@host`. Answer with [`Answers::password`].
     Password {
         /// Login name.
         user: String,
@@ -87,6 +87,12 @@ impl Password {
     #[must_use]
     pub fn new(value: &str) -> Self {
         Self(Zeroizing::new(value.to_owned()))
+    }
+
+    /// The password, still wiped on drop.
+    #[must_use]
+    pub fn into_secret(self) -> Zeroizing<String> {
+        self.0
     }
 }
 
@@ -210,24 +216,70 @@ struct Pending {
     password: Option<tokio::sync::oneshot::Sender<Option<Zeroizing<String>>>>,
 }
 
-/// Asks the UI through session events and waits for its answer. A saved password is
-/// offered once before asking.
-struct UiPrompt {
-    listener: Listener,
-    pending: Arc<Mutex<Pending>>,
-    saved: Mutex<Option<Zeroizing<String>>>,
+/// Where the UI answers the questions an [`AskUi`] asked.
+#[derive(Clone, Default)]
+pub struct Answers(Arc<Mutex<Pending>>);
+
+impl Answers {
+    /// Answers [`SessionEvent::HostKey`]: trust the new key, or stop.
+    pub fn host_key(&self, trust: bool) {
+        if let Some(reply) = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.host_key.take())
+        {
+            let _ = reply.send(trust);
+        }
+    }
+
+    /// Answers [`SessionEvent::Password`]; `None` gives up.
+    pub fn password(&self, password: Option<Zeroizing<String>>) {
+        if let Some(reply) = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.password.take())
+        {
+            let _ = reply.send(password);
+        }
+    }
 }
 
-impl Prompt for UiPrompt {
+/// A [`Prompt`] that asks the UI with [`SessionEvent::HostKey`] and
+/// [`SessionEvent::Password`] and waits for the [`Answers`]. A saved password is offered
+/// once before asking.
+pub struct AskUi {
+    answers: Answers,
+    saved: Mutex<Option<Zeroizing<String>>>,
+    notify: Box<dyn Fn(SessionEvent) + Send + Sync>,
+}
+
+impl AskUi {
+    /// Asks through `notify`; the UI replies on `answers`.
+    pub fn new(
+        answers: Answers,
+        saved_password: Option<Zeroizing<String>>,
+        notify: impl Fn(SessionEvent) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            answers,
+            saved: Mutex::new(saved_password),
+            notify: Box::new(notify),
+        }
+    }
+}
+
+impl Prompt for AskUi {
     fn trust_new_host_key(
         &self,
         question: HostKeyQuestion,
     ) -> tokio::sync::oneshot::Receiver<bool> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Ok(mut pending) = self.pending.lock() {
+        if let Ok(mut pending) = self.answers.0.lock() {
             pending.host_key = Some(tx);
         }
-        self.listener.send(SessionEvent::HostKey(question));
+        (self.notify)(SessionEvent::HostKey(question));
         rx
     }
 
@@ -241,10 +293,10 @@ impl Prompt for UiPrompt {
             let _ = tx.send(Some(saved));
             return rx;
         }
-        if let Ok(mut pending) = self.pending.lock() {
+        if let Ok(mut pending) = self.answers.0.lock() {
             pending.password = Some(tx);
         }
-        self.listener.send(SessionEvent::Password { user, host });
+        (self.notify)(SessionEvent::Password { user, host });
         rx
     }
 }
@@ -254,7 +306,7 @@ pub struct Session {
     term: Arc<FairMutex<Term<Listener>>>,
     backend: Backend,
     events: Receiver<SessionEvent>,
-    pending: Arc<Mutex<Pending>>,
+    answers: Answers,
     palette: Palette,
 }
 
@@ -279,7 +331,7 @@ impl Session {
             reply: Arc::new(Mutex::new(None)),
         };
         let term = Arc::new(FairMutex::new(Term::new(config(), &size, listener.clone())));
-        let pending = Arc::new(Mutex::new(Pending::default()));
+        let answers = Answers::default();
         let backend = match program {
             Program::Ssh {
                 target,
@@ -292,7 +344,7 @@ impl Session {
                 size,
                 term.clone(),
                 listener.clone(),
-                pending.clone(),
+                answers.clone(),
             )?),
             Program::DefaultShell | Program::Command { .. } => {
                 let shell = match program {
@@ -323,7 +375,7 @@ impl Session {
             term,
             backend,
             events,
-            pending,
+            answers,
             palette: Palette::annulus_dark(),
         })
     }
@@ -353,28 +405,10 @@ impl Session {
         }
     }
 
-    /// Answers [`SessionEvent::HostKey`]: trust the new key, or stop.
-    pub fn answer_host_key(&self, trust: bool) {
-        if let Some(reply) = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.host_key.take())
-        {
-            let _ = reply.send(trust);
-        }
-    }
-
-    /// Answers [`SessionEvent::Password`]; `None` gives up.
-    pub fn answer_password(&self, password: Option<Zeroizing<String>>) {
-        if let Some(reply) = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.password.take())
-        {
-            let _ = reply.send(password);
-        }
+    /// Where the UI answers [`SessionEvent::HostKey`] and [`SessionEvent::Password`].
+    #[must_use]
+    pub fn answers(&self) -> &Answers {
+        &self.answers
     }
 
     /// Scrolls the view through the scrollback by `lines` (positive scrolls back in time).
@@ -445,7 +479,7 @@ fn spawn_ssh(
     size: Size,
     term: Arc<FairMutex<Term<Listener>>>,
     listener: Listener,
-    pending: Arc<Mutex<Pending>>,
+    answers: Answers,
 ) -> std::io::Result<tokio::sync::mpsc::UnboundedSender<SshInput>> {
     let (input_tx, mut input) = tokio::sync::mpsc::unbounded_channel();
     let replies = input_tx.clone();
@@ -461,11 +495,10 @@ fn spawn_ssh(
         .name("ssh session".into())
         .spawn(move || {
             runtime.block_on(async move {
-                let prompt = Arc::new(UiPrompt {
-                    listener: listener.clone(),
-                    pending,
-                    saved: Mutex::new(saved_password),
-                });
+                let notifier = listener.clone();
+                let prompt = Arc::new(AskUi::new(answers, saved_password, move |event| {
+                    notifier.send(event);
+                }));
                 let connection = match annulus_ssh::connect(
                     &target,
                     &files.known_hosts,
