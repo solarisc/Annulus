@@ -134,10 +134,37 @@ struct Checker {
     known_hosts: PathBuf,
     prompt: Arc<dyn Prompt>,
     changed: Arc<std::sync::Mutex<Option<String>>>,
+    /// Where connections to each remote-forwarded port go.
+    remote: forward::RemoteMap,
 }
 
 impl client::Handler for Checker {
     type Error = russh::Error;
+
+    /// A connection arrived at a port the server listens on for a remote rule: carry it to
+    /// the rule's destination. Ports no rule asked for are refused (by dropping `reply`).
+    #[allow(clippy::too_many_arguments)] // The trait's signature.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let target = self
+            .remote
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&connected_port).cloned());
+        if let Some(target) = target {
+            reply.accept().await;
+            tokio::spawn(forward::carry_remote(channel, target));
+        }
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -195,6 +222,7 @@ fn known_hosts_name(host: &str, port: u16) -> String {
 /// An authenticated connection.
 pub struct Connection {
     handle: Handle<Checker>,
+    remote: forward::RemoteMap,
 }
 
 /// Connects to `target`, checks its key against `known_hosts`, and logs in: first trying
@@ -214,12 +242,14 @@ pub async fn connect(
         ..client::Config::default()
     });
     let changed = Arc::new(std::sync::Mutex::new(None));
+    let remote = forward::RemoteMap::default();
     let checker = Checker {
         host: target.host.clone(),
         port: target.port,
         known_hosts: known_hosts.to_path_buf(),
         prompt: prompt.clone(),
         changed: changed.clone(),
+        remote: remote.clone(),
     };
     let address = (target.host.as_str(), target.port);
     let mut handle = match client::connect(config, address, checker).await {
@@ -258,7 +288,7 @@ pub async fn connect(
             let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
             tried.push(format!("key {name}"));
             match handle.authenticate_publickey(&target.user, key).await? {
-                AuthResult::Success => return Ok(Connection { handle }),
+                AuthResult::Success => return Ok(Connection { handle, remote }),
                 AuthResult::Failure {
                     remaining_methods, ..
                 } => offered = format!("{remaining_methods:?}"),
@@ -279,7 +309,7 @@ pub async fn connect(
             .authenticate_password(&target.user, password.as_str())
             .await?
         {
-            AuthResult::Success => return Ok(Connection { handle }),
+            AuthResult::Success => return Ok(Connection { handle, remote }),
             AuthResult::Failure {
                 remaining_methods, ..
             } => offered = format!("{remaining_methods:?}"),

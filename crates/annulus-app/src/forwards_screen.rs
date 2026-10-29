@@ -77,15 +77,7 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
             _stop: stop,
         };
     };
-    let forward_rule = match (rule.kind, rule.bind()) {
-        (_, None) => None,
-        (ForwardKind::Local, Some(bind)) => Some(Rule::Local {
-            bind,
-            host: rule.destination_host.trim().to_owned(),
-            port: rule.destination_port,
-        }),
-        (ForwardKind::Dynamic, Some(bind)) => Some(Rule::Dynamic { bind }),
-    };
+    let forward_rule = engine_rule(rule);
     let prompt_answers = answers.clone();
     let thread = std::thread::Builder::new()
         .name("port forward".into())
@@ -144,6 +136,25 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
     }
 }
 
+/// The saved rule as the forwarding engine runs it; `None` if it is not valid.
+fn engine_rule(rule: &PortForward) -> Option<Rule> {
+    match (rule.kind, rule.bind()) {
+        (ForwardKind::Local | ForwardKind::Dynamic, None) => None,
+        (ForwardKind::Local, Some(bind)) => Some(Rule::Local {
+            bind,
+            host: rule.destination_host.trim().to_owned(),
+            port: rule.destination_port,
+        }),
+        (ForwardKind::Dynamic, Some(bind)) => Some(Rule::Dynamic { bind }),
+        (ForwardKind::Remote, _) => Some(Rule::Remote {
+            bind_host: rule.bind_address.trim().to_owned(),
+            bind_port: rule.bind_port,
+            host: rule.destination_host.trim().to_owned(),
+            port: rule.destination_port,
+        }),
+    }
+}
+
 /// The rule being edited, with its ports as text until saved.
 struct Draft {
     rule: PortForward,
@@ -176,7 +187,7 @@ impl Draft {
         let mut rule = self.rule.clone();
         self.rule.label.trim().clone_into(&mut rule.label);
         rule.bind_port = self.bind_port.trim().parse().unwrap_or(0);
-        rule.destination_port = if rule.kind == ForwardKind::Local {
+        rule.destination_port = if rule.has_destination() {
             self.destination_port.trim().parse().unwrap_or(0)
         } else {
             0
@@ -435,6 +446,7 @@ fn fields(ui: &mut Ui, draft: &mut Draft, host_names: &[(u64, String)]) {
             ui.horizontal(|ui| {
                 ui.radio_value(&mut draft.rule.kind, ForwardKind::Local, "Local");
                 ui.radio_value(&mut draft.rule.kind, ForwardKind::Dynamic, "SOCKS");
+                ui.radio_value(&mut draft.rule.kind, ForwardKind::Remote, "Remote");
             });
             ui.end_row();
             ui.label("Through host");
@@ -450,7 +462,11 @@ fn fields(ui: &mut Ui, draft: &mut Draft, host_names: &[(u64, String)]) {
                     }
                 });
             ui.end_row();
-            ui.label("Listen on");
+            ui.label(if draft.rule.kind == ForwardKind::Remote {
+                "Server listens on"
+            } else {
+                "Listen on"
+            });
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.rule.bind_address).desired_width(110.0),
@@ -463,7 +479,7 @@ fn fields(ui: &mut Ui, draft: &mut Draft, host_names: &[(u64, String)]) {
                 );
             });
             ui.end_row();
-            if draft.rule.kind == ForwardKind::Local {
+            if draft.rule.has_destination() {
                 ui.label("Destination");
                 ui.horizontal(|ui| {
                     ui.add(

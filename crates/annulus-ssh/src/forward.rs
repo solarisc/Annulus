@@ -1,11 +1,15 @@
-//! Port forwarding (F-FWD-001…003): local rules and dynamic (SOCKS5) rules. Each rule
-//! listens on a local address and carries every accepted connection through its own
-//! `direct-tcpip` channel.
+//! Port forwarding (F-FWD-001…003). Local and dynamic (SOCKS5) rules listen on a local
+//! address and carry every accepted connection through its own `direct-tcpip` channel.
+//! Remote rules ask the server to listen and carry each `forwarded-tcpip` channel it opens
+//! to a destination reached from this computer.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use russh::Channel;
+use russh::client::Msg;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -29,16 +33,39 @@ pub enum Rule {
         /// The local address to listen on.
         bind: SocketAddr,
     },
+    /// The server listens on `bind_host:bind_port`; connections there reach `host:port` as
+    /// seen from this computer.
+    Remote {
+        /// The address the server listens on (`localhost` keeps it on the server).
+        bind_host: String,
+        /// The server port; 0 lets the server choose.
+        bind_port: u16,
+        /// The destination host, resolved here.
+        host: String,
+        /// The destination port.
+        port: u16,
+    },
 }
 
-impl Rule {
-    /// The local address the rule listens on.
-    #[must_use]
-    pub fn bind(&self) -> SocketAddr {
-        match self {
-            Rule::Local { bind, .. } | Rule::Dynamic { bind } => *bind,
-        }
+/// Where a remote rule's connections go, with its connection counter.
+#[derive(Clone)]
+pub(crate) struct RemoteTarget {
+    host: String,
+    port: u16,
+    active: Arc<AtomicUsize>,
+}
+
+/// Remote rules of one connection, by the server port they listen on.
+pub(crate) type RemoteMap = Arc<std::sync::Mutex<HashMap<u32, RemoteTarget>>>;
+
+/// Carries one `forwarded-tcpip` channel to its rule's destination.
+pub(crate) async fn carry_remote(channel: Channel<Msg>, target: RemoteTarget) {
+    target.active.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut socket) = TcpStream::connect((target.host.as_str(), target.port)).await {
+        let mut stream = channel.into_stream();
+        let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
     }
+    target.active.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// Why a rule could not start.
@@ -50,21 +77,44 @@ pub enum ForwardError {
     /// The address cannot be listened on (no permission, not a local address, …).
     #[error("cannot listen on {0}: {1}")]
     Bind(SocketAddr, std::io::Error),
+    /// The server refused to listen (port taken, or forwarding disabled in its config).
+    #[error("the server refused to listen on {0}: {1}")]
+    RemoteRefused(String, String),
 }
 
 /// A running rule. Dropping it stops listening; connections already open keep going
 /// until either side closes them.
 pub struct Forward {
-    local: SocketAddr,
+    listening: Listening,
     active: Arc<AtomicUsize>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
+}
+
+/// Where a running rule listens.
+enum Listening {
+    Here(SocketAddr),
+    /// On the server: the cancel request needs the connection, address and port.
+    Server(Arc<Connection>, String, u32),
 }
 
 impl Forward {
-    /// The address actually listened on (the real port when the rule asked for port 0).
+    /// The local address actually listened on (the real port when the rule asked for port
+    /// 0); `None` for remote rules.
     #[must_use]
-    pub fn local(&self) -> SocketAddr {
-        self.local
+    pub fn local(&self) -> Option<SocketAddr> {
+        match self.listening {
+            Listening::Here(address) => Some(address),
+            Listening::Server(..) => None,
+        }
+    }
+
+    /// The port the server listens on, for remote rules.
+    #[must_use]
+    pub fn remote_port(&self) -> Option<u32> {
+        match self.listening {
+            Listening::Here(_) => None,
+            Listening::Server(_, _, port) => Some(port),
+        }
     }
 
     /// Connections currently open through the rule.
@@ -76,7 +126,21 @@ impl Forward {
 
 impl Drop for Forward {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+        if let Listening::Server(connection, address, port) = &self.listening {
+            if let Ok(mut map) = connection.remote.lock() {
+                map.remove(port);
+            }
+            // Ask the server to stop listening; if the runtime is gone, so is the connection.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let (connection, address, port) = (connection.clone(), address.clone(), *port);
+                runtime.spawn(async move {
+                    let _ = connection.handle.cancel_tcpip_forward(address, port).await;
+                });
+            }
+        }
     }
 }
 
@@ -86,7 +150,15 @@ impl Drop for Forward {
 /// # Errors
 /// The local address is in use or cannot be listened on.
 pub async fn start(connection: Arc<Connection>, rule: Rule) -> Result<Forward, ForwardError> {
-    let bind = rule.bind();
+    let bind = match &rule {
+        Rule::Local { bind, .. } | Rule::Dynamic { bind } => *bind,
+        Rule::Remote {
+            bind_host,
+            bind_port,
+            host,
+            port,
+        } => return start_remote(connection, bind_host, *bind_port, host, *port).await,
+    };
     let listener = TcpListener::bind(bind).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::AddrInUse {
             ForwardError::PortInUse(bind)
@@ -111,9 +183,46 @@ pub async fn start(connection: Arc<Connection>, rule: Rule) -> Result<Forward, F
         }
     });
     Ok(Forward {
-        local,
+        listening: Listening::Here(local),
         active,
-        task,
+        task: Some(task),
+    })
+}
+
+async fn start_remote(
+    connection: Arc<Connection>,
+    bind_host: &str,
+    bind_port: u16,
+    host: &str,
+    port: u16,
+) -> Result<Forward, ForwardError> {
+    let place = format!("{bind_host}:{bind_port}");
+    let granted = connection
+        .handle
+        .tcpip_forward(bind_host, u32::from(bind_port))
+        .await
+        .map_err(|error| ForwardError::RemoteRefused(place, error.to_string()))?;
+    // Servers answer 0 when the requested port was used as asked.
+    let server_port = if granted == 0 {
+        u32::from(bind_port)
+    } else {
+        granted
+    };
+    let active = Arc::new(AtomicUsize::new(0));
+    if let Ok(mut map) = connection.remote.lock() {
+        map.insert(
+            server_port,
+            RemoteTarget {
+                host: host.to_owned(),
+                port,
+                active: active.clone(),
+            },
+        );
+    }
+    Ok(Forward {
+        listening: Listening::Server(connection, bind_host.to_owned(), server_port),
+        active,
+        task: None,
     })
 }
 
@@ -126,6 +235,7 @@ async fn carry(
     let (host, port) = match rule {
         Rule::Local { host, port, .. } => (host.clone(), *port),
         Rule::Dynamic { .. } => socks5_request(&mut socket).await?,
+        Rule::Remote { .. } => return Ok(()),
     };
     let channel = connection
         .handle
@@ -141,7 +251,7 @@ async fn carry(
             socket.write_all(&socks5_reply(SOCKS_OK)).await?;
             channel
         }
-        (Ok(channel), Rule::Local { .. }) => channel,
+        (Ok(channel), Rule::Local { .. } | Rule::Remote { .. }) => channel,
         (Err(error), rule) => {
             if matches!(rule, Rule::Dynamic { .. }) {
                 socket.write_all(&socks5_reply(SOCKS_REFUSED)).await?;

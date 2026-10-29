@@ -55,8 +55,8 @@ fn targets_parse_with_defaults() {
 struct TestServer {
     /// Open channels not yet claimed by a shell or the SFTP subsystem.
     channels: Arc<Mutex<HashMap<ChannelId, ServerChannel<ServerMsg>>>>,
-    /// Channels speaking SFTP; their data is not echoed.
-    sftp: Arc<Mutex<HashSet<ChannelId>>>,
+    /// Channels speaking SFTP or carrying a remote forward; their data is not echoed.
+    quiet: Arc<Mutex<HashSet<ChannelId>>>,
 }
 
 /// Answers `realpath` with `/home/alice`; everything else is unsupported.
@@ -118,6 +118,45 @@ impl server::Handler for TestServer {
         Ok(())
     }
 
+    /// Listens on a free localhost port and opens a `forwarded-tcpip` channel per
+    /// connection, as sshd does for `ssh -R`.
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        *port = u32::from(listener.local_addr()?.port());
+        let (handle, address, bound, quiet) = (
+            session.handle(),
+            address.to_owned(),
+            *port,
+            self.quiet.clone(),
+        );
+        tokio::spawn(async move {
+            while let Ok((mut socket, peer)) = listener.accept().await {
+                let Ok(channel) = handle
+                    .channel_open_forwarded_tcpip(
+                        address.clone(),
+                        bound,
+                        peer.ip().to_string(),
+                        u32::from(peer.port()),
+                    )
+                    .await
+                else {
+                    break;
+                };
+                quiet.lock().unwrap().insert(channel.id());
+                tokio::spawn(async move {
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+                });
+            }
+        });
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments)] // The trait's signature.
     async fn pty_request(
         &mut self,
@@ -152,7 +191,7 @@ impl server::Handler for TestServer {
         let claimed = self.channels.lock().unwrap().remove(&channel);
         match claimed {
             Some(stream) if name == "sftp" => {
-                self.sftp.lock().unwrap().insert(channel);
+                self.quiet.lock().unwrap().insert(channel);
                 session.channel_success(channel)?;
                 russh_sftp::server::run(stream.into_stream(), HomeOnly).await;
                 Ok(())
@@ -167,7 +206,7 @@ impl server::Handler for TestServer {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.sftp.lock().unwrap().contains(&channel) {
+        if self.quiet.lock().unwrap().contains(&channel) {
             return Ok(());
         }
         session.data(channel, data.to_vec())
@@ -314,7 +353,9 @@ async fn local_and_socks_forwards_carry_bytes_and_a_busy_port_is_reported() {
     )
     .await
     .unwrap();
-    let mut client = tokio::net::TcpStream::connect(local.local()).await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(local.local().unwrap())
+        .await
+        .unwrap();
     client.write_all(b"ping").await.unwrap();
     let mut echoed = [0u8; 4];
     client.read_exact(&mut echoed).await.unwrap();
@@ -324,7 +365,7 @@ async fn local_and_socks_forwards_carry_bytes_and_a_busy_port_is_reported() {
     let busy = forward::start(
         connection.clone(),
         forward::Rule::Dynamic {
-            bind: local.local(),
+            bind: local.local().unwrap(),
         },
     )
     .await;
@@ -333,7 +374,9 @@ async fn local_and_socks_forwards_carry_bytes_and_a_busy_port_is_reported() {
     let socks = forward::start(connection, forward::Rule::Dynamic { bind: any_port })
         .await
         .unwrap();
-    let mut client = tokio::net::TcpStream::connect(socks.local()).await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(socks.local().unwrap())
+        .await
+        .unwrap();
     client
         .write_all(&[5, 1, 0, 5, 1, 0, 3, 4, b'h', b'o', b's', b't', 0, 80])
         .await
@@ -345,6 +388,53 @@ async fn local_and_socks_forwards_carry_bytes_and_a_busy_port_is_reported() {
     client.write_all(b"pong").await.unwrap();
     client.read_exact(&mut echoed).await.unwrap();
     assert_eq!(&echoed, b"pong");
+}
+
+#[tokio::test]
+async fn a_remote_forward_reaches_a_destination_on_this_side() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // The destination: an echo service only this side can reach.
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = echo.accept().await {
+            tokio::spawn(async move {
+                let (mut reader, mut writer) = socket.split();
+                let _ = tokio::io::copy(&mut reader, &mut writer).await;
+            });
+        }
+    });
+    let port = serve(new_key()).await;
+    let script = Script::new(true, &["secret"]);
+    let connection = Arc::new(
+        connect(&target(port, "alice"), &known_hosts("remote"), None, script)
+            .await
+            .unwrap(),
+    );
+    let remote = forward::start(
+        connection,
+        forward::Rule::Remote {
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            host: "127.0.0.1".into(),
+            port: echo_port,
+        },
+    )
+    .await
+    .unwrap();
+    let server_port = u16::try_from(remote.remote_port().unwrap()).unwrap();
+    assert_eq!(remote.local(), None);
+
+    // A client of the server's port reaches the echo service through the tunnel.
+    let mut client = tokio::net::TcpStream::connect(("127.0.0.1", server_port))
+        .await
+        .unwrap();
+    client.write_all(b"remote").await.unwrap();
+    let mut echoed = [0u8; 6];
+    client.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"remote");
+    assert_eq!(remote.connections(), 1);
 }
 
 #[tokio::test]

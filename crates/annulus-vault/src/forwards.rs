@@ -14,6 +14,8 @@ pub enum ForwardKind {
     Local,
     /// A local SOCKS5 proxy; each client names its destination.
     Dynamic,
+    /// The server listens; its connections reach a destination as seen from this computer.
+    Remote,
 }
 
 /// One port-forwarding rule.
@@ -28,15 +30,17 @@ pub struct PortForward {
     /// Local or dynamic.
     #[serde(default)]
     pub kind: ForwardKind,
-    /// The local address to listen on; loopback unless the user opens it up.
+    /// The address to listen on: local for local and SOCKS rules, on the server for remote
+    /// rules. Loopback unless the user opens it up.
     #[serde(default = "loopback")]
     pub bind_address: String,
-    /// The local port.
+    /// The port to listen on.
     pub bind_port: u16,
-    /// Local rules: the destination host, resolved by the server.
+    /// Local rules: the destination host, resolved by the server. Remote rules: resolved
+    /// here.
     #[serde(default)]
     pub destination_host: String,
-    /// Local rules: the destination port.
+    /// Local and remote rules: the destination port.
     #[serde(default)]
     pub destination_port: u16,
     /// Start the rule when the vault is unlocked (F-FWD-004).
@@ -70,22 +74,35 @@ impl PortForward {
     pub fn problem(&self) -> Option<&'static str> {
         if self.label.trim().is_empty() {
             Some("Give the rule a name.")
-        } else if self.bind_address.trim().parse::<IpAddr>().is_err() {
+        } else if self.kind == ForwardKind::Remote && self.bind_address.trim().is_empty() {
+            Some("Enter the address the server listens on, such as localhost.")
+        } else if self.kind != ForwardKind::Remote
+            && self.bind_address.trim().parse::<IpAddr>().is_err()
+        {
             Some("The bind address must be an IP address, such as 127.0.0.1.")
         } else if self.bind_port == 0 {
-            Some("Choose a local port from 1 to 65535.")
-        } else if self.kind == ForwardKind::Local && self.destination_host.trim().is_empty() {
+            Some("Choose a port to listen on, from 1 to 65535.")
+        } else if self.has_destination() && self.destination_host.trim().is_empty() {
             Some("Enter the destination host.")
-        } else if self.kind == ForwardKind::Local && self.destination_port == 0 {
+        } else if self.has_destination() && self.destination_port == 0 {
             Some("Choose a destination port from 1 to 65535.")
         } else {
             None
         }
     }
 
-    /// The local address to listen on, if the rule is valid.
+    /// Whether the rule has a fixed destination (all but SOCKS rules).
+    #[must_use]
+    pub fn has_destination(&self) -> bool {
+        self.kind != ForwardKind::Dynamic
+    }
+
+    /// The local address to listen on, if the rule listens here and is valid.
     #[must_use]
     pub fn bind(&self) -> Option<std::net::SocketAddr> {
+        if self.kind == ForwardKind::Remote {
+            return None;
+        }
         let ip: IpAddr = self.bind_address.trim().parse().ok()?;
         Some(std::net::SocketAddr::new(ip, self.bind_port))
     }
@@ -104,13 +121,26 @@ impl PortForward {
                 self.destination_port
             ),
             ForwardKind::Dynamic => format!("SOCKS on {bind}"),
+            ForwardKind::Remote => format!(
+                "server {bind} \u{2192} {}:{} here",
+                self.destination_host.trim(),
+                self.destination_port
+            ),
         }
     }
 
-    /// Whether the rule listens beyond this computer.
+    /// Whether the rule listens beyond one computer: this one for local and SOCKS rules,
+    /// the server for remote rules.
     #[must_use]
     pub fn is_exposed(&self) -> bool {
-        self.bind().is_some_and(|bind| !bind.ip().is_loopback())
+        match self.kind {
+            ForwardKind::Remote => {
+                let address = self.bind_address.trim();
+                !(address.eq_ignore_ascii_case("localhost")
+                    || address.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+            }
+            _ => self.bind().is_some_and(|bind| !bind.ip().is_loopback()),
+        }
     }
 }
 
@@ -187,6 +217,31 @@ mod tests {
         };
         assert_eq!(open.summary(), "SOCKS on 0.0.0.0:1080");
         assert!(open.is_exposed());
+        let remote = PortForward {
+            kind: ForwardKind::Remote,
+            bind_address: "localhost".into(),
+            bind_port: 9000,
+            destination_host: "127.0.0.1".into(),
+            destination_port: 3000,
+            ..rule()
+        };
+        assert_eq!(
+            remote.problem(),
+            None,
+            "remote rules may name the server's address"
+        );
+        assert_eq!(
+            remote.summary(),
+            "server localhost:9000 \u{2192} 127.0.0.1:3000 here"
+        );
+        assert!(!remote.is_exposed());
+        assert!(
+            PortForward {
+                bind_address: "*".into(),
+                ..remote
+            }
+            .is_exposed()
+        );
         let v6 = PortForward {
             bind_address: "::1".into(),
             ..rule()
