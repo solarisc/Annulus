@@ -2858,6 +2858,45 @@ fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
         "the keyboard stays with the pane typed in"
     );
     assert_eq!(layout_faults(&output.zones, viewport), Vec::<String>::new());
+    // Ctrl+Alt+Shift+B leaves the focused pane (bastion) out by keyboard; another pane typed
+    // in then does not reach it, and the same keys take it back.
+    let leave_out = Modifiers {
+        alt: true,
+        ..Modifiers::CTRL_SHIFT
+    };
+    let into = |output: &FrameOutput, pane: u64| {
+        let zone = output
+            .zones
+            .iter()
+            .find(|zone| zone.id == terminal(pane))
+            .unwrap();
+        vec![
+            Event::PointerMoved(zone.rect.center()),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ]
+    };
+    output = step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Char('b'), leave_out)],
+        5.5,
+    );
+    output = step(&mut app, &mut state, &into(&output, 1), 5.6);
+    assert_eq!(front_panes(&app).receivers(), [3], "bastion is left out");
+    step(&mut app, &mut state, &into(&output, 4), 5.7);
+    output = step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Char('b'), leave_out)],
+        5.8,
+    );
+    step(&mut app, &mut state, &into(&output, 1), 5.9);
+    assert_eq!(front_panes(&app).receivers(), [3, 4], "back in");
+    assert!(
+        front_panes(&app).broadcasting(),
+        "broadcast itself stays on"
+    );
     // Ctrl+Shift+B stops it.
     step(
         &mut app,

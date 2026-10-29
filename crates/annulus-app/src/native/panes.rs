@@ -455,6 +455,16 @@ impl Panes {
         self.broadcast = !self.broadcast && self.all.len() > 1;
     }
 
+    /// Leaves the focused pane out of broadcast, or takes it back in (Ctrl+Alt+Shift+B): the
+    /// keyboard's way to its switch, which a focused terminal otherwise keeps out of Tab's
+    /// reach.
+    pub fn toggle_left_out(&mut self) {
+        let focused = self.focused;
+        if let Some(pane) = self.all.iter_mut().find(|pane| pane.id == focused) {
+            pane.skip_broadcast = !pane.skip_broadcast;
+        }
+    }
+
     /// Whether typing in the focused pane goes to the others.
     #[must_use]
     pub fn broadcasting(&self) -> bool {

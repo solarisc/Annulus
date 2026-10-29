@@ -432,6 +432,13 @@ impl NativeApp {
         if ui.key(Key::Char('b'), Modifiers::CTRL_SHIFT) {
             panes.toggle_broadcast();
         }
+        let ctrl_alt_shift = Modifiers {
+            alt: true,
+            ..Modifiers::CTRL_SHIFT
+        };
+        if ui.key(Key::Char('b'), ctrl_alt_shift) {
+            panes.toggle_left_out();
+        }
         if ui.key(Key::Char('m'), Modifiers::CTRL_SHIFT) {
             panes.toggle_focus_mode();
         }
