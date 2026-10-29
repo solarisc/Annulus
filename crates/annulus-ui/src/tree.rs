@@ -9,8 +9,10 @@ use std::ops::{BitOr, BitOrAssign};
 
 use crate::display_list::{DisplayList, Op};
 use crate::geometry::{Color, Rect};
+use annulus_config::tokens::{self, Palette, Rgb};
+
 use crate::style::Style;
-use crate::widget::Widget;
+use crate::widget::{Action, PaintCx, Widget, WidgetState};
 
 /// A handle to a node. It stays valid until the node is removed, and never refers to another
 /// node afterwards.
@@ -103,6 +105,12 @@ pub struct Tree {
     pub(crate) focus_visible: bool,
     /// The node that handled a pointer press and receives pointer events until release.
     pub(crate) captured: Option<NodeId>,
+    /// The node under the pointer.
+    pub(crate) hovered: Option<NodeId>,
+    /// Actions widgets reported since the app last took them.
+    pub(crate) actions: Vec<(NodeId, Action)>,
+    /// The active theme's colors.
+    palette: Palette,
 }
 
 impl Tree {
@@ -120,6 +128,9 @@ impl Tree {
             focused: None,
             focus_visible: false,
             captured: None,
+            hovered: None,
+            actions: Vec::new(),
+            palette: tokens::DARK,
         };
         tree.root = tree.allocate(root, None);
         tree
@@ -305,6 +316,28 @@ impl Tree {
         self.damage
     }
 
+    /// Switches the theme; everything repaints.
+    pub fn set_palette(&mut self, palette: Palette) {
+        if palette != self.palette {
+            self.palette = palette;
+            let root = self.root;
+            let _ = self.mark_dirty(root, Dirty::PAINT);
+            self.damage = self.bounds(root).unwrap_or_default();
+        }
+    }
+
+    /// The node under the pointer, if it still exists.
+    #[must_use]
+    pub fn hovered(&self) -> Option<NodeId> {
+        self.hovered.filter(|id| self.contains(*id))
+    }
+
+    /// The actions widgets reported since the last call, in order, with the node each came
+    /// from. The app's view models act on them.
+    pub fn take_actions(&mut self) -> Vec<(NodeId, Action)> {
+        std::mem::take(&mut self.actions)
+    }
+
     /// Paints the whole tree, parents before children, and clears every paint bit and the
     /// damage. Backends redraw only [`Self::damage`] from the result.
     ///
@@ -322,10 +355,24 @@ impl Tree {
             return;
         };
         node.dirty = Dirty(node.dirty.0 & !Dirty::PAINT.0);
-        node.widget.paint(node.bounds, list);
         let (bounds, clips) = (node.bounds, node.style.scroll);
-        if self.focus_visible && self.focused == Some(id) {
-            list.push(focus_ring(bounds));
+        let focused = self.focused == Some(id);
+        let state = WidgetState {
+            hovered: self.hovered == Some(id),
+            pressed: self.captured == Some(id),
+            focused,
+            focus_visible: focused && self.focus_visible,
+        };
+        let cx = PaintCx {
+            bounds,
+            palette: &self.palette,
+            state,
+        };
+        if let Some(node) = self.node(id) {
+            node.widget.paint(&cx, list);
+        }
+        if state.focus_visible {
+            list.push(focus_ring(bounds, self.palette.accent));
         }
         let (overlays, flow) = self.split_children(id);
         if clips {
@@ -406,9 +453,10 @@ impl Tree {
     }
 }
 
-/// The ring drawn around the focused widget after keyboard navigation (UI-SPEC §Accessibility).
-fn focus_ring(bounds: Rect) -> Op {
-    const WIDTH: f32 = 2.0;
+/// The ring drawn around the focused widget after keyboard navigation (UI-SPEC §8:
+/// accent, 2 DIPs, offset 2 DIPs).
+fn focus_ring(bounds: Rect, accent: Rgb) -> Op {
+    const WIDTH: f32 = tokens::metrics::FOCUS_RING_WIDTH;
     Op::Border {
         rect: Rect::new(
             bounds.origin.x - WIDTH,
@@ -418,8 +466,7 @@ fn focus_ring(bounds: Rect) -> Op {
         ),
         radius: WIDTH,
         width: WIDTH,
-        // TODO: take the color from the focus-ring design token.
-        color: Color::rgb(0x3B, 0x82, 0xF6),
+        color: Color::rgb(accent.r, accent.g, accent.b),
     }
 }
 
@@ -435,9 +482,9 @@ mod tests {
             "swatch"
         }
 
-        fn paint(&self, bounds: Rect, list: &mut DisplayList) {
+        fn paint(&self, cx: &PaintCx<'_>, list: &mut DisplayList) {
             list.push(Op::Rect {
-                rect: bounds,
+                rect: cx.bounds,
                 color: Color::rgb(self.0, 0, 0),
             });
         }

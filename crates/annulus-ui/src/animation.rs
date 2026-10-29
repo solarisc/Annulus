@@ -186,8 +186,7 @@ mod tests {
 
     use super::*;
     use crate::display_list::DisplayList;
-    use crate::geometry::Rect;
-    use crate::widget::Widget;
+    use crate::widget::{PaintCx, Widget};
 
     struct Blank;
 
@@ -196,7 +195,7 @@ mod tests {
             "blank"
         }
 
-        fn paint(&self, _bounds: Rect, _list: &mut DisplayList) {}
+        fn paint(&self, _cx: &PaintCx<'_>, _list: &mut DisplayList) {}
     }
 
     fn setup() -> (Tree, NodeId, Animator) {

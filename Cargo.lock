@@ -699,6 +699,7 @@ version = "0.0.0"
 dependencies = [
  "thiserror",
  "unicode-segmentation",
+ "annulus-config",
  "zeroize",
 ]
 

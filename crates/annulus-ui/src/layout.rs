@@ -7,11 +7,12 @@
 use crate::geometry::{Point, Rect, Size};
 use crate::style::{Align, Axis, Justify, Length, Position, Style};
 use crate::tree::{Dirty, NodeId, Tree};
+use crate::widget::TextMeasure;
 
 impl Tree {
     /// Lays out the tree to fill `viewport`. Does nothing when no node needs layout and the
     /// viewport did not change, so idle frames cost nothing.
-    pub fn layout(&mut self, viewport: Size) {
+    pub fn layout(&mut self, viewport: Size, text: &mut dyn TextMeasure) {
         let root = self.root();
         let needed = self
             .dirty(root)
@@ -26,12 +27,13 @@ impl Tree {
                     origin: Point::default(),
                     size: viewport,
                 },
+                text,
             );
         }
     }
 
     /// The size `id` wants when at most `available` is free.
-    fn measure(&self, id: NodeId, available: Size) -> Size {
+    fn measure(&self, id: NodeId, available: Size, text: &mut dyn TextMeasure) -> Size {
         let Some(node) = self.node(id) else {
             return Size::default();
         };
@@ -51,9 +53,9 @@ impl Tree {
         );
         let flow = self.flow_children(id);
         let content = if flow.is_empty() {
-            node.widget.content_size(inner)
+            node.widget.content_size(inner, text)
         } else {
-            self.measure_children(style, &flow, inner)
+            self.measure_children(style, &flow, inner, text)
         };
         let natural = Size::new(
             content.width + pad.horizontal(),
@@ -74,14 +76,20 @@ impl Tree {
     }
 
     /// The size the flow children of a container with `style` need inside `inner`.
-    fn measure_children(&self, style: &Style, flow: &[NodeId], inner: Size) -> Size {
+    fn measure_children(
+        &self,
+        style: &Style,
+        flow: &[NodeId],
+        inner: Size,
+        text: &mut dyn TextMeasure,
+    ) -> Size {
         let axis = style.axis;
         let mut child_space = inner;
         if style.scroll {
             set_main(axis, &mut child_space, f32::INFINITY);
         }
         if style.wrap {
-            let lines = self.wrap_lines(style, flow, child_space);
+            let lines = self.wrap_lines(style, flow, child_space, text);
             let main = lines.iter().map(|line| line.main).fold(0.0, f32::max);
             let cross =
                 lines.iter().map(|line| line.cross).sum::<f32>() + style.gap * gaps(lines.len());
@@ -90,7 +98,7 @@ impl Tree {
         let mut main = style.gap * gaps(flow.len());
         let mut cross = 0.0_f32;
         for &child in flow {
-            let size = self.measure(child, child_space);
+            let size = self.measure(child, child_space, text);
             let child_style = self.child_style(child);
             main += match main_length(axis, &child_style) {
                 Length::Fill(_) => main_of(axis, child_style.min),
@@ -102,7 +110,7 @@ impl Tree {
     }
 
     /// Gives `id` the rectangle `rect` and lays out its children inside it.
-    fn arrange(&mut self, id: NodeId, rect: Rect) {
+    fn arrange(&mut self, id: NodeId, rect: Rect, text: &mut dyn TextMeasure) {
         if self.set_bounds(id, rect).is_err() {
             return;
         }
@@ -117,12 +125,12 @@ impl Tree {
         );
         let flow = self.flow_children(id);
         let placed = if style.wrap {
-            self.place_wrapped(&style, &flow, inner)
+            self.place_wrapped(&style, &flow, inner, text)
         } else {
-            self.place_line(id, &style, &flow, inner)
+            self.place_line(id, &style, &flow, inner, text)
         };
         for (child, child_rect) in placed {
-            self.arrange(child, child_rect);
+            self.arrange(child, child_rect, text);
         }
         for child in self.children(id).to_vec() {
             let child_style = self.child_style(child);
@@ -131,9 +139,9 @@ impl Tree {
                     non_negative(rect.size.width - x),
                     non_negative(rect.size.height - y),
                 );
-                let size = self.measure(child, space);
+                let size = self.measure(child, space, text);
                 let origin = Point::new(rect.origin.x + x, rect.origin.y + y);
-                self.arrange(child, Rect { origin, size });
+                self.arrange(child, Rect { origin, size }, text);
             }
         }
     }
@@ -146,6 +154,7 @@ impl Tree {
         style: &Style,
         flow: &[NodeId],
         inner: Rect,
+        text: &mut dyn TextMeasure,
     ) -> Vec<(NodeId, Rect)> {
         let axis = style.axis;
         let inner_main = main_of(axis, inner.size);
@@ -161,7 +170,7 @@ impl Tree {
                 (
                     child,
                     self.child_style(child),
-                    self.measure(child, child_space),
+                    self.measure(child, child_space, text),
                 )
             })
             .collect();
@@ -243,11 +252,17 @@ impl Tree {
     }
 
     /// Places flow children in lines that wrap when the next child would not fit.
-    fn place_wrapped(&self, style: &Style, flow: &[NodeId], inner: Rect) -> Vec<(NodeId, Rect)> {
+    fn place_wrapped(
+        &self,
+        style: &Style,
+        flow: &[NodeId],
+        inner: Rect,
+        text: &mut dyn TextMeasure,
+    ) -> Vec<(NodeId, Rect)> {
         let axis = style.axis;
         let mut placed = Vec::with_capacity(flow.len());
         let mut cross_pos = 0.0;
-        for line in self.wrap_lines(style, flow, inner.size) {
+        for line in self.wrap_lines(style, flow, inner.size, text) {
             let mut cursor = 0.0;
             for (child, size) in line.items {
                 let cross = cross_of(axis, size);
@@ -269,12 +284,18 @@ impl Tree {
     }
 
     /// Splits flow children into lines no longer than the inner main size.
-    fn wrap_lines(&self, style: &Style, flow: &[NodeId], inner: Size) -> Vec<Line> {
+    fn wrap_lines(
+        &self,
+        style: &Style,
+        flow: &[NodeId],
+        inner: Size,
+        text: &mut dyn TextMeasure,
+    ) -> Vec<Line> {
         let axis = style.axis;
         let limit = main_of(axis, inner);
         let mut lines: Vec<Line> = Vec::new();
         for &child in flow {
-            let size = self.measure(child, inner);
+            let size = self.measure(child, inner, text);
             let main = main_of(axis, size);
             let starts_new = lines
                 .last()

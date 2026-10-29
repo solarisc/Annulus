@@ -145,6 +145,12 @@ impl TextEngine {
     }
 }
 
+impl annulus_ui::TextMeasure for TextEngine {
+    fn measure(&mut self, text: &str, size: f32, max_width: Option<f32>) -> Size {
+        TextEngine::measure(self, text, size, max_width)
+    }
+}
+
 /// A glyph image: `color` with each pixel's alpha scaled by the glyph's coverage,
 /// premultiplied as tiny-skia expects.
 fn tint(coverage: &[u8], width: u32, height: u32, color: Color) -> Option<Pixmap> {

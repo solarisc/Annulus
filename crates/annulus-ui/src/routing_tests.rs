@@ -3,10 +3,11 @@ use std::rc::Rc;
 
 use super::*;
 use crate::display_list::{DisplayList, Op};
-use crate::geometry::{Rect, Size};
+use crate::geometry::Size;
 use crate::input::{Button, Modifiers};
 use crate::style::{Axis, Length, Style};
-use crate::widget::Widget;
+use crate::test_support::FixedAdvance;
+use crate::widget::{EventCx, PaintCx, Widget};
 
 type Log = Rc<RefCell<Vec<(&'static str, &'static str)>>>;
 
@@ -34,13 +35,13 @@ impl Widget for Probe {
         self.tag
     }
 
-    fn paint(&self, _bounds: Rect, _list: &mut DisplayList) {}
+    fn paint(&self, _cx: &PaintCx<'_>, _list: &mut DisplayList) {}
 
     fn focusable(&self) -> bool {
         self.focusable
     }
 
-    fn handle(&mut self, event: &Event) -> Handled {
+    fn handle(&mut self, event: &Event, _cx: &mut EventCx) -> Handled {
         self.log.borrow_mut().push((self.tag, kind(event)));
         if self.handles.contains(&kind(event)) {
             Handled::Yes
@@ -135,7 +136,7 @@ fn overlay_wins_the_hit_test_over_the_flow_child_below_it() {
             ..Style::default()
         },
     );
-    f.tree.layout(Size::new(100.0, 100.0));
+    f.tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
     assert_eq!(f.tree.hit_test(Point::new(5.0, 5.0)), Some(overlay));
     assert_eq!(f.tree.hit_test(Point::new(50.0, 10.0)), Some(row));
     assert_eq!(f.tree.hit_test(Point::new(50.0, 90.0)), Some(root));
@@ -167,11 +168,11 @@ fn children_scrolled_out_of_view_cannot_be_hit() {
     );
     let first = f.add(list, "first", false, &[], height(80.0));
     let second = f.add(list, "second", false, &[], height(80.0));
-    f.tree.layout(Size::new(100.0, 300.0));
+    f.tree.layout(Size::new(100.0, 300.0), &mut FixedAdvance);
     // The second item ends at y=160, outside the 100-high list.
     assert_eq!(f.tree.hit_test(Point::new(10.0, 150.0)), Some(root));
     f.tree.scroll_by(list, 60.0).unwrap();
-    f.tree.layout(Size::new(100.0, 300.0));
+    f.tree.layout(Size::new(100.0, 300.0), &mut FixedAdvance);
     assert_eq!(f.tree.hit_test(Point::new(10.0, 50.0)), Some(second));
     assert_ne!(f.tree.hit_test(Point::new(10.0, 10.0)), Some(second));
     let _ = first;
@@ -185,7 +186,7 @@ fn tab_walks_focusable_nodes_in_visual_order_and_wraps() {
     let group = f.add(root, "group", false, &[], height(10.0));
     let b = f.add(group, "b", true, &[], height(10.0));
     let c = f.add(root, "c", true, &[], height(10.0));
-    f.tree.layout(Size::new(100.0, 100.0));
+    f.tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
 
     let mut order = Vec::new();
     for _ in 0..4 {
@@ -203,7 +204,7 @@ fn focus_ring_shows_after_keyboard_focus_but_not_after_a_click() {
     let mut f = Fixture::new();
     let root = f.tree.root();
     let button = f.add(root, "button", true, &[], height(20.0));
-    f.tree.layout(Size::new(100.0, 100.0));
+    f.tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
     let has_ring = |tree: &mut Tree| {
         tree.paint()
             .ops()
@@ -250,7 +251,7 @@ fn pressed_widget_keeps_the_pointer_until_release() {
     let mut f = Fixture::new();
     let root = f.tree.root();
     let slider = f.add(root, "slider", false, &["down", "move", "up"], height(10.0));
-    f.tree.layout(Size::new(100.0, 100.0));
+    f.tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
     assert_eq!(f.tree.dispatch(&down(5.0, 5.0)), Some(slider));
     // Dragged far outside the slider: it still gets the moves and the release.
     let far = Point::new(90.0, 90.0);
@@ -285,11 +286,79 @@ fn unhandled_wheel_scrolls_the_nearest_scrolling_ancestor() {
     for tag in ["one", "two", "three"] {
         f.add(list, tag, false, &[], height(80.0));
     }
-    f.tree.layout(Size::new(100.0, 300.0));
+    f.tree.layout(Size::new(100.0, 300.0), &mut FixedAdvance);
     let wheel = Event::Wheel {
         position: Point::new(10.0, 10.0),
         delta: 30.0,
     };
     assert_eq!(f.tree.dispatch(&wheel), Some(list));
     assert_eq!(f.tree.scroll_offset(list), Some(30.0));
+}
+
+/// Reports an activation when released over itself, like a button.
+struct Clicker;
+
+impl Widget for Clicker {
+    fn name(&self) -> &'static str {
+        "clicker"
+    }
+
+    fn paint(&self, _cx: &PaintCx<'_>, _list: &mut DisplayList) {}
+
+    fn handle(&mut self, event: &Event, cx: &mut EventCx) -> Handled {
+        match event {
+            Event::PointerDown { .. } => Handled::Yes,
+            Event::PointerUp { position, .. } if cx.bounds.contains(*position) => {
+                cx.emit(crate::widget::Action::Activate);
+                Handled::Yes
+            }
+            _ => Handled::No,
+        }
+    }
+}
+
+#[test]
+fn actions_are_reported_with_the_node_they_came_from() {
+    let mut f = Fixture::new();
+    let root = f.tree.root();
+    let button = f.tree.append_child(root, Box::new(Clicker)).unwrap();
+    f.tree.set_style(button, height(20.0)).unwrap();
+    f.tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
+    f.tree.dispatch(&down(5.0, 5.0));
+    f.tree.dispatch(&Event::PointerUp {
+        position: Point::new(5.0, 5.0),
+        button: Button::Primary,
+    });
+    assert_eq!(
+        f.tree.take_actions(),
+        [(button, crate::widget::Action::Activate)]
+    );
+    assert_eq!(f.tree.take_actions(), []);
+
+    // Released outside: no activation, as with any native button.
+    f.tree.dispatch(&down(5.0, 5.0));
+    f.tree.dispatch(&Event::PointerUp {
+        position: Point::new(5.0, 90.0),
+        button: Button::Primary,
+    });
+    assert_eq!(f.tree.take_actions(), []);
+}
+
+#[test]
+fn hover_follows_the_pointer_and_repaints_what_it_leaves() {
+    let mut f = Fixture::new();
+    let root = f.tree.root();
+    let a = f.add(root, "a", false, &[], height(20.0));
+    let b = f.add(root, "b", false, &[], height(20.0));
+    f.tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
+    f.tree.dispatch(&Event::PointerMove {
+        position: Point::new(5.0, 5.0),
+    });
+    assert_eq!(f.tree.hovered(), Some(a));
+    f.tree.paint();
+    f.tree.dispatch(&Event::PointerMove {
+        position: Point::new(5.0, 25.0),
+    });
+    assert_eq!(f.tree.hovered(), Some(b));
+    assert!(f.tree.dirty(a).unwrap().contains(Dirty::PAINT));
 }

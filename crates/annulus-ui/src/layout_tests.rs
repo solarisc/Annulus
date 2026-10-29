@@ -8,7 +8,8 @@
 use super::*;
 use crate::display_list::{DisplayList, Op};
 use crate::style::Edges;
-use crate::widget::Widget;
+use crate::test_support::FixedAdvance;
+use crate::widget::{PaintCx, TextMeasure, Widget};
 
 /// A widget whose content has a fixed size, like a label of known text.
 struct Leaf(Size);
@@ -18,13 +19,13 @@ impl Widget for Leaf {
         "leaf"
     }
 
-    fn content_size(&self, _available: Size) -> Size {
+    fn content_size(&self, _available: Size, _text: &mut dyn TextMeasure) -> Size {
         self.0
     }
 
-    fn paint(&self, bounds: Rect, list: &mut DisplayList) {
+    fn paint(&self, cx: &PaintCx<'_>, list: &mut DisplayList) {
         list.push(Op::Rect {
-            rect: bounds,
+            rect: cx.bounds,
             color: crate::geometry::Color::rgb(0, 0, 0),
         });
     }
@@ -297,7 +298,7 @@ fn cases() -> Vec<Case> {
 fn layout_cases() {
     for case in cases() {
         let (mut tree, ids) = build(case.parent, &case.children);
-        tree.layout(case.viewport);
+        tree.layout(case.viewport, &mut FixedAdvance);
         let got: Vec<Rect> = ids.iter().map(|id| tree.bounds(*id).unwrap()).collect();
         if case.expected.is_empty() {
             for rect in &got {
@@ -338,11 +339,11 @@ fn scrolling_moves_children_and_stops_at_the_content_end() {
         5
     ];
     let (mut tree, ids) = build(parent, &children);
-    tree.layout(Size::new(50.0, 200.0));
+    tree.layout(Size::new(50.0, 200.0), &mut FixedAdvance);
     let root = tree.root();
 
     assert_eq!(tree.scroll_by(root, 1000.0).unwrap(), 300.0);
-    tree.layout(Size::new(50.0, 200.0));
+    tree.layout(Size::new(50.0, 200.0), &mut FixedAdvance);
     assert_eq!(
         tree.bounds(ids[3]).unwrap(),
         Rect::new(0.0, 0.0, 50.0, 100.0)
@@ -375,7 +376,7 @@ fn scroll_container_clips_its_children_but_not_overlays() {
         ),
     ];
     let (mut tree, _) = build(parent, &children);
-    tree.layout(Size::new(50.0, 50.0));
+    tree.layout(Size::new(50.0, 50.0), &mut FixedAdvance);
     let ops = tree.paint();
     let kinds: Vec<&str> = ops
         .ops()
@@ -393,11 +394,11 @@ fn scroll_container_clips_its_children_but_not_overlays() {
 #[test]
 fn unchanged_tree_and_viewport_relayout_nothing() {
     let (mut tree, _) = build(row(), &[(fixed(10.0, 10.0), NO_CONTENT)]);
-    tree.layout(Size::new(100.0, 100.0));
+    tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
     tree.paint();
-    tree.layout(Size::new(100.0, 100.0));
+    tree.layout(Size::new(100.0, 100.0), &mut FixedAdvance);
     assert!(tree.damage().is_empty());
-    tree.layout(Size::new(120.0, 100.0));
+    tree.layout(Size::new(120.0, 100.0), &mut FixedAdvance);
     assert!(!tree.damage().is_empty());
 }
 
@@ -430,6 +431,6 @@ fn nested_fit_container_wraps_its_children() {
             .unwrap();
         tree.set_style(child, Style::default()).unwrap();
     }
-    tree.layout(Size::new(500.0, 500.0));
+    tree.layout(Size::new(500.0, 500.0), &mut FixedAdvance);
     assert_eq!(tree.bounds(card).unwrap(), Rect::new(0.0, 0.0, 70.0, 26.0));
 }

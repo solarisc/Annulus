@@ -8,7 +8,7 @@ use crate::geometry::Point;
 use crate::input::{Event, Handled, Key};
 use crate::style::Position;
 use crate::tree::{Dirty, NodeId, Tree};
-use crate::widget::Widget;
+use crate::widget::{EventCx, Widget};
 
 impl Tree {
     /// The focused node, if it still exists.
@@ -74,6 +74,7 @@ impl Tree {
                 target.and_then(|id| self.bubble(id, event))
             }
             Event::PointerMove { position } => {
+                self.update_hover(*position);
                 let target = self.captured.filter(|id| self.contains(*id));
                 let target = target.or_else(|| self.hit_test(*position));
                 target.and_then(|id| self.bubble(id, event))
@@ -104,13 +105,29 @@ impl Tree {
         let mut current = Some(start);
         while let Some(id) = current {
             let node = self.node_mut(id)?;
-            if node.widget.handle(event) == Handled::Yes {
+            let mut cx = EventCx::new(node.bounds);
+            let handled = node.widget.handle(event, &mut cx);
+            let parent = node.parent;
+            self.actions
+                .extend(cx.into_actions().into_iter().map(|action| (id, action)));
+            if handled == Handled::Yes {
                 let _ = self.mark_dirty(id, Dirty::PAINT);
                 return Some(id);
             }
-            current = node.parent;
+            current = parent;
         }
         None
+    }
+
+    /// Tracks the node under the pointer; the nodes it leaves and enters repaint.
+    fn update_hover(&mut self, position: Point) {
+        let now = self.hit_test(position);
+        if now != self.hovered {
+            for changed in [self.hovered, now].into_iter().flatten() {
+                let _ = self.mark_dirty(changed, Dirty::PAINT);
+            }
+            self.hovered = now;
+        }
     }
 
     fn scroll_ancestor(&mut self, start: NodeId, delta: f32) -> Option<NodeId> {

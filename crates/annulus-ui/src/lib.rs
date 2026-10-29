@@ -11,6 +11,8 @@ pub mod input;
 mod layout;
 mod routing;
 pub mod style;
+#[cfg(test)]
+mod test_support;
 pub mod text_edit;
 pub mod tree;
 pub mod widget;
@@ -21,4 +23,4 @@ pub use geometry::{Color, Point, Rect, Size};
 pub use input::{Button, Event, Handled, Key, Modifiers};
 pub use style::{Align, Axis, Edges, Justify, Length, Position, Style};
 pub use tree::{Dirty, NodeId, Tree, TreeError};
-pub use widget::Widget;
+pub use widget::{Action, EventCx, PaintCx, Role, TextMeasure, Widget, WidgetState};

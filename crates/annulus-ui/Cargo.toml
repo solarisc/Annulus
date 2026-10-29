@@ -13,5 +13,6 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+annulus-config = { path = "../annulus-config" }
 unicode-segmentation.workspace = true
 zeroize.workspace = true
