@@ -585,6 +585,84 @@ fn fields(ui: &mut Ui, draft: &mut Draft, host_names: &[(u64, String)]) {
 mod tests {
     use super::*;
 
+    /// Reads the SSH banner a forwarded port leads to, or `None` if nothing answers.
+    fn banner_through(port: u16) -> Option<String> {
+        use std::io::Read as _;
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        let mut buffer = [0u8; 64];
+        let read = stream.read(&mut buffer).ok()?;
+        Some(String::from_utf8_lossy(&buffer[..read]).into_owned())
+    }
+
+    /// Answers host-key questions and waits until `running` reports `wanted`.
+    fn wait_for(running: &mut Running, wanted: impl Fn(&Status) -> bool) -> Status {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            while let Ok(event) = running.events.try_recv() {
+                if matches!(event, SessionEvent::HostKey(_)) {
+                    running.answers.host_key(true);
+                }
+            }
+            let status = running.status();
+            if wanted(&status) {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "stuck at {status:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// End to end on test VM 1 (docs/TESTING.md §Test VMs): a local rule to the VM's own
+    /// sshd keeps working after its connection is killed on the server.
+    #[test]
+    #[ignore = "needs the test servers"]
+    fn e2e_a_local_rule_comes_back_after_its_connection_is_killed() {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+        let (vm1, user) = (var("ANNULUS_E2E_VM1"), var("ANNULUS_E2E_USER"));
+        let key = std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap();
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let mut rule = PortForward::new(1, 1);
+        (rule.label, rule.bind_port) = ("sshd".into(), port);
+        (rule.destination_host, rule.destination_port) = ("127.0.0.1".into(), 22);
+        let dir = std::env::temp_dir().join(format!("annulus-fwd-e2e-{}", std::process::id()));
+        let program = Program::Ssh {
+            target: annulus_session::Target {
+                host: vm1.clone(),
+                port: 22,
+                user: user.clone(),
+            },
+            files: annulus_session::SshFiles {
+                known_hosts: dir.join("known_hosts"),
+                key_dir: None,
+            },
+            password: None,
+            identity: Some(annulus_session::Password::new(&key)),
+            via: Vec::new(),
+            proxy: None,
+            reconnect: true,
+        };
+        let mut running = start(&rule, program, || {});
+        wait_for(&mut running, |status| matches!(status, Status::Active(_)));
+        assert!(banner_through(port).is_some_and(|b| b.starts_with("SSH-2.0-OpenSSH")));
+
+        // Kill every forward-only login of the test user on the VM (this rule's, and any
+        // tunnel); the exec session doing it is "sshd: user@notty" and survives.
+        let killed = std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", &format!("{user}@{vm1}")])
+            .arg(format!("pkill -9 -f '^sshd: {user}$'"))
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        wait_for(&mut running, |status| {
+            matches!(status, Status::Reconnecting(_))
+        });
+        wait_for(&mut running, |status| matches!(status, Status::Active(_)));
+        assert!(banner_through(port).is_some_and(|b| b.starts_with("SSH-2.0-OpenSSH")));
+    }
+
     #[test]
     fn reconnects_back_off_up_to_thirty_seconds() {
         let waits: Vec<u64> = (1..=7).map(backoff).collect();
