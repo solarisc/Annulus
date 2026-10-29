@@ -19,7 +19,7 @@ use crate::ssh_dialogs::SshDialogs;
 
 /// Where a running rule is.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Status {
+pub(crate) enum Status {
     Starting,
     Active(usize),
     /// The connection dropped; the reason, while retrying.
@@ -28,7 +28,7 @@ enum Status {
 }
 
 /// A rule that was started.
-struct Running {
+pub(crate) struct Running {
     status: Arc<Mutex<Status>>,
     events: Receiver<SessionEvent>,
     answers: Answers,
@@ -38,7 +38,17 @@ struct Running {
 }
 
 impl Running {
-    fn status(&self) -> Status {
+    /// Questions the rule's connection asks (a new host key, a password).
+    pub(crate) fn take_events(&self) -> Vec<SessionEvent> {
+        self.events.try_iter().collect()
+    }
+
+    /// The rule's connection, for answering its questions.
+    pub(crate) fn answers(&self) -> &Answers {
+        &self.answers
+    }
+
+    pub(crate) fn status(&self) -> Status {
         self.status.lock().map_or_else(
             |_| Status::Failed("stopped".into()),
             |status| status.clone(),
@@ -49,7 +59,11 @@ impl Running {
 /// Sets a rule's status and asks for a repaint.
 type SetStatus = Arc<dyn Fn(Status) + Send + Sync>;
 
-fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + 'static) -> Running {
+pub(crate) fn start(
+    rule: &PortForward,
+    program: Program,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> Running {
     let status = Arc::new(Mutex::new(Status::Starting));
     let (events_tx, events) = channel();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -233,16 +247,16 @@ fn engine_rule(rule: &PortForward) -> Option<Rule> {
 }
 
 /// The rule being edited, with its ports as text until saved.
-struct Draft {
-    rule: PortForward,
-    bind_port: String,
-    destination_port: String,
-    problem: Option<String>,
-    is_new: bool,
+pub(crate) struct Draft {
+    pub(crate) rule: PortForward,
+    pub(crate) bind_port: String,
+    pub(crate) destination_port: String,
+    pub(crate) problem: Option<String>,
+    pub(crate) is_new: bool,
 }
 
 impl Draft {
-    fn new(rule: PortForward, is_new: bool) -> Self {
+    pub(crate) fn new(rule: PortForward, is_new: bool) -> Self {
         let port = |port: u16| {
             if port == 0 {
                 String::new()
@@ -260,7 +274,7 @@ impl Draft {
     }
 
     /// The rule with its ports parsed, or why it cannot be saved.
-    fn finish(&self) -> Result<PortForward, String> {
+    pub(crate) fn finish(&self) -> Result<PortForward, String> {
         let mut rule = self.rule.clone();
         self.rule.label.trim().clone_into(&mut rule.label);
         rule.bind_port = self.bind_port.trim().parse().unwrap_or(0);

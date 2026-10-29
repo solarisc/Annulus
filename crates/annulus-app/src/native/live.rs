@@ -10,9 +10,9 @@ use annulus_config::tokens::space;
 use annulus_platform::window::Waker;
 use annulus_session::{HostKeyQuestion, Program, Session, SessionEvent};
 use annulus_ssh::Trust;
-use annulus_term::Size;
 use annulus_term::alacritty_terminal::term::TermMode;
 use annulus_term::keys::{self, Mods};
+use annulus_term::{Palette, Size};
 use annulus_ui::gfx::{Align, Font, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Typed, Ui};
@@ -131,7 +131,14 @@ impl LiveTerminal {
     }
 
     /// Draws the terminal into `rect` and feeds it the keyboard while focused.
-    pub fn draw(&mut self, ui: &mut Ui<'_>, rect: Rect, font: Font, waker: Option<&Waker>, id: Id) {
+    pub fn draw(
+        &mut self,
+        ui: &mut Ui<'_>,
+        rect: Rect,
+        (font, palette): (Font, &Palette),
+        waker: Option<&Waker>,
+        id: Id,
+    ) {
         let inner = rect.inset(space::L, space::M);
         let grid = terminal::grid_size(ui, inner, font);
         if self.session.is_none() && self.failed.is_none() && !self.exited {
@@ -149,6 +156,9 @@ impl LiveTerminal {
                 (cell_h * scale) as u16,
             );
             self.grid = Some(grid);
+        }
+        if let Some(session) = &mut self.session {
+            session.set_palette(palette);
         }
         self.drain();
         let response = ui.zone(id, inner, Role::Terminal, "Terminal");
@@ -481,10 +491,11 @@ mod tests {
                 &mut state,
                 Rect::new(0.0, 0.0, 800.0, 400.0),
             );
+            let palette = Palette::annulus_dark();
             live.draw(
                 &mut ui,
                 Rect::new(0.0, 0.0, 800.0, 400.0),
-                Font::mono(13.0),
+                (Font::mono(13.0), &palette),
                 None,
                 id,
             );

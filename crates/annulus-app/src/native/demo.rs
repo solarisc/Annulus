@@ -23,6 +23,7 @@ type Fixture = (
 /// # Panics
 /// When the temporary folder cannot be written.
 #[must_use]
+#[allow(clippy::too_many_lines)] // Made-up data, one entity after another.
 pub fn fixture_vault(name: &str, populated: bool) -> Vault {
     let dir = std::env::temp_dir().join(format!("annulus-scenes-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -118,7 +119,70 @@ pub fn fixture_vault(name: &str, populated: bool) -> Vault {
         host.group = group.map(|at| group_uids[at].clone());
         vault.upsert_host(host).expect("a temporary vault");
     }
+    let first = vault.hosts()[0].id;
+    for (label, script) in [
+        ("Restart nginx", "sudo systemctl restart nginx"),
+        ("Disk usage", "df -h --total | tail -1"),
+        ("Tail the app log", "journalctl -u app -f -n 100"),
+    ] {
+        let mut snippet = vault.draft_snippet();
+        snippet.label = label.into();
+        snippet.script = script.into();
+        vault.upsert_snippet(snippet).expect("a temporary vault");
+    }
+    let mut rule = vault.draft_forward(first);
+    rule.label = "Postgres on prod".into();
+    rule.bind_port = 15432;
+    rule.destination_host = "localhost".into();
+    rule.destination_port = 5432;
+    vault.upsert_forward(rule).expect("a temporary vault");
+    let mut socks = vault.draft_forward(first);
+    socks.kind = annulus_vault::forwards::ForwardKind::Dynamic;
+    socks.bind_port = 1080;
+    vault.upsert_forward(socks).expect("a temporary vault");
     vault
+        .add_log(
+            "prod-db",
+            "deploy@prod-db:~$ uptime\n 09:12:44 up 2 days,  load average: 0.08\n",
+            1_793_260_800,
+        )
+        .expect("a temporary vault");
+    vault
+        .add_log(
+            "web-1",
+            "deploy@web-1:~$ sudo nginx -t\nsyntax is ok\n",
+            1_793_264_400,
+        )
+        .expect("a temporary vault");
+    let pair = annulus_ssh::keys::generate(annulus_ssh::keys::KeyKind::Ed25519, "demo@annulus")
+        .expect("Ed25519 keys always generate");
+    let key = crate::keychain_screen::stored(&vault, "Work laptop", &pair);
+    vault.upsert_key(key).expect("a temporary vault");
+    vault
+}
+
+/// A `known_hosts` file in a temporary folder with three made-up servers.
+///
+/// # Panics
+/// When the temporary folder cannot be written.
+#[must_use]
+pub fn known_hosts(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("annulus-known-{}-{name}", std::process::id()));
+    let lines: Vec<String> = ["bastion.example.com", "10.0.4.12", "[nas.local]:2200"]
+        .iter()
+        .map(|host| {
+            let pair = annulus_ssh::keys::generate(annulus_ssh::keys::KeyKind::Ed25519, "")
+                .expect("Ed25519 keys always generate");
+            let mut parts = pair.public.split_whitespace();
+            let (kind, blob) = (
+                parts.next().unwrap_or_default(),
+                parts.next().unwrap_or_default(),
+            );
+            format!("{host} {kind} {blob}")
+        })
+        .collect();
+    std::fs::write(&path, lines.join("\n") + "\n").expect("a temporary file");
+    path
 }
 
 /// A terminal replaying a made-up session on a database server: a colored prompt,

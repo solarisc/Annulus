@@ -737,6 +737,11 @@ impl<'a> Ui<'a> {
         self.state.pointer
     }
 
+    /// Puts `text` on the clipboard when the frame ends.
+    pub fn copy(&mut self, text: String) {
+        self.state.clipboard_out = Some(text);
+    }
+
     /// Asks for the cursor shown this frame.
     pub fn set_cursor(&mut self, cursor: Cursor) {
         self.state.cursor = cursor;

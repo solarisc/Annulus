@@ -7,13 +7,17 @@ pub mod demo;
 pub mod hosts;
 mod live;
 pub mod lock;
+mod pages;
 #[cfg(test)]
 mod scenes;
+mod screens;
 mod terminal;
 mod titlebar;
 
-use annulus_config::tokens::{Appearance, space};
+use annulus_config::settings::Settings;
+use annulus_config::tokens::{Appearance, ThemeMode, space};
 use annulus_platform::window::{Waker, WindowApp, WindowError, WindowRequest, run};
+use annulus_session::profiles::{self, Profile};
 use annulus_session::{Program, SshFiles};
 use annulus_term::Emulator;
 use annulus_ui::gfx::{Align, Color, Font, Rect};
@@ -24,9 +28,6 @@ use annulus_vault::vault::Vault;
 
 use crate::connect;
 use crate::terminal_view::TabStatus;
-
-/// The terminal font size in DIPs (the setting joins with live sessions).
-const TERMINAL_FONT: f32 = 13.5;
 
 /// Height of the title bar, in DIPs.
 pub const TITLE_H: f32 = 44.0;
@@ -171,6 +172,16 @@ pub struct NativeApp {
     pub waker: Option<Waker>,
     /// Terminal tabs to open after this frame: title and program.
     opens: Vec<(String, Program)>,
+    /// The device settings, and where they are saved (`None` in the preview).
+    pub settings: Settings,
+    settings_path: Option<std::path::PathBuf>,
+    /// The local shells found at start.
+    profiles: Vec<Profile>,
+    keychain: screens::KeychainView,
+    snippets: screens::SnippetsView,
+    forwards: screens::ForwardsView,
+    known: screens::KnownView,
+    logs: screens::LogsView,
     next_uid: u64,
 }
 
@@ -199,6 +210,14 @@ impl NativeApp {
             },
             waker: None,
             opens: Vec::new(),
+            settings: Settings::default(),
+            settings_path: None,
+            profiles: profiles::detect(),
+            keychain: screens::KeychainView::default(),
+            snippets: screens::SnippetsView::default(),
+            forwards: screens::ForwardsView::default(),
+            known: screens::KnownView::default(),
+            logs: screens::LogsView::default(),
             next_uid: 1,
         }
     }
@@ -221,6 +240,42 @@ impl NativeApp {
         self.opens.push((title.into(), program));
     }
 
+    /// Opens the default local shell (Settings, Local shells).
+    fn open_local(&mut self) {
+        let profile = self
+            .settings
+            .default_profile
+            .as_ref()
+            .and_then(|name| self.profiles.iter().find(|profile| &profile.name == name))
+            .or_else(|| self.profiles.first());
+        let (title, program) =
+            profile.map_or(("Local".to_owned(), Program::DefaultShell), |profile| {
+                (
+                    profile.name.clone(),
+                    Program::Command {
+                        program: profile.program.clone(),
+                        args: profile.args.clone(),
+                    },
+                )
+            });
+        self.open(title, program);
+    }
+
+    /// What another screen asked for.
+    fn screen_action(&mut self, action: screens::ScreenAction) {
+        match action {
+            screens::ScreenAction::Terminal(title, program) => self.open(title, *program),
+            screens::ScreenAction::Log(title, text) => {
+                let mut emulator = Emulator::new(120, 40);
+                emulator.advance(text.replace('\n', "\r\n").as_bytes());
+                self.push_terminal(
+                    format!("{title} (log)"),
+                    TermView::Replay(Box::new(emulator)),
+                );
+            }
+        }
+    }
+
     /// What the Hosts screen asked for, as a tab to open.
     fn act(&mut self, action: hosts::HostsAction) {
         match action {
@@ -237,7 +292,7 @@ impl NativeApp {
                 let program = connect::quick(&target, &self.ssh_files);
                 self.open(target, program);
             }
-            hosts::HostsAction::LocalTerminal => self.open("Local", Program::DefaultShell),
+            hosts::HostsAction::LocalTerminal => self.open_local(),
             // TODO: the ssh_config import preview in the new UI.
             hosts::HostsAction::ImportSshConfig => {}
         }
@@ -294,7 +349,7 @@ impl NativeApp {
             self.active = (self.active + 1) % self.tabs.len();
         }
         if ui.key(Key::Char('t'), Modifiers::CTRL_SHIFT) {
-            self.open("Local", Program::DefaultShell);
+            self.open_local();
         }
         if ui.key(Key::Char('w'), Modifiers::CTRL_SHIFT) && self.active > 0 {
             self.tabs.remove(self.active);
@@ -311,20 +366,14 @@ impl NativeApp {
                     self.open_vault(action);
                 }
             } else {
-                match self.section {
-                    Section::Hosts => {
-                        if let Some(action) = self.hosts.draw(ui, content, self.vault.as_mut()) {
-                            self.act(action);
-                        }
-                    }
-                    other => placeholder(ui, content, other.title()),
-                }
+                self.section_screen(ui, content);
             }
         } else if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(view) = tab.terminal.as_mut()
         {
-            let font = Font::mono(TERMINAL_FONT);
-            let palette = annulus_term::Palette::annulus_dark();
+            let font = Font::mono(self.settings.font_size.clamp(8.0, 32.0));
+            let palette = annulus_term::themes::theme(&self.settings.terminal_theme)
+                .unwrap_or_else(annulus_term::Palette::annulus_dark);
             let background = Color::rgba(
                 palette.background.r,
                 palette.background.g,
@@ -342,15 +391,15 @@ impl NativeApp {
                 }
                 TermView::Live(live) => {
                     let id = Id::new(("terminal", tab.uid));
-                    live.draw(ui, content, font, self.waker.as_ref(), id);
+                    live.draw(ui, content, (font, &palette), self.waker.as_ref(), id);
                     if let Some(title) = &live.title {
                         title.clone_into(&mut tab.title);
                     }
                 }
             }
         } else {
-            let content = panel(ui, area);
-            placeholder(ui, content, "Terminal");
+            // A terminal tab always holds a terminal; an empty panel is never more than a frame.
+            panel(ui, area);
         }
         ui.overlays();
         for tab in &mut self.tabs {
@@ -366,6 +415,52 @@ impl NativeApp {
             ui.request_repaint();
         }
         action
+    }
+
+    fn section_screen(&mut self, ui: &mut Ui<'_>, content: Rect) {
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
+        let action = match self.section {
+            Section::Hosts => {
+                if let Some(action) = self.hosts.draw(ui, content, Some(vault)) {
+                    self.act(action);
+                }
+                None
+            }
+            Section::Keychain => {
+                self.keychain.draw(ui, content, vault);
+                None
+            }
+            Section::Snippets => self.snippets.draw(ui, content, vault),
+            Section::PortForwarding => {
+                self.forwards
+                    .draw(ui, content, vault, &self.ssh_files, self.waker.as_ref());
+                None
+            }
+            Section::KnownHosts => {
+                let openssh = directories::BaseDirs::new()
+                    .map(|dirs| dirs.home_dir().join(".ssh").join("known_hosts"))
+                    .filter(|path| path.exists());
+                self.known
+                    .draw(ui, content, &self.ssh_files.known_hosts, openssh.as_deref());
+                None
+            }
+            Section::Logs => self
+                .logs
+                .draw(ui, content, vault, self.settings.record_logs),
+            Section::Settings => {
+                if screens::settings(ui, content, &mut self.settings, &self.profiles)
+                    && let Some(path) = &self.settings_path
+                {
+                    let _ = self.settings.save(path);
+                }
+                None
+            }
+        };
+        if let Some(action) = action {
+            self.screen_action(action);
+        }
     }
 
     fn navigation(&mut self, ui: &mut Ui<'_>, rect: Rect, compact: bool) {
@@ -484,29 +579,6 @@ fn vault_status(ui: &mut Ui<'_>, rect: Rect, unlocked: bool, sync: &SyncBadge) {
     );
 }
 
-/// A screen that is not ported yet.
-fn placeholder(ui: &mut Ui<'_>, rect: Rect, title: &str) {
-    let t = ui.theme;
-    let mut inner = rect.inset(space::XL + 4.0, space::XL);
-    let head = inner.take_top(32.0);
-    ui.strict_text(
-        head,
-        title,
-        annulus_ui::widgets::TITLE,
-        t.text,
-        Align::Start,
-    );
-    inner.take_top(space::S);
-    let line = inner.take_top(20.0);
-    ui.gfx.text(
-        line,
-        "This screen moves to the new UI next.",
-        BODY,
-        t.text2,
-        Align::Start,
-    );
-}
-
 /// The new UI in a window over a throwaway demo vault: `annulus-app --preview` (add `--light`
 /// for the light theme).
 struct Preview {
@@ -537,7 +609,11 @@ impl WindowApp for Preview {
     }
 
     fn theme(&self) -> Theme {
-        self.theme
+        match self.app.settings.theme {
+            ThemeMode::Light => Theme::new(Appearance::Light),
+            ThemeMode::Dark => Theme::new(Appearance::Dark),
+            ThemeMode::System => self.theme,
+        }
     }
 }
 
@@ -556,6 +632,9 @@ pub fn run_native(light: bool, data_dir: &std::path::Path) -> Result<(), WindowE
     });
     app.vault_path = Some(vault_path);
     app.ssh_files.known_hosts = data_dir.join("known_hosts");
+    let settings_path = data_dir.join("settings.json");
+    app.settings = Settings::load(&settings_path);
+    app.settings_path = Some(settings_path);
     let _ = std::fs::create_dir_all(data_dir);
     run(
         "Annulus",
@@ -582,6 +661,7 @@ pub fn run_preview(light: bool) -> Result<(), WindowError> {
         Appearance::Dark
     };
     let mut app = NativeApp::new(Some(demo::fixture_vault("preview", true)));
+    app.ssh_files.known_hosts = demo::known_hosts("preview");
     app.push_terminal("prod-db", TermView::Replay(Box::new(demo::terminal())));
     app.active = 0;
     run(

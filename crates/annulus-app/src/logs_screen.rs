@@ -19,7 +19,7 @@ pub struct LogsScreen {
 }
 
 /// `YYYY-MM-DD HH:MM` (UTC) for seconds since the Unix epoch.
-fn date(seconds: u64) -> String {
+pub(crate) fn date(seconds: u64) -> String {
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
     let minutes = seconds % 86_400 / 60;
     let z = days + 719_468;
@@ -58,7 +58,7 @@ fn file_name(log: &SessionLog) -> String {
 }
 
 /// The user's Downloads folder, else home, else the temp folder.
-fn downloads() -> PathBuf {
+pub(crate) fn downloads() -> PathBuf {
     directories::UserDirs::new()
         .and_then(|dirs| {
             dirs.download_dir()
@@ -69,7 +69,7 @@ fn downloads() -> PathBuf {
 }
 
 /// Writes `log` to `dir` under a free name (never over an existing file).
-fn export(log: &SessionLog, dir: &std::path::Path) -> std::io::Result<PathBuf> {
+pub(crate) fn export(log: &SessionLog, dir: &std::path::Path) -> std::io::Result<PathBuf> {
     let name = file_name(log);
     let mut path = dir.join(&name);
     let mut n = 1;

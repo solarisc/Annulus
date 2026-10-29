@@ -69,7 +69,7 @@ fn install_result(outcome: Outcome) -> Result<(), String> {
 }
 
 /// The key as stored, from a generated or imported pair.
-fn stored(vault: &Vault, label: &str, pair: &KeyPair) -> SshKey {
+pub(crate) fn stored(vault: &Vault, label: &str, pair: &KeyPair) -> SshKey {
     SshKey {
         id: vault.next_key_id(),
         label: label.trim().to_owned(),
@@ -80,7 +80,7 @@ fn stored(vault: &Vault, label: &str, pair: &KeyPair) -> SshKey {
 }
 
 /// The default comment of a generated key: `user@computer`.
-fn comment() -> String {
+pub(crate) fn comment() -> String {
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "annulus".into());

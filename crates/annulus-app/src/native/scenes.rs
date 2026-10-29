@@ -80,6 +80,35 @@ fn with_tabs(app: &mut NativeApp) {
     }
 }
 
+fn section(app: &mut NativeApp, section: super::Section) {
+    app.ssh_files.known_hosts = super::demo::known_hosts("scenes");
+    app.section = section;
+}
+
+fn keychain(app: &mut NativeApp) {
+    section(app, super::Section::Keychain);
+}
+
+fn snippets(app: &mut NativeApp) {
+    section(app, super::Section::Snippets);
+}
+
+fn forwards(app: &mut NativeApp) {
+    section(app, super::Section::PortForwarding);
+}
+
+fn known_hosts(app: &mut NativeApp) {
+    section(app, super::Section::KnownHosts);
+}
+
+fn logs(app: &mut NativeApp) {
+    section(app, super::Section::Logs);
+}
+
+fn settings(app: &mut NativeApp) {
+    section(app, super::Section::Settings);
+}
+
 fn locked(app: &mut NativeApp) {
     app.vault = None;
 }
@@ -182,6 +211,78 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: nothing,
+        acts: &[],
+    },
+    Scene {
+        name: "keychain",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[],
+    },
+    Scene {
+        name: "snippets",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: snippets,
+        acts: &[],
+    },
+    Scene {
+        name: "snippets-new",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: snippets,
+        acts: &[Act::Click("New snippet")],
+    },
+    Scene {
+        name: "forwards",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards,
+        acts: &[],
+    },
+    Scene {
+        name: "forwards-new",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards,
+        acts: &[Act::Click("New rule")],
+    },
+    Scene {
+        name: "known-hosts",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: known_hosts,
+        acts: &[],
+    },
+    Scene {
+        name: "logs",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: logs,
+        acts: &[],
+    },
+    Scene {
+        name: "settings",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
         acts: &[],
     },
     Scene {
