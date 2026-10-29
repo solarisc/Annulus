@@ -42,13 +42,14 @@ impl Ask {
 }
 
 /// Draws the question over `rect` and sends the answer through `answers`; returns whether it
-/// was answered.
+/// was answered. Its zones' ids are made from `id` (the pane or screen asking), so two
+/// questions on screen at once never share one.
 #[allow(clippy::too_many_lines)] // Both questions' cards, each top to bottom.
-pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bool {
+pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answers) -> bool {
     let t = ui.theme;
     let card = rect.centered(rect.w.min(460.0), 236.0);
     ui.gfx.fill_rect(rect, 0.0, t.scrim);
-    ui.zone(Id::new("live.ask.backdrop"), rect, Role::Backdrop, "");
+    ui.zone(id.with("ask.backdrop"), rect, Role::Backdrop, "");
     ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
     ui.gfx.fill_rect(card, 14.0, t.raised);
     ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
@@ -99,7 +100,7 @@ pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bo
             row.take_right(space::S);
             let once = row.take_right(once_w);
             if ui
-                .button(Id::new("live.cancel"), cancel, "Cancel", None, Kind::Ghost)
+                .button(id.with("ask.cancel"), cancel, "Cancel", None, Kind::Ghost)
                 .clicked
                 || ui.key(Key::Escape, Modifiers::NONE)
             {
@@ -108,7 +109,7 @@ pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bo
             }
             if ui
                 .button(
-                    Id::new("live.once"),
+                    id.with("ask.once"),
                     once,
                     "Connect once",
                     None,
@@ -121,7 +122,7 @@ pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bo
             }
             if ui
                 .button(
-                    Id::new("live.trust"),
+                    id.with("ask.trust"),
                     trust,
                     "Trust and connect",
                     None,
@@ -151,7 +152,7 @@ pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bo
             );
             column.take_top(space::L);
             let field = ui.text_field(
-                Id::new("live.password"),
+                id.with("ask.password"),
                 column.take_top(CONTROL),
                 secret,
                 FieldStyle {
@@ -161,7 +162,7 @@ pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bo
                 },
             );
             if ui.state.focus().is_none() {
-                ui.state.set_focus(Some(Id::new("live.password")), false);
+                ui.state.set_focus(Some(id.with("ask.password")), false);
             }
             column.take_top(space::XL);
             let mut row = column.take_top(CONTROL);
@@ -169,7 +170,7 @@ pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bo
             row.take_right(space::S);
             let cancel = row.take_right(button_width(ui.gfx, "Cancel", None));
             if ui
-                .button(Id::new("live.cancel"), cancel, "Cancel", None, Kind::Ghost)
+                .button(id.with("ask.cancel"), cancel, "Cancel", None, Kind::Ghost)
                 .clicked
                 || ui.key(Key::Escape, Modifiers::NONE)
             {
@@ -178,7 +179,7 @@ pub fn card(ui: &mut Ui<'_>, rect: Rect, ask: &mut Ask, answers: &Answers) -> bo
             }
             if ui
                 .button(
-                    Id::new("live.connect"),
+                    id.with("ask.connect"),
                     connect,
                     "Connect",
                     None,

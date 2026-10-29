@@ -118,7 +118,7 @@ impl SftpView {
         }
         self.dialog_card(ui, rect);
         if let (Some(ask), Some(answers)) = (self.ask.as_mut(), self.tab.answers())
-            && ask::card(ui, rect, ask, answers)
+            && ask::card(ui, Id::new("sftp.ask"), rect, ask, answers)
         {
             self.ask = None;
         }

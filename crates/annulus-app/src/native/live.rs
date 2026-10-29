@@ -285,7 +285,7 @@ impl LiveTerminal {
         }
     }
 
-    fn find_bar(&mut self, ui: &mut Ui<'_>, bar: Rect) {
+    fn find_bar(&mut self, ui: &mut Ui<'_>, bar: Rect, id: Id) {
         let Some(find) = self.find.as_mut() else {
             return;
         };
@@ -303,7 +303,7 @@ impl LiveTerminal {
         row.take_right(space::S);
         let case = row.take_right(button_width(ui.gfx, "Aa", None));
         row.take_right(space::S);
-        let field_id = Id::new(("find", std::ptr::from_ref(&self.program) as usize));
+        let field_id = id.with("find");
         if find.focus {
             ui.state.set_focus(Some(field_id), false);
             find.focus = false;
@@ -320,7 +320,7 @@ impl LiveTerminal {
         );
         if ui
             .button(
-                Id::new("find.case"),
+                id.with("find.case"),
                 case,
                 "Aa",
                 None,
@@ -340,7 +340,7 @@ impl LiveTerminal {
         }
         let back = ui
             .icon_button(
-                Id::new("find.previous"),
+                id.with("find.previous"),
                 previous,
                 icons::CHEVRON_UP,
                 "Previous match",
@@ -350,7 +350,7 @@ impl LiveTerminal {
             || ui.key(Key::Enter, Modifiers::SHIFT);
         let forward = ui
             .icon_button(
-                Id::new("find.next"),
+                id.with("find.next"),
                 next,
                 icons::CHEVRON_DOWN,
                 "Next match",
@@ -365,7 +365,7 @@ impl LiveTerminal {
         }
         let closed = ui
             .icon_button(
-                Id::new("find.close"),
+                id.with("find.close"),
                 close,
                 icons::CLOSE,
                 "Close find",
@@ -577,11 +577,11 @@ impl LiveTerminal {
             );
         }
         if let Some(bar) = bar {
-            self.find_bar(ui, bar);
+            self.find_bar(ui, bar, id);
         }
-        self.ask_card(ui, rect);
+        self.ask_card(ui, rect, id);
         self.paste_card(ui, rect, id);
-        self.ended_banner(ui, rect);
+        self.ended_banner(ui, rect, id);
     }
 
     /// Asks before pasting several lines into a program that did not ask for bracketed
@@ -591,7 +591,12 @@ impl LiveTerminal {
         let t = ui.theme;
         let lines = text.lines().count().max(1);
         ui.gfx.fill_rect(rect, 0.0, t.scrim);
-        ui.zone(Id::new("live.paste.backdrop"), rect, Role::Backdrop, "");
+        ui.zone(
+            terminal.with("live.paste.backdrop"),
+            rect,
+            Role::Backdrop,
+            "",
+        );
         let card = rect.centered(rect.w.min(480.0), 186.0);
         ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
         ui.gfx.fill_rect(card, 14.0, t.raised);
@@ -625,7 +630,7 @@ impl LiveTerminal {
         // Drawn left to right, so Tab follows the eye.
         if ui
             .button(
-                Id::new("live.paste.cancel"),
+                terminal.with("live.paste.cancel"),
                 cancel,
                 "Cancel",
                 None,
@@ -638,7 +643,7 @@ impl LiveTerminal {
         }
         if ui
             .button(
-                Id::new("live.paste.one"),
+                terminal.with("live.paste.one"),
                 one,
                 "Paste as one line",
                 None,
@@ -650,7 +655,7 @@ impl LiveTerminal {
         }
         if ui
             .button(
-                Id::new("live.paste.go"),
+                terminal.with("live.paste.go"),
                 paste,
                 "Paste",
                 None,
@@ -672,11 +677,11 @@ impl LiveTerminal {
         }
     }
 
-    fn ask_card(&mut self, ui: &mut Ui<'_>, rect: Rect) {
+    fn ask_card(&mut self, ui: &mut Ui<'_>, rect: Rect, id: Id) {
         let (Some(ask), Some(session)) = (self.ask.as_mut(), &self.session) else {
             return;
         };
-        if ask::card(ui, rect, ask, session.answers()) {
+        if ask::card(ui, id, rect, ask, session.answers()) {
             self.ask = None;
         }
     }
@@ -684,7 +689,7 @@ impl LiveTerminal {
     /// The bar over a session that ended, dropped or failed: why, what to try, and a way to
     /// start again.
     #[allow(clippy::too_many_lines)] // Three states of one bar, laid out once.
-    fn ended_banner(&mut self, ui: &mut Ui<'_>, rect: Rect) {
+    fn ended_banner(&mut self, ui: &mut Ui<'_>, rect: Rect, id: Id) {
         if self.failed.is_none() && !self.exited {
             return;
         }
@@ -765,7 +770,7 @@ impl LiveTerminal {
         // Drawn left to right, so Tab follows the eye.
         if let (Some(label), Some(slot)) = (second, second_rect)
             && ui
-                .button(Id::new("live.second"), slot, label, None, Kind::Ghost)
+                .button(id.with("live.second"), slot, label, None, Kind::Ghost)
                 .clicked
         {
             if waiting.is_some() {
@@ -777,7 +782,7 @@ impl LiveTerminal {
         }
         if ui
             .button(
-                Id::new("live.again"),
+                id.with("live.again"),
                 again,
                 again_label,
                 Some(icons::SYNC),
@@ -1092,6 +1097,43 @@ mod tests {
         );
         assert_eq!(live.held_paste, None);
         assert_eq!(live.sent, [b"echo one echo two".to_vec()]);
+    }
+
+    #[test]
+    fn two_terminals_with_the_same_cards_open_share_no_zone_id() {
+        let mut state = UiState::default();
+        let mut canvas = CpuCanvas::new(1000, 400, 1.0, TextEngine::new()).unwrap();
+        state.begin_frame(&[], 0.0);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            &mut state,
+            Rect::new(0.0, 0.0, 1000.0, 400.0),
+        );
+        let palette = Palette::annulus_dark();
+        for (index, x) in [0.0, 500.0].into_iter().enumerate() {
+            let mut live = LiveTerminal::new(Program::system_ssh("web"));
+            // Ended with a failure, the find bar open, a paste waiting: every card at once.
+            live.failed = Some("could not reach web:22: refused".into());
+            live.find = Some(FindBar::default());
+            live.held_paste = Some("a\nb".into());
+            live.draw(
+                &mut ui,
+                Rect::new(x, 0.0, 500.0, 400.0),
+                (Font::mono(13.0), &palette),
+                None,
+                Id::new(("pane", index)),
+            );
+        }
+        let zones = state.end_frame().zones;
+        let mut ids = std::collections::HashSet::new();
+        for zone in &zones {
+            assert!(
+                ids.insert(zone.id),
+                "{:?} is in both panes under one id",
+                zone.label
+            );
+        }
     }
 
     #[test]

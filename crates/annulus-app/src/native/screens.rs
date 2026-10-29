@@ -292,7 +292,7 @@ impl KeychainView {
         // A question the install's connection asks, over the screen.
         if let Some(install) = &mut self.install
             && let (Some(task), Some(ask_now)) = (&install.task, &mut install.ask)
-            && ask::card(ui, rect, ask_now, task.answers())
+            && ask::card(ui, Id::new("install.ask"), rect, ask_now, task.answers())
         {
             install.ask = None;
         }
@@ -1569,7 +1569,13 @@ impl ForwardsView {
         }
         if let Some((&id, ask)) = self.asks.iter_mut().next()
             && let Some(running) = self.running.get(&id)
-            && ask::card(ui, rect, ask, running.answers())
+            && ask::card(
+                ui,
+                Id::new(("forward.ask", id)),
+                rect,
+                ask,
+                running.answers(),
+            )
         {
             self.asks.remove(&id);
         }
