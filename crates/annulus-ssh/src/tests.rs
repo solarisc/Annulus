@@ -57,6 +57,14 @@ struct TestServer {
     channels: Arc<Mutex<HashMap<ChannelId, ServerChannel<ServerMsg>>>>,
     /// Channels speaking SFTP or carrying a remote forward; their data is not echoed.
     quiet: Arc<Mutex<HashSet<ChannelId>>>,
+    /// Every channel and request the client made, in order (F-SSH-011).
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl TestServer {
+    fn record(&self, what: impl Into<String>) {
+        self.requests.lock().unwrap().push(what.into());
+    }
 }
 
 /// Answers `realpath` with `/home/alice`; everything else is unsupported.
@@ -111,6 +119,7 @@ impl server::Handler for TestServer {
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.record("session");
         self.channels.lock().unwrap().insert(channel.id(), channel);
         reply.accept().await;
         Ok(())
@@ -127,6 +136,7 @@ impl server::Handler for TestServer {
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.record("direct-tcpip");
         reply.accept().await;
         Ok(())
     }
@@ -182,6 +192,7 @@ impl server::Handler for TestServer {
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.record("pty");
         session.channel_success(channel)
     }
 
@@ -190,6 +201,7 @@ impl server::Handler for TestServer {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.record("shell");
         self.channels.lock().unwrap().remove(&channel);
         session.channel_success(channel)?;
         session.data(channel, b"welcome\r\n".to_vec())
@@ -201,6 +213,7 @@ impl server::Handler for TestServer {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.record(format!("exec {}", String::from_utf8_lossy(data)));
         self.channels.lock().unwrap().remove(&channel);
         session.channel_success(channel)?;
         session.data(channel, [b"ran: ", data].concat())?;
@@ -215,6 +228,7 @@ impl server::Handler for TestServer {
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.record(format!("subsystem {name}"));
         let claimed = self.channels.lock().unwrap().remove(&channel);
         match claimed {
             Some(stream) if name == "sftp" => {
@@ -251,20 +265,27 @@ impl server::Handler for TestServer {
 
 /// Starts a server with `key` on a free localhost port; serves one connection.
 async fn serve(key: PrivateKey) -> u16 {
+    serve_recording(key).await.0
+}
+
+/// [`serve`], also returning the list of what the client asked for.
+async fn serve_recording(key: PrivateKey) -> (u16, Arc<Mutex<Vec<String>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(server::Config {
         keys: vec![key],
         ..server::Config::default()
     });
+    let handler = TestServer::default();
+    let requests = handler.requests.clone();
     tokio::spawn(async move {
         if let Ok((stream, _)) = listener.accept().await
-            && let Ok(running) = server::run_stream(config, stream, TestServer::default()).await
+            && let Ok(running) = server::run_stream(config, stream, handler).await
         {
             let _ = running.await;
         }
     });
-    port
+    (port, requests)
 }
 
 /// Scripted answers: whether to trust a new key, and passwords to hand out in order.
@@ -358,6 +379,31 @@ async fn end_of(shell: &mut crate::Shell) -> Output {
             end => return end,
         }
     }
+}
+
+#[tokio::test]
+async fn a_session_asks_the_server_for_nothing_the_user_did_not() {
+    let (port, requests) = serve_recording(new_key()).await;
+    let script = Script::new(true, &["secret"]);
+    let connection = connect(
+        &target(port, "alice"),
+        &known_hosts("hidden"),
+        None,
+        &[],
+        script,
+    )
+    .await
+    .unwrap();
+    let mut shell = connection.shell(80, 24).await.unwrap();
+    assert_eq!(shell.next().await, Output::Data(b"welcome\r\n".to_vec()));
+    let _sftp = connection.sftp_stream().await.unwrap();
+    // Idle for a moment: nothing runs in the background (no probes, no exec).
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        *requests.lock().unwrap(),
+        ["session", "pty", "shell", "session", "subsystem sftp"],
+        "no exec, env or forwarding the user did not ask for (F-SSH-011)"
+    );
 }
 
 #[tokio::test]
