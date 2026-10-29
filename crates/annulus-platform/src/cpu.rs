@@ -131,11 +131,9 @@ impl Canvas {
                 self.shadow(*rect, *radius, offset.x, offset.y, *blur, *color);
             }
             // TODO: text runs need the text service (bundled font, swash, parley).
-            Op::TextRun { .. } => {}
             // TODO: icons need the icon set.
-            Op::Icon { .. } => {}
             // TODO: images need an image store; none are used before the host grid.
-            Op::Image { .. } => {}
+            Op::TextRun { .. } | Op::Icon { .. } | Op::Image { .. } => {}
             Op::PushClip(rect) => self.push_clip(*rect),
             Op::PopClip => {
                 self.clips.pop();
@@ -266,6 +264,7 @@ fn paint(color: Color) -> Paint<'static> {
 }
 
 /// A rectangle path with circular corners, or `None` for an empty or invalid rectangle.
+#[allow(clippy::many_single_char_names)] // x, y, w, h, r read like the geometry they are.
 fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
     if rect.is_empty() || !rect.origin.x.is_finite() || !rect.origin.y.is_finite() {
         return None;
