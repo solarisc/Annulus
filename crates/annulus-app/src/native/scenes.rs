@@ -589,6 +589,18 @@ const SCENES: &[Scene] = &[
         ],
     },
     Scene {
+        name: "lock-setup-strength",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: false,
+        setup: first_run,
+        acts: &[
+            Act::Click("Master password (10+ characters)"),
+            Act::Type("Summer2024!!"),
+        ],
+    },
+    Scene {
         name: "terminal",
         width: 1100,
         height: 720,

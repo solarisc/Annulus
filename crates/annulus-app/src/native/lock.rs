@@ -6,6 +6,7 @@ use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
 use annulus_ui::widgets::{BODY, CONTROL, FieldStyle, Kind, SMALL};
+use annulus_vault::strength::{self, Strength};
 use zeroize::Zeroizing;
 
 /// The shortest master password accepted.
@@ -53,6 +54,8 @@ pub struct LockView {
     pending: Option<Box<annulus_vault::vault::Vault>>,
     key: Zeroizing<String>,
     typed: String,
+    /// How hard the new master password is to guess, while one is typed.
+    strength: Option<Strength>,
 }
 
 /// What creating or unlocking gives: the vault, and a new vault's recovery key.
@@ -75,6 +78,7 @@ impl LockView {
             pending: None,
             key: Zeroizing::new(String::new()),
             typed: String::new(),
+            strength: None,
         }
     }
 
@@ -201,6 +205,9 @@ impl LockView {
         if self.password.chars().count() < MIN_PASSWORD {
             return Err(format!("Use at least {MIN_PASSWORD} characters."));
         }
+        if !strength::estimate(&self.password).is_strong() {
+            return Err("Too easy to guess. Make it longer or less common.".into());
+        }
         if self.password.as_str() != self.confirm.as_str() {
             return Err("The two passwords differ.".into());
         }
@@ -233,6 +240,7 @@ impl LockView {
             ),
         };
         let fields = if setup { 2.0 } else { 1.0 };
+        let meter_h = if setup { space::S + METER_H } else { 0.0 };
         let error_h = if self.error.is_some() { 28.0 } else { 0.0 };
         let height = 64.0
             + 20.0
@@ -241,6 +249,7 @@ impl LockView {
             + 28.0
             + fields * (CONTROL + space::M)
             + error_h
+            + meter_h
             + CONTROL
             + if setup { 0.0 } else { 44.0 };
         let card = rect.centered(rect.w.min(400.0), height + 2.0 * space::XL);
@@ -288,8 +297,15 @@ impl LockView {
         let mut submitted = first.submitted;
         if first.changed {
             self.error = None;
+            self.strength =
+                (setup && !self.password.is_empty()).then(|| strength::estimate(&self.password));
         }
         if setup {
+            column.take_top(space::S);
+            let meter = column.take_top(METER_H);
+            if let Some(strength) = &self.strength {
+                strength_meter(ui, meter, strength);
+            }
             column.take_top(space::M);
             let second = ui.text_field(
                 Id::new("lock.confirm"),
@@ -337,6 +353,7 @@ impl LockView {
                 match self.check_new() {
                     Ok(()) => {
                         self.confirm = Zeroizing::new(String::new());
+                        self.strength = None;
                         action = Some(LockAction::Create(std::mem::replace(
                             &mut self.password,
                             Zeroizing::new(String::new()),
@@ -377,6 +394,40 @@ impl LockView {
     }
 }
 
+/// The height of [`strength_meter`].
+pub const METER_H: f32 = 36.0;
+
+/// Four bars and a word for how hard a new password is to guess, and what would help.
+pub fn strength_meter(ui: &mut Ui<'_>, rect: Rect, strength: &Strength) {
+    let t = ui.theme;
+    let color = match strength.score {
+        0 | 1 => t.error,
+        2 | 3 => t.warn,
+        _ => t.ok,
+    };
+    let mut column = rect;
+    let mut row = column.take_top(16.0);
+    let bars = row.take_left(120.0);
+    let gap = 4.0;
+    let width = (bars.w - 3.0 * gap) / 4.0;
+    let filled = strength.score.max(1);
+    for bar in 0..4_u8 {
+        let x = bars.x + f32::from(bar) * (width + gap);
+        let on = bar < filled;
+        ui.gfx.fill_rect(
+            Rect::new(x, bars.y + (bars.h - 4.0) / 2.0, width, 4.0),
+            2.0,
+            if on { color } else { t.line_strong },
+        );
+    }
+    row.take_left(space::M);
+    ui.strict_text(row, strength.label(), SMALL, color, Align::Start);
+    if let Some(hint) = strength.hint {
+        column.take_top(2.0);
+        ui.strict_text(column, hint, SMALL, t.text2, Align::Start);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +448,16 @@ mod tests {
         );
         view.confirm = Zeroizing::new("long enough pw".into());
         assert_eq!(view.check_new(), Ok(()));
+    }
+
+    #[test]
+    fn a_long_but_common_master_password_is_refused() {
+        let mut view = LockView::new(Mode::Setup);
+        view.password = Zeroizing::new("Password2024!".into());
+        view.confirm = Zeroizing::new("Password2024!".into());
+        assert_eq!(
+            view.check_new(),
+            Err("Too easy to guess. Make it longer or less common.".to_owned())
+        );
     }
 }

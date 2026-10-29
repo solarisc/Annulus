@@ -10,6 +10,8 @@ const MIN_PASSWORD: usize = 10;
 pub(crate) fn problem(new: &str, confirm: &str) -> Option<&'static str> {
     if new.chars().count() < MIN_PASSWORD {
         Some("Use at least 10 characters.")
+    } else if !annulus_vault::strength::estimate(new).is_strong() {
+        Some("Too easy to guess. Make it longer or less common.")
     } else if new != confirm {
         Some("The two new passwords differ.")
     } else {
@@ -22,8 +24,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_new_password_must_be_long_and_typed_twice() {
+    fn a_new_password_must_be_long_strong_and_typed_twice() {
         assert!(problem("short", "short").is_some());
+        assert_eq!(
+            problem("qwerty123456", "qwerty123456"),
+            Some("Too easy to guess. Make it longer or less common.")
+        );
         assert!(problem("long enough pw", "long enough pX").is_some());
         assert_eq!(problem("long enough pw", "long enough pw"), None);
     }

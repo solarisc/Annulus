@@ -12,5 +12,6 @@ pub mod hosts;
 pub mod keychain;
 pub mod logs;
 pub mod snippets;
+pub mod strength;
 pub mod sync;
 pub mod vault;

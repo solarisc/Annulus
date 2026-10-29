@@ -53,6 +53,16 @@ impl KdfParams {
         parallelism: 1,
     };
 
+    /// The most a key file may ask for: 1 GiB, 16 passes, 16 lanes. A key file comes from
+    /// the sync server at sign-in, and a hostile one could otherwise ask for terabytes and
+    /// crash the app. Weaker settings need no floor: they derive
+    /// another key, which does not open the vault.
+    pub const MOST: Self = Self {
+        memory_kib: 1024 * 1024,
+        iterations: 16,
+        parallelism: 16,
+    };
+
     /// Cheap parameters for tests only.
     #[cfg(test)]
     pub const TEST: Self = Self {
@@ -183,6 +193,13 @@ fn open(key: &Key, sealed: &Sealed, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, Cr
 
 /// The master key from `password`.
 fn master_key(password: &str, salt: &[u8], params: KdfParams) -> Result<Key, CryptoError> {
+    let most = KdfParams::MOST;
+    if params.memory_kib > most.memory_kib
+        || params.iterations > most.iterations
+        || params.parallelism > most.parallelism
+    {
+        return Err(CryptoError::Parameters);
+    }
     let argon_params = argon2::Params::new(
         params.memory_kib,
         params.iterations,
@@ -485,6 +502,31 @@ mod tests {
             Keys::recover(&new_file, &recovery).is_ok(),
             "the recovery key still works"
         );
+    }
+
+    #[test]
+    fn a_key_file_asking_for_too_much_memory_is_refused_before_any_work() {
+        let (_, mut file, _) = vault();
+        for kdf in [
+            KdfParams {
+                memory_kib: u32::MAX,
+                ..KdfParams::TEST
+            },
+            KdfParams {
+                iterations: u32::MAX,
+                ..KdfParams::TEST
+            },
+            KdfParams {
+                parallelism: 1 << 20,
+                ..KdfParams::TEST
+            },
+        ] {
+            file.kdf = kdf;
+            assert_eq!(
+                Keys::unlock(&file, "correct horse").err(),
+                Some(CryptoError::Parameters)
+            );
+        }
     }
 
     #[test]
