@@ -32,6 +32,8 @@ pub struct TerminalTab {
     find: Option<FindBar>,
     /// The text of a session that ended here, waiting to be saved as a log.
     finished: Option<String>,
+    /// What the keyboard sent this frame, for broadcast to other panes.
+    sent: Vec<Vec<u8>>,
 }
 
 impl TerminalTab {
@@ -49,6 +51,7 @@ impl TerminalTab {
             dialogs: SshDialogs::default(),
             find: None,
             finished: None,
+            sent: Vec::new(),
         }
     }
 
@@ -175,7 +178,7 @@ impl TerminalTab {
                 );
             });
             if !prompting {
-                handle_input(ui, session);
+                self.sent = handle_input(ui, session);
             }
         }
         // Ctrl+wheel zooms (handled by the shell); a plain wheel scrolls back.
@@ -210,6 +213,19 @@ impl TerminalTab {
             .as_ref()
             .map(Session::transcript)
             .filter(|text| !text.trim().is_empty())
+    }
+
+    /// What the keyboard sent this frame (taken once).
+    pub fn take_sent(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.sent)
+    }
+
+    /// Sends bytes to the program as if typed here (broadcast from another pane).
+    pub fn write(&self, bytes: &[u8]) {
+        if let Some(session) = &self.session {
+            session.scroll_to_bottom();
+            session.write(bytes.to_vec());
+        }
     }
 
     /// The text of a session that ended, once: the caller saves it as a log.
@@ -506,20 +522,21 @@ fn handle_mouse(response: &egui::Response, session: &Session, origin: Pos2, cell
     }
 }
 
-/// Sends this frame's keyboard and paste input to the program.
-fn handle_input(ui: &Ui, session: &Session) {
+/// Sends this frame's keyboard and paste input to the program, and returns what was sent
+/// (for broadcast to other panes).
+fn handle_input(ui: &Ui, session: &Session) -> Vec<Vec<u8>> {
     let term_mode = session.mode();
     let events = ui.input(|input| input.events.clone());
+    let mut sent = Vec::new();
+    let mut emit = |bytes: Vec<u8>| {
+        session.scroll_to_bottom();
+        sent.push(bytes.clone());
+        session.write(bytes);
+    };
     for event in events {
         match event {
-            egui::Event::Text(text) => {
-                session.scroll_to_bottom();
-                session.write(text.into_bytes());
-            }
-            egui::Event::Paste(text) => {
-                session.scroll_to_bottom();
-                session.write(paste_bytes(&text, term_mode));
-            }
+            egui::Event::Text(text) => emit(text.into_bytes()),
+            egui::Event::Paste(text) => emit(paste_bytes(&text, term_mode)),
             egui::Event::Key {
                 key,
                 pressed: true,
@@ -551,13 +568,13 @@ fn handle_input(ui: &Ui, session: &Session) {
                 if let Some(key) = map_key(key, modifiers.ctrl)
                     && let Some(bytes) = keys::encode(key, mods, term_mode)
                 {
-                    session.scroll_to_bottom();
-                    session.write(bytes);
+                    emit(bytes);
                 }
             }
             _ => {}
         }
     }
+    sent
 }
 
 /// Pasted text, wrapped in bracketed-paste markers when the program asked for them, so a

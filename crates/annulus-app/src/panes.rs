@@ -7,6 +7,9 @@ use annulus_session::Program;
 
 use crate::terminal_view::TerminalTab;
 
+/// The amber of broadcast mode: the banner and every receiving pane's outline.
+const BROADCAST: egui::Color32 = egui::Color32::from_rgb(0xE0, 0xA4, 0x3A);
+
 /// Most panes in one tab.
 pub const MAX_PANES: usize = 16;
 
@@ -24,6 +27,8 @@ pub struct Panes {
     list: Vec<TerminalTab>,
     layout: Layout,
     focused: usize,
+    /// Typing in the focused pane goes to every pane (F-WS-003).
+    broadcast: bool,
 }
 
 impl Panes {
@@ -34,6 +39,7 @@ impl Panes {
             list: vec![TerminalTab::new(title, program)],
             layout: Layout::Row,
             focused: 0,
+            broadcast: false,
         }
     }
 
@@ -89,6 +95,17 @@ impl Panes {
         self.list[self.focused].take_focus();
     }
 
+    /// Turns broadcast input on or off (Ctrl+Shift+B); it needs two panes or more.
+    pub fn toggle_broadcast(&mut self) {
+        self.broadcast = !self.broadcast && self.list.len() > 1;
+    }
+
+    /// Whether typing goes to every pane.
+    #[must_use]
+    pub fn broadcasting(&self) -> bool {
+        self.broadcast && self.list.len() > 1
+    }
+
     /// How many panes there are.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -105,12 +122,29 @@ impl Panes {
 
     /// Draws the panes in equal parts of the area, with a thin line between them.
     pub fn ui(&mut self, ui: &mut Ui, font_size: f32) {
+        if self.broadcasting() {
+            ui.colored_label(
+                BROADCAST,
+                format!(
+                    "Typing into {} panes \u{b7} Ctrl+Shift+B to stop",
+                    self.list.len()
+                ),
+            );
+        }
         let area = ui.available_rect_before_wrap();
         let rects = split_rect(area, self.list.len(), self.layout, 2.0);
         let focused = self.focused;
         let several = self.list.len() > 1;
+        let broadcasting = self.broadcasting();
         for (index, (pane, rect)) in self.list.iter_mut().zip(rects).enumerate() {
-            if several && index == focused {
+            if broadcasting {
+                ui.painter().rect_stroke(
+                    rect.expand(1.0),
+                    0.0,
+                    egui::Stroke::new(2.0, BROADCAST),
+                    egui::StrokeKind::Outside,
+                );
+            } else if several && index == focused {
                 let accent = ui.visuals().selection.stroke.color;
                 ui.painter().rect_stroke(
                     rect.expand(1.0),
@@ -126,6 +160,20 @@ impl Panes {
             if response.response.contains_pointer() && ui.input(|input| input.pointer.any_pressed())
             {
                 self.focused = index;
+            }
+        }
+        let typed = self
+            .list
+            .get_mut(focused)
+            .map(TerminalTab::take_sent)
+            .unwrap_or_default();
+        if self.broadcasting() {
+            for (index, pane) in self.list.iter().enumerate() {
+                if index != focused {
+                    for bytes in &typed {
+                        pane.write(bytes);
+                    }
+                }
             }
         }
         if self.list.len() > 1 {
@@ -211,6 +259,18 @@ mod tests {
         assert_eq!(tab.title(), "one", "wraps from the last to the first");
         tab.move_focus(-1);
         assert_eq!(tab.title(), "p15");
+    }
+
+    #[test]
+    fn broadcast_needs_two_panes_and_ends_when_one_is_left() {
+        let mut tab = panes();
+        tab.toggle_broadcast();
+        assert!(!tab.broadcasting(), "nothing to broadcast to");
+        tab.split(Layout::Row, "two", Program::DefaultShell);
+        tab.toggle_broadcast();
+        assert!(tab.broadcasting());
+        tab.close_focused();
+        assert!(!tab.broadcasting());
     }
 
     #[test]

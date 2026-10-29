@@ -210,6 +210,9 @@ impl Shell {
         };
         let command = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
         let several = panes.len() > 1;
+        if ui.input_mut(|input| input.consume_key(command, egui::Key::B)) {
+            panes.toggle_broadcast();
+        }
         let (right, down, back, forward) = ui.input_mut(|input| {
             let mut arrow = |key| several && input.consume_key(egui::Modifiers::ALT, key);
             let back = arrow(egui::Key::ArrowLeft) | arrow(egui::Key::ArrowUp);
