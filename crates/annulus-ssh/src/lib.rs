@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use russh::client::{self, AuthResult, Handle, Msg};
-use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, check_known_hosts_path};
+use russh::keys::known_hosts::known_host_keys_path;
+use russh::keys::{
+    Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, check_known_hosts_path,
+};
 use russh::{Channel, ChannelMsg};
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::Zeroizing;
@@ -207,6 +210,17 @@ impl client::Handler for Checker {
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
         match check_known_hosts_path(&self.host, self.port, key, &self.known_hosts) {
             Ok(true) => Ok(true),
+            // Known by another key (of another kind; the same kind is the Err below): that is
+            // a changed key, never a first meeting to trust.
+            Ok(false)
+                if known_host_keys_path(&self.host, self.port, &self.known_hosts)
+                    .is_ok_and(|known| !known.is_empty()) =>
+            {
+                if let Ok(mut changed) = self.changed.lock() {
+                    *changed = Some(fingerprint);
+                }
+                Ok(false)
+            }
             Ok(false) => {
                 let question = HostKeyQuestion {
                     host: known_hosts_name(&self.host, self.port),
@@ -346,6 +360,36 @@ pub async fn connect_via(
     .await
 }
 
+/// The host-key algorithms to ask `host` for: the kinds of the keys `known_hosts` holds for it,
+/// so the server proves the key we know (and any other is a change, not a first meeting), or
+/// every safe kind for a host not known yet. SHA-1 `ssh-rsa` signatures are never offered; an
+/// RSA key signs with SHA-2.
+pub(crate) fn host_key_algorithms(host: &str, port: u16, known_hosts: &Path) -> Vec<Algorithm> {
+    let safe: Vec<Algorithm> = russh::Preferred::DEFAULT
+        .key
+        .iter()
+        .filter(|algorithm| !matches!(algorithm, Algorithm::Rsa { hash: None }))
+        .cloned()
+        .collect();
+    let known: Vec<Algorithm> = known_host_keys_path(host, port, known_hosts)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, key)| key.algorithm())
+        .collect();
+    let same_kind = |known: &Algorithm, offered: &Algorithm| match (known, offered) {
+        (Algorithm::Rsa { .. }, Algorithm::Rsa { .. }) => true,
+        _ => known == offered,
+    };
+    let wanted: Vec<Algorithm> = safe
+        .iter()
+        .filter(|offered| known.iter().any(|known| same_kind(known, offered)))
+        .cloned()
+        .collect();
+    // A host known only by a kind not offered (DSA): ask for any; whatever it shows is then
+    // a changed key.
+    if wanted.is_empty() { safe } else { wanted }
+}
+
 /// Opens the SSH transport to `target` (directly, or through `via`) and checks its host key.
 async fn handshake(
     target: &Target,
@@ -355,6 +399,14 @@ async fn handshake(
 ) -> Result<(Handle<Checker>, forward::RemoteMap), SshError> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        preferred: russh::Preferred {
+            key: std::borrow::Cow::Owned(host_key_algorithms(
+                &target.host,
+                target.port,
+                known_hosts,
+            )),
+            ..russh::Preferred::DEFAULT
+        },
         ..client::Config::default()
     });
     let changed = Arc::new(std::sync::Mutex::new(None));
@@ -410,6 +462,19 @@ async fn handshake(
                 return Err(SshError::HostKeyChanged {
                     host: name,
                     fingerprint,
+                });
+            }
+            // A known host that offers none of the kinds of key we know for it: the same as a
+            // changed key (someone in between offering another kind, or a reinstall).
+            let known = known_host_keys_path(&target.host, target.port, known_hosts)
+                .is_ok_and(|keys| !keys.is_empty());
+            if known
+                && let russh::Error::NoCommonAlgo { kind, .. } = &error
+                && matches!(kind, russh::AlgorithmKind::Key)
+            {
+                return Err(SshError::HostKeyChanged {
+                    host: name,
+                    fingerprint: "a key of another kind".into(),
                 });
             }
             Err(match error {

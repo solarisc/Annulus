@@ -268,12 +268,23 @@ async fn serve(key: PrivateKey) -> u16 {
     serve_recording(key).await.0
 }
 
+/// [`serve`] with several host keys of different kinds.
+async fn serve_keys(keys: Vec<PrivateKey>) -> u16 {
+    serve_with(keys).await.0
+}
+
 /// [`serve`], also returning the list of what the client asked for.
 async fn serve_recording(key: PrivateKey) -> (u16, Arc<Mutex<Vec<String>>>) {
+    serve_with(vec![key]).await
+}
+
+/// A server with `keys` on a free localhost port; serves one connection. Returns its port and
+/// what the client asked for.
+async fn serve_with(keys: Vec<PrivateKey>) -> (u16, Arc<Mutex<Vec<String>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(server::Config {
-        keys: vec![key],
+        keys,
         ..server::Config::default()
     });
     let handler = TestServer::default();
@@ -800,6 +811,74 @@ async fn a_changed_host_key_is_a_hard_stop() {
         script.asked_key.lock().unwrap().is_none(),
         "the user is not offered to trust a changed key"
     );
+}
+
+/// A `known_hosts` file that holds `key` for 127.0.0.1 on `port`.
+fn known_as(name: &str, port: u16, key: &PrivateKey) -> PathBuf {
+    let path = known_hosts(name);
+    russh::keys::known_hosts::learn_known_hosts_path("127.0.0.1", port, key.public_key(), &path)
+        .unwrap();
+    path
+}
+
+#[tokio::test]
+async fn a_known_host_presenting_another_kind_of_key_is_a_changed_key() {
+    // Security review: the host is known by an Ed25519 key; someone in between offers only
+    // an ECDSA key. That is a changed key and a hard stop, not a first meeting to trust.
+    let known = new_key();
+    let other = PrivateKey::random(
+        &mut rand::rng(),
+        Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let port = serve(other).await;
+    let path = known_as("other-kind", port, &known);
+    let script = Script::new(true, &["secret"]);
+    let result = connect(&target(port, "alice"), &path, None, &[], script.clone()).await;
+    assert!(
+        matches!(result, Err(SshError::HostKeyChanged { .. })),
+        "{:?}",
+        result.err()
+    );
+    assert!(
+        script.asked_key.lock().unwrap().is_none(),
+        "the user is not offered to trust it as a new host"
+    );
+}
+
+#[tokio::test]
+async fn a_host_known_by_an_ecdsa_key_is_asked_for_that_key() {
+    // A server with both kinds of key, known by its ECDSA one: Annulus asks for the kind it
+    // knows, so it connects without a question (and without mistaking it for a change).
+    let ecdsa = PrivateKey::random(
+        &mut rand::rng(),
+        Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let port = serve_keys(vec![new_key(), ecdsa.clone()]).await;
+    let path = known_as("known-ecdsa", port, &ecdsa);
+    let script = Script::new(true, &["secret"]);
+    connect(&target(port, "alice"), &path, None, &[], script.clone())
+        .await
+        .unwrap();
+    assert!(script.asked_key.lock().unwrap().is_none(), "no question");
+}
+
+#[test]
+fn sha1_rsa_signatures_are_never_offered() {
+    // Security review: rsa-sha2-256/512 only; an RSA key still works.
+    let offered = host_key_algorithms("127.0.0.1", 22, &known_hosts("no-sha1"));
+    assert!(
+        !offered.contains(&Algorithm::Rsa { hash: None }),
+        "{offered:?}"
+    );
+    assert!(offered.contains(&Algorithm::Rsa {
+        hash: Some(russh::keys::HashAlg::Sha512)
+    }));
 }
 
 #[tokio::test]
