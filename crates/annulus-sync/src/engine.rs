@@ -6,9 +6,18 @@
 //!   version wins over an unpushed local edit, the local edit is pushed first and then
 //!   replaced, so it stays in the server's history.
 //! - Edited on one side and deleted on the other: the edit wins; a deletion never removes
-//!   an edit nobody has seen.
+//!   an edit nobody has seen. The edit is made newer than the deletion, so the next rule
+//!   holds for it too.
+//! - Never back in time: a version older than the one held, with nothing pending here, is the
+//!   server serving an old copy again (a rollback). It is not applied, and the copy held here
+//!   is pushed back over it.
+//! - A deletion is a sealed record like any other (a tombstone with an empty body). One the
+//!   server made up, with nothing sealed, is passed over.
 
 use annulus_proto::{Change, Changes, PushResult};
+
+/// The kind inside a sealed deletion; its empty body is what marks it.
+pub const TOMBSTONE: u8 = 0;
 
 /// How often a round retries after another device pushed in between.
 const ROUNDS: usize = 3;
@@ -31,7 +40,7 @@ pub enum SyncError {
     Undecryptable(String),
 }
 
-/// The plaintext inside a record's ciphertext.
+/// The plaintext inside a record's ciphertext. An empty body is a deletion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     /// What the body is (a host, a rule, …), known only to clients.
@@ -91,11 +100,21 @@ pub trait Replica {
     fn open(&self, id: &str, ciphertext: &[u8]) -> Result<Item, SyncError>;
     /// The server accepted the pending change of `id` as version `seq`.
     fn pushed(&mut self, id: &str, seq: u64);
-    /// Takes the server's version `seq` of `id` (`None`: it was deleted), dropping any
-    /// pending local change of it.
-    fn apply(&mut self, id: &str, seq: u64, item: Option<Item>);
+    /// Takes the server's version `seq` of `id`, made at clock time `hlc` (`None`: it was
+    /// deleted), dropping any pending local change of it.
+    fn apply(&mut self, id: &str, seq: u64, hlc: u64, item: Option<Item>);
     /// Keeps the pending local change of `id` but makes it build on server version `seq`.
     fn rebase(&mut self, id: &str, seq: u64);
+    /// Makes the pending local change of `id` newer than clock time `after` (an edit that
+    /// beats a newer deletion).
+    fn renew(&mut self, id: &str, after: u64);
+    /// When the copy of `id` held here (a record or its deletion) was made; `None` if none.
+    fn held_time(&self, id: &str) -> Option<u64>;
+    /// A clock time of this device, newer than `after`.
+    fn next_time(&mut self, after: u64) -> u64;
+    /// The server's version `seq` of `id` is older than the copy held here: that copy is
+    /// pushed again, over it.
+    fn reassert(&mut self, id: &str, seq: u64);
     /// Whether clock time `hlc` was made on this device (an edit of ours coming back).
     fn own_time(&self, hlc: u64) -> bool;
     /// Starts over against a server that lost changes (restored from a backup): the cursor
@@ -162,19 +181,28 @@ fn pull(
         if record.seq <= replica.version(&record.id) {
             continue;
         }
-        let remote = if record.deleted {
-            None
-        } else {
-            Some(replica.open(&record.id, &record.ciphertext)?)
-        };
+        // What a record is comes from its sealed content, never from the server's flag.
+        if record.ciphertext.is_empty() {
+            continue;
+        }
+        let item = replica.open(&record.id, &record.ciphertext)?;
+        let hlc = item.hlc;
+        let remote = (!item.body.is_empty()).then_some(item);
         let local = pending.iter().find(|change| change.id == record.id);
+        if local.is_none() && replica.held_time(&record.id).is_some_and(|held| hlc < held) {
+            replica.reassert(&record.id, record.seq);
+            continue;
+        }
         match (local, remote) {
-            (None, remote) => replica.apply(&record.id, record.seq, remote),
+            (None, remote) => replica.apply(&record.id, record.seq, hlc, remote),
             // Edit beats deletion, either way round.
-            (Some(local), None) if local.item.is_some() => replica.rebase(&record.id, record.seq),
-            (Some(_), None) => replica.apply(&record.id, record.seq, None),
+            (Some(local), None) if local.item.is_some() => {
+                replica.rebase(&record.id, record.seq);
+                replica.renew(&record.id, hlc);
+            }
+            (Some(_), None) => replica.apply(&record.id, record.seq, hlc, None),
             (Some(local), Some(remote)) => match &local.item {
-                None => replica.apply(&record.id, record.seq, Some(remote)),
+                None => replica.apply(&record.id, record.seq, hlc, Some(remote)),
                 // The same edit: ours, pushed in a round whose result was not kept.
                 Some(_) if local.hlc == remote.hlc => replica.pushed(&record.id, record.seq),
                 Some(_) if local.hlc > remote.hlc => {
@@ -192,7 +220,7 @@ fn pull(
                         base: record.seq,
                         winner: record.ciphertext.clone(),
                     });
-                    replica.apply(&record.id, record.seq, Some(remote));
+                    replica.apply(&record.id, record.seq, hlc, Some(remote));
                 }
             },
         }
@@ -248,7 +276,15 @@ fn push(
             base: change.base,
             ciphertext: match &change.item {
                 Some(item) => replica.seal(&change.id, item)?,
-                None => Vec::new(),
+                // A deletion is sealed too, so no one else can make one up.
+                None => replica.seal(
+                    &change.id,
+                    &Item {
+                        kind: TOMBSTONE,
+                        hlc: change.hlc,
+                        body: Vec::new(),
+                    },
+                )?,
             },
             deleted: change.item.is_none(),
         });
@@ -296,11 +332,14 @@ pub fn restore(
     id: &str,
     version: &annulus_proto::Record,
 ) -> Result<(), SyncError> {
-    let item = replica.open(id, &version.ciphertext)?;
+    let mut item = replica.open(id, &version.ciphertext)?;
+    // Bringing it back is a new edit: newer than the deletion, or other devices would take
+    // it for an old copy served again.
+    item.hlc = replica.next_time(replica.held_time(id).unwrap_or(0));
     let change = Change {
         id: id.to_owned(),
         base: replica.version(id),
-        ciphertext: version.ciphertext.clone(),
+        ciphertext: replica.seal(id, &item)?,
         deleted: false,
     };
     let result = transport.push(&[change])?;
@@ -309,7 +348,8 @@ pub fn restore(
             "it changed on another device meanwhile; sync and try again".into(),
         ));
     };
-    replica.apply(id, seq, Some(item));
+    let hlc = item.hlc;
+    replica.apply(id, seq, hlc, Some(item));
     Ok(())
 }
 

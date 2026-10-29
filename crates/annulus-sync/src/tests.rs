@@ -94,6 +94,8 @@ struct Device {
     node: u64,
     cursor: u64,
     records: HashMap<String, (u64, Option<Item>)>,
+    /// When each deletion held was made.
+    deleted_at: HashMap<String, u64>,
     pending: HashMap<String, Outgoing>,
 }
 
@@ -177,15 +179,23 @@ impl Replica for Device {
     }
 
     fn pushed(&mut self, id: &str, seq: u64) {
-        let item = self.pending.remove(id).map_or_else(
-            || self.records.get(id).and_then(|(_, item)| item.clone()),
-            |change| change.item,
-        );
+        let item = match self.pending.remove(id) {
+            Some(change) => {
+                if change.item.is_none() {
+                    self.deleted_at.insert(id.to_owned(), change.hlc);
+                }
+                change.item
+            }
+            None => self.records.get(id).and_then(|(_, item)| item.clone()),
+        };
         self.records.insert(id.to_owned(), (seq, item));
     }
 
-    fn apply(&mut self, id: &str, seq: u64, item: Option<Item>) {
+    fn apply(&mut self, id: &str, seq: u64, hlc: u64, item: Option<Item>) {
         self.pending.remove(id);
+        if item.is_none() {
+            self.deleted_at.insert(id.to_owned(), hlc);
+        }
         self.records.insert(id.to_owned(), (seq, item));
     }
 
@@ -193,6 +203,44 @@ impl Replica for Device {
         if let Some(change) = self.pending.get_mut(id) {
             change.base = seq;
         }
+    }
+
+    fn next_time(&mut self, after: u64) -> u64 {
+        (after / 1000 + 1) * 1000 + self.node
+    }
+
+    fn renew(&mut self, id: &str, after: u64) {
+        let hlc = self.next_time(after);
+        if let Some(change) = self.pending.get_mut(id) {
+            change.hlc = hlc;
+            if let Some(item) = &mut change.item {
+                item.hlc = hlc;
+            }
+        }
+    }
+
+    fn held_time(&self, id: &str) -> Option<u64> {
+        let (_, item) = self.records.get(id)?;
+        item.as_ref()
+            .map(|item| item.hlc)
+            .or_else(|| self.deleted_at.get(id).copied())
+    }
+
+    fn reassert(&mut self, id: &str, seq: u64) {
+        let Some((_, item)) = self.records.get(id) else {
+            return;
+        };
+        let hlc = self.held_time(id).unwrap_or(0);
+        let item = item.clone();
+        self.pending.insert(
+            id.to_owned(),
+            Outgoing {
+                id: id.to_owned(),
+                base: seq,
+                item,
+                hlc,
+            },
+        );
     }
 
     fn own_time(&self, hlc: u64) -> bool {
@@ -336,6 +384,93 @@ fn a_deletion_reaches_the_other_device() {
     run(&server, b_id, &mut b);
     assert_eq!(b.body("r1"), None);
     assert!(b.records.contains_key("r1"), "kept as a tombstone");
+}
+
+#[test]
+fn a_deletion_the_server_made_up_is_passed_over() {
+    let server = server();
+    let (a_id, b_id) = account(&server);
+    let (mut a, mut b) = (Device::default(), Device::default());
+    a.edit("r1", "prod-db", 10);
+    run(&server, a_id, &mut a);
+    run(&server, b_id, &mut b);
+    // Marked deleted with nothing sealed, as a hostile server (or a stolen token) can.
+    let seq = a.version("r1");
+    let forged = Change {
+        id: "r1".into(),
+        base: seq,
+        ciphertext: Vec::new(),
+        deleted: true,
+    };
+    assert_eq!(server.push(a_id, &[forged]).unwrap().accepted.len(), 1);
+    run(&server, b_id, &mut b);
+    assert_eq!(b.body("r1").as_deref(), Some("prod-db"), "still there");
+}
+
+#[test]
+fn an_old_version_served_again_is_not_applied_and_the_newer_goes_back() {
+    let server = server();
+    let (a_id, b_id) = account(&server);
+    let (mut a, mut b) = (Device::default(), Device::default());
+    a.edit("r1", "old address", 10);
+    run(&server, a_id, &mut a);
+    let old = seal(&Item {
+        kind: 1,
+        hlc: 10,
+        body: b"old address".to_vec(),
+    });
+    a.edit("r1", "new address", 20);
+    run(&server, a_id, &mut a);
+    run(&server, b_id, &mut b);
+    assert_eq!(b.body("r1").as_deref(), Some("new address"));
+    // The server serves the old ciphertext again as the newest version.
+    let replay = Change {
+        id: "r1".into(),
+        base: a.version("r1"),
+        ciphertext: old,
+        deleted: false,
+    };
+    server.push(a_id, &[replay]).unwrap();
+    run(&server, b_id, &mut b);
+    assert_eq!(
+        b.body("r1").as_deref(),
+        Some("new address"),
+        "not rolled back"
+    );
+    run(&server, a_id, &mut a);
+    assert_eq!(
+        a.body("r1").as_deref(),
+        Some("new address"),
+        "the newer copy went back over the old one"
+    );
+}
+
+#[test]
+fn a_deleted_record_is_not_brought_back_by_its_last_version() {
+    let server = server();
+    let (a_id, b_id) = account(&server);
+    let (mut a, mut b) = (Device::default(), Device::default());
+    a.edit("r1", "v1", 10);
+    run(&server, a_id, &mut a);
+    let last = seal(&Item {
+        kind: 1,
+        hlc: 10,
+        body: b"v1".to_vec(),
+    });
+    run(&server, b_id, &mut b);
+    a.delete("r1", 20);
+    run(&server, a_id, &mut a);
+    run(&server, b_id, &mut b);
+    assert_eq!(b.body("r1"), None);
+    let replay = Change {
+        id: "r1".into(),
+        base: a.version("r1"),
+        ciphertext: last,
+        deleted: false,
+    };
+    server.push(a_id, &[replay]).unwrap();
+    run(&server, b_id, &mut b);
+    assert_eq!(b.body("r1"), None, "still deleted");
 }
 
 #[test]

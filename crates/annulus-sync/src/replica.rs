@@ -56,13 +56,33 @@ impl Replica for VaultReplica {
         self.0.pushed(id, seq);
     }
 
-    fn apply(&mut self, id: &str, seq: u64, item: Option<Item>) {
-        self.0
-            .apply(id, seq, item.map(|item| (item.kind, item.hlc, item.body)));
+    fn apply(&mut self, id: &str, seq: u64, hlc: u64, item: Option<Item>) {
+        match item {
+            Some(item) => self
+                .0
+                .apply(id, seq, Some((item.kind, item.hlc, item.body))),
+            None => self.0.deleted_on_server(id, seq, hlc),
+        }
     }
 
     fn rebase(&mut self, id: &str, seq: u64) {
         self.0.rebase(id, seq);
+    }
+
+    fn renew(&mut self, id: &str, after: u64) {
+        self.0.renew(id, after);
+    }
+
+    fn held_time(&self, id: &str) -> Option<u64> {
+        self.0.held_time(id)
+    }
+
+    fn next_time(&mut self, after: u64) -> u64 {
+        self.0.next_time(after)
+    }
+
+    fn reassert(&mut self, id: &str, seq: u64) {
+        self.0.reassert(id, seq);
     }
 
     fn own_time(&self, hlc: u64) -> bool {

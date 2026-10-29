@@ -524,12 +524,47 @@ impl SyncCopy {
         }
     }
 
+    /// Makes the pending change of `id` newer than clock time `after`.
+    pub fn renew(&mut self, id: &str, after: u64) {
+        let hlc = self.next_time(after);
+        if let Some(entry) = self.state.entries.get_mut(id) {
+            entry.hlc = hlc;
+        }
+    }
+
+    /// A clock time of this device, newer than `after`.
+    pub fn next_time(&mut self, after: u64) -> u64 {
+        self.state.clock = self.state.clock.max(after);
+        self.state.tick()
+    }
+
+    /// When the copy of `id` held here (an entity or its deletion) was made.
+    #[must_use]
+    pub fn held_time(&self, id: &str) -> Option<u64> {
+        self.state.entries.get(id).map(|entry| entry.hlc)
+    }
+
+    /// The server's version `seq` of `id` is older than the copy held here (it served an old
+    /// copy again): this copy is pushed again, over it.
+    pub fn reassert(&mut self, id: &str, seq: u64) {
+        if let Some(entry) = self.state.entries.get_mut(id) {
+            entry.base = seq;
+            entry.dirty = true;
+        }
+    }
+
+    /// Takes the server's deletion of `id`, version `seq`, made at clock time `hlc`.
+    pub fn deleted_on_server(&mut self, id: &str, seq: u64, hlc: u64) {
+        self.state.clock = self.state.clock.max(hlc);
+        self.apply_deletion(id, seq, hlc);
+    }
+
     /// Takes the server's version `seq` of `id`: `content` is `(kind, hlc, body)`, or
     /// `None` when it was deleted. A body this version cannot read is skipped (kept on the
     /// server) rather than guessed at.
     pub fn apply(&mut self, id: &str, seq: u64, content: Option<(u8, u64, Vec<u8>)>) {
         let Some((kind, hlc, body)) = content else {
-            self.apply_deletion(id, seq);
+            self.apply_deletion(id, seq, 0);
             return;
         };
         self.state.clock = self.state.clock.max(hlc);
@@ -653,8 +688,9 @@ impl SyncCopy {
         Some((local, awaits, awaits_jump))
     }
 
-    /// Removes the local copy of `id`, deleted on the server as version `seq`.
-    fn apply_deletion(&mut self, id: &str, seq: u64) {
+    /// Removes the local copy of `id`, deleted on the server as version `seq` at clock time
+    /// `hlc`.
+    fn apply_deletion(&mut self, id: &str, seq: u64, hlc: u64) {
         if let Some(entry) = self.state.entries.get_mut(id) {
             match entry.kind {
                 kind::HOST => self.hosts.retain(|host| host.id != entry.local),
@@ -668,6 +704,7 @@ impl SyncCopy {
             entry.deleted = true;
             entry.dirty = false;
             entry.base = seq;
+            entry.hlc = entry.hlc.max(hlc);
         }
     }
 
