@@ -50,10 +50,12 @@ impl TextEngine {
         }
     }
 
-    /// The size `text` takes at font `size` (DIPs), wrapped at `max_width` if given.
+    /// The size `text` takes at font `size` (DIPs), wrapped at `max_width` if given. Empty
+    /// text has no width but keeps one line's height, so an empty field does not collapse.
     pub fn measure(&mut self, text: &str, size: f32, max_width: Option<f32>) -> Size {
         let layout = self.layout(text, size, 1.0, max_width);
-        Size::new(layout.width(), layout.height())
+        let width = if text.is_empty() { 0.0 } else { layout.width() };
+        Size::new(width, layout.height())
     }
 
     /// Draws one line of `text` with its baseline starting at `baseline` (device pixels) at
@@ -147,7 +149,13 @@ impl TextEngine {
 /// premultiplied as tiny-skia expects.
 fn tint(coverage: &[u8], width: u32, height: u32, color: Color) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(width, height)?;
-    for (pixel, cover) in pixmap.data_mut().chunks_exact_mut(4).zip(coverage) {
+    for (pixel, cover) in pixmap
+        .data_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(coverage)
+    {
         let alpha = u16::from(color.a) * u16::from(*cover) / 255;
         let premultiply =
             |channel: u8| u8::try_from(u16::from(channel) * alpha / 255).unwrap_or(u8::MAX);
