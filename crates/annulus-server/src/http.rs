@@ -50,12 +50,17 @@ fn router(server: Arc<Server>) -> Router {
         .route(path::REGISTER_FINISH, post(register_finish))
         .route(path::LOGIN_START, post(login_start))
         .route(path::LOGIN_FINISH, post(login_finish))
-        // Only a signed-in device's push may be large; everything else stays small.
+        // Only a signed-in device's push may be large, and the token is checked before any
+        // of the body is read; everything else stays small.
         .route(
             path::RECORDS,
             get(pull)
                 .post(push)
-                .layer(axum::extract::DefaultBodyLimit::max(annulus_proto::MAX_BODY)),
+                .layer(axum::extract::DefaultBodyLimit::max(annulus_proto::MAX_BODY))
+                .layer(axum::middleware::from_fn_with_state(
+                    server.clone(),
+                    signed_in_first,
+                )),
         )
         .route(path::HISTORY, get(history))
         .route(path::WAIT, get(wait))
@@ -67,6 +72,19 @@ fn router(server: Arc<Server>) -> Router {
             annulus_proto::MAX_SMALL_BODY,
         ))
         .with_state(server)
+}
+
+/// Refuses a request without a valid device token before its body is read, so a stranger
+/// cannot make the server take in a large push.
+async fn signed_in_first(
+    State(server): State<Arc<Server>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    match caller(&server, request.headers()) {
+        Ok(_) => next.run(request).await,
+        Err(refused) => *refused,
+    }
 }
 
 fn failure(status: StatusCode, message: impl Into<String>) -> Response {

@@ -363,7 +363,7 @@ fn http_server() -> String {
 }
 
 #[test]
-fn only_a_push_may_be_large_and_strangers_get_413() {
+fn only_a_signed_in_push_may_be_large_and_strangers_are_refused_first() {
     let base = http_server();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -388,12 +388,37 @@ fn only_a_push_may_be_large_and_strangers_get_413() {
         assert_eq!(status(route, big), 413, "{route}");
         assert_ne!(status(route, 100), 413, "{route}: a normal size is read");
     }
-    // A push of the same size is read (and refused only for want of a token).
-    assert_eq!(status(annulus_proto::path::RECORDS, big), 401);
-    assert_eq!(
-        status(annulus_proto::path::RECORDS, annulus_proto::MAX_BODY + 1),
-        413
-    );
+    // Without a token a push is refused before its body is read, whatever its size: 401,
+    // or (0) the connection closed on the rest of the upload, which is never read.
+    assert_eq!(status(annulus_proto::path::RECORDS, 10), 401);
+    for bytes in [big, annulus_proto::MAX_BODY + 1] {
+        let refused = status(annulus_proto::path::RECORDS, bytes);
+        assert!(matches!(refused, 401 | 0), "{bytes} bytes: {refused}");
+    }
+    // A signed-in device may push large bodies, up to the limit.
+    let mut http = crate::http::HttpServer::new(&base, None).unwrap();
+    let session = account::register(
+        &mut http,
+        &cheap(),
+        "limits",
+        "pw",
+        b"keys".to_vec(),
+        "laptop",
+    )
+    .unwrap();
+    let signed_in = |bytes: usize| {
+        agent
+            .post(&format!("{base}{}", annulus_proto::path::RECORDS))
+            .header(
+                annulus_proto::VERSION_HEADER,
+                &annulus_proto::PROTOCOL_VERSION.to_string(),
+            )
+            .header("Authorization", &format!("Bearer {}", session.token))
+            .send(&vec![0u8; bytes][..])
+            .map_or(0, |response| response.status().as_u16())
+    };
+    assert_eq!(signed_in(annulus_proto::MAX_BODY + 1), 413);
+    assert_eq!(signed_in(big), 200, "read (zeros are an empty push)");
 }
 
 #[test]
