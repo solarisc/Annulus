@@ -71,6 +71,23 @@ pub struct EditState {
     pub dragging: bool,
 }
 
+impl EditState {
+    /// Puts the caret and anchor inside `text` on character boundaries. A field's state
+    /// outlives its text (the same field shows a new folder name, then a rename), so an old
+    /// caret can be past the end or in the middle of a character.
+    fn fit(&mut self, text: &str) {
+        let fit = |at: usize| {
+            let mut at = at.min(text.len());
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        self.cursor = fit(self.cursor);
+        self.anchor = fit(self.anchor);
+    }
+}
+
 /// Text a field can edit: a plain `String`, or a `Zeroizing<String>` for secrets.
 pub trait TextBuffer {
     /// The text.
@@ -293,6 +310,7 @@ impl Ui<'_> {
         }
 
         let mut state = self.state.edit(id);
+        state.fit(buffer.as_str());
         let mut changed = false;
         let mut submitted = false;
         if response.focused {
@@ -328,8 +346,7 @@ impl Ui<'_> {
             self.state.return_keys(leftover);
         }
         let content = buffer.as_str();
-        state.cursor = state.cursor.min(content.len());
-        state.anchor = state.anchor.min(content.len());
+        state.fit(content);
         let shown: String = if buffer.is_secret() {
             "\u{2022}".repeat(content.chars().count())
         } else {
@@ -465,6 +482,7 @@ impl Ui<'_> {
         let inner = rect.inset(space::M - 2.0, space::S);
         let line_h = self.gfx.measure("Ag", font).height;
         let mut state = self.state.edit(id);
+        state.fit(buffer.as_str());
         let mut changed = false;
         if response.focused {
             let mut leftover = Vec::new();
@@ -519,8 +537,7 @@ impl Ui<'_> {
         }
         let secret = buffer.is_secret();
         let text = buffer.as_str();
-        state.cursor = state.cursor.min(text.len());
-        state.anchor = state.anchor.min(text.len());
+        state.fit(text);
         // The caret's line stays in view.
         let caret_row = text[..state.cursor].matches('\n').count();
         #[allow(clippy::cast_precision_loss)] // Scripts are short.
@@ -1330,6 +1347,39 @@ mod tests {
                 .iter()
                 .any(|(_, text)| text == &"\u{2022}".repeat(10))
         );
+    }
+
+    #[test]
+    fn a_caret_left_from_other_text_lands_on_a_character_boundary() {
+        let mut state = UiState::default();
+        let id = Id::new("field");
+        let mut short = String::from("ab");
+        frame(&mut state, &[], |ui| {
+            ui.text_field(id, FIELD, &mut short, FieldStyle::default());
+        });
+        state.set_focus(Some(id), true);
+        // The caret after "a", byte 1.
+        frame(
+            &mut state,
+            &[
+                key(Key::Home, Modifiers::NONE),
+                key(Key::Right, Modifiers::NONE),
+            ],
+            |ui| {
+                ui.text_field(id, FIELD, &mut short, FieldStyle::default());
+            },
+        );
+        // The same field now shows text whose byte 1 is inside "\u{c4}"; typing must not panic.
+        let mut name = String::from("\u{c4}rger.txt");
+        frame(&mut state, &[Event::Text("x".into())], |ui| {
+            ui.text_field(id, FIELD, &mut name, FieldStyle::default());
+        });
+        assert_eq!(name, "x\u{c4}rger.txt");
+        let mut area = String::from("\u{c4}\n\u{c4}");
+        frame(&mut state, &[Event::Text("y".into())], |ui| {
+            ui.text_area(id, FIELD, &mut area, FieldStyle::default());
+        });
+        assert!(area.contains('y'));
     }
 
     #[test]

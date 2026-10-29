@@ -267,8 +267,12 @@ impl LiveTerminal {
                 Typed::Key(Key::Backspace, modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
                     session.clear_scrollback();
                 }
-                // Each line would run as it arrives: ask first.
-                Typed::Paste(text) if needs_confirm(&text, mode) => self.held_paste = Some(text),
+                // Each line would run as it arrives: ask first, and send nothing typed after it
+                // until the question is answered.
+                Typed::Paste(text) if needs_confirm(&text, mode) => {
+                    self.held_paste = Some(text);
+                    break;
+                }
                 typed => {
                     if let Some(bytes) = encode(&typed, mode) {
                         session.scroll_to_bottom();

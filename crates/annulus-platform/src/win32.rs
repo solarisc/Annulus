@@ -704,6 +704,8 @@ impl Host {
         let mut request = None;
         let output = {
             let Ok(mut canvas) = D2dCanvas::new(&self.d2d, target.clone(), self.scale) else {
+                // The input waits for the next frame.
+                self.events = events;
                 self.painting = false;
                 return;
             };
