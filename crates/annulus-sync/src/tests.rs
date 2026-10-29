@@ -376,6 +376,7 @@ fn a_full_round_over_http_then_a_revoked_device_is_refused() {
     )
     .unwrap();
     laptop.set_token(Some(session.token.clone()));
+    let laptop_token = session.token.clone();
     let mut device = Device::default();
     device.edit("r1", "prod-db", 10);
     assert_eq!(sync(&mut laptop, &mut device).unwrap().pushed, 1);
@@ -387,6 +388,26 @@ fn a_full_round_over_http_then_a_revoked_device_is_refused() {
     sync(&mut phone, &mut phone_copy).unwrap();
     assert_eq!(phone_copy.body("r1").as_deref(), Some("prod-db"));
     assert_eq!(laptop.devices().unwrap().devices.len(), 2);
+    // Live sync: a wait returns as soon as another device pushes.
+    let cursor = phone_copy.cursor;
+    let waiting = std::thread::spawn({
+        let base = base.clone();
+        let token = laptop_token.clone();
+        move || {
+            let http = crate::http::HttpServer::new(&base, Some(token)).unwrap();
+            let started = std::time::Instant::now();
+            (http.wait(cursor).unwrap(), started.elapsed())
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    phone_copy.edit("r9", "from the phone", 50);
+    sync(&mut phone, &mut phone_copy).unwrap();
+    let (newest, elapsed) = waiting.join().unwrap();
+    assert!(newest > cursor);
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "woke on the push, not the timeout"
+    );
     device.edit("r1", "edited", 20);
     sync(&mut laptop, &mut device).unwrap();
     assert_eq!(

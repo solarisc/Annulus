@@ -4,6 +4,8 @@
 //! touched on the UI thread.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -66,6 +68,56 @@ pub struct SyncScreen {
     last_round: f64,
     /// When a local change was first seen unpushed.
     dirty_since: Option<f64>,
+    /// The thread that waits for changes from other devices (live sync).
+    watcher: Option<Watcher>,
+}
+
+/// Waits on the server for changes from other devices and flags them, so a round runs at
+/// once instead of at the next minute.
+struct Watcher {
+    /// Which account it watches: server, name, device.
+    account: (String, String, u64),
+    stop: Arc<AtomicBool>,
+    news: Arc<AtomicBool>,
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Watcher {
+    fn start(ctx: &egui::Context, account: &SyncAccount, since: u64) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let news = Arc::new(AtomicBool::new(false));
+        let (server, token) = (account.server.clone(), account.token.expose().to_owned());
+        let (thread_stop, thread_news, ctx) = (stop.clone(), news.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let Ok(http) = HttpServer::new(&server, Some(token)) else {
+                return;
+            };
+            let mut since = since;
+            while !thread_stop.load(Ordering::Relaxed) {
+                match http.wait(since) {
+                    Ok(latest) if latest > since => {
+                        since = latest;
+                        thread_news.store(true, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    }
+                    Ok(_) => {}
+                    Err(SyncError::Unauthorized) => return,
+                    // Offline or the server is down: try again in a while.
+                    Err(_) => std::thread::sleep(Duration::from_secs(15)),
+                }
+            }
+        });
+        Self {
+            account: (account.server.clone(), account.name.clone(), account.device),
+            stop,
+            news,
+        }
+    }
 }
 
 impl Default for SyncScreen {
@@ -84,6 +136,7 @@ impl Default for SyncScreen {
             trash: Vec::new(),
             last_round: f64::NEG_INFINITY,
             dirty_since: None,
+            watcher: None,
         }
     }
 }
@@ -139,8 +192,29 @@ impl SyncScreen {
         }
         let state = hosts.vault().sync_state();
         let Some(signed_in) = state.account.clone() else {
+            self.watcher = None;
             return replaced;
         };
+        let watched = (
+            signed_in.server.clone(),
+            signed_in.name.clone(),
+            signed_in.device,
+        );
+        if self
+            .watcher
+            .as_ref()
+            .is_none_or(|watcher| watcher.account != watched)
+        {
+            self.watcher = Some(Watcher::start(ctx, &signed_in, state.cursor));
+        }
+        if self
+            .watcher
+            .as_ref()
+            .is_some_and(|watcher| watcher.news.swap(false, Ordering::Relaxed))
+        {
+            // Another device pushed: sync now.
+            self.last_round = f64::NEG_INFINITY;
+        }
         let now = ctx.input(|input| input.time);
         if state.pending_count() == 0 {
             self.dirty_since = None;

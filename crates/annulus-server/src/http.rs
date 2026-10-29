@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use annulus_proto::{
-    Failure, History, LoginFinish, LoginStart, PROTOCOL_VERSION, Push, RegisterFinish,
+    Failure, History, Latest, LoginFinish, LoginStart, PROTOCOL_VERSION, Push, RegisterFinish,
     RegisterStart, Revoke, VERSION_HEADER, decode, encode, path,
 };
 
@@ -52,6 +52,7 @@ fn router(server: Arc<Server>) -> Router {
         .route(path::LOGIN_FINISH, post(login_finish))
         .route(path::RECORDS, get(pull).post(push))
         .route(path::HISTORY, get(history))
+        .route(path::WAIT, get(wait))
         .route(path::PASSWORD_START, post(password_start))
         .route(path::PASSWORD_FINISH, post(password_finish))
         .route(path::DEVICES, get(devices))
@@ -196,6 +197,35 @@ async fn pull(
         Some(since) => reply(server.pull(caller, since)),
         None => failure(StatusCode::BAD_REQUEST, "since must be a number"),
     }
+}
+
+/// How long a wait request is held open before answering with no news.
+const WAIT_FOR: std::time::Duration = std::time::Duration::from_secs(25);
+
+async fn wait(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let caller = match caller(&server, &headers) {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    let since = query
+        .as_deref()
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("since="))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut receiver = match server.watch(caller) {
+        Ok(receiver) => receiver,
+        Err(error) => return reply::<()>(Err(error)),
+    };
+    let newer = |latest: &u64| *latest > since;
+    let _ = tokio::time::timeout(WAIT_FOR, receiver.wait_for(newer)).await;
+    let latest = *receiver.borrow();
+    reply(Ok(Latest { latest }))
 }
 
 async fn history(

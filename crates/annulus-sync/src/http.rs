@@ -47,7 +47,7 @@ impl HttpServer {
         let agent: Agent = Agent::config_builder()
             .tls_config(tls)
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
+            .timeout_global(Some(Duration::from_secs(40)))
             .build()
             .into();
         Ok(Self { base, agent, token })
@@ -130,6 +130,17 @@ impl HttpServer {
     /// Unreachable or signed out.
     pub fn password_finish(&self, request: &RegisterFinish) -> Result<(), SyncError> {
         self.post(path::PASSWORD_FINISH, request)
+    }
+
+    /// Waits (up to about 25 s) until the account has changes newer than `since`; returns
+    /// the newest sequence number, which equals `since` when nothing changed.
+    ///
+    /// # Errors
+    /// Unreachable or signed out.
+    pub fn wait(&self, since: u64) -> Result<u64, SyncError> {
+        let latest: annulus_proto::Latest =
+            self.request(&format!("{}?since={since}", path::WAIT), None)?;
+        Ok(latest.latest)
     }
 
     /// Earlier versions of record `id`, newest first.

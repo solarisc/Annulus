@@ -93,6 +93,8 @@ pub struct Server {
     signups: Signups,
     logins: Mutex<HashMap<u64, PendingLogin>>,
     failures: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per account, the newest sequence number, for clients waiting for changes.
+    latest: Mutex<HashMap<i64, tokio::sync::watch::Sender<u64>>>,
 }
 
 /// One account as the admin sees it: no record contents, which the server cannot read.
@@ -212,6 +214,7 @@ impl Server {
             signups,
             logins: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            latest: Mutex::new(HashMap::new()),
         })
     }
 
@@ -546,6 +549,11 @@ impl Server {
             params![last, caller.account],
         )?;
         tx.commit()?;
+        if let Ok(waiting) = self.latest.lock()
+            && let Some(sender) = waiting.get(&caller.account)
+        {
+            sender.send_replace(seq(last));
+        }
         Ok(result)
     }
 
@@ -579,6 +587,31 @@ impl Server {
             records,
             latest: seq(latest),
         })
+    }
+
+    /// A receiver that sees the account's newest sequence number change.
+    ///
+    /// # Errors
+    /// The database failed.
+    pub fn watch(&self, caller: Caller) -> Result<tokio::sync::watch::Receiver<u64>, ServerError> {
+        let latest: i64 = self.db()?.query_row(
+            "SELECT last_seq FROM accounts WHERE id = ?1",
+            [caller.account],
+            |row| row.get(0),
+        )?;
+        let mut waiting = self
+            .latest
+            .lock()
+            .map_err(|_| ServerError::Storage("lock poisoned".into()))?;
+        let sender = waiting
+            .entry(caller.account)
+            .or_insert_with(|| tokio::sync::watch::channel(seq(latest)).0);
+        sender.send_if_modified(|value| {
+            let changed = *value != seq(latest);
+            *value = (*value).max(seq(latest));
+            changed
+        });
+        Ok(sender.subscribe())
     }
 
     /// Earlier versions of a record, newest first (for restoring from history or trash).

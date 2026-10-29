@@ -39,6 +39,9 @@ pub mod path {
     pub const LOGIN_FINISH: &str = "/v1/login/finish";
     /// Pull with `GET ?since=<seq>`, push with `POST` ([`super::Push`]).
     pub const RECORDS: &str = "/v1/records";
+    /// Waits until the account has changes newer than `?since=<seq>`, or about 25 s
+    /// ([`super::Latest`]): live sync without a stream.
+    pub const WAIT: &str = "/v1/records/wait";
     /// Earlier versions of one record, `GET ?id=<record id>` ([`super::History`]).
     pub const HISTORY: &str = "/v1/records/history";
     /// Starts a password change for the signed-in account ([`super::RegisterStart`]; its
@@ -203,6 +206,13 @@ pub struct Changes {
     /// Current versions of records changed after the cursor, in sequence order.
     pub records: Vec<Record>,
     /// The newest sequence number on the server; the client's next cursor.
+    pub latest: u64,
+}
+
+/// The newest sequence number of the account.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Latest {
+    /// The newest sequence number.
     pub latest: u64,
 }
 
