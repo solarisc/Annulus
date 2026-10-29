@@ -10,6 +10,7 @@ use annulus_vault::vault::Vault;
 use crate::forwards_screen::ForwardsScreen;
 use crate::hosts_screen::{HostsScreen, Request};
 use crate::keychain_screen::KeychainScreen;
+use crate::known_hosts_screen::KnownHostsScreen;
 use crate::lock_screen::LockScreen;
 use crate::panes::{Layout as PaneLayout, Panes};
 use crate::password_screen::PasswordScreen;
@@ -121,6 +122,8 @@ pub struct Shell {
     keychain: KeychainScreen,
     /// The Snippets screen.
     snippets: SnippetsScreen,
+    /// The Known Hosts screen.
+    known_hosts: KnownHostsScreen,
     /// Changing the master password, in Settings.
     password: PasswordScreen,
     /// The snippet panel beside terminals is open (Ctrl+Shift+.), and its search text.
@@ -166,6 +169,7 @@ impl Shell {
             sync: SyncScreen::default(),
             keychain: KeychainScreen::default(),
             snippets: SnippetsScreen::default(),
+            known_hosts: KnownHostsScreen::default(),
             password: PasswordScreen::default(),
             snippet_panel: None,
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
@@ -592,6 +596,11 @@ impl Shell {
                     self.unlocked(vault);
                 }
             }
+            Section::KnownHosts => {
+                let palette = self.palette();
+                let path = self.data_dir.join("known_hosts");
+                self.known_hosts.ui(ui, &palette, &path);
+            }
             Section::Snippets => {
                 let palette = self.palette();
                 if let Some(hosts) = &mut self.hosts {
@@ -617,10 +626,10 @@ impl Shell {
                 }
             }
             Section::Settings => self.settings(ui),
-            other => empty_state(
+            Section::Logs => empty_state(
                 ui,
-                other.title(),
-                "Arrives with the vault.",
+                Section::Logs.title(),
+                "Session logs are not recorded yet.",
                 &self.palette(),
             ),
         }

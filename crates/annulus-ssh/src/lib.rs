@@ -8,6 +8,7 @@
 
 pub mod forward;
 pub mod keys;
+pub mod known;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
