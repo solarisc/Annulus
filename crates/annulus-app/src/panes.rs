@@ -5,7 +5,7 @@
 use eframe::egui::{self, Rect, Ui, UiBuilder, Vec2};
 use annulus_session::Program;
 
-use crate::terminal_view::TerminalTab;
+use crate::terminal_view::{TabStatus, TerminalTab};
 
 /// The amber of broadcast mode: the banner and every receiving pane's outline.
 const BROADCAST: egui::Color32 = egui::Color32::from_rgb(0xE0, 0xA4, 0x3A);
@@ -185,6 +185,9 @@ impl Panes {
             {
                 self.focused = index;
             }
+            if several && let Some(status) = pane.status() {
+                pane_dot(ui, rect, index, status);
+            }
         }
         let typed = self
             .list
@@ -215,6 +218,30 @@ impl Panes {
         }
         ui.allocate_rect(area, egui::Sense::hover());
     }
+}
+
+/// The colour of a pane's dot: accent, amber or red, from the theme.
+fn dot_color(visuals: &egui::Visuals, status: TabStatus) -> egui::Color32 {
+    match status {
+        TabStatus::Unread => visuals.selection.stroke.color,
+        TabStatus::Input => visuals.warn_fg_color,
+        TabStatus::Error => visuals.error_fg_color,
+    }
+}
+
+/// A pane's status dot in its top-right corner (F-APP-002), with a tooltip and an
+/// accessible name, so a split tab shows which pane needs attention.
+fn pane_dot(ui: &Ui, rect: Rect, index: usize, status: TabStatus) {
+    let color = dot_color(ui.visuals(), status);
+    let center = rect.right_top() + egui::vec2(-10.0, 10.0);
+    ui.painter().circle_filled(center, 4.0, color);
+    let response = ui.interact(
+        egui::Rect::from_center_size(center, egui::vec2(12.0, 12.0)),
+        ui.scope_id().with(("pane-dot", index)),
+        egui::Sense::hover(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, status.describe()));
+    response.on_hover_text(status.describe());
 }
 
 /// `count` equal parts of `area` along `layout`, with `gap` points between them.
@@ -252,6 +279,20 @@ mod tests {
 
     fn panes() -> Panes {
         Panes::single("one", Program::DefaultShell)
+    }
+
+    #[test]
+    fn pane_dots_take_the_themes_accent_warning_and_error_colours() {
+        let visuals = egui::Visuals::dark();
+        assert_eq!(
+            dot_color(&visuals, TabStatus::Unread),
+            visuals.selection.stroke.color
+        );
+        assert_eq!(dot_color(&visuals, TabStatus::Input), visuals.warn_fg_color);
+        assert_eq!(
+            dot_color(&visuals, TabStatus::Error),
+            visuals.error_fg_color
+        );
     }
 
     #[test]
