@@ -29,6 +29,32 @@ pub struct Panes {
     focused: usize,
     /// Typing in the focused pane goes to every pane (F-WS-003).
     broadcast: bool,
+    /// One large pane and a list of the others instead of the split (F-WS-002).
+    focus_mode: bool,
+}
+
+/// Width of the session list beside the large pane in focus mode (UI-SPEC §3).
+const FOCUS_LIST: f32 = 220.0;
+
+/// Where each pane goes: in split mode every pane gets a part of `area`; in focus mode only
+/// `focused` does, beside a list strip on the right (the second value).
+fn arrange(
+    area: Rect,
+    count: usize,
+    focused: usize,
+    focus_mode: bool,
+    layout: Layout,
+) -> (Vec<Option<Rect>>, Option<Rect>) {
+    if !focus_mode || count < 2 {
+        let rects = split_rect(area, count, layout, 2.0);
+        return (rects.into_iter().map(Some).collect(), None);
+    }
+    let list = Rect::from_min_max(egui::pos2(area.max.x - FOCUS_LIST, area.min.y), area.max);
+    let large = Rect::from_min_max(area.min, egui::pos2(list.min.x - 2.0, area.max.y));
+    let rects = (0..count)
+        .map(|index| (index == focused).then_some(large))
+        .collect();
+    (rects, Some(list))
 }
 
 impl Panes {
@@ -40,7 +66,13 @@ impl Panes {
             layout: Layout::Row,
             focused: 0,
             broadcast: false,
+            focus_mode: false,
         }
+    }
+
+    /// Switches between split and focus mode (Ctrl+Shift+M).
+    pub fn toggle_focus_mode(&mut self) {
+        self.focus_mode = !self.focus_mode;
     }
 
     /// The tab title: the focused pane's.
@@ -62,6 +94,29 @@ impl Panes {
         for pane in &mut self.list {
             pane.poll(ctx);
         }
+    }
+
+    /// Focus mode's list of the tab's sessions; a click brings one into the large pane.
+    fn session_list(&mut self, ui: &mut Ui, list: Rect) {
+        ui.scope_builder(
+            UiBuilder::new().id_salt("focus-list").max_rect(list),
+            |ui| {
+                ui.label(egui::RichText::new("Sessions").strong());
+                for (index, pane) in self.list.iter().enumerate() {
+                    let label = match pane.status() {
+                        Some(status) => format!("{} \u{2022} {}", pane.title, status.describe()),
+                        None => pane.title.clone(),
+                    };
+                    if ui.selectable_label(index == self.focused, label).clicked() {
+                        self.focused = index;
+                    }
+                }
+                ui.label(
+                    egui::RichText::new("Ctrl+Shift+M: back to split")
+                        .size(annulus_config::tokens::text::SECONDARY),
+                );
+            },
+        );
     }
 
     /// The pane that has the keyboard.
@@ -156,11 +211,22 @@ impl Panes {
             );
         }
         let area = ui.available_rect_before_wrap();
-        let rects = split_rect(area, self.list.len(), self.layout, 2.0);
+        let (rects, list) = arrange(
+            area,
+            self.list.len(),
+            self.focused,
+            self.focus_mode,
+            self.layout,
+        );
         let focused = self.focused;
         let several = self.list.len() > 1;
         let broadcasting = self.broadcasting();
         for (index, (pane, rect)) in self.list.iter_mut().zip(rects).enumerate() {
+            // A pane hidden by focus mode still takes in its session's news.
+            let Some(rect) = rect else {
+                pane.poll(ui.ctx());
+                continue;
+            };
             if broadcasting {
                 ui.painter().rect_stroke(
                     rect.expand(1.0),
@@ -168,7 +234,7 @@ impl Panes {
                     egui::Stroke::new(2.0, BROADCAST),
                     egui::StrokeKind::Outside,
                 );
-            } else if several && index == focused {
+            } else if several && index == focused && list.is_none() {
                 let accent = ui.visuals().selection.stroke.color;
                 ui.painter().rect_stroke(
                     rect.expand(1.0),
@@ -189,6 +255,9 @@ impl Panes {
                 pane_dot(ui, rect, index, status);
             }
         }
+        if let Some(list) = list {
+            self.session_list(ui, list);
+        }
         let typed = self
             .list
             .get_mut(focused)
@@ -203,7 +272,7 @@ impl Panes {
                 }
             }
         }
-        if self.list.len() > 1 {
+        if self.list.len() > 1 && !self.focus_mode {
             let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
             for rect in split_rect(area, self.list.len(), self.layout, 2.0)
                 .iter()
@@ -279,6 +348,28 @@ mod tests {
 
     fn panes() -> Panes {
         Panes::single("one", Program::DefaultShell)
+    }
+
+    #[test]
+    fn focus_mode_gives_the_focused_pane_the_room_beside_a_list() {
+        let area = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        let (split, list) = arrange(area, 3, 1, false, Layout::Row);
+        assert!(list.is_none());
+        assert!(split.iter().all(Option::is_some));
+        let (focus, list) = arrange(area, 3, 1, true, Layout::Row);
+        assert_eq!(list.map(|rect| rect.width()), Some(FOCUS_LIST));
+        assert_eq!(focus[0], None);
+        assert_eq!(focus[2], None);
+        assert_eq!(
+            focus[1].map(|rect| rect.width()),
+            Some(1000.0 - FOCUS_LIST - 2.0)
+        );
+        let (single, list) = arrange(area, 1, 0, true, Layout::Row);
+        assert_eq!(
+            (single, list),
+            (vec![Some(area)], None),
+            "one pane: no list"
+        );
     }
 
     #[test]

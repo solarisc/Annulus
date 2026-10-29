@@ -223,6 +223,9 @@ impl Shell {
         if ui.input_mut(|input| input.consume_key(command, egui::Key::B)) {
             panes.toggle_broadcast();
         }
+        if ui.input_mut(|input| input.consume_key(command, egui::Key::M)) {
+            panes.toggle_focus_mode();
+        }
         let (right, down, back, forward) = ui.input_mut(|input| {
             let mut arrow = |key| several && input.consume_key(egui::Modifiers::ALT, key);
             let back = arrow(egui::Key::ArrowLeft) | arrow(egui::Key::ArrowUp);
