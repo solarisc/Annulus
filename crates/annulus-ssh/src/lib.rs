@@ -12,6 +12,7 @@ use std::sync::Arc;
 use russh::client::{self, AuthResult, Handle, Msg};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, check_known_hosts_path};
 use russh::{Channel, ChannelMsg};
+use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::Zeroizing;
 
 pub use russh;
@@ -301,6 +302,18 @@ impl Connection {
             .await?;
         channel.request_shell(true).await?;
         Ok(Shell { channel })
+    }
+
+    /// Opens the `sftp` subsystem and returns its byte stream, for `annulus-sftp`.
+    ///
+    /// # Errors
+    /// The server refused the channel or the subsystem.
+    pub async fn sftp_stream(
+        &self,
+    ) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, SshError> {
+        let channel = self.handle.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        Ok(channel.into_stream())
     }
 }
 
