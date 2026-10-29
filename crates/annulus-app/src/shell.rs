@@ -105,6 +105,10 @@ pub struct Shell {
     data_dir: std::path::PathBuf,
     /// Terminal font size in points, shared by all terminal tabs.
     pub font_size: f32,
+    /// Lock the vault after this many idle minutes; 0 never locks.
+    pub auto_lock_minutes: u32,
+    /// When input last arrived, in egui seconds.
+    last_input: f64,
     applied: Option<Appearance>,
 }
 
@@ -124,6 +128,8 @@ impl Shell {
             lock: LockScreen::new(&data_dir.join(VAULT_FILE)),
             data_dir: data_dir.to_path_buf(),
             font_size: DEFAULT_FONT_SIZE,
+            auto_lock_minutes: 15,
+            last_input: 0.0,
             applied: None,
         }
     }
@@ -173,6 +179,7 @@ impl Shell {
         ui.ctx()
             .options_mut(|options| options.zoom_with_keyboard = false);
         self.shortcuts(ui);
+        self.auto_lock(ui.ctx());
         egui::Panel::top("tabs").show(ui, |ui| self.tab_strip(ui));
         if matches!(self.tabs.get(self.active_tab), Some(Tab::Vault)) {
             egui::Panel::left("vault-nav")
@@ -371,6 +378,32 @@ impl Shell {
         }
     }
 
+    /// Locks an unlocked vault after the idle timeout (F-SEC-004). Instead of polling, one
+    /// repaint is requested for the moment the timeout would pass.
+    fn auto_lock(&mut self, ctx: &egui::Context) {
+        let (now, active) = ctx.input(|input| {
+            (
+                input.time,
+                !input.events.is_empty() || input.pointer.is_moving(),
+            )
+        });
+        if active || self.last_input == 0.0 {
+            self.last_input = now;
+        }
+        if self.hosts.is_none() || self.auto_lock_minutes == 0 {
+            return;
+        }
+        let timeout = f64::from(self.auto_lock_minutes) * 60.0;
+        let idle = now - self.last_input;
+        if idle_expired(idle, timeout) {
+            self.lock_vault();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                (timeout - idle).max(1.0),
+            ));
+        }
+    }
+
     fn settings(&mut self, ui: &mut Ui) {
         ui.heading("Settings");
         ui.add_space(space::M);
@@ -384,7 +417,15 @@ impl Shell {
                 ui.selectable_value(&mut self.theme_mode, mode, label);
             }
         });
+        ui.add_space(space::M);
+        ui.label("Lock the vault after idle minutes (0 = never)");
+        ui.add(egui::DragValue::new(&mut self.auto_lock_minutes).range(0..=240));
     }
+}
+
+/// Whether `idle` seconds have reached the `timeout`.
+fn idle_expired(idle: f64, timeout: f64) -> bool {
+    idle >= timeout
 }
 
 fn empty_state(ui: &mut Ui, title: &str, detail: &str, palette: &Palette) {
@@ -433,6 +474,19 @@ mod tests {
         shell.active_tab = 2;
         shell.close_tab(1);
         assert_eq!(shell.tabs[shell.active_tab].title(), "b");
+    }
+
+    #[test]
+    fn idle_time_at_or_past_the_timeout_locks() {
+        assert!(!idle_expired(899.0, 900.0));
+        assert!(idle_expired(900.0, 900.0));
+    }
+
+    #[test]
+    fn locking_drops_the_unlocked_hosts() {
+        let mut shell = test_shell();
+        shell.lock_vault();
+        assert!(shell.hosts.is_none());
     }
 
     #[test]

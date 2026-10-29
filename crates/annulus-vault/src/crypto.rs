@@ -321,7 +321,7 @@ fn decode_recovery(text: &str) -> Option<Zeroizing<[u8; 32]>> {
     let mut bits = 0u32;
     let mut count = 0;
     let mut index = 0;
-    for c in text.chars().filter(|c| c.is_ascii_alphanumeric()) {
+    for c in text.chars().filter(char::is_ascii_alphanumeric) {
         let value = BASE32
             .iter()
             .position(|b| char::from(*b) == c.to_ascii_uppercase())?;

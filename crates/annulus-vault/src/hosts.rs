@@ -214,10 +214,7 @@ mod tests {
 
     #[test]
     fn a_missing_plain_file_is_an_empty_list() {
-        assert!(
-            load_plain(Path::new("does-not-exist/hosts.json"))
-                .unwrap()
-                .is_empty()
-        );
+        let hosts = load_plain(Path::new("does-not-exist/hosts.json")).unwrap();
+        assert_eq!(hosts, Vec::<Host>::new());
     }
 }
