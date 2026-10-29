@@ -140,7 +140,7 @@ impl HostsScreen {
             for host in &matches {
                 match host_row(ui, host, palette) {
                     RowAction::Connect => {
-                        request = Some(Request::Open(host.label.clone(), self.connect_host(host)))
+                        request = Some(Request::Open(host.label.clone(), self.connect_host(host)));
                     }
                     RowAction::Edit => {
                         self.editor = Some(Draft {

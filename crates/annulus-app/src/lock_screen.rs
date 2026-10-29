@@ -1,7 +1,7 @@
 //! Creating and unlocking the vault (F-SYNC-001, F-SEC-001): the master password, the
 //! recovery key shown once at setup, and unlocking with either.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use eframe::egui::{self, RichText, Ui};
 use annulus_config::tokens::{Palette, space, text};
@@ -28,7 +28,7 @@ pub enum LockScreen {
     /// The vault exists and is created or unlocked once the recovery key is confirmed.
     Recovery {
         /// The new vault, handed over once the user confirms.
-        vault: Option<Vault>,
+        vault: Option<Box<Vault>>,
         /// The recovery key, shown this once.
         key: Zeroizing<String>,
         /// The user's re-typed first group, proving it was written down.
@@ -67,7 +67,7 @@ impl LockScreen {
     }
 
     /// Draws the screen; returns the vault once it is created or unlocked.
-    pub fn ui(&mut self, ui: &mut Ui, path: &PathBuf, palette: &Palette) -> Option<Vault> {
+    pub fn ui(&mut self, ui: &mut Ui, path: &Path, palette: &Palette) -> Option<Vault> {
         let mut opened = None;
         let mut next = None;
         ui.vertical_centered(|ui| {
@@ -86,8 +86,8 @@ impl LockScreen {
                         } else if password.expose() != confirm.expose() {
                             *error = Some("The two passwords differ.".into());
                         } else {
-                            match Vault::create(path.clone(), password.expose(), KdfParams::DEFAULT) {
-                                Ok((vault, key)) => next = Some(LockScreen::Recovery { vault: Some(vault), key, typed: String::new(), error: None }),
+                            match Vault::create(path.to_path_buf(), password.expose(), KdfParams::DEFAULT) {
+                                Ok((vault, key)) => next = Some(LockScreen::Recovery { vault: Some(Box::new(vault)), key, typed: String::new(), error: None }),
                                 Err(failure) => *error = Some(format!("Could not create the vault: {failure}")),
                             }
                         }
@@ -104,7 +104,7 @@ impl LockScreen {
                     if ui.button("I saved it, open the vault").clicked() {
                         let first = key.split('-').next().unwrap_or_default();
                         if typed.trim().eq_ignore_ascii_case(first) {
-                            opened = vault.take();
+                            opened = vault.take().map(|vault| *vault);
                         } else {
                             *error = Some("That does not match the first group.".into());
                         }
@@ -121,7 +121,7 @@ impl LockScreen {
                     show_error(ui, palette, error.as_deref());
                     let enter = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     if ui.button("Unlock").clicked() || enter {
-                        let result = if *with_recovery { Vault::recover(path.clone(), secret.expose()) } else { Vault::unlock(path.clone(), secret.expose()) };
+                        let result = if *with_recovery { Vault::recover(path.to_path_buf(), secret.expose()) } else { Vault::unlock(path.to_path_buf(), secret.expose()) };
                         egui::TextBuffer::clear(secret);
                         match result {
                             Ok(vault) => opened = Some(vault),

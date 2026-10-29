@@ -54,6 +54,31 @@ impl TerminalTab {
         }
     }
 
+    /// Applies what the session reported since the last frame.
+    fn drain_events(&mut self, ctx: &egui::Context) {
+        let events = self
+            .session
+            .as_ref()
+            .map(Session::take_events)
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                SessionEvent::Title(title) if !title.trim().is_empty() => self.title = title,
+                SessionEvent::Exited => self.exited = true,
+                // A bell asks for attention (the taskbar flashes) instead of making a sound.
+                SessionEvent::Bell => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                        egui::UserAttentionType::Informational,
+                    ));
+                }
+                SessionEvent::HostKey(question) => self.host_key = Some(question),
+                SessionEvent::Password { user, host } => self.password_for = Some((user, host)),
+                SessionEvent::Failed(message) => self.failed = Some(message),
+                SessionEvent::Title(_) => {}
+            }
+        }
+    }
+
     /// Draws the tab and handles its input.
     pub fn ui(&mut self, ui: &mut Ui, font_size: f32) {
         let font = FontId::monospace(font_size);
@@ -92,23 +117,7 @@ impl TerminalTab {
             session.resize(size, cell_w, cell_h);
             self.size = Some((size, cell_w, cell_h));
         }
-        for event in session.take_events() {
-            match event {
-                SessionEvent::Title(title) if !title.trim().is_empty() => self.title = title,
-                SessionEvent::Exited => self.exited = true,
-                // A bell asks for attention (the taskbar flashes) instead of making a sound.
-                SessionEvent::Bell => {
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                            egui::UserAttentionType::Informational,
-                        ));
-                }
-                SessionEvent::HostKey(question) => self.host_key = Some(question),
-                SessionEvent::Password { user, host } => self.password_for = Some((user, host)),
-                SessionEvent::Failed(message) => self.failed = Some(message),
-                SessionEvent::Title(_) => {}
-            }
-        }
+        self.drain_events(ui.ctx());
         if let Some(message) = &self.failed {
             ui.colored_label(Color32::from_rgb(0xE8, 0x64, 0x5D), message);
             return;
