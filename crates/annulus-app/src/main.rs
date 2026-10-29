@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod shell;
+mod terminal_view;
 
 use std::process::ExitCode;
 

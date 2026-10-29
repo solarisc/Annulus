@@ -15,4 +15,6 @@ workspace = true
 [dependencies]
 eframe.workspace = true
 annulus-config = { path = "../annulus-config" }
+annulus-session = { path = "../annulus-session" }
+annulus-term = { path = "../annulus-term" }
 annulus-ui = { path = "../annulus-ui" }

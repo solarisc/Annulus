@@ -12,6 +12,7 @@ publish = false
 
 # Direct dependency versions are pinned here once; crates inherit them with `foo.workspace = true`.
 [workspace.dependencies]
+alacritty_terminal = "0.26.0"
 anyhow = "1.0.104"
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"] }
 egui = "0.37.0"
