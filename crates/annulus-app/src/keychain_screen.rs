@@ -396,11 +396,11 @@ mod tests {
         assert_eq!(install_result(Err("refused".into())), Err("refused".into()));
     }
 
-    #[test]
-    fn a_generated_key_is_stored_with_its_public_half_and_a_fresh_id() {
-        let dir = std::env::temp_dir().join(format!("annulus-keychain-{}", std::process::id()));
+    fn vault(name: &str) -> Vault {
+        let dir =
+            std::env::temp_dir().join(format!("annulus-keychain-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let (mut vault, _) = Vault::create(
+        Vault::create(
             dir.join("vault.anv"),
             "pw",
             annulus_vault::crypto::KdfParams {
@@ -409,7 +409,30 @@ mod tests {
                 parallelism: 1,
             },
         )
-        .unwrap();
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn an_installed_key_becomes_the_hosts_key() {
+        let mut vault = vault("link");
+        let pair = keys::generate(keys::KeyKind::Ed25519, "me@test").unwrap();
+        let key = stored(&vault, "work", &pair);
+        vault.upsert_key(key.clone()).unwrap();
+        let mut host = vault.draft_host();
+        (host.label, host.address) = ("web".into(), "10.0.0.1".into());
+        vault.upsert_host(host.clone()).unwrap();
+        assert_eq!(
+            link_key(&mut vault, Some(host.id), &key),
+            "Installed work on web; it now logs in with this key."
+        );
+        assert_eq!(vault.hosts()[0].key_id, Some(key.id));
+        assert_eq!(link_key(&mut vault, Some(999), &key), "Installed work.");
+    }
+
+    #[test]
+    fn a_generated_key_is_stored_with_its_public_half_and_a_fresh_id() {
+        let mut vault = vault("generate");
         let pair = keys::generate(keys::KeyKind::Ed25519, "me@test").unwrap();
         let key = stored(&vault, "  work  ", &pair);
         assert_eq!(key.label, "work");

@@ -875,6 +875,15 @@ fn host_row(ui: &mut Ui, host: &Host, palette: &Palette, groups: &[(String, Stri
                     }
                 }
             });
+        })
+        .response
+        .on_hover_text("More actions")
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::Role::Button,
+                true,
+                format!("More actions for {}", host.label),
+            )
         });
     });
     if !matches!(chosen, RowAction::None) {
@@ -1066,6 +1075,22 @@ mod tests {
             output.ends_with(&format!("{}\n", var("ANNULUS_E2E_USER"))),
             "{output}"
         );
+    }
+
+    #[test]
+    fn duplicate_saves_a_copy_with_a_new_id_and_the_same_address() {
+        let mut screen = screen_with("dup");
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let host = screen.vault.hosts()[0].clone();
+            screen.row_action(ui, &host, RowAction::Duplicate, &[]);
+        });
+        output.textures_delta.clear();
+        let hosts = screen.vault.hosts();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[1].label, "dup copy");
+        assert_eq!(hosts[1].address, hosts[0].address);
+        assert_ne!(hosts[1].id, hosts[0].id);
     }
 
     #[test]

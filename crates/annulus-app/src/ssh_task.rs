@@ -108,3 +108,65 @@ impl SshTask {
         self.outcome.lock().ok().and_then(|mut slot| slot.take())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Polls `task` until it is done (at most 20 s).
+    fn finish(task: &mut SshTask) -> Outcome {
+        let ctx = egui::Context::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let mut found = None;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                found = task.poll(ui.ctx());
+            });
+            output.textures_delta.clear();
+            if let Some(outcome) = found {
+                return outcome;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the task never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_host_annulus_cannot_reach_itself_fails_at_once() {
+        let mut task = SshTask::exec(Program::system_ssh("web"), "true".into(), || {});
+        assert_eq!(
+            finish(&mut task),
+            Err("Annulus cannot connect to this host itself.".into())
+        );
+    }
+
+    #[test]
+    fn a_refused_connection_comes_back_as_an_error() {
+        // A port that was just free: nothing listens there.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let dir = std::env::temp_dir().join(format!("annulus-task-{}", std::process::id()));
+        let program = Program::Ssh {
+            target: annulus_session::Target {
+                host: "127.0.0.1".into(),
+                port,
+                user: "nobody".into(),
+            },
+            files: annulus_session::SshFiles {
+                known_hosts: dir.join("known_hosts"),
+                key_dir: None,
+            },
+            password: None,
+            identity: None,
+            via: Vec::new(),
+            proxy: None,
+            reconnect: false,
+        };
+        let mut task = SshTask::exec(program, "true".into(), || {});
+        assert!(finish(&mut task).is_err());
+    }
+}
