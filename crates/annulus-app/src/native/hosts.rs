@@ -46,6 +46,8 @@ pub enum HostsAction {
     QuickConnect(String),
     /// Open a local terminal.
     LocalTerminal,
+    /// Browse a saved host's files.
+    Sftp(u64),
     /// Import hosts from `~/.ssh/config`.
     ImportSshConfig,
 }
@@ -568,6 +570,7 @@ impl HostsView {
                         CardEvent::Select => self.selected = Some(card.id),
                         CardEvent::Connect => action = Some(HostsAction::Connect(card.id)),
                         CardEvent::Edit => self.edit_host(vault, card.id),
+                        CardEvent::Files => action = Some(HostsAction::Sftp(card.id)),
                         CardEvent::None => {}
                     }
                 }
@@ -581,6 +584,7 @@ impl HostsView {
                         CardEvent::Select => self.selected = Some(card.id),
                         CardEvent::Connect => action = Some(HostsAction::Connect(card.id)),
                         CardEvent::Edit => self.edit_host(vault, card.id),
+                        CardEvent::Files => action = Some(HostsAction::Sftp(card.id)),
                         CardEvent::None => {}
                     }
                     y += ROW_H + GAP;
@@ -1031,6 +1035,7 @@ enum CardEvent {
     None,
     Select,
     Connect,
+    Files,
     Edit,
 }
 
@@ -1103,9 +1108,11 @@ fn host_card(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEv
         CardEvent::None
     };
     if response.hovered || hover > 0.0 || selected {
-        let actions = inner.take_right(64.0);
+        let actions = inner.take_right(98.0);
         let mut slots = actions;
         let connect = slots.take_right(30.0).centered(30.0, 30.0);
+        slots.take_right(4.0);
+        let files = slots.take_right(30.0).centered(30.0, 30.0);
         slots.take_right(4.0);
         let edit = slots.take_right(30.0).centered(30.0, 30.0);
         if ui
@@ -1113,6 +1120,12 @@ fn host_card(ui: &mut Ui<'_>, rect: Rect, card: &Card, selected: bool) -> CardEv
             .clicked
         {
             event = CardEvent::Edit;
+        }
+        if ui
+            .icon_button(id.with("files"), files, icons::FOLDER, "Open SFTP", false)
+            .clicked
+        {
+            event = CardEvent::Files;
         }
         if ui
             .icon_button(id.with("connect"), connect, icons::PLAY, "Connect", false)

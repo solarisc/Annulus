@@ -70,6 +70,13 @@ pub(crate) fn jump_chain(vault: &Vault, host: &Host) -> Vec<Hop> {
     chain
 }
 
+/// The login of a saved host and the jump hosts in front of it, outermost first (for an
+/// SFTP connection); `None` when its target does not parse.
+#[must_use]
+pub fn login(vault: &Vault, host: &Host) -> Option<(Hop, Vec<Hop>)> {
+    Some((hop(vault, host)?, jump_chain(vault, host)))
+}
+
 /// The program that connects to a saved host: through its jump hosts, with its key and saved
 /// password.
 #[must_use]

@@ -54,10 +54,10 @@ pub enum LocalAction {
 pub struct LocalPane {
     /// The folder shown.
     pub dir: PathBuf,
-    entries: Vec<LocalEntry>,
-    selected: Option<String>,
-    error: Option<String>,
-    path_field: String,
+    pub(crate) entries: Vec<LocalEntry>,
+    pub(crate) selected: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) path_field: String,
 }
 
 impl LocalPane {

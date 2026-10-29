@@ -14,6 +14,7 @@ mod panes;
 #[cfg(test)]
 mod scenes;
 mod screens;
+mod sftp;
 mod terminal;
 mod titlebar;
 
@@ -105,6 +106,8 @@ pub enum TabKind {
     Vault,
     /// A terminal, local or SSH.
     Terminal,
+    /// A host's files.
+    Sftp,
 }
 
 /// One tab of the title bar.
@@ -119,6 +122,8 @@ pub struct Tab {
     pub status: Option<TabStatus>,
     /// The terminal of a terminal tab.
     pub terminal: Option<TermView>,
+    /// The files of an SFTP tab.
+    pub sftp: Option<Box<sftp::SftpView>>,
 }
 
 /// What a terminal tab shows.
@@ -201,6 +206,7 @@ impl NativeApp {
                 title: "Vault".into(),
                 status: None,
                 terminal: None,
+                sftp: None,
             }],
             active: 0,
             section: Section::Hosts,
@@ -236,6 +242,7 @@ impl NativeApp {
             title: title.into(),
             status: None,
             terminal: Some(view),
+            sftp: None,
         });
         self.next_uid += 1;
         self.active = self.tabs.len() - 1;
@@ -431,6 +438,31 @@ impl NativeApp {
                 self.open(target, program);
             }
             hosts::HostsAction::LocalTerminal => self.open_local(),
+            hosts::HostsAction::Sftp(id) => {
+                let Some(vault) = &self.vault else { return };
+                let Some(host) = vault.hosts().iter().find(|host| host.id == id) else {
+                    return;
+                };
+                let Some((last, via)) = connect::login(vault, host) else {
+                    return;
+                };
+                let tab = crate::sftp_view::SftpTab::new(
+                    format!("{} files", host.label),
+                    last,
+                    self.ssh_files.clone(),
+                    via,
+                );
+                self.tabs.push(Tab {
+                    uid: self.next_uid,
+                    kind: TabKind::Sftp,
+                    title: tab.title.clone(),
+                    status: None,
+                    terminal: None,
+                    sftp: Some(Box::new(sftp::SftpView::new(tab))),
+                });
+                self.next_uid += 1;
+                self.active = self.tabs.len() - 1;
+            }
             // TODO: the ssh_config import preview in the new UI.
             hosts::HostsAction::ImportSshConfig => {}
         }
@@ -509,6 +541,13 @@ impl NativeApp {
             } else {
                 self.section_screen(ui, content);
             }
+        } else if let Some(view) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|tab| tab.sftp.as_mut())
+        {
+            let content = panel(ui, area);
+            view.draw(ui, content, self.waker.as_ref());
         } else if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(view) = tab.terminal.as_mut()
         {

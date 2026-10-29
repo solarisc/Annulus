@@ -19,7 +19,7 @@ use crate::local_pane::{LocalAction, LocalPane};
 use crate::ssh_dialogs::SshDialogs;
 
 /// What the tab asks the connection thread to do.
-enum Command {
+pub(crate) enum Command {
     /// List a folder; replies carry the request number so stale ones can be dropped.
     List(String, u64),
     Download {
@@ -78,7 +78,7 @@ enum Reply {
 type Send = Arc<dyn Fn(Reply) + std::marker::Send + Sync>;
 
 /// The running connection.
-struct Worker {
+pub(crate) struct Worker {
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
     replies: Receiver<Reply>,
     answers: Answers,
@@ -294,24 +294,24 @@ fn progress(
 }
 
 /// One transfer in the bottom panel.
-struct Transfer {
-    id: u64,
-    label: String,
-    upload: bool,
-    done: u64,
-    total: u64,
-    state: TransferState,
-    cancel: Arc<AtomicBool>,
+pub(crate) struct Transfer {
+    pub(crate) id: u64,
+    pub(crate) label: String,
+    pub(crate) upload: bool,
+    pub(crate) done: u64,
+    pub(crate) total: u64,
+    pub(crate) state: TransferState,
+    pub(crate) cancel: Arc<AtomicBool>,
     /// How to start it again.
-    recipe: Recipe,
+    pub(crate) recipe: Recipe,
     /// When this run's first progress came, and how much was done then (a resumed run
     /// starts above zero), for its speed.
-    since: Option<(std::time::Instant, u64)>,
+    pub(crate) since: Option<(std::time::Instant, u64)>,
 }
 
 /// What a transfer copies, so Retry can send it again.
 #[derive(Clone)]
-enum Recipe {
+pub(crate) enum Recipe {
     Download {
         remote: String,
         to: PathBuf,
@@ -354,7 +354,7 @@ impl Recipe {
     }
 }
 
-enum TransferState {
+pub(crate) enum TransferState {
     Running,
     Done(String),
     Skipped,
@@ -362,7 +362,7 @@ enum TransferState {
 }
 
 /// A dialog waiting for the user.
-enum Dialog {
+pub(crate) enum Dialog {
     NewFolder(String),
     Rename {
         from: String,
@@ -398,31 +398,36 @@ type Login = (Vec<Hop>, Hop, SshFiles);
 pub struct SftpTab {
     /// The tab's title.
     pub title: String,
-    start: Option<Login>,
-    worker: Option<Worker>,
-    dialogs: SshDialogs,
-    failed: Option<String>,
+    pub(crate) start: Option<Login>,
+    pub(crate) worker: Option<Worker>,
+    pub(crate) dialogs: SshDialogs,
+    pub(crate) failed: Option<String>,
     /// The folder shown; `None` until connected.
-    cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     /// The login folder.
-    home: String,
+    pub(crate) home: String,
     /// The newest listing asked for; older replies are dropped.
-    list_request: u64,
-    path_field: String,
-    entries: Vec<Entry>,
-    selected: Option<String>,
-    list_error: Option<String>,
-    notice: Option<String>,
-    show_hidden: bool,
-    filter: String,
+    pub(crate) list_request: u64,
+    pub(crate) path_field: String,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) selected: Option<String>,
+    pub(crate) list_error: Option<String>,
+    pub(crate) notice: Option<String>,
+    pub(crate) show_hidden: bool,
+    pub(crate) filter: String,
     /// The column the listing is sorted by, and whether ascending.
-    sort: (SortBy, bool),
-    conflict: Conflict,
-    transfers: Vec<Transfer>,
-    next_id: u64,
-    dialog: Option<Dialog>,
+    pub(crate) sort: (SortBy, bool),
+    pub(crate) conflict: Conflict,
+    pub(crate) transfers: Vec<Transfer>,
+    pub(crate) next_id: u64,
+    pub(crate) dialog: Option<Dialog>,
     /// The local folder beside the remote one; downloads land in it.
-    local: LocalPane,
+    pub(crate) local: LocalPane,
+    /// Drawn by the new UI: questions are collected in `questions` instead of shown as egui
+    /// dialogs.
+    pub(crate) native: bool,
+    /// Questions the connection asked, for the new UI to answer.
+    pub(crate) questions: Vec<SessionEvent>,
 }
 
 impl SftpTab {
@@ -451,6 +456,8 @@ impl SftpTab {
             next_id: 0,
             dialog: None,
             local: LocalPane::new(downloads_dir()),
+            native: false,
+            questions: Vec::new(),
         }
     }
 
@@ -480,25 +487,25 @@ impl SftpTab {
         tab
     }
 
-    fn send(&self, command: Command) {
+    pub(crate) fn send(&self, command: Command) {
         if let Some(worker) = &self.worker {
             let _ = worker.commands.send(command);
         }
     }
 
-    fn navigate(&mut self, dir: String) {
+    pub(crate) fn navigate(&mut self, dir: String) {
         self.list_request += 1;
         self.send(Command::List(dir, self.list_request));
     }
 
-    fn reload(&mut self) {
+    pub(crate) fn reload(&mut self) {
         if let Some(cwd) = self.cwd.clone() {
             self.navigate(cwd);
         }
     }
 
     /// Applies what the connection reported since the last frame.
-    fn drain(&mut self) {
+    pub(crate) fn drain(&mut self) {
         let replies: Vec<Reply> = self
             .worker
             .as_ref()
@@ -508,7 +515,11 @@ impl SftpTab {
             match reply {
                 Reply::Session(SessionEvent::Failed(message)) => self.failed = Some(message),
                 Reply::Session(event) => {
-                    self.dialogs.take(event);
+                    if self.native {
+                        self.questions.push(event);
+                    } else {
+                        self.dialogs.take(event);
+                    }
                 }
                 Reply::Ready { home } => {
                     // Shown even if listing it fails, so the error has somewhere to appear.
@@ -588,7 +599,7 @@ impl SftpTab {
     }
 
     /// Sends failed transfer `id` again; it continues from what arrived before.
-    fn retry(&mut self, id: u64) {
+    pub(crate) fn retry(&mut self, id: u64) {
         let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) else {
             return;
         };
@@ -599,7 +610,7 @@ impl SftpTab {
         self.send(command);
     }
 
-    fn download(&mut self, entry: &Entry) {
+    pub(crate) fn download(&mut self, entry: &Entry) {
         let Some(cwd) = self.cwd.clone() else { return };
         let recipe = Recipe::Download {
             remote: join(&cwd, &entry.name),
@@ -609,7 +620,7 @@ impl SftpTab {
         self.start_transfer(format!("\u{2193} {}", entry.name), recipe);
     }
 
-    fn upload(&mut self, local: PathBuf) {
+    pub(crate) fn upload(&mut self, local: PathBuf) {
         let Some(dir) = self.cwd.clone() else { return };
         let name = local.file_name().map_or_else(
             || local.display().to_string(),
@@ -627,6 +638,23 @@ impl SftpTab {
             conflict: self.conflict,
         };
         self.start_transfer(format!("\u{2191} {name}"), recipe);
+    }
+
+    /// Starts the connection if it has not started; `wake` repaints the window.
+    pub(crate) fn start_with(&mut self, wake: impl Fn() + std::marker::Send + Sync + 'static) {
+        if let Some(login) = self.start.take() {
+            match Worker::start(login, wake) {
+                Ok(worker) => self.worker = Some(worker),
+                Err(error) => {
+                    self.failed = Some(format!("Could not start the connection: {error}"));
+                }
+            }
+        }
+    }
+
+    /// The connection's answers, for its questions.
+    pub(crate) fn answers(&self) -> Option<&Answers> {
+        self.worker.as_ref().map(|worker| &worker.answers)
     }
 
     /// Draws the tab.
@@ -1075,7 +1103,7 @@ fn conflict_name(conflict: Conflict) -> &'static str {
 }
 
 /// A name for a new or renamed entry: not empty, no `/`, not `.` or `..`.
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     let name = name.trim();
     !name.is_empty() && name != "." && name != ".." && !name.contains('/')
 }
@@ -1093,7 +1121,7 @@ fn downloads_dir() -> PathBuf {
 
 /// "12.3 MiB/s · 0:42 left" from `moved` bytes in `seconds` with `left` bytes to go;
 /// empty until there is a second's worth to measure.
-fn pace(moved: u64, left: u64, seconds: f64) -> String {
+pub(crate) fn pace(moved: u64, left: u64, seconds: f64) -> String {
     if seconds < 1.0 || moved == 0 {
         return String::new();
     }
@@ -1151,14 +1179,14 @@ fn permissions_dialog(
 
 /// What the SFTP listing can be sorted by (F-SFTP-001).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SortBy {
+pub(crate) enum SortBy {
     Name,
     Size,
     Modified,
 }
 
 /// Sorts `entries` by `by`, folders always first; names break ties.
-fn sort_entries(entries: &mut [Entry], by: SortBy, ascending: bool) {
+pub(crate) fn sort_entries(entries: &mut [Entry], by: SortBy, ascending: bool) {
     entries.sort_by(|a, b| {
         let order = match by {
             SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
@@ -1246,7 +1274,7 @@ pub fn human_size(bytes: u64) -> String {
 }
 
 /// Seconds since the Unix epoch as `YYYY-MM-DD HH:MM` (UTC).
-fn format_time(seconds: u32) -> String {
+pub(crate) fn format_time(seconds: u32) -> String {
     let days = i64::from(seconds / 86_400);
     let minutes_of_day = seconds % 86_400 / 60;
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).

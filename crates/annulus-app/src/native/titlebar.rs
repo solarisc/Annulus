@@ -224,7 +224,9 @@ fn tab_width(ui: &mut Ui<'_>, title: &str, kind: TabKind) -> f32 {
     let text = ui.gfx.measure(title, BODY_MEDIUM).width;
     match kind {
         TabKind::Vault => (text + 16.0 + 8.0 + 2.0 * space::M).ceil(),
-        TabKind::Terminal => (text + 8.0 + 8.0 + 16.0 + 6.0 + 2.0 * space::M).clamp(132.0, 220.0),
+        TabKind::Terminal | TabKind::Sftp => {
+            (text + 8.0 + 8.0 + 16.0 + 6.0 + 2.0 * space::M).clamp(132.0, 220.0)
+        }
     }
 }
 
@@ -266,7 +268,7 @@ fn tab(ui: &mut Ui<'_>, rect: Rect, app: &NativeApp, index: usize) -> TabEvent {
                 .icon(icons::GRID_VIEW, icon, if active { t.accent } else { ink });
             inner.take_left(8.0);
         }
-        TabKind::Terminal => {
+        TabKind::Terminal | TabKind::Sftp => {
             let dot = inner.take_left(8.0);
             let color = match tab.status {
                 Some(TabStatus::Unread) => t.accent,
