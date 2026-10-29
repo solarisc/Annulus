@@ -1,5 +1,5 @@
 //! The accessibility tree: the widget tree as screen readers see it, as an AccessKit update.
-//! The per-OS adapters (UIA, NSAccessibility, AT-SPI) in `annulus-platform` pass
+//! The per-OS adapters (UIA, `NSAccessibility`, AT-SPI) in `annulus-platform` pass
 //! it on unchanged.
 
 use accesskit::{
@@ -112,7 +112,7 @@ mod tests {
     use crate::style::{Axis, Style};
     use crate::test_support::FixedAdvance;
     use crate::widgets::{
-        Button, ButtonKind, Checkbox, FieldStyle, Label, Radio, Select, TextField,
+        Button, ButtonKind, Checkbox, FieldStyle, Group, Label, Radio, Select, TextField,
     };
 
     /// One line per node: depth, role, name, value and states, in tree order.
@@ -154,7 +154,7 @@ mod tests {
     fn form_snapshot_names_every_control_with_its_state() {
         let mut tree = Tree::new(Box::new(Label::new("")));
         let root = tree.root();
-        let row = tree.append_child(root, Box::new(Label::new(""))).unwrap();
+        let row = tree.append_child(root, Box::new(Group)).unwrap();
         tree.set_style(
             row,
             Style {

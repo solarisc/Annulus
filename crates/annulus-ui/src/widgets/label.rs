@@ -7,6 +7,18 @@ use crate::display_list::{DisplayList, Op};
 use crate::geometry::{Point, Size};
 use crate::widget::{PaintCx, Role, TextMeasure, Widget};
 
+/// A container with no look of its own, for grouping and laying out children.
+#[derive(Debug, Default)]
+pub struct Group;
+
+impl Widget for Group {
+    fn name(&self) -> &'static str {
+        "group"
+    }
+
+    fn paint(&self, _cx: &mut PaintCx<'_>, _list: &mut DisplayList) {}
+}
+
 /// One line of text.
 #[derive(Debug)]
 pub struct Label {
