@@ -322,11 +322,8 @@ impl Vault {
     #[must_use]
     pub fn draft_host(&self) -> Host {
         let id = self
-            .hosts
-            .iter()
-            .map(|host| host.id)
-            .max()
-            .map_or(1, |max| max + 1);
+            .sync
+            .fresh_id(kind::HOST, self.hosts.iter().map(|host| host.id));
         Host {
             id,
             label: String::new(),
@@ -427,7 +424,7 @@ impl Vault {
         }
         let mut next = self.hosts.clone();
         let mut sync = self.sync.clone();
-        let mut id = next.iter().map(|host| host.id).max().unwrap_or(0);
+        let mut id = sync.fresh_id(kind::HOST, next.iter().map(|host| host.id)) - 1;
         for mut host in imported.iter().cloned() {
             id += 1;
             host.id = id;
@@ -456,7 +453,9 @@ impl Vault {
     /// A new local rule through `host_id` with a fresh id; not saved until upserted.
     #[must_use]
     pub fn draft_forward(&self, host_id: u64) -> PortForward {
-        let id = self.forwards.iter().map(|rule| rule.id).max().unwrap_or(0) + 1;
+        let id = self
+            .sync
+            .fresh_id(kind::FORWARD, self.forwards.iter().map(|rule| rule.id));
         PortForward::new(id, host_id)
     }
 
@@ -623,7 +622,10 @@ impl Vault {
         groups: &[Group],
     ) -> Result<(), VaultError> {
         let mut next_snippets = self.snippets.clone();
-        let mut snippet_id = next_snippets.iter().map(|s| s.id).max().unwrap_or(0);
+        let mut snippet_id = self
+            .sync
+            .fresh_id(kind::SNIPPET, next_snippets.iter().map(|s| s.id))
+            - 1;
         let mut sync = self.sync.clone();
         for snippet in snippets {
             snippet_id += 1;
@@ -636,7 +638,7 @@ impl Vault {
         let mut next_hosts = self.hosts.clone();
         let mut next_forwards = self.forwards.clone();
         let mut next_keys = self.ssh_keys.clone();
-        let mut key_id = next_keys.iter().map(|key| key.id).max().unwrap_or(0);
+        let mut key_id = sync.fresh_id(kind::KEY, next_keys.iter().map(|key| key.id)) - 1;
         let mut new_key_ids = std::collections::HashMap::new();
         for key in ssh_keys {
             key_id += 1;
@@ -648,7 +650,7 @@ impl Vault {
             });
         }
         let mut next_groups = self.groups.clone();
-        let mut group_id = next_groups.iter().map(|group| group.id).max().unwrap_or(0);
+        let mut group_id = sync.fresh_id(kind::GROUP, next_groups.iter().map(|group| group.id)) - 1;
         for group in groups {
             group_id += 1;
             sync.touch(kind::GROUP, group_id, false)?;
@@ -661,7 +663,7 @@ impl Vault {
             next_groups.push(adopted);
         }
         next_groups.sort_by_key(|group| group.name.to_lowercase());
-        let mut host_id = next_hosts.iter().map(|host| host.id).max().unwrap_or(0);
+        let mut host_id = sync.fresh_id(kind::HOST, next_hosts.iter().map(|host| host.id)) - 1;
         let mut new_ids = std::collections::HashMap::new();
         for host in hosts {
             host_id += 1;
@@ -686,7 +688,8 @@ impl Vault {
                 .jump_id
                 .and_then(|jump| new_ids.get(&jump).copied());
         }
-        let mut rule_id = next_forwards.iter().map(|rule| rule.id).max().unwrap_or(0);
+        let mut rule_id =
+            sync.fresh_id(kind::FORWARD, next_forwards.iter().map(|rule| rule.id)) - 1;
         for rule in forwards {
             rule_id += 1;
             sync.touch(kind::FORWARD, rule_id, false)?;
@@ -804,7 +807,9 @@ impl Vault {
     /// No randomness for its uid.
     pub fn draft_group(&self, parent: Option<String>) -> Result<Group, VaultError> {
         Ok(Group {
-            id: self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1,
+            id: self
+                .sync
+                .fresh_id(kind::GROUP, self.groups.iter().map(|group| group.id)),
             uid: groups::new_uid()?,
             name: String::new(),
             parent,
@@ -913,7 +918,8 @@ impl Vault {
     /// A fresh key id.
     #[must_use]
     pub fn next_key_id(&self) -> u64 {
-        self.ssh_keys.iter().map(|key| key.id).max().unwrap_or(0) + 1
+        self.sync
+            .fresh_id(kind::KEY, self.ssh_keys.iter().map(|key| key.id))
     }
 
     /// Adds or replaces a key, then saves. On failure nothing changes.
@@ -994,7 +1000,9 @@ impl Vault {
     /// # Errors
     /// Writing the file; nothing changes then.
     pub fn add_log(&mut self, title: &str, text: &str, saved_at: u64) -> Result<(), VaultError> {
-        let id = self.logs.iter().map(|log| log.id).max().unwrap_or(0) + 1;
+        let id = self
+            .sync
+            .fresh_id(kind::LOG, self.logs.iter().map(|log| log.id));
         let mut next = self.logs.clone();
         next.push(SessionLog {
             id,
@@ -1054,7 +1062,9 @@ impl Vault {
     #[must_use]
     pub fn draft_snippet(&self) -> Snippet {
         Snippet {
-            id: self.snippets.iter().map(|s| s.id).max().unwrap_or(0) + 1,
+            id: self
+                .sync
+                .fresh_id(kind::SNIPPET, self.snippets.iter().map(|s| s.id)),
             label: String::new(),
             script: String::new(),
             package: String::new(),

@@ -679,6 +679,46 @@ mod vaults {
     }
 
     #[test]
+    fn a_link_to_a_host_deleted_elsewhere_never_lands_on_a_new_host() {
+        let server = server();
+        let (a_token, b_token) = tokens(&server);
+        let (a_id, b_id) = (
+            server.authenticate(&a_token).unwrap(),
+            server.authenticate(&b_token).unwrap(),
+        );
+        let (mut laptop, _) = Vault::create(temp("stale-a"), "pw", CHEAP_KDF).unwrap();
+        let mut bastion = laptop.draft_host();
+        (bastion.label, bastion.address) = ("bastion".into(), "10.0.0.1".into());
+        laptop.upsert_host(bastion).unwrap();
+        round(&server, a_id, &mut laptop);
+        let mut desktop =
+            Vault::join(temp("stale-b"), &laptop.key_file_bytes(), "pw", account(2)).unwrap();
+        round(&server, b_id, &mut desktop);
+
+        // The desktop adds a rule on bastion but has not synced it when the laptop deletes
+        // bastion.
+        let old_id = desktop.hosts()[0].id;
+        let mut rule = desktop.draft_forward(old_id);
+        rule.label = "db".into();
+        desktop.upsert_forward(rule).unwrap();
+        let id = laptop.hosts()[0].id;
+        laptop.remove_host(id).unwrap();
+        round(&server, a_id, &mut laptop);
+        round(&server, b_id, &mut desktop);
+        assert_eq!(desktop.hosts(), []);
+
+        let mut fresh = desktop.draft_host();
+        (fresh.label, fresh.address) = ("new".into(), "10.0.0.2".into());
+        let fresh_id = fresh.id;
+        desktop.upsert_host(fresh).unwrap();
+        assert_ne!(
+            fresh_id, old_id,
+            "a deleted host's id is never handed out again"
+        );
+        assert_ne!(desktop.forwards()[0].host_id, fresh_id);
+    }
+
+    #[test]
     fn a_deleted_host_comes_back_from_the_trash_on_every_device() {
         let server = server();
         let (a_token, b_token) = tokens(&server);

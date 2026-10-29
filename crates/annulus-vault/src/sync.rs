@@ -90,6 +90,9 @@ pub struct SyncState {
     /// When the last sync round finished, seconds since the Unix epoch.
     #[serde(default)]
     pub last_synced: u64,
+    /// Per kind, the highest local id among entries `restart` forgot, so it is not reused.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retired: BTreeMap<u8, u64>,
 }
 
 fn now_millis() -> u64 {
@@ -147,6 +150,23 @@ impl SyncState {
             .map(|(id, _)| id.as_str())
     }
 
+    /// A local id for a new entity of `kind` that no entity, live or deleted, has had. Ids are
+    /// never reused, so a link left pointing at a deleted entity (here, or on a device that
+    /// has not synced the deletion yet) can never land on a new one.
+    #[must_use]
+    pub fn fresh_id(&self, kind: u8, live: impl Iterator<Item = u64>) -> u64 {
+        let known = self
+            .entries
+            .values()
+            .filter(|entry| entry.kind == kind)
+            .map(|entry| entry.local);
+        live.chain(known)
+            .chain(self.retired.get(&kind).copied())
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
     /// Records a local change of (`kind`, `local`): a new entity gets a sync id.
     pub(crate) fn touch(&mut self, kind: u8, local: u64, deleted: bool) -> Result<(), CryptoError> {
         let hlc = self.tick();
@@ -175,6 +195,12 @@ impl SyncState {
     /// a server that lost changes. Deletions never pushed are forgotten.
     pub(crate) fn restart(&mut self) {
         self.cursor = 0;
+        for entry in self.entries.values() {
+            if entry.deleted && entry.base == 0 {
+                let high = self.retired.entry(entry.kind).or_default();
+                *high = (*high).max(entry.local);
+            }
+        }
         self.entries
             .retain(|_, entry| !(entry.deleted && entry.base == 0));
         for entry in self.entries.values_mut() {
@@ -515,7 +541,10 @@ impl SyncCopy {
                     return;
                 };
                 let mut host = synced.host;
-                host.id = existing.unwrap_or_else(|| next_id(self.hosts.iter().map(|h| h.id)));
+                host.id = existing.unwrap_or_else(|| {
+                    self.state
+                        .fresh_id(kind::HOST, self.hosts.iter().map(|h| h.id))
+                });
                 host.key_id = synced
                     .key
                     .as_ref()
@@ -539,7 +568,10 @@ impl SyncCopy {
                     return;
                 };
                 let mut rule = synced.rule;
-                rule.id = existing.unwrap_or_else(|| next_id(self.forwards.iter().map(|r| r.id)));
+                rule.id = existing.unwrap_or_else(|| {
+                    self.state
+                        .fresh_id(kind::FORWARD, self.forwards.iter().map(|r| r.id))
+                });
                 rule.auto_start = self
                     .forwards
                     .iter()
@@ -603,7 +635,10 @@ impl SyncCopy {
     ) -> Option<(u64, Option<String>, Option<String>)> {
         let synced = serde_json::from_slice::<SyncedGroup>(body).ok()?;
         let mut group = synced.group;
-        group.id = existing.unwrap_or_else(|| next_id(self.groups.iter().map(|g| g.id)));
+        group.id = existing.unwrap_or_else(|| {
+            self.state
+                .fresh_id(kind::GROUP, self.groups.iter().map(|g| g.id))
+        });
         let local_of = |id: &Option<String>, want: u8| {
             id.as_ref()
                 .and_then(|id| self.state.entries.get(id))
@@ -643,7 +678,10 @@ impl SyncCopy {
         match kind {
             kind::KEY => {
                 let mut key = serde_json::from_slice::<SshKey>(body).ok()?;
-                key.id = existing.unwrap_or_else(|| next_id(self.ssh_keys.iter().map(|k| k.id)));
+                key.id = existing.unwrap_or_else(|| {
+                    self.state
+                        .fresh_id(kind::KEY, self.ssh_keys.iter().map(|k| k.id))
+                });
                 let local = key.id;
                 upsert(
                     &mut self.ssh_keys,
@@ -655,8 +693,10 @@ impl SyncCopy {
             }
             kind::SNIPPET => {
                 let mut snippet = serde_json::from_slice::<Snippet>(body).ok()?;
-                snippet.id =
-                    existing.unwrap_or_else(|| next_id(self.snippets.iter().map(|s| s.id)));
+                snippet.id = existing.unwrap_or_else(|| {
+                    self.state
+                        .fresh_id(kind::SNIPPET, self.snippets.iter().map(|s| s.id))
+                });
                 let local = snippet.id;
                 upsert(
                     &mut self.snippets,
@@ -668,7 +708,10 @@ impl SyncCopy {
             }
             kind::LOG => {
                 let mut log = serde_json::from_slice::<SessionLog>(body).ok()?;
-                log.id = existing.unwrap_or_else(|| next_id(self.logs.iter().map(|l| l.id)));
+                log.id = existing.unwrap_or_else(|| {
+                    self.state
+                        .fresh_id(kind::LOG, self.logs.iter().map(|l| l.id))
+                });
                 let local = log.id;
                 match self.logs.iter_mut().find(|l| l.id == local) {
                     Some(slot) => *slot = log,
@@ -728,10 +771,6 @@ impl SyncCopy {
     }
 }
 
-fn next_id(ids: impl Iterator<Item = u64>) -> u64 {
-    ids.max().unwrap_or(0) + 1
-}
-
 fn upsert<T, K: Ord>(list: &mut Vec<T>, item: T, id: impl Fn(&T) -> u64, sort: impl Fn(&T) -> K) {
     let key = id(&item);
     match list.iter_mut().find(|existing| id(existing) == key) {
@@ -759,6 +798,19 @@ mod tests {
             state: SyncState::new().unwrap(),
             generation: 0,
         }
+    }
+
+    #[test]
+    fn fresh_ids_stay_above_deleted_and_forgotten_entries() {
+        let mut state = SyncState::new().unwrap();
+        state.touch(kind::HOST, 7, false).unwrap();
+        state.touch(kind::HOST, 7, true).unwrap();
+        assert_eq!(state.fresh_id(kind::HOST, [1, 2].into_iter()), 8);
+        assert_eq!(state.fresh_id(kind::KEY, std::iter::empty()), 1, "per kind");
+        // A deletion never pushed is forgotten by a restart, but its id stays retired.
+        state.restart();
+        assert!(state.entries.is_empty());
+        assert_eq!(state.fresh_id(kind::HOST, std::iter::empty()), 8);
     }
 
     #[test]

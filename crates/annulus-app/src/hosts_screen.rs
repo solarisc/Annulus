@@ -1042,18 +1042,21 @@ mod tests {
         let answers = annulus_session::Answers::default();
         let trusting = answers.clone();
         let notify: std::sync::Arc<dyn Fn(annulus_session::SessionEvent) + Send + Sync> =
-            std::sync::Arc::new(move |event| {
-                if matches!(event, annulus_session::SessionEvent::HostKey(_)) {
-                    trusting.host_key(true);
-                }
+            std::sync::Arc::new(move |event| match event {
+                annulus_session::SessionEvent::HostKey(_) => trusting.host_key(true),
+                // Nothing should ask for a password: fail at once instead of waiting.
+                annulus_session::SessionEvent::Password { .. } => trusting.password(None),
+                _ => {}
             });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let output = runtime.block_on(async {
-            let connection = annulus_session::connect_chain(&via, &last, &files, &answers, notify)
+            let connecting = annulus_session::connect_chain(&via, &last, &files, &answers, notify);
+            let connection = tokio::time::timeout(std::time::Duration::from_secs(30), connecting)
                 .await
+                .expect("connected within 30 s")
                 .expect("reached through the group's jump host");
             connection.exec("hostname; whoami").await.unwrap().output
         });
