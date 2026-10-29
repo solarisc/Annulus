@@ -13,10 +13,9 @@ pub struct Rgb {
 }
 
 impl Rgb {
-    /// The color `0xRRGGBB`.
+    /// The color with these red, green and blue values.
     #[must_use]
-    pub const fn hex(value: u32) -> Self {
-        let [_, r, g, b] = value.to_be_bytes();
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
 
@@ -129,34 +128,34 @@ impl Palette {
 
 /// The dark theme.
 pub const DARK: Palette = Palette {
-    bg_app: Rgb::hex(0x12_14_16),
-    bg_surface: Rgb::hex(0x1A_1D_20),
-    bg_raised: Rgb::hex(0x23_27_2B),
-    bg_hover: Rgb::hex(0x2B_30_35),
-    bg_selected: Rgb::hex(0x13_3A_37),
-    border_subtle: Rgb::hex(0x2C_31_36),
-    text_primary: Rgb::hex(0xE8_EA_ED),
-    text_secondary: Rgb::hex(0xA9_B0_B7),
-    accent: Rgb::hex(0x2B_B3_A3),
-    status_warn: Rgb::hex(0xE0_A4_3A),
-    status_error: Rgb::hex(0xE8_64_5D),
-    status_ok: Rgb::hex(0x4C_C2_7A),
+    bg_app: Rgb::new(0x12, 0x14, 0x16),
+    bg_surface: Rgb::new(0x1A, 0x1D, 0x20),
+    bg_raised: Rgb::new(0x23, 0x27, 0x2B),
+    bg_hover: Rgb::new(0x2B, 0x30, 0x35),
+    bg_selected: Rgb::new(0x13, 0x3A, 0x37),
+    border_subtle: Rgb::new(0x2C, 0x31, 0x36),
+    text_primary: Rgb::new(0xE8, 0xEA, 0xED),
+    text_secondary: Rgb::new(0xA9, 0xB0, 0xB7),
+    accent: Rgb::new(0x2B, 0xB3, 0xA3),
+    status_warn: Rgb::new(0xE0, 0xA4, 0x3A),
+    status_error: Rgb::new(0xE8, 0x64, 0x5D),
+    status_ok: Rgb::new(0x4C, 0xC2, 0x7A),
 };
 
 /// The light theme. Raised surfaces are white and set apart by a shadow.
 pub const LIGHT: Palette = Palette {
-    bg_app: Rgb::hex(0xF6_F7_F8),
-    bg_surface: Rgb::hex(0xFF_FF_FF),
-    bg_raised: Rgb::hex(0xFF_FF_FF),
-    bg_hover: Rgb::hex(0xEE_F0_F2),
-    bg_selected: Rgb::hex(0xD9_F2_EE),
-    border_subtle: Rgb::hex(0xE2_E5_E8),
-    text_primary: Rgb::hex(0x15_18_1B),
-    text_secondary: Rgb::hex(0x4D_56_5E),
-    accent: Rgb::hex(0x11_7C_70),
-    status_warn: Rgb::hex(0xB9_7B_10),
-    status_error: Rgb::hex(0xC9_3A_33),
-    status_ok: Rgb::hex(0x24_93_4F),
+    bg_app: Rgb::new(0xF6, 0xF7, 0xF8),
+    bg_surface: Rgb::new(0xFF, 0xFF, 0xFF),
+    bg_raised: Rgb::new(0xFF, 0xFF, 0xFF),
+    bg_hover: Rgb::new(0xEE, 0xF0, 0xF2),
+    bg_selected: Rgb::new(0xD9, 0xF2, 0xEE),
+    border_subtle: Rgb::new(0xE2, 0xE5, 0xE8),
+    text_primary: Rgb::new(0x15, 0x18, 0x1B),
+    text_secondary: Rgb::new(0x4D, 0x56, 0x5E),
+    accent: Rgb::new(0x11, 0x7C, 0x70),
+    status_warn: Rgb::new(0xB9, 0x7B, 0x10),
+    status_error: Rgb::new(0xC9, 0x3A, 0x33),
+    status_ok: Rgb::new(0x24, 0x93, 0x4F),
 };
 
 /// Corner radii in DIPs.
@@ -257,12 +256,12 @@ mod tests {
 
     #[test]
     fn contrast_matches_wcag_reference_values() {
-        let black = Rgb::hex(0x00_00_00);
-        let white = Rgb::hex(0xFF_FF_FF);
+        let black = Rgb::new(0x00, 0x00, 0x00);
+        let white = Rgb::new(0xFF, 0xFF, 0xFF);
         assert!((black.contrast(white) - 21.0).abs() < 1e-9);
         assert!((white.contrast(white) - 1.0).abs() < 1e-9);
         // #767676 on white is the classic smallest gray that passes AA (4.54:1).
-        assert!((Rgb::hex(0x76_76_76).contrast(white) - 4.54).abs() < 0.01);
+        assert!((Rgb::new(0x76, 0x76, 0x76).contrast(white) - 4.54).abs() < 0.01);
     }
 
     #[test]

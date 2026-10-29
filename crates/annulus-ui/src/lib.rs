@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod animation;
 pub mod display_list;
 pub mod geometry;
 pub mod input;
@@ -13,6 +14,7 @@ pub mod style;
 pub mod tree;
 pub mod widget;
 
+pub use animation::{Animator, Easing, Property, Update};
 pub use display_list::{DisplayList, Op};
 pub use geometry::{Color, Point, Rect, Size};
 pub use input::{Button, Event, Handled, Key, Modifiers};
