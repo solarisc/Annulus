@@ -131,6 +131,18 @@ impl TerminalTab {
                     (self.lost, self.tries) = (None, 0);
                     self.finished = self.transcript();
                 }
+                SessionEvent::Lost
+                    if !matches!(
+                        self.program,
+                        Program::Ssh {
+                            reconnect: true,
+                            ..
+                        }
+                    ) =>
+                {
+                    self.exited = true;
+                    self.finished = self.transcript();
+                }
                 SessionEvent::Lost => {
                     if self.tries == 0 {
                         self.finished = self.transcript();

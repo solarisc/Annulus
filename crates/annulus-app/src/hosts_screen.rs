@@ -77,6 +77,7 @@ impl HostsScreen {
                 identity: None,
                 via: Vec::new(),
                 proxy: None,
+                reconnect: true,
             },
             None => Program::system_ssh(target),
         }
@@ -136,6 +137,7 @@ impl HostsScreen {
                 identity: hop.identity,
                 via: self.jump_chain(host),
                 proxy: hop.proxy,
+                reconnect: !host.no_reconnect,
             },
             None => Program::system_ssh(&host.target()),
         }
@@ -395,6 +397,7 @@ impl HostsScreen {
                     "socks5://host:1080 or http://host:8080",
                 );
                 ui.end_row();
+                reconnect_row(ui, &mut draft.host);
                 ui.label("Password");
                 let saved = draft.host.password.is_some() && !draft.forget_password;
                 secret_field(
@@ -534,6 +537,15 @@ enum RowAction {
     Edit,
     CopyCommand,
     Duplicate,
+}
+
+/// The editor row for the host's auto-reconnect switch (F-SSH-009).
+fn reconnect_row(ui: &mut Ui, host: &mut Host) {
+    ui.label("Reconnect");
+    let mut reconnect = !host.no_reconnect;
+    ui.checkbox(&mut reconnect, "Reconnect when the connection drops");
+    host.no_reconnect = !reconnect;
+    ui.end_row();
 }
 
 /// An OpenSSH command line that reaches `host` (through `jump`, if it has one), for pasting
@@ -679,6 +691,19 @@ mod tests {
                 key_dir: None,
             },
         )
+    }
+
+    #[test]
+    fn a_host_can_turn_off_reconnecting() {
+        let mut screen = screen_with("rc");
+        let mut host = screen.vault.hosts()[0].clone();
+        let reconnects = |screen: &HostsScreen, host: &Host| {
+            matches!(screen.connect_host(host), Program::Ssh { reconnect: true, .. })
+        };
+        assert!(reconnects(&screen, &host), "on by default");
+        host.no_reconnect = true;
+        screen.vault.upsert_host(host.clone()).unwrap();
+        assert!(!reconnects(&screen, &host));
     }
 
     #[test]

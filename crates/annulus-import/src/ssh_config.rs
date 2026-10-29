@@ -323,6 +323,7 @@ impl Found {
             key_id: None,
             jump_id: None,
             proxy: None,
+            no_reconnect: false,
         }
     }
 
@@ -488,6 +489,7 @@ mod tests {
             key_id: None,
             jump_id: None,
             proxy: None,
+            no_reconnect: false,
         }
     }
 }

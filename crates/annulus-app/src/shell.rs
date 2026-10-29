@@ -302,6 +302,7 @@ impl Shell {
                 identity,
                 via,
                 proxy,
+                ..
             } => SftpTab::new(
                 title,
                 annulus_session::Hop {

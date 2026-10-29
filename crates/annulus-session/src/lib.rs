@@ -87,6 +87,8 @@ pub enum Program {
         via: Vec<Hop>,
         /// A proxy to reach the first hop through (F-SSH-015).
         proxy: Option<Password>,
+        /// Reconnect on its own when the connection drops (F-SSH-009).
+        reconnect: bool,
     },
 }
 
@@ -449,6 +451,7 @@ impl Session {
                 identity,
                 via,
                 proxy,
+                ..
             } => Backend::Ssh(spawn_ssh(
                 SshLogin {
                     last: Hop {
@@ -804,6 +807,7 @@ mod tests {
                 identity: None,
                 via: Vec::new(),
                 proxy: None,
+                reconnect: false,
             },
             Size::new(80, 24),
             8,

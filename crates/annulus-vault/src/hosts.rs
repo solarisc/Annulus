@@ -39,6 +39,9 @@ pub struct Host {
     /// which is why it lives in the encrypted record).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<Secret>,
+    /// Never reconnect on its own when the connection drops (F-SSH-009).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_reconnect: bool,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -176,6 +179,7 @@ mod tests {
             key_id: None,
             jump_id: None,
             proxy: None,
+            no_reconnect: false,
         }
     }
 

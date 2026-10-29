@@ -80,6 +80,7 @@ fn start(rule: &PortForward, program: Program, wake: impl Fn() + Send + Sync + '
             identity,
             via,
             proxy,
+            ..
         },
         Some(forward_rule),
     ) = (program, engine_rule(rule))

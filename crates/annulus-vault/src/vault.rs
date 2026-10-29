@@ -311,6 +311,7 @@ impl Vault {
             key_id: None,
             jump_id: None,
             proxy: None,
+            no_reconnect: false,
         }
     }
 
