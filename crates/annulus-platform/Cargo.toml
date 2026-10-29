@@ -10,3 +10,11 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tiny-skia.workspace = true
+annulus-ui = { path = "../annulus-ui" }
+
+[dev-dependencies]
+tiny-skia.workspace = true
