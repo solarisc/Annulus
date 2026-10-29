@@ -442,7 +442,7 @@ pub fn strength_meter(ui: &mut Ui<'_>, rect: Rect, strength: &Strength) {
     }
     row.take_left(space::M);
     ui.strict_text(row, strength.label(), SMALL, color, Align::Start);
-    if let Some(hint) = strength.hint {
+    if let Some(hint) = strength.hint.as_deref() {
         column.take_top(2.0);
         ui.strict_text(column, hint, SMALL, t.text2, Align::Start);
     }

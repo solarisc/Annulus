@@ -3000,3 +3000,24 @@ fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
     );
     assert!(!front_panes(&app).broadcasting());
 }
+
+#[test]
+fn probe_idle_frames() {
+    for (x, y) in [(550.0, 360.0), (100.0, 100.0), (60.0, 20.0), (900.0, 500.0), (300.0, 250.0), (1050.0, 20.0), (200.0, 600.0)] {
+        let mut app = NativeApp::new(Some(fixture_vault("idle-probe", true)));
+        app.push_terminal("prod-db", TermView::Replay(Box::new(super::demo::terminal())));
+        app.push_sftp(super::demo::sftp_tab("idle-probe"));
+        app.active = 0;
+        let mut state = UiState::default();
+        let mut busy = Vec::new();
+        drive(&mut app, &mut state, &[Event::PointerMoved(annulus_ui::gfx::Point::new(x, y))], 0.0);
+        for frame in 1..60 {
+            let time = f64::from(frame) * 0.1;
+            let output = drive(&mut app, &mut state, &[], time);
+            if output.repaint || output.repaint_after.is_some_and(|a| a.as_secs_f64() < 5.0) {
+                busy.push((frame, output.repaint, output.repaint_after));
+            }
+        }
+        eprintln!("pointer ({x},{y}): {} busy frames, last {:?}", busy.len(), busy.last());
+    }
+}
