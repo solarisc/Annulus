@@ -841,6 +841,7 @@ mod tests {
             group: None,
             env: Vec::new(),
             startup: String::new(),
+            term: String::new(),
         };
         copy.apply(
             "host-sync-id",
@@ -897,6 +898,7 @@ mod tests {
             group: None,
             env: Vec::new(),
             startup: String::new(),
+            term: String::new(),
         });
         // Many entries, so random ids would put some rule before some host by chance.
         for _ in 0..20 {

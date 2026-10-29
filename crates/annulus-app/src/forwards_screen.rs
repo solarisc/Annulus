@@ -678,6 +678,7 @@ mod tests {
             reconnect: true,
             env: Vec::new(),
             startup: None,
+            term: String::new(),
         };
         let mut running = start(&rule, program, || {});
         wait_for(&mut running, |status| matches!(status, Status::Active(_)));

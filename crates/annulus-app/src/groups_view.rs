@@ -234,6 +234,28 @@ pub fn session_rows(ui: &mut Ui, env: &mut String, startup: &mut String, hints: 
     ui.end_row();
 }
 
+/// The editors' terminal type row (F-SSH-007): empty keeps what the group (or the default)
+/// gives.
+pub fn term_row(ui: &mut Ui, term: &mut String, unset: &str) {
+    ui.label("Terminal type");
+    let shown = if term.is_empty() {
+        unset
+    } else {
+        term.as_str()
+    };
+    egui::ComboBox::from_id_salt("term-type")
+        .selected_text(shown.to_owned())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(term, String::new(), unset);
+            for choice in annulus_ssh::TERM_CHOICES {
+                ui.selectable_value(term, choice.to_owned(), choice);
+            }
+        })
+        .response
+        .on_hover_text("What the server is told this terminal is (TERM)");
+    ui.end_row();
+}
+
 /// A picker of a key or host by id, or "Not set".
 fn id_picker(ui: &mut Ui, id: &str, chosen: &mut Option<u64>, choices: &[(u64, String)]) {
     let shown = chosen
@@ -384,6 +406,7 @@ impl GroupDraft {
                     &mut self.group.defaults.startup,
                     ("LANG=en_US.UTF-8", "Not set"),
                 );
+                term_row(ui, &mut self.group.defaults.term, "Not set");
             });
         if let Some(problem) = &self.problem {
             ui.add_space(space::S);

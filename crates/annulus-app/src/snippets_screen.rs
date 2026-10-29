@@ -319,6 +319,7 @@ mod tests {
             reconnect: true,
             env: Vec::new(),
             startup: startup.map(Into::into),
+            term: String::new(),
         };
         let startup = |program: Program| match program {
             Program::Ssh { startup, .. } => startup,

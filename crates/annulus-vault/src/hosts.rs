@@ -52,6 +52,10 @@ pub struct Host {
     /// A command typed into the shell once it opens (F-SSH-013); empty inherits.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub startup: String,
+    /// The terminal type asked for (`TERM`, F-SSH-007); empty inherits, else
+    /// `xterm-256color`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub term: String,
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -196,6 +200,7 @@ mod tests {
             group: None,
             env: Vec::new(),
             startup: String::new(),
+            term: String::new(),
         }
     }
 

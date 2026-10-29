@@ -670,3 +670,23 @@ async fn an_upload_cut_off_by_the_server_continues_where_it_stopped() {
     run(&again, "rm -f ~/annulus-upcut.bin ~/.annulus-upcut.bin.*").await;
     assert!(same, "the resumed upload differs from what was sent");
 }
+
+#[tokio::test]
+#[ignore = "needs the test servers"]
+async fn a_chosen_terminal_type_reaches_the_server() {
+    let env = env();
+    let connection = with_key(&env, &env.vm1, "term").await;
+    let mut shell = connection
+        .shell_with_env(80, 24, "vt100", &[])
+        .await
+        .unwrap();
+    shell.write(b"echo term=[$TERM]; exit\n").await.unwrap();
+    let mut out = String::new();
+    while let Output::Data(bytes) = tokio::time::timeout(Duration::from_secs(20), shell.next())
+        .await
+        .expect("shell answered")
+    {
+        out.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    assert!(out.contains("term=[vt100]"), "{out}");
+}

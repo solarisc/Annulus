@@ -111,6 +111,7 @@ impl HostsScreen {
                 reconnect: true,
                 env: Vec::new(),
                 startup: None,
+                term: String::new(),
             },
             None => Program::system_ssh(target),
         }
@@ -176,6 +177,7 @@ impl HostsScreen {
                 reconnect: !host.no_reconnect,
                 env: resolved.env,
                 startup: Some(resolved.startup).filter(|command| !command.trim().is_empty()),
+                term: resolved.term,
             },
             None => Program::system_ssh(&self.vault.resolve(host).0.target()),
         }
@@ -676,6 +678,7 @@ impl HostsScreen {
                     &mut draft.host.startup,
                     (&inherited.env, &inherited.startup),
                 );
+                groups_view::term_row(ui, &mut draft.host.term, &inherited.term);
                 reconnect_row(ui, &mut draft.host);
                 password_rows(ui, draft);
             });
@@ -909,6 +912,7 @@ struct Hints {
     proxy: String,
     env: String,
     startup: String,
+    term: String,
     /// The groups each value would come from, if the host did not set it.
     groups: annulus_vault::groups::Sources,
 }
@@ -922,6 +926,7 @@ fn inherited_hints(
     let mut bare = host.clone();
     (bare.port, bare.key_id, bare.jump_id, bare.proxy) = (None, None, None, None);
     bare.startup.clear();
+    bare.term.clear();
     bare.username.clear();
     let (resolved, sources) = vault.resolve(&bare);
     let groups = sources.clone();
@@ -965,6 +970,11 @@ fn inherited_hints(
             "LANG=en_US.UTF-8".to_owned()
         },
         startup: from(resolved.startup, sources.startup, "e.g. tmux attach"),
+        term: if resolved.term.is_empty() {
+            format!("Default ({})", annulus_ssh::DEFAULT_TERM)
+        } else {
+            format!("{} (from the group)", resolved.term)
+        },
         groups,
     }
 }

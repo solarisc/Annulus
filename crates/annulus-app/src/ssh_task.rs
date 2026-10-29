@@ -167,6 +167,7 @@ mod tests {
             reconnect: false,
             env: Vec::new(),
             startup: None,
+            term: String::new(),
         };
         let mut task = SshTask::exec(program, "true".into(), || {});
         assert!(finish(&mut task).is_err());

@@ -53,6 +53,9 @@ pub struct Defaults {
     /// A command typed into the shell once it opens.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub startup: String,
+    /// The terminal type (`TERM`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub term: String,
 }
 
 /// Where each inherited value of a resolved host came from: the group's name, or `None`
@@ -132,6 +135,9 @@ pub fn resolve(host: &Host, groups: &[Group]) -> (Host, Sources) {
             resolved.proxy.clone_from(&defaults.proxy);
             sources.proxy = Some(group.name.clone());
         }
+        if resolved.term.is_empty() && !defaults.term.is_empty() {
+            resolved.term.clone_from(&defaults.term);
+        }
         if resolved.startup.trim().is_empty() && !defaults.startup.trim().is_empty() {
             resolved.startup.clone_from(&defaults.startup);
             sources.startup = Some(group.name.clone());
@@ -184,6 +190,7 @@ mod tests {
             group: Some(group.into()),
             env: Vec::new(),
             startup: String::new(),
+            term: String::new(),
         }
     }
 
@@ -200,6 +207,7 @@ mod tests {
                     proxy: None,
                     env: vec![("LANG".into(), "C".into()), ("TZ".into(), "UTC".into())],
                     startup: "uptime".into(),
+                    term: "vt100".into(),
                 },
             ),
             group(
@@ -249,6 +257,10 @@ mod tests {
         assert_eq!(
             (resolved.startup.as_str(), sources.startup.as_deref()),
             ("uptime", Some("PROD"))
+        );
+        assert_eq!(
+            resolved.term, "vt100",
+            "the terminal type comes from the group too"
         );
         let mut own = host_in("db");
         own.env = vec![("TZ".into(), "Etc/UTC".into())];

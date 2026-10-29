@@ -1166,6 +1166,7 @@ mod tests {
             reconnect: false,
             env: Vec::new(),
             startup: None,
+            term: String::new(),
         };
         let mut tab = TerminalTab::new("db", program);
         assert!(!tab.connecting(), "nothing started yet");

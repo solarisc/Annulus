@@ -339,6 +339,7 @@ impl Vault {
             group: None,
             env: Vec::new(),
             startup: String::new(),
+            term: String::new(),
         }
     }
 

@@ -95,6 +95,13 @@ impl From<bool> for Trust {
     }
 }
 
+/// The terminal type a shell asks for unless told otherwise.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Terminal types a host can choose (F-SSH-007): the default, then older ones for systems
+/// that do not know it.
+pub const TERM_CHOICES: [&str; 4] = [DEFAULT_TERM, "xterm", "vt100", "linux"];
+
 /// Answers to questions only the user can answer.
 pub trait Prompt: Send + Sync {
     /// The server's key is not known yet: trust it, and remember it?
@@ -494,11 +501,12 @@ impl Connection {
     /// # Errors
     /// The server refused the channel, the PTY or the shell.
     pub async fn shell(&self, columns: u32, rows: u32) -> Result<Shell, SshError> {
-        self.shell_with_env(columns, rows, &[]).await
+        self.shell_with_env(columns, rows, DEFAULT_TERM, &[]).await
     }
 
-    /// [`Connection::shell`], first sending `env` (F-SSH-012). A server that does not accept
-    /// a variable (sshd's `AcceptEnv`) ignores it; that is not an error.
+    /// [`Connection::shell`] with terminal type `term` (F-SSH-007), first sending `env`
+    /// (F-SSH-012). A server that does not accept a variable (sshd's `AcceptEnv`) ignores
+    /// it; that is not an error.
     ///
     /// # Errors
     /// The server refused the channel, the PTY or the shell.
@@ -506,11 +514,17 @@ impl Connection {
         &self,
         columns: u32,
         rows: u32,
+        term: &str,
         env: &[(String, String)],
     ) -> Result<Shell, SshError> {
+        let term = if term.trim().is_empty() {
+            DEFAULT_TERM
+        } else {
+            term.trim()
+        };
         let channel = self.handle.channel_open_session().await?;
         channel
-            .request_pty(true, "xterm-256color", columns, rows, 0, 0, &[])
+            .request_pty(true, term, columns, rows, 0, 0, &[])
             .await?;
         for (name, value) in env {
             channel

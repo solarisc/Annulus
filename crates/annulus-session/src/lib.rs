@@ -94,6 +94,8 @@ pub enum Program {
         env: Vec<(String, String)>,
         /// A command typed into the shell once it opens (F-SSH-013).
         startup: Option<String>,
+        /// The terminal type (`TERM`); empty is `xterm-256color` (F-SSH-007).
+        term: String,
     },
 }
 
@@ -463,6 +465,7 @@ impl Session {
                 proxy,
                 env,
                 startup,
+                term: term_type,
                 ..
             } => Backend::Ssh(spawn_ssh(
                 SshLogin {
@@ -476,6 +479,7 @@ impl Session {
                     via: via.clone(),
                     env: env.clone(),
                     startup: startup.clone(),
+                    term: term_type.clone(),
                 },
                 size,
                 term.clone(),
@@ -669,6 +673,7 @@ struct SshLogin {
     via: Vec<Hop>,
     env: Vec<(String, String)>,
     startup: Option<String>,
+    term: String,
 }
 
 fn spawn_ssh(
@@ -704,7 +709,10 @@ fn spawn_ssh(
                     };
                 let columns = u32::try_from(size.columns).unwrap_or(u32::MAX);
                 let rows = u32::try_from(size.rows).unwrap_or(u32::MAX);
-                let mut shell = match connection.shell_with_env(columns, rows, &login.env).await {
+                let mut shell = match connection
+                    .shell_with_env(columns, rows, &login.term, &login.env)
+                    .await
+                {
                     Ok(shell) => shell,
                     Err(error) => return listener.send(SessionEvent::Failed(error.to_string())),
                 };
@@ -801,6 +809,7 @@ mod tests {
             reconnect: true,
             env: Vec::new(),
             startup: None,
+            term: String::new(),
         };
         // A panic message or a log line made from these must not carry a secret (F-SEC-006).
         for text in [format!("{hop:?}"), format!("{program:?}")] {
@@ -891,6 +900,7 @@ mod tests {
                 reconnect: false,
                 env: Vec::new(),
                 startup: None,
+                term: String::new(),
             },
             Size::new(80, 24),
             8,

@@ -327,6 +327,7 @@ impl Found {
             group: None,
             env: Vec::new(),
             startup: String::new(),
+            term: String::new(),
         }
     }
 
@@ -496,6 +497,7 @@ mod tests {
             group: None,
             env: Vec::new(),
             startup: String::new(),
+            term: String::new(),
         }
     }
 }
