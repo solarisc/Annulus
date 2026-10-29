@@ -17,6 +17,7 @@ pub mod style;
 mod test_support;
 pub mod text_edit;
 pub mod tree;
+pub mod virtualize;
 pub mod widget;
 pub mod widgets;
 
