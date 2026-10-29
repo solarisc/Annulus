@@ -121,6 +121,7 @@ impl Worker {
                     let home = session.1.home().await.unwrap_or_else(|_| "/".to_owned());
                     send(Reply::Ready { home });
                     let suspect = Arc::new(AtomicBool::new(false));
+                    let slots = Arc::new(tokio::sync::Semaphore::new(TRANSFER_SLOTS));
                     // Each command runs as its own task, so a long transfer does not hold up
                     // browsing. The loop ends when the tab closes.
                     while let Some(command) = incoming.recv().await {
@@ -145,6 +146,7 @@ impl Worker {
                             command,
                             send.clone(),
                             suspect.clone(),
+                            slots.clone(),
                         ));
                     }
                 });
@@ -200,8 +202,22 @@ fn refuse(command: Command, message: &str, send: &Send) {
     });
 }
 
+/// Transfers that run at once per tab; the others wait their turn (browsing never waits).
+const TRANSFER_SLOTS: usize = 3;
+
 /// Runs `command`; a failure marks the session `suspect`, so it is checked before the next.
-async fn run(sftp: Arc<Sftp>, command: Command, send: Send, suspect: Arc<AtomicBool>) {
+/// Transfers first take one of the `slots`.
+async fn run(
+    sftp: Arc<Sftp>,
+    command: Command,
+    send: Send,
+    suspect: Arc<AtomicBool>,
+    slots: Arc<tokio::sync::Semaphore>,
+) {
+    let _slot = match &command {
+        Command::Download { .. } | Command::Upload { .. } => slots.acquire_owned().await.ok(),
+        _ => None,
+    };
     let failed = move |reply: Reply| {
         let bad = matches!(
             &reply,
@@ -875,6 +891,12 @@ impl SftpTab {
                                     human_size(transfer.total)
                                 ),
                             ));
+                            if transfer.since.is_none() {
+                                ui.label(RichText::new("waiting").size(text::SECONDARY))
+                                    .on_hover_text(format!(
+                                        "Up to {TRANSFER_SLOTS} transfers run at once"
+                                    ));
+                            }
                             if let Some((at, from)) = transfer.since {
                                 let rate = pace(
                                     transfer.done.saturating_sub(from),
@@ -1149,6 +1171,90 @@ mod tests {
         }
     }
 
+    /// Waits until `worker` is connected; its home folder.
+    fn ready(worker: Worker) -> (Worker, String) {
+        loop {
+            match worker
+                .replies
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap()
+            {
+                Reply::Session(SessionEvent::HostKey(_)) => worker.answers.host_key(true),
+                Reply::Ready { home } => return (worker, home),
+                Reply::Session(SessionEvent::Failed(why)) => panic!("{why}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// End to end on test VM 1: of five downloads started at once, at most
+    /// [`TRANSFER_SLOTS`] run together, and all finish.
+    #[test]
+    #[ignore = "needs the test servers"]
+    fn e2e_transfers_beyond_the_slots_wait_their_turn() {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+        let (vm1, user) = (var("ANNULUS_E2E_VM1"), var("ANNULUS_E2E_USER"));
+        let ssh = |command: &str| {
+            let status = std::process::Command::new("ssh")
+                .args(["-o", "BatchMode=yes", &format!("{user}@{vm1}"), command])
+                .status()
+                .unwrap();
+            assert!(status.success(), "{command}");
+        };
+        ssh("head -c 30000000 /dev/urandom > ~/annulus-slots.bin");
+        let dir = std::env::temp_dir().join(format!("annulus-slots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hop = Hop {
+            target: Target {
+                host: vm1.clone(),
+                port: 22,
+                user: user.clone(),
+            },
+            password: None,
+            identity: Some(annulus_session::Password::new(
+                &std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap(),
+            )),
+            proxy: None,
+        };
+        let files = SshFiles {
+            known_hosts: dir.join("known_hosts"),
+            key_dir: None,
+        };
+        let (worker, home) = ready(Worker::start((Vec::new(), hop, files), || {}).unwrap());
+        let recipe = Recipe::Download {
+            remote: join(&home, "annulus-slots.bin"),
+            to: dir.clone(),
+            conflict: Conflict::KeepBoth,
+        };
+        for id in 1..=5 {
+            let command = recipe.command(id, Arc::new(AtomicBool::new(false)));
+            worker.commands.send(command).unwrap();
+        }
+        let (mut running, mut most, mut finished) = (Vec::new(), 0, 0);
+        while finished < 5 {
+            match worker
+                .replies
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("a reply within a minute")
+            {
+                Reply::Progress { id, .. } if !running.contains(&id) => {
+                    running.push(id);
+                    most = most.max(running.len());
+                }
+                Reply::Finished { id, result } => {
+                    assert!(result.is_ok(), "{result:?}");
+                    running.retain(|other| *other != id);
+                    finished += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(most <= TRANSFER_SLOTS, "{most} ran at once");
+        assert!(most > 1, "transfers still run side by side");
+        ssh("rm -f ~/annulus-slots.bin");
+    }
+
     /// End to end on test VM 1: the server cuts a download off; Retry through the same tab
     /// reconnects SFTP and continues where it stopped.
     #[test]
@@ -1183,19 +1289,7 @@ mod tests {
             known_hosts: dir.join("known_hosts"),
             key_dir: None,
         };
-        let worker = Worker::start((Vec::new(), hop, files), || {}).unwrap();
-        let home = loop {
-            match worker
-                .replies
-                .recv_timeout(std::time::Duration::from_secs(60))
-                .unwrap()
-            {
-                Reply::Session(SessionEvent::HostKey(_)) => worker.answers.host_key(true),
-                Reply::Ready { home } => break home,
-                Reply::Session(SessionEvent::Failed(why)) => panic!("{why}"),
-                _ => {}
-            }
-        };
+        let (worker, home) = ready(Worker::start((Vec::new(), hop, files), || {}).unwrap());
         let recipe = Recipe::Download {
             remote: join(&home, "annulus-retry.bin"),
             to: dir.clone(),
