@@ -24,5 +24,8 @@ tokio = { workspace = true, features = ["io-util"] }
 zeroize.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+hmac = "0.13.0"
+sha1 = "0.11.0"
 russh-sftp.workspace = true
 tokio.workspace = true

@@ -5789,9 +5789,12 @@ name = "annulus-ssh"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "base64 0.22.1",
+ "hmac 0.13.0",
  "rand 0.10.3",
  "russh",
  "russh-sftp",
+ "sha1",
  "thiserror 2.0.21",
  "tokio",
  "zeroize",

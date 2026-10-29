@@ -98,6 +98,10 @@ pub struct Imported {
 /// `~/.ssh/known_hosts`) to the one at `into` (F-KNOWN-005), atomically. Only hosts with no
 /// trusted key yet are added; comments and lines that are not entries are left out.
 ///
+/// A host that already has a key is never given a second one, hashed (`|1|…`) lines on
+/// either side included: the host-key check treats a second key of the same type as a
+/// changed key, so it would grant nothing and lock the host out.
+///
 /// # Errors
 /// A file cannot be read, or `into` cannot be written; it is left as it was.
 pub fn import(into: &Path, from: &Path) -> std::io::Result<Imported> {
@@ -113,18 +117,24 @@ pub fn import(into: &Path, from: &Path) -> std::io::Result<Imported> {
         .filter(|name| name != "(hashed)")
         .collect();
     let mut lines: Vec<String> = text.lines().map(normalized).collect();
+    // Only real entries: a key this app can read.
+    let candidates: Vec<(String, KnownHost)> = source
+        .lines()
+        .filter_map(|line| {
+            let entry = parse(line).into_iter().next()?;
+            (!entry.fingerprint.is_empty()).then(|| (normalized(line), entry))
+        })
+        .collect();
+    let hashed_known = hashed_matches(into, &names, &candidates)?;
     let mut result = Imported::default();
-    for line in source.lines() {
-        // Only real entries: a key this app can read.
-        let Some(entry) = parse(line)
-            .into_iter()
-            .next()
-            .filter(|entry| !entry.fingerprint.is_empty())
-        else {
-            continue;
-        };
-        let line = normalized(line);
-        let known = entry.hosts.iter().any(|host| names.contains(host));
+    for (index, (line, entry)) in candidates.into_iter().enumerate() {
+        let known = hashed_known.contains(&(index + 1))
+            || entry.hosts.iter().any(|host| names.contains(host))
+            || entry
+                .hosts
+                .iter()
+                .filter(|host| *host != "(hashed)")
+                .any(|host| has_key(into, host));
         if known || lines.contains(&line) {
             result.skipped += 1;
             continue;
@@ -144,6 +154,51 @@ pub fn import(into: &Path, from: &Path) -> std::io::Result<Imported> {
         std::fs::rename(&temporary, into)?;
     }
     Ok(result)
+}
+
+/// Splits `host` or `[host]:port` into the name and port the host-key check looks up.
+fn host_and_port(name: &str) -> (&str, u16) {
+    name.strip_prefix('[')
+        .and_then(|rest| rest.split_once("]:"))
+        .and_then(|(host, port)| Some((host, port.parse().ok()?)))
+        .unwrap_or((name, 22))
+}
+
+/// Whether the file at `path` already holds a key for host name `name` (hashed lines
+/// too). A file the check cannot read counts as holding one: better skip than add.
+fn has_key(path: &Path, name: &str) -> bool {
+    let (host, port) = host_and_port(name);
+    russh::keys::known_hosts::known_host_keys_path(host, port, path)
+        .map_or(true, |keys| !keys.is_empty())
+}
+
+/// The candidates (by position, from 1) whose hashed host names match one of `names`,
+/// found with the host-key check's own matching through a scratch file next to `into`.
+fn hashed_matches(
+    into: &Path,
+    names: &[String],
+    candidates: &[(String, KnownHost)],
+) -> std::io::Result<Vec<usize>> {
+    if names.is_empty() || candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scratch = into.with_extension("import");
+    let mut body = candidates
+        .iter()
+        .map(|(line, _)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    body.push('\n');
+    std::fs::write(&scratch, body)?;
+    let mut matched = Vec::new();
+    for name in names {
+        let (host, port) = host_and_port(name);
+        if let Ok(keys) = russh::keys::known_hosts::known_host_keys_path(host, port, &scratch) {
+            matched.extend(keys.into_iter().map(|(line, _)| line));
+        }
+    }
+    let _ = std::fs::remove_file(&scratch);
+    Ok(matched)
 }
 
 /// `line` with its fields separated by single spaces.
@@ -215,6 +270,69 @@ mod tests {
                 added: 0,
                 skipped: 3
             }
+        );
+    }
+
+    /// An OpenSSH hashed host field for `host`: `|1|salt|HMAC-SHA1(salt, host)`.
+    fn hashed(host: &str) -> String {
+        use base64::Engine as _;
+        use hmac::{KeyInit, Mac};
+        let salt = [7u8; 20];
+        let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(&salt).unwrap();
+        mac.update(host.as_bytes());
+        let b64 = base64::engine::general_purpose::STANDARD;
+        format!(
+            "|1|{}|{}",
+            b64.encode(salt),
+            b64.encode(mac.finalize().into_bytes())
+        )
+    }
+
+    #[test]
+    fn a_hashed_line_for_a_host_with_a_key_is_left_out_and_the_check_still_passes() {
+        const OTHER: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIGtOO8V0K1MT4rhhh35kzjb6OArnlu8NDuGa6nLdDgQS";
+        let dir = std::env::temp_dir().join(format!("annulus-known-hashed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("known_hosts");
+        let theirs = dir.join("openssh_known_hosts");
+        std::fs::write(
+            &ours,
+            format!("web ssh-ed25519 {ED25519}\n[jump]:2222 ssh-ed25519 {ED25519}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &theirs,
+            format!(
+                "{} ssh-ed25519 {OTHER}\n{} ssh-ed25519 {OTHER}\n{} ssh-ed25519 {OTHER}\n",
+                hashed("web"),
+                hashed("[jump]:2222"),
+                hashed("new-host")
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            import(&ours, &theirs).unwrap(),
+            Imported {
+                added: 1,
+                skipped: 2
+            }
+        );
+        // The key Annulus pinned for web still passes the host-key check.
+        let pinned = PublicKey::from_openssh(&format!("ssh-ed25519 {ED25519}")).unwrap();
+        assert_eq!(
+            russh::keys::check_known_hosts_path("web", 22, &pinned, &ours).ok(),
+            Some(true)
+        );
+        let new = PublicKey::from_openssh(&format!("ssh-ed25519 {OTHER}")).unwrap();
+        assert_eq!(
+            russh::keys::check_known_hosts_path("new-host", 22, &new, &ours).ok(),
+            Some(true),
+            "the new host's hashed key works"
+        );
+        assert!(
+            !dir.join("known_hosts.import").exists(),
+            "no scratch file left"
         );
     }
 
