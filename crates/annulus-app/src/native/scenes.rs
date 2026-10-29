@@ -1160,7 +1160,7 @@ fn move_to_group_puts_the_host_in_the_chosen_group_or_back_on_top() {
     let mut state = UiState::default();
     let mut output = step(&mut app, &mut state, &[], 0.0);
     output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 1.0);
-    let more = click_within(&output, "prod-db", "more");
+    let more = click_within(&output, "prod-db", "More actions");
     output = step(&mut app, &mut state, &more, 2.0);
     let menu = click_on(&output, "Move to Production");
     output = step(&mut app, &mut state, &menu, 3.0);
@@ -1171,7 +1171,7 @@ fn move_to_group_puts_the_host_in_the_chosen_group_or_back_on_top() {
     // It left the top level: open Production to find it, then move it back up.
     output = step(&mut app, &mut state, &click_on(&output, "Production"), 4.0);
     output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 5.0);
-    let more = click_within(&output, "prod-db", "more");
+    let more = click_within(&output, "prod-db", "More actions");
     output = step(&mut app, &mut state, &more, 6.0);
     let menu = click_on(&output, "Move to the top level");
     step(&mut app, &mut state, &menu, 7.0);
@@ -1188,7 +1188,7 @@ fn duplicate_saves_a_copy_with_a_new_id_and_the_same_address() {
     let mut output = step(&mut app, &mut state, &[], 0.0);
     let hover = [Event::PointerMoved(zone_center(&output.zones, "grafana"))];
     output = step(&mut app, &mut state, &hover, 1.0);
-    let more = click_within(&output, "grafana", "more");
+    let more = click_within(&output, "grafana", "More actions");
     output = step(&mut app, &mut state, &more, 2.0);
     step(&mut app, &mut state, &click_on(&output, "Duplicate"), 3.0);
     assert_eq!(app.vault.as_ref().unwrap().hosts().len(), before + 1);
