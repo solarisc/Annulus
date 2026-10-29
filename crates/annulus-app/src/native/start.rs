@@ -230,18 +230,20 @@ impl StartView {
             .iter()
             .filter_map(|(id, at)| row_for(*id, Some(ago(*at, now))))
             .collect();
-        let mut saved_rows: Vec<Row> = found
+        let saved_rows: Vec<Row> = found
             .saved
             .iter()
             .filter_map(|id| row_for(*id, None))
             .collect();
         let query = self.query.trim();
+        // A typed target no saved host matches: a one-time connection, under its own heading.
+        let mut quick_rows = Vec::new();
         if !files
             && recent_rows.is_empty()
             && saved_rows.is_empty()
             && Target::parse(query, "").is_some()
         {
-            saved_rows.push(Row {
+            quick_rows.push(Row {
                 choice: Choice::Quick(query.to_owned()),
                 title: format!("Connect to {query}"),
                 detail: "Not saved: a one-time SSH connection".to_owned(),
@@ -249,7 +251,7 @@ impl StartView {
                 when: None,
             });
         }
-        let count = recent_rows.len() + saved_rows.len();
+        let count = recent_rows.len() + saved_rows.len() + quick_rows.len();
         self.highlight = self.highlight.min(count.saturating_sub(1));
         if ui.key(Key::Down, Modifiers::NONE) && count > 0 {
             self.highlight = (self.highlight + 1).min(count - 1);
@@ -276,6 +278,7 @@ impl StartView {
                     },
                     saved_rows,
                 ),
+                ("Quick connect", quick_rows),
             ];
             #[allow(clippy::cast_precision_loss)] // Rows on one page.
             let content: f32 = sections
@@ -310,7 +313,8 @@ impl StartView {
                 ui.gfx.stroke_rect(pill, 10.0, 1.0, t.accent.alpha(0.35));
             }
             for (label, title, rows) in layout {
-                let line = Rect::new(label.x + 4.0, label.y + 8.0, label.w, 18.0);
+                // In line with the rows' tiles.
+                let line = Rect::new(label.x + space::M, label.y + 8.0, label.w, 18.0);
                 ui.section_label(line, &format!("{title} \u{b7} {}", rows.len()));
                 for row in rows {
                     let place = places[index];
@@ -377,20 +381,21 @@ fn draw_row(ui: &mut Ui<'_>, base: Id, rect: Rect, row: &Row, highlighted: bool)
         os::tile(ui, tile, &row.title, row.os);
     }
     inner.take_left(space::M);
-    // Right side: Enter on the highlighted row, else when it was used.
-    let hint_w = if highlighted {
-        keys_width(&mut ui.gfx, "Enter") + space::S
-    } else {
-        row.when
-            .as_ref()
-            .map_or(0.0, |when| ui.gfx.measure(when, SMALL).width + space::S)
-    };
-    let hint = inner.take_right(hint_w);
+    // Right side: when it was used, and Enter on the highlighted row.
     if highlighted {
-        let at = Point::new(hint.x + space::S, hint.center().y - KEYCAP_H / 2.0);
-        ui.keys(at, "Enter");
-    } else if let Some(when) = &row.when {
-        ui.gfx.text(hint, when, SMALL, t.text3, Align::End);
+        let width = keys_width(&mut ui.gfx, "Enter");
+        let keys = inner.take_right(width);
+        ui.keys(
+            Point::new(keys.x, keys.center().y - KEYCAP_H / 2.0),
+            "Enter",
+        );
+        inner.take_right(space::M);
+    }
+    if let Some(when) = &row.when {
+        let width = ui.gfx.measure(when, SMALL).width;
+        let hint = inner.take_right(width);
+        ui.gfx.text(hint, when, SMALL, t.text2, Align::End);
+        inner.take_right(space::S);
     }
     let name = Rect::new(inner.x, rect.center().y - 19.0, inner.w, 20.0);
     let detail = Rect::new(inner.x, rect.center().y + 1.0, inner.w, 18.0);

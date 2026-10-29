@@ -68,6 +68,8 @@ pub struct LiveTerminal {
     log: Vec<String>,
     /// The connecting card shows its log.
     show_log: bool,
+    /// The saved host this connects to: its name and its server's OS, for the connecting card.
+    pub identity: Option<(String, Option<&'static super::os::Os>)>,
     /// Held connecting, never started (the scenes).
     #[cfg(test)]
     held: bool,
@@ -123,6 +125,7 @@ impl LiveTerminal {
             stage: 0,
             log: Vec::new(),
             show_log: false,
+            identity: None,
             #[cfg(test)]
             held: false,
         }
@@ -688,13 +691,18 @@ impl LiveTerminal {
         const STEPS: [&str; 4] = ["Server", "Key", "Login", "Shell"];
         let t = ui.theme;
         let id = terminal.with("connect");
-        let (who, route) = match &self.program {
+        let (mut who, route) = match &self.program {
             Program::Ssh { target, .. } => (
                 target.host.clone(),
                 format!("SSH {}@{}:{}", target.user, target.host, target.port),
             ),
             _ => (self.name(), String::new()),
         };
+        let mut mark = None;
+        if let Some((label, os)) = &self.identity {
+            label.clone_into(&mut who);
+            mark = *os;
+        }
         let active = active_step(self.stage, self.ask.as_ref());
         let log_h = if self.show_log { 132.0 } else { 0.0 };
         let width = (rect.w - 2.0 * space::XL).clamp(0.0, 520.0);
@@ -710,7 +718,7 @@ impl LiveTerminal {
         // The host, and Show log.
         let mut head = inner.take_top(44.0);
         let tile = head.take_left(44.0).centered(40.0, 40.0);
-        super::os::tile(ui, tile, &who, None);
+        super::os::tile(ui, tile, &who, mark);
         head.take_left(space::M);
         let label = if self.show_log {
             "Hide log"

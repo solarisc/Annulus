@@ -87,16 +87,38 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     // Where each tab belongs, left to right. Tabs glide to their places (a tab closed, moved
     // or renamed), but take clicks in them, so what is clicked never moves under the pointer.
     let mut slots: Vec<Rect> = Vec::with_capacity(shown);
+    let wanted: Vec<f32> = (0..shown)
+        .map(|index| tab_width(ui, &app.tabs[index].title, app.tabs[index].kind))
+        .collect();
+    // Too many sessions for the strip: they share it evenly, down to a narrowest width,
+    // rather than the last one shrinking to nothing.
+    let fixed: f32 = wanted
+        .iter()
+        .take(FIXED_TABS)
+        .map(|width| width + 2.0)
+        .sum();
+    let room = row.w - PLUS_W - space::S - fixed - DIVIDER;
+    let sessions = shown.saturating_sub(FIXED_TABS);
+    let asked: f32 = wanted
+        .iter()
+        .skip(FIXED_TABS)
+        .map(|width| width + 2.0)
+        .sum();
+    #[allow(clippy::cast_precision_loss)] // A few dozen tabs.
+    let share = (asked > room && sessions > 0).then(|| (room / sessions as f32 - 2.0).max(MIN_TAB));
     let mut x = row.x;
-    for index in 0..shown {
+    for (index, mut width) in wanted.into_iter().enumerate() {
         if index == FIXED_TABS {
             x += DIVIDER;
         }
-        let room = row.r() - PLUS_W - space::S - x;
-        if room < 60.0 {
+        if index >= FIXED_TABS
+            && let Some(share) = share
+        {
+            width = width.min(share);
+        }
+        if x + width > row.r() - PLUS_W - space::S + 0.5 {
             break;
         }
-        let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind).min(room);
         slots.push(Rect::new(x, row.center().y - TAB_H / 2.0, width, TAB_H));
         x += width + 2.0;
     }
@@ -165,6 +187,8 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
 const DIVIDER: f32 = 13.0;
 /// Room kept for the + button after the tabs.
 const PLUS_W: f32 = 36.0;
+/// The narrowest a session tab gets when many share the strip.
+const MIN_TAB: f32 = 96.0;
 
 /// The + button: a quiet square that lights on hover, its plus turning a little as it does.
 fn plus_button(ui: &mut Ui<'_>, rect: Rect, response: &annulus_ui::kit::Response) {

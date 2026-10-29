@@ -1151,11 +1151,12 @@ impl Ui<'_> {
     /// A small uppercase label above a group of rows.
     pub fn section_label(&mut self, rect: Rect, label: &str) {
         let t = self.theme;
+        // Quieter than body text, yet readable on the light theme too.
         self.gfx.text(
             rect,
             &label.to_uppercase(),
             LABEL,
-            t.text3.mix(t.text2, 0.4),
+            t.text3.mix(t.text2, 0.75),
             Align::Start,
         );
     }

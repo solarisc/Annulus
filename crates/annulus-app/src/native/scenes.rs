@@ -196,7 +196,7 @@ fn sftp_picker(app: &mut NativeApp) {
 /// An SSH tab part-way through connecting, its log open.
 fn connecting(app: &mut NativeApp) {
     let program = crate::connect::quick("deploy@web-1.example.com", &app.ssh_files);
-    let terminal = super::live::LiveTerminal::held_at(
+    let mut terminal = super::live::LiveTerminal::held_at(
         program,
         1,
         &[
@@ -204,6 +204,7 @@ fn connecting(app: &mut NativeApp) {
             "web-1.example.com's key is trusted",
         ],
     );
+    terminal.identity = Some(("web-1".into(), super::os::find("ubuntu")));
     app.push_terminal(
         "web-1",
         TermView::Live(Box::new(super::panes::Panes::new(terminal))),
@@ -1325,6 +1326,19 @@ const FILMS: &[Scene] = &[
         populated: true,
         setup: nothing,
         acts: &[Act::Hover("prod-db"), Act::Click("Edit")],
+    },
+    Scene {
+        name: "motion-editor-close",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[
+            Act::Hover("prod-db"),
+            Act::Click("Edit"),
+            Act::Press(Key::Escape, Modifiers::NONE),
+        ],
     },
     Scene {
         name: "motion-settings",
@@ -3376,6 +3390,33 @@ fn closing_a_background_tab_keeps_the_front_tab() {
     app.active = 3;
     app.close_tab(2);
     assert_eq!(app.tabs[app.active].title, "b");
+}
+
+#[test]
+fn many_tabs_share_the_strip_and_none_shrinks_to_nothing() {
+    let mut app = NativeApp::new(Some(fixture_vault("many-tabs", false)));
+    for index in 0..6 {
+        replay(&mut app, &format!("session number {index}"));
+    }
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let tabs: Vec<&Zone> = output
+        .zones
+        .iter()
+        .filter(|zone| zone.role == Role::Tab && zone.label.starts_with("session"))
+        .collect();
+    assert_eq!(tabs.len(), 6, "every tab fits in a 1100-wide window");
+    let widths: Vec<f32> = tabs.iter().map(|zone| zone.rect.w).collect();
+    assert!(
+        widths.iter().all(|width| *width >= 96.0 - 0.5),
+        "{widths:?}"
+    );
+    assert!(
+        widths
+            .windows(2)
+            .all(|pair| (pair[0] - pair[1]).abs() < 1.0),
+        "they share it evenly: {widths:?}"
+    );
 }
 
 #[test]

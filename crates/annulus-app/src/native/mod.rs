@@ -1201,12 +1201,14 @@ impl NativeApp {
         }
         self.learn_server_os();
         for (title, program, origin) in std::mem::take(&mut self.opens) {
-            self.push_terminal(
-                title,
-                TermView::Live(Box::new(panes::Panes::new(live::LiveTerminal::new(
-                    program,
-                )))),
-            );
+            let mut terminal = live::LiveTerminal::new(program);
+            // A saved host's tab connects under its name and its server's mark.
+            if let (Some(OpenTab::Host(id)), Some(vault)) = (&origin, &self.vault)
+                && let Some(host) = vault.hosts().iter().find(|host| host.id == *id)
+            {
+                terminal.identity = Some((host.label.clone(), os::of(host)));
+            }
+            self.push_terminal(title, TermView::Live(Box::new(panes::Panes::new(terminal))));
             // In front: last, or where the new tab it was chosen from was.
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.origin = origin;

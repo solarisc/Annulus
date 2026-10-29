@@ -89,6 +89,8 @@ pub struct HostsView {
     picked: Option<(u64, usize)>,
     /// Deleting a tag from every host: the tag, and whether the user said yes.
     untag: Option<(String, bool)>,
+    /// Where the editor panel was last drawn, for its surface to slide out once it closes.
+    last_panel: Option<Rect>,
 }
 
 /// The host editor's draft.
@@ -383,6 +385,20 @@ impl HostsView {
                 self.editor_panel(ui, panel, vault);
             }
             ui.pop_layer();
+            self.last_panel = Some(panel);
+        }
+        // Closed, the panel's surface slides back out the way it came (its form is gone).
+        let present = ui.presence(Id::new("editor.presence"), open, Motion::BASE);
+        if !open && present > 0.0 {
+            if let Some(panel) = self.last_panel {
+                let t = ui.theme;
+                ui.push_layer(Layer::fade(present).shifted(40.0 * (1.0 - present), 0.0));
+                ui.gfx.shadow(panel, 0.0, 18.0, 0.0, t.shadow);
+                ui.gfx.fill_rect(panel, 0.0, t.raised);
+                ui.pop_layer();
+            }
+        } else if !open {
+            self.last_panel = None;
         }
         self.import_card(ui, rect, vault);
         action
