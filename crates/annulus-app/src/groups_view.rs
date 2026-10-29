@@ -309,7 +309,7 @@ pub struct GroupDraft {
 
 /// What deleting a group does with the hosts directly in it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Deletion {
+pub(crate) enum Deletion {
     /// They (and its subgroups) move up into its parent.
     MoveHostsUp,
     /// They are deleted with it; its subgroups still move up.
@@ -317,7 +317,7 @@ enum Deletion {
 }
 
 /// Deletes `group` from `vault` as `how` says.
-fn delete_group(vault: &mut Vault, group: &Group, how: Deletion) -> Result<(), String> {
+pub(crate) fn delete_group(vault: &mut Vault, group: &Group, how: Deletion) -> Result<(), String> {
     if how == Deletion::WithHosts {
         let inside: Vec<u64> = vault
             .hosts()

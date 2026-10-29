@@ -765,3 +765,83 @@ fn the_lint_catches_partial_overlaps_but_not_nesting() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn first_run_creates_the_vault_and_opens_it_only_after_the_recovery_key_is_confirmed() {
+    let dir = std::env::temp_dir().join(format!("annulus-first-run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = NativeApp::new(None);
+    app.vault_path = Some(dir.join("vault.anv"));
+    app.lock = super::lock::LockView::new(super::lock::Mode::Setup);
+    let mut state = UiState::default();
+    let started = std::time::Instant::now();
+    let clock = || started.elapsed().as_secs_f64();
+    let mut output = drive(&mut app, &mut state, &[], clock());
+    let type_into = |output: &FrameOutput, field: &str, text: &str| {
+        vec![
+            Event::PointerMoved(zone_center(&output.zones, field)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+            Event::Text(text.to_owned()),
+        ]
+    };
+    let events = type_into(
+        &output,
+        "Master password (10+ characters)",
+        "correct horse battery",
+    );
+    output = drive(&mut app, &mut state, &events, clock());
+    let events = type_into(&output, "Type it again", "correct horse battery");
+    output = drive(&mut app, &mut state, &events, clock());
+    let create = vec![
+        Event::PointerMoved(zone_center(&output.zones, "Create vault")),
+        Event::PointerDown(Button::Primary),
+        Event::PointerUp(Button::Primary),
+    ];
+    output = drive(&mut app, &mut state, &create, clock());
+    while app.lock.mode != super::lock::Mode::Recovery {
+        assert!(
+            clock() < 60.0,
+            "the vault was not created: {:?}",
+            app.lock.error
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        output = drive(&mut app, &mut state, &[], clock());
+    }
+    assert!(app.vault.is_none(), "not open before the key is confirmed");
+    // A wrong first group is refused.
+    let events = type_into(
+        &output,
+        "Type its first group to confirm you saved it",
+        "nope",
+    );
+    output = drive(&mut app, &mut state, &events, clock());
+    let confirm = |output: &FrameOutput| {
+        vec![
+            Event::PointerMoved(zone_center(&output.zones, "I saved it, open the vault")),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ]
+    };
+    output = drive(&mut app, &mut state, &confirm(&output), clock());
+    assert!(app.vault.is_none());
+    // The key's first group, from the file the vault now has on disk: reopen proves it.
+    assert!(dir.join("vault.anv").exists());
+    let key = app.lock.recovery_key_for_tests();
+    let first = key.split('-').next().unwrap().to_owned();
+    let mut events = vec![
+        Event::PointerMoved(zone_center(
+            &output.zones,
+            "Type its first group to confirm you saved it",
+        )),
+        Event::PointerDown(Button::Primary),
+        Event::PointerUp(Button::Primary),
+        Event::Key(Key::Char('a'), Modifiers::CTRL),
+        Event::Key(Key::Backspace, Modifiers::NONE),
+    ];
+    events.push(Event::Text(first));
+    output = drive(&mut app, &mut state, &events, clock());
+    drive(&mut app, &mut state, &confirm(&output), clock());
+    assert!(app.vault.is_some());
+}

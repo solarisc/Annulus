@@ -18,6 +18,8 @@ pub enum Mode {
     Setup,
     /// A vault exists: type its password (or the recovery key).
     Unlock,
+    /// A vault was just made: its recovery key is shown this once.
+    Recovery,
 }
 
 /// What the user asked the vault to do.
@@ -32,6 +34,8 @@ pub enum LockAction {
         /// It is the recovery key.
         recovery: bool,
     },
+    /// The recovery key was confirmed: the new vault can open.
+    Confirmed,
 }
 
 /// The lock screen's state.
@@ -43,7 +47,19 @@ pub struct LockView {
     recovery: bool,
     /// The last problem, shown under the fields.
     pub error: Option<String>,
+    /// Creating or unlocking, on another thread.
+    pub working: Option<crate::job::Job<Opened>>,
+    /// A new vault, waiting for its recovery key to be confirmed.
+    pending: Option<Box<annulus_vault::vault::Vault>>,
+    key: Zeroizing<String>,
+    typed: String,
 }
+
+/// What creating or unlocking gives: the vault, and a new vault's recovery key.
+pub type Opened = Result<
+    (annulus_vault::vault::Vault, Option<Zeroizing<String>>),
+    annulus_vault::vault::VaultError,
+>;
 
 impl LockView {
     /// A screen in `mode`.
@@ -55,7 +71,129 @@ impl LockView {
             confirm: Zeroizing::new(String::new()),
             recovery: false,
             error: None,
+            working: None,
+            pending: None,
+            key: Zeroizing::new(String::new()),
+            typed: String::new(),
         }
+    }
+
+    /// Shows `key` for the new `vault`, which opens once the key is confirmed.
+    pub fn show_recovery(&mut self, vault: annulus_vault::vault::Vault, key: Zeroizing<String>) {
+        self.mode = Mode::Recovery;
+        self.pending = Some(Box::new(vault));
+        self.key = key;
+        self.typed.clear();
+        self.error = None;
+    }
+
+    /// The new vault, after its recovery key was confirmed.
+    pub fn take_vault(&mut self) -> Option<annulus_vault::vault::Vault> {
+        self.key = Zeroizing::new(String::new());
+        self.pending.take().map(|vault| *vault)
+    }
+
+    /// The recovery key shown, for tests that confirm it.
+    #[cfg(test)]
+    pub fn recovery_key_for_tests(&self) -> String {
+        self.key.to_string()
+    }
+
+    /// The recovery key is being used to unlock.
+    #[must_use]
+    pub fn recovery_mode(&self) -> bool {
+        self.recovery
+    }
+
+    /// The recovery key, once, and a check that it was written down.
+    fn recovery_card(&mut self, ui: &mut Ui<'_>, rect: Rect) -> Option<LockAction> {
+        let t = ui.theme;
+        let card = rect.centered(rect.w.min(460.0), 330.0);
+        ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
+        ui.gfx.fill_rect(card, 14.0, t.raised);
+        ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
+        let mut column = card.inset(space::XL + 4.0, space::XL);
+        ui.strict_text(
+            column.take_top(26.0),
+            "Save your recovery key",
+            annulus_ui::widgets::HEADING,
+            t.text,
+            Align::Center,
+        );
+        column.take_top(space::XS);
+        ui.gfx.text(
+            column.take_top(20.0),
+            "If you forget the master password, it is the only way in.",
+            SMALL,
+            t.text2,
+            Align::Center,
+        );
+        ui.gfx.text(
+            column.take_top(18.0),
+            "It is shown only now.",
+            SMALL,
+            t.text2,
+            Align::Center,
+        );
+        column.take_top(space::L);
+        let key_box = column.take_top(48.0);
+        ui.gfx.fill_rect(key_box, 8.0, t.field);
+        ui.gfx.stroke_rect(key_box, 8.0, 1.0, t.line_strong);
+        let mut inside = key_box.inset(space::M, 0.0);
+        let copy = inside.take_right(30.0).centered(30.0, 30.0);
+        ui.gfx.text(
+            inside,
+            &self.key,
+            annulus_ui::gfx::Font::mono(14.0),
+            t.text,
+            Align::Center,
+        );
+        if ui
+            .icon_button(
+                Id::new("recovery.copy"),
+                copy,
+                icons::COPY,
+                "Copy the recovery key",
+                false,
+            )
+            .clicked
+        {
+            ui.copy(self.key.to_string());
+        }
+        column.take_top(space::L);
+        let field = ui.text_field(
+            Id::new("recovery.typed"),
+            column.take_top(CONTROL),
+            &mut self.typed,
+            FieldStyle {
+                placeholder: "Type its first group to confirm you saved it",
+                ..FieldStyle::default()
+            },
+        );
+        if let Some(error) = &self.error {
+            column.take_top(space::XS);
+            ui.gfx
+                .text(column.take_top(18.0), error, SMALL, t.error, Align::Start);
+        }
+        column.take_top(space::M);
+        let go = column.take_top(CONTROL);
+        let clicked = ui
+            .button(
+                Id::new("recovery.go"),
+                go,
+                "I saved it, open the vault",
+                None,
+                Kind::Primary,
+            )
+            .clicked;
+        if clicked || field.submitted {
+            let first = self.key.split('-').next().unwrap_or_default();
+            if self.typed.trim().eq_ignore_ascii_case(first) {
+                return Some(LockAction::Confirmed);
+            }
+            self.error = Some("That does not match the first group.".into());
+        }
+        None
     }
 
     /// Checks a new master password and its confirmation.
@@ -72,6 +210,9 @@ impl LockView {
     /// Draws the screen centered in `rect`.
     #[allow(clippy::too_many_lines)] // One card, top to bottom.
     pub fn draw(&mut self, ui: &mut Ui<'_>, rect: Rect) -> Option<LockAction> {
+        if self.mode == Mode::Recovery {
+            return self.recovery_card(ui, rect);
+        }
         let t = ui.theme;
         let setup = self.mode == Mode::Setup;
         let (title, detail, button) = match (setup, self.recovery) {
@@ -176,11 +317,22 @@ impl LockView {
         }
         column.take_top(space::L);
         let go = column.take_top(CONTROL);
+        let busy = self.working.is_some();
+        let label = if busy {
+            if setup {
+                "Creating the vault\u{2026}"
+            } else {
+                "Unlocking\u{2026}"
+            }
+        } else {
+            button
+        };
         let clicked = ui
-            .button(Id::new("lock.go"), go, button, None, Kind::Primary)
-            .clicked;
+            .button(Id::new("lock.go"), go, label, None, Kind::Primary)
+            .clicked
+            && !busy;
         let mut action = None;
-        if clicked || submitted {
+        if (clicked || submitted) && !busy {
             if setup {
                 match self.check_new() {
                     Ok(()) => {

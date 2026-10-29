@@ -477,29 +477,51 @@ impl NativeApp {
         }
     }
 
-    /// Creates or unlocks the vault as the lock screen asked.
-    fn open_vault(&mut self, action: lock::LockAction) {
+    /// Creates or unlocks the vault as the lock screen asked, on another thread (Argon2id is
+    /// slow on purpose).
+    fn open_vault(&mut self, ui: &Ui<'_>, action: lock::LockAction) {
         let Some(path) = self.vault_path.clone() else {
             self.lock.error = Some("This preview has no vault file.".into());
             return;
         };
-        let opened = match action {
+        let pace = FramePace::new(ui, self.waker.clone());
+        self.lock.working = Some(crate::job::Job::start(&pace, move || match action {
             lock::LockAction::Create(password) => {
                 Vault::create(path, &password, annulus_vault::crypto::KdfParams::DEFAULT)
-                    .map(|(vault, _)| vault)
+                    .map(|(vault, key)| (vault, Some(key)))
             }
-            lock::LockAction::Unlock { secret, recovery } => {
-                if recovery {
-                    Vault::recover(path, &secret)
-                } else {
-                    Vault::unlock(path, &secret)
-                }
+            lock::LockAction::Unlock { secret, recovery } => if recovery {
+                Vault::recover(path, &secret)
+            } else {
+                Vault::unlock(path, &secret)
             }
+            .map(|vault| (vault, None)),
+            // Handled by the caller before any work starts.
+            lock::LockAction::Confirmed => Err(annulus_vault::vault::VaultError::WrongPassword),
+        }));
+    }
+
+    /// Takes the vault the lock screen's work opened, once it is done.
+    fn poll_lock(&mut self) {
+        let Some(job) = &self.lock.working else {
+            return;
         };
-        match opened {
-            Ok(vault) => self.vault = Some(vault),
+        let result = match job.poll() {
+            crate::job::Poll::Running => return,
+            crate::job::Poll::Done(result) => result,
+            crate::job::Poll::Lost => Err(annulus_vault::vault::VaultError::WrongPassword),
+        };
+        self.lock.working = None;
+        match result {
+            // A new vault shows its recovery key first; it opens once that is confirmed.
+            Ok((vault, Some(key))) => self.lock.show_recovery(vault, key),
+            Ok((vault, None)) => self.vault = Some(vault),
             Err(annulus_vault::vault::VaultError::WrongPassword) => {
-                self.lock.error = Some("Wrong password.".into());
+                self.lock.error = Some(if self.lock.recovery_mode() {
+                    "That recovery key does not open this vault.".into()
+                } else {
+                    "Wrong password.".into()
+                });
             }
             Err(error) => self.lock.error = Some(format!("Could not open the vault: {error}")),
         }
@@ -589,8 +611,11 @@ impl NativeApp {
             self.navigation(ui, nav, compact);
             let content = panel(ui, area);
             if self.vault.is_none() {
-                if let Some(action) = self.lock.draw(ui, content) {
-                    self.open_vault(action);
+                self.poll_lock();
+                match self.lock.draw(ui, content) {
+                    Some(lock::LockAction::Confirmed) => self.vault = self.lock.take_vault(),
+                    Some(action) => self.open_vault(ui, action),
+                    None => {}
                 }
             } else {
                 self.section_screen(ui, content);

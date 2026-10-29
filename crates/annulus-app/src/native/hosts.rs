@@ -65,6 +65,8 @@ pub struct HostsView {
     pub group: Option<String>,
     /// The editor, while open.
     pub editor: Option<Editor>,
+    /// The group editor, while open.
+    pub group_editor: Option<GroupEditor>,
 }
 
 /// The host editor's draft.
@@ -184,6 +186,7 @@ impl HostsView {
     pub fn new_host(&mut self, vault: &Vault) {
         let mut host = vault.draft_host();
         host.group.clone_from(&self.group);
+        self.group_editor = None;
         self.editor = Some(Editor::new(host, true));
     }
 
@@ -191,6 +194,7 @@ impl HostsView {
     pub fn edit_host(&mut self, vault: &Vault, id: u64) {
         if let Some(host) = vault.hosts().iter().find(|host| host.id == id) {
             self.selected = Some(id);
+            self.group_editor = None;
             self.editor = Some(Editor::new(host.clone(), false));
         }
     }
@@ -204,14 +208,16 @@ impl HostsView {
     ) -> Option<HostsAction> {
         let mut area = rect;
         let mut action = None;
-        let panel = self
-            .editor
-            .is_some()
+        let panel = (self.editor.is_some() || self.group_editor.is_some())
             .then(|| area.take_right(EDITOR_W.min(area.w * 0.6)));
         let vault = vault?;
         action = self.listing_area(ui, area, vault).or(action);
         if let Some(panel) = panel {
-            self.editor_panel(ui, panel, vault);
+            if self.group_editor.is_some() {
+                self.group_panel(ui, panel, vault);
+            } else {
+                self.editor_panel(ui, panel, vault);
+            }
         }
         action
     }
@@ -233,7 +239,11 @@ impl HostsView {
             action = Some(toolbar);
         }
         main.take_top(space::L);
-        if cards.is_empty() && groups.is_empty() {
+        if self.group.is_some() && self.query.trim().is_empty() {
+            self.breadcrumb(ui, main.take_top(CONTROL), vault);
+            main.take_top(space::M);
+        }
+        if cards.is_empty() && groups.is_empty() && self.group.is_none() {
             if self.query.trim().is_empty() {
                 if let Some(empty) = self.empty_state(ui, main, vault) {
                     action = Some(empty);
@@ -421,12 +431,7 @@ impl HostsView {
             Kind::Primary,
             &items,
         ) {
-            Some(0) => {
-                if let Ok(mut group) = vault.draft_group(self.group.clone()) {
-                    group.name = "New group".into();
-                    let _ = vault.upsert_group(group);
-                }
-            }
+            Some(0) => self.new_group(vault),
             Some(_) => action = Some(HostsAction::ImportSshConfig),
             None => {}
         }
@@ -871,6 +876,413 @@ impl HostsView {
         }
         if saved || close_editor {
             self.editor = None;
+        }
+    }
+}
+
+/// The group editor's draft (F-HOST-003): name, parent and what its hosts inherit.
+pub struct GroupEditor {
+    group: annulus_vault::groups::Group,
+    is_new: bool,
+    name: String,
+    username: String,
+    port: String,
+    proxy: Zeroizing<String>,
+    env: String,
+    startup: String,
+    term: String,
+    problem: Option<String>,
+    confirm_delete: bool,
+    content_h: f32,
+}
+
+impl GroupEditor {
+    /// An editor over `group`.
+    #[must_use]
+    pub fn new(group: annulus_vault::groups::Group, is_new: bool) -> Self {
+        let defaults = &group.defaults;
+        Self {
+            name: group.name.clone(),
+            username: defaults.username.clone(),
+            port: defaults
+                .port
+                .map(|port| port.to_string())
+                .unwrap_or_default(),
+            proxy: Zeroizing::new(
+                defaults
+                    .proxy
+                    .as_ref()
+                    .map(|proxy| proxy.expose().to_owned())
+                    .unwrap_or_default(),
+            ),
+            env: groups_view::format_env(&defaults.env),
+            startup: defaults.startup.clone(),
+            term: defaults.term.clone(),
+            problem: None,
+            confirm_delete: false,
+            content_h: 0.0,
+            group,
+            is_new,
+        }
+    }
+
+    /// The group as edited, or why it cannot be saved.
+    fn build(&self) -> Result<annulus_vault::groups::Group, String> {
+        let mut group = self.group.clone();
+        self.name.trim().clone_into(&mut group.name);
+        if group.name.is_empty() {
+            return Err("Give the group a name".into());
+        }
+        let defaults = &mut group.defaults;
+        self.username.trim().clone_into(&mut defaults.username);
+        defaults.port = match self.port.trim() {
+            "" => None,
+            port => Some(
+                port.parse()
+                    .map_err(|_| "The port is a number from 1 to 65535".to_owned())?,
+            ),
+        };
+        defaults.proxy = (!self.proxy.trim().is_empty()).then(|| Secret::new(self.proxy.trim()));
+        defaults.env = groups_view::parse_env(&self.env)?;
+        self.startup.trim().clone_into(&mut defaults.startup);
+        self.term.trim().clone_into(&mut defaults.term);
+        Ok(group)
+    }
+}
+
+impl HostsView {
+    /// Opens the group editor on a new group inside the one shown.
+    pub fn new_group(&mut self, vault: &Vault) {
+        if let Ok(group) = vault.draft_group(self.group.clone()) {
+            self.editor = None;
+            self.group_editor = Some(GroupEditor::new(group, true));
+        }
+    }
+
+    /// The path back up from the group shown: All hosts, then each parent.
+    fn breadcrumb(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &Vault) {
+        let t = ui.theme;
+        let mut chain: Vec<(String, String)> =
+            annulus_vault::groups::chain(vault.groups(), self.group.as_deref())
+                .iter()
+                .map(|group| (group.uid.clone(), group.name.clone()))
+                .collect();
+        chain.reverse();
+        let mut row = rect;
+        let mut go = None;
+        let all_w = button_width(ui.gfx, "All hosts", None);
+        if ui
+            .button(
+                Id::new("crumb.all"),
+                row.take_left(all_w),
+                "All hosts",
+                None,
+                Kind::Ghost,
+            )
+            .clicked
+        {
+            go = Some(None);
+        }
+        for (index, (uid, name)) in chain.iter().enumerate() {
+            let chevron = row.take_left(16.0).centered(12.0, 12.0);
+            ui.gfx.icon(icons::CHEVRON_RIGHT, chevron, t.text3);
+            let width = button_width(ui.gfx, name, None);
+            let slot = row.take_left(width);
+            let last = index + 1 == chain.len();
+            let kind = if last { Kind::Secondary } else { Kind::Ghost };
+            if ui
+                .button(Id::new(("crumb", uid.as_str())), slot, name, None, kind)
+                .clicked
+                && !last
+            {
+                go = Some(Some(uid.clone()));
+            }
+        }
+        if let Some(group) = self.group.clone() {
+            row.take_left(space::S);
+            let edit = row.take_left(30.0).centered(30.0, 30.0);
+            if ui
+                .icon_button(
+                    Id::new("crumb.edit"),
+                    edit,
+                    icons::EDIT,
+                    "Edit this group",
+                    false,
+                )
+                .clicked
+                && let Some(found) = vault.groups().iter().find(|known| known.uid == group)
+            {
+                self.editor = None;
+                self.group_editor = Some(GroupEditor::new(found.clone(), false));
+            }
+        }
+        if let Some(target) = go {
+            self.group = target;
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // One panel, top to bottom: header, form, footer.
+    fn group_panel(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) {
+        let t = ui.theme;
+        let Some(editor) = self.group_editor.as_mut() else {
+            return;
+        };
+        ui.gfx.shadow(rect, 0.0, 18.0, 0.0, t.shadow);
+        let shape = Rect::new(rect.x, rect.y, rect.w + 24.0, rect.h + 24.0);
+        ui.gfx.fill_rect(shape, 0.0, t.raised);
+        ui.gfx
+            .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
+        ui.zone(Id::new("group.backdrop"), rect, Role::Backdrop, "");
+        let mut area = rect;
+        let mut head = area.take_top(64.0).inset(space::XL, 0.0);
+        let close = head.take_right(32.0).centered(32.0, 32.0);
+        let mut close_editor = ui
+            .icon_button(Id::new("group.close"), close, icons::CLOSE, "Close", false)
+            .clicked
+            || ui.key(Key::Escape, Modifiers::NONE);
+        let title = if editor.is_new {
+            "New group"
+        } else {
+            "Edit group"
+        };
+        ui.strict_text(
+            Rect::new(head.x, head.y + 14.0, head.w, 22.0),
+            title,
+            HEADING,
+            t.text,
+            Align::Start,
+        );
+        ui.gfx.text(
+            Rect::new(head.x, head.y + 36.0, head.w, 18.0),
+            "Hosts inside inherit what you set here",
+            SMALL,
+            t.text2,
+            Align::Start,
+        );
+        ui.gfx
+            .fill_rect(Rect::new(area.x, area.y, area.w, 1.0), 0.0, t.line);
+        let footer = area.take_bottom(68.0);
+        ui.gfx
+            .fill_rect(Rect::new(footer.x, footer.y, footer.w, 1.0), 0.0, t.line);
+        let body = area;
+        let offset = ui.scroll_view(Id::new("group.scroll"), body, editor.content_h);
+        ui.push_clip(body);
+        let mut form = Form {
+            x: body.x + space::XL,
+            y: body.y + space::XL - offset,
+            w: body.w - 2.0 * space::XL,
+        };
+        let choices = groups_view::choices(vault.groups(), Some(editor.group.uid.as_str()));
+        let mut parents = vec!["Top level".to_owned()];
+        parents.extend(choices.iter().map(|(_, path)| path.clone()));
+        let parent_at = editor
+            .group
+            .parent
+            .as_ref()
+            .and_then(|uid| choices.iter().position(|(known, _)| known == uid))
+            .map_or(0, |at| at + 1);
+        let hosts: Vec<(u64, String)> = vault
+            .hosts()
+            .iter()
+            .map(|h| (h.id, h.label.clone()))
+            .collect();
+        let keys: Vec<(u64, String)> = vault
+            .ssh_keys()
+            .iter()
+            .map(|k| (k.id, k.label.clone()))
+            .collect();
+
+        form.section(ui, "Group");
+        let name_error = editor.problem.as_deref().filter(|p| p.contains("name"));
+        form.text(
+            ui,
+            "group.name",
+            "Name",
+            &mut editor.name,
+            "Production",
+            name_error,
+        );
+        if let Some(chosen) = form.select(ui, "group.parent", "Inside", &parents, Some(parent_at)) {
+            editor.group.parent = chosen
+                .checked_sub(1)
+                .and_then(|at| choices.get(at))
+                .map(|(uid, _)| uid.clone());
+        }
+        form.gap(space::S);
+        form.section(ui, "Hosts inside inherit");
+        form.text(
+            ui,
+            "group.user",
+            "Username",
+            &mut editor.username,
+            "deploy",
+            None,
+        );
+        form.text(ui, "group.port", "Port", &mut editor.port, "22", None);
+        let mut key_items = vec!["From the parent group".to_owned()];
+        key_items.extend(keys.iter().map(|(_, label)| label.clone()));
+        let key_at = editor
+            .group
+            .defaults
+            .key_id
+            .and_then(|id| keys.iter().position(|(k, _)| *k == id))
+            .map_or(0, |at| at + 1);
+        if let Some(chosen) = form.select(ui, "group.key", "Key", &key_items, Some(key_at)) {
+            editor.group.defaults.key_id = chosen
+                .checked_sub(1)
+                .and_then(|at| keys.get(at))
+                .map(|(id, _)| *id);
+        }
+        let mut jump_items = vec!["From the parent group".to_owned()];
+        jump_items.extend(hosts.iter().map(|(_, label)| label.clone()));
+        let jump_at = editor
+            .group
+            .defaults
+            .jump_id
+            .and_then(|id| hosts.iter().position(|(h, _)| *h == id))
+            .map_or(0, |at| at + 1);
+        if let Some(chosen) = form.select(ui, "group.jump", "Jump host", &jump_items, Some(jump_at))
+        {
+            editor.group.defaults.jump_id = chosen
+                .checked_sub(1)
+                .and_then(|at| hosts.get(at))
+                .map(|(id, _)| *id);
+        }
+        form.secret(
+            ui,
+            "group.proxy",
+            "Proxy",
+            &mut editor.proxy,
+            "socks5://host:1080",
+        );
+        form.text(
+            ui,
+            "group.env",
+            "Environment",
+            &mut editor.env,
+            "LANG=en_US.UTF-8",
+            None,
+        );
+        form.text(
+            ui,
+            "group.startup",
+            "Startup command",
+            &mut editor.startup,
+            "tmux attach",
+            None,
+        );
+        form.text(
+            ui,
+            "group.term",
+            "Terminal type",
+            &mut editor.term,
+            "xterm-256color",
+            None,
+        );
+        if let Some(problem) = editor.problem.as_deref().filter(|p| !p.contains("name")) {
+            ui.gfx.text(
+                Rect::new(form.x, form.y, form.w, 20.0),
+                problem,
+                SMALL,
+                t.error,
+                Align::Start,
+            );
+            form.y += 28.0;
+        }
+        editor.content_h = form.y + offset - body.y + space::L;
+        ui.pop_clip();
+
+        let mut buttons = footer.inset(space::XL, (footer.h - CONTROL) / 2.0);
+        let mut done = false;
+        if editor.confirm_delete {
+            let up_w = button_width(ui.gfx, "Move its hosts up", None);
+            let all_w = button_width(ui.gfx, "Delete its hosts too", None);
+            let up = buttons.take_left(up_w);
+            buttons.take_left(space::S);
+            let all = buttons.take_left(all_w);
+            let how = if ui
+                .button(
+                    Id::new("group.delete.up"),
+                    up,
+                    "Move its hosts up",
+                    None,
+                    Kind::Secondary,
+                )
+                .clicked
+            {
+                Some(groups_view::Deletion::MoveHostsUp)
+            } else if ui
+                .button(
+                    Id::new("group.delete.all"),
+                    all,
+                    "Delete its hosts too",
+                    None,
+                    Kind::Danger,
+                )
+                .clicked
+            {
+                Some(groups_view::Deletion::WithHosts)
+            } else {
+                None
+            };
+            if let Some(how) = how {
+                match groups_view::delete_group(vault, &editor.group, how) {
+                    Ok(()) => {
+                        if self.group.as_deref() == Some(editor.group.uid.as_str()) {
+                            self.group.clone_from(&editor.group.parent);
+                        }
+                        done = true;
+                    }
+                    Err(problem) => editor.problem = Some(problem),
+                }
+            }
+        } else {
+            let save = buttons.take_right(button_width(ui.gfx, "Save", None).max(88.0));
+            buttons.take_right(space::S);
+            let cancel = buttons.take_right(button_width(ui.gfx, "Cancel", None));
+            if !editor.is_new {
+                let delete_w = button_width(ui.gfx, "Delete", Some(icons::TRASH));
+                let delete = Rect::new(footer.x + space::XL, cancel.y, delete_w, CONTROL);
+                if ui
+                    .button(
+                        Id::new("group.delete"),
+                        delete,
+                        "Delete",
+                        Some(icons::TRASH),
+                        Kind::Danger,
+                    )
+                    .clicked
+                {
+                    editor.confirm_delete = true;
+                }
+            }
+            if ui
+                .button(
+                    Id::new("group.cancel"),
+                    cancel,
+                    "Cancel",
+                    None,
+                    Kind::Secondary,
+                )
+                .clicked
+            {
+                close_editor = true;
+            }
+            if ui
+                .button(Id::new("group.save"), save, "Save", None, Kind::Primary)
+                .clicked
+            {
+                match editor.build() {
+                    Ok(group) => match vault.upsert_group(group) {
+                        Ok(()) => done = true,
+                        Err(error) => editor.problem = Some(error.to_string()),
+                    },
+                    Err(problem) => editor.problem = Some(problem),
+                }
+            }
+        }
+        if done || close_editor {
+            self.group_editor = None;
         }
     }
 }
