@@ -163,7 +163,7 @@ mod tests {
                 list.push(Op::Rect {
                     rect: Rect::default(),
                     color: RED,
-                })
+                });
             });
         });
         let kinds: Vec<_> = list.ops().iter().map(std::mem::discriminant).collect();
