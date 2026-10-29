@@ -987,6 +987,84 @@ mod tests {
         output.textures_delta.clear();
     }
 
+    /// End to end on the test VMs (docs/TESTING.md §Test VMs): a host that sets nothing but
+    /// its address and group is reached through the group's jump host, as the group's user,
+    /// with the group's keychain key.
+    #[test]
+    #[ignore = "needs the test servers"]
+    fn e2e_a_grouped_host_is_reached_with_everything_it_inherits() {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+        let key_text = std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap();
+        let pair = annulus_ssh::keys::import(&key_text, None).unwrap();
+        let mut screen = screen_with("e2e-group");
+        let key = annulus_vault::keychain::SshKey {
+            id: screen.vault.next_key_id(),
+            label: "test key".into(),
+            private: Secret::new(pair.private.as_str()),
+            public: pair.public.clone(),
+            fingerprint: pair.fingerprint.clone(),
+        };
+        screen.vault.upsert_key(key.clone()).unwrap();
+        let mut bastion = screen.vault.draft_host();
+        (bastion.label, bastion.address) = ("bastion".into(), var("ANNULUS_E2E_VM1"));
+        // The jump host is outside the group, so it sets its own login.
+        (bastion.username, bastion.key_id) = (var("ANNULUS_E2E_USER"), Some(key.id));
+        screen.vault.upsert_host(bastion.clone()).unwrap();
+        let mut group = screen.vault.draft_group(None).unwrap();
+        group.name = "lab".into();
+        group.defaults.username = var("ANNULUS_E2E_USER");
+        group.defaults.key_id = Some(key.id);
+        group.defaults.jump_id = Some(bastion.id);
+        screen.vault.upsert_group(group.clone()).unwrap();
+        let mut inner = screen.vault.draft_host();
+        (inner.label, inner.address) = ("inner".into(), var("ANNULUS_E2E_VM2"));
+        inner.group = Some(group.uid);
+        screen.vault.upsert_host(inner.clone()).unwrap();
+
+        let Program::Ssh {
+            target,
+            files,
+            password,
+            identity,
+            via,
+            proxy,
+            ..
+        } = screen.connect_host(&inner)
+        else {
+            panic!("an ssh program");
+        };
+        let last = Hop {
+            target,
+            password,
+            identity,
+            proxy,
+        };
+        let answers = annulus_session::Answers::default();
+        let trusting = answers.clone();
+        let notify: std::sync::Arc<dyn Fn(annulus_session::SessionEvent) + Send + Sync> =
+            std::sync::Arc::new(move |event| {
+                if matches!(event, annulus_session::SessionEvent::HostKey(_)) {
+                    trusting.host_key(true);
+                }
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = runtime.block_on(async {
+            let connection = annulus_session::connect_chain(&via, &last, &files, &answers, notify)
+                .await
+                .expect("reached through the group's jump host");
+            connection.exec("hostname; whoami").await.unwrap().output
+        });
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.starts_with("annulus-test-2\n"), "{output}");
+        assert!(
+            output.ends_with(&format!("{}\n", var("ANNULUS_E2E_USER"))),
+            "{output}"
+        );
+    }
+
     #[test]
     fn a_host_can_turn_off_reconnecting() {
         let mut screen = screen_with("rc");
