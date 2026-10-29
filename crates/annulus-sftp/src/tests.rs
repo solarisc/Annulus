@@ -328,6 +328,91 @@ async fn a_cancelled_download_leaves_no_partial_file() {
     assert!(!local.join("big.bin").exists());
 }
 
+/// The part-file stamp of `path` as a transfer sees it: size and modification time.
+fn stamp_of(path: &Path) -> String {
+    let meta = fs::metadata(path).unwrap();
+    let modified = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    format!("{}-{modified}", meta.len())
+}
+
+#[tokio::test]
+async fn a_kept_part_of_the_same_file_is_continued_and_a_stale_one_is_not() {
+    let remote = temp_dir("resume-remote");
+    let local = temp_dir("resume-local");
+    let body: Vec<u8> = (0..CHUNK * 3)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
+    fs::write(remote.join("big.bin"), &body).unwrap();
+    let stamp = stamp_of(&remote.join("big.bin"));
+    // An earlier try got the first chunk before the connection dropped.
+    fs::write(
+        local.join(format!(".big.bin.{stamp}.annulus-part")),
+        &body[..CHUNK],
+    )
+    .unwrap();
+    // A part of an older version of the file must not be continued.
+    fs::write(local.join(".big.bin.1-1.annulus-part"), b"stale").unwrap();
+    let sftp = client(remote).await;
+
+    let mut first = None;
+    let outcome = sftp
+        .download("/big.bin", &local, Conflict::KeepBoth, &mut |done, _| {
+            first.get_or_insert(done);
+            true
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, Outcome::Done { bytes, .. } if bytes == body.len() as u64));
+    // Without the kept chunk the first report would be at most one chunk.
+    assert!(
+        first.unwrap() > CHUNK as u64,
+        "it started after the kept chunk"
+    );
+    assert_eq!(fs::read(local.join("big.bin")).unwrap(), body);
+    assert_eq!(names(&local), [".big.bin.1-1.annulus-part", "big.bin"]);
+}
+
+#[tokio::test]
+async fn an_upload_continues_a_kept_remote_part() {
+    let remote = temp_dir("resume-up-remote");
+    let local = temp_dir("resume-up-local");
+    let body: Vec<u8> = (0..CHUNK * 2 + 7)
+        .map(|i| u8::try_from(i % 249).unwrap())
+        .collect();
+    fs::write(local.join("up.bin"), &body).unwrap();
+    let stamp = stamp_of(&local.join("up.bin"));
+    fs::write(
+        remote.join(format!(".up.bin.{stamp}.annulus-part")),
+        &body[..CHUNK],
+    )
+    .unwrap();
+    let sftp = client(remote.clone()).await;
+
+    let mut first = None;
+    sftp.upload(
+        &local.join("up.bin"),
+        "/",
+        Conflict::KeepBoth,
+        &mut |done, _| {
+            first.get_or_insert(done);
+            true
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        first.unwrap() > CHUNK as u64,
+        "it started after the kept chunk"
+    );
+    assert_eq!(fs::read(remote.join("up.bin")).unwrap(), body);
+    assert_eq!(names(&remote), ["up.bin"]);
+}
+
 /// The file names in `dir`, sorted.
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)

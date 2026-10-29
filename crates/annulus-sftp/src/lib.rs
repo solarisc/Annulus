@@ -4,13 +4,15 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as ProtocolError;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use annulus_ssh::{Connection, SshError};
 
 #[cfg(test)]
@@ -120,6 +122,22 @@ pub enum Outcome {
 /// An open SFTP session.
 pub struct Sftp {
     session: SftpSession,
+    /// Part files of transfers running now, so two never write the same one.
+    in_flight: Mutex<HashSet<String>>,
+}
+
+/// Marks a part file busy until dropped.
+struct Busy<'a> {
+    set: &'a Mutex<HashSet<String>>,
+    path: String,
+}
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.path);
+        }
+    }
 }
 
 impl Sftp {
@@ -141,6 +159,7 @@ impl Sftp {
     {
         Ok(Sftp {
             session: SftpSession::new(stream).await?,
+            in_flight: Mutex::new(HashSet::new()),
         })
     }
 
@@ -223,17 +242,29 @@ impl Sftp {
         }
     }
 
+    /// Marks `path` busy; `None` if another transfer is writing it.
+    fn claim(&self, path: &str) -> Option<Busy<'_>> {
+        let mut set = self.in_flight.lock().ok()?;
+        set.insert(path.to_owned()).then(|| Busy {
+            set: &self.in_flight,
+            path: path.to_owned(),
+        })
+    }
+
     /// Downloads the remote file `remote` into the local folder `local_dir`, under the
     /// remote file's name. `progress(done, total)` is called after each chunk and stops
     /// the transfer by returning `false`.
     ///
     /// The bytes go to a hidden part file first, which takes the target's name only once
     /// complete: an existing file is replaced (with [`Conflict::Overwrite`]) only by a
-    /// whole copy, never lost to a cancelled or failed one.
+    /// whole copy, never lost to a cancelled or failed one. The part file's name holds the
+    /// remote file's size and modification time; when the connection fails it is kept, and
+    /// the next download of the same, unchanged file continues from it (F-SFTP-004).
     ///
     /// # Errors
     /// The remote name is unsafe as a local name, reading or writing failed, or the
-    /// transfer was cancelled. The part file is removed.
+    /// transfer was cancelled. The part file is removed, unless reading from the server
+    /// failed.
     pub async fn download(
         &self,
         remote: &str,
@@ -256,22 +287,19 @@ impl Sftp {
             move |source| SftpError::Local { path, source }
         };
         let mut source = self.session.open(remote).await?;
-        let total = source.metadata().await.map_or(0, |attrs| attrs.len());
-        let mut part = None;
-        for n in 0..KEEP_BOTH_TRIES {
-            let path = local_dir.join(part_name(name, n));
-            match tokio::fs::File::create_new(&path).await {
-                Ok(file) => {
-                    part = Some((path, file));
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(local_error(&path)(error)),
-            }
+        let attrs = source.metadata().await.ok();
+        let total = attrs.as_ref().map_or(0, FileAttributes::len);
+        let stamp = format!("{total}-{}", attrs.and_then(|a| a.mtime).unwrap_or(0));
+        let (part, mut sink, start, _busy) =
+            self.local_part(local_dir, name, &stamp, total).await?;
+        if start > 0 {
+            source
+                .seek(io::SeekFrom::Start(start))
+                .await
+                .map_err(|error| SftpError::Remote(error.to_string()))?;
         }
-        let (part, mut sink) = part.ok_or_else(|| SftpError::UnsafeName(name.to_owned()))?;
 
-        let copied = copy(&mut source, &mut sink, total, progress).await;
+        let copied = copy(&mut source, &mut sink, start, total, progress).await;
         let flushed = sink.flush().await;
         drop(sink);
         let _ = source.close().await;
@@ -295,19 +323,63 @@ impl Sftp {
                 }
             }
             (Err(Copy::Cancelled), _) => SftpError::Cancelled,
-            (Err(Copy::Read(error)), _) => SftpError::Remote(error.to_string()),
+            // The server went away: keep what arrived, for the next try to continue.
+            (Err(Copy::Read(error)), _) => return Err(SftpError::Remote(error.to_string())),
             (Err(Copy::Write(error)), _) | (_, Err(error)) => local_error(&part)(error),
         };
         let _ = tokio::fs::remove_file(&part).await;
         Err(failure)
     }
 
+    /// The local part file for a download of `name` (`stamp` is the remote size and
+    /// time): a kept one to continue, else a new one. Returns it open for appending, where
+    /// to start, and the claim that keeps other transfers off it.
+    async fn local_part(
+        &self,
+        dir: &Path,
+        name: &str,
+        stamp: &str,
+        total: u64,
+    ) -> Result<(PathBuf, tokio::fs::File, u64, Busy<'_>), SftpError> {
+        let kept = dir.join(part_name(name, stamp, 0));
+        if let Ok(meta) = tokio::fs::metadata(&kept).await
+            && meta.is_file()
+            && meta.len() <= total
+            && let Some(busy) = self.claim(&kept.display().to_string())
+        {
+            let file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&kept)
+                .await
+                .map_err(|source| SftpError::Local {
+                    path: kept.clone(),
+                    source,
+                })?;
+            return Ok((kept, file, meta.len(), busy));
+        }
+        for n in 0..KEEP_BOTH_TRIES {
+            let path = dir.join(part_name(name, stamp, n));
+            let Some(busy) = self.claim(&path.display().to_string()) else {
+                continue;
+            };
+            match tokio::fs::File::create_new(&path).await {
+                Ok(file) => return Ok((path, file, 0, busy)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(source) => return Err(SftpError::Local { path, source }),
+            }
+        }
+        Err(SftpError::UnsafeName(name.to_owned()))
+    }
+
     /// Uploads the local file `local` into the remote folder `remote_dir`, under its
     /// local name. `progress` works as in [`Sftp::download`], and so does the part file:
-    /// an existing remote file is removed only once the new copy is complete.
+    /// an existing remote file is removed only once the new copy is complete, and a part
+    /// file kept when the connection failed is continued by the next upload of the same,
+    /// unchanged file.
     ///
     /// # Errors
-    /// Reading or writing failed, or the transfer was cancelled. The part file is removed.
+    /// Reading or writing failed, or the transfer was cancelled. The part file is removed,
+    /// unless writing to the server failed.
     pub async fn upload(
         &self,
         local: &Path,
@@ -332,19 +404,23 @@ impl Sftp {
             return Ok(Outcome::Skipped);
         }
         let mut source = tokio::fs::File::open(local).await.map_err(local_error)?;
-        let total = source.metadata().await.map_err(local_error)?.len();
-        let mut part = None;
-        for n in 0..KEEP_BOTH_TRIES {
-            let path = join(remote_dir, &part_name(name, n));
-            if !self.session.try_exists(path.as_str()).await? {
-                part = Some(path);
-                break;
-            }
+        let meta = source.metadata().await.map_err(local_error)?;
+        let total = meta.len();
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs());
+        let (part, mut sink, start, _busy) = self
+            .remote_part(remote_dir, name, &format!("{total}-{modified}"), total)
+            .await?;
+        if start > 0 {
+            source
+                .seek(io::SeekFrom::Start(start))
+                .await
+                .map_err(local_error)?;
         }
-        let part = part.ok_or_else(|| SftpError::UnsafeName(name.to_owned()))?;
-        let flags = OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE;
-        let mut sink = self.session.open_with_flags(part.as_str(), flags).await?;
-        let copied = copy(&mut source, &mut sink, total, progress).await;
+        let copied = copy(&mut source, &mut sink, start, total, progress).await;
         let closed = sink.shutdown().await;
         let failure = match (copied, closed) {
             (Ok(bytes), Ok(())) => {
@@ -367,10 +443,54 @@ impl Sftp {
             }
             (Err(Copy::Cancelled), _) => SftpError::Cancelled,
             (Err(Copy::Read(error)), _) => local_error(error),
-            (Err(Copy::Write(error)), _) | (_, Err(error)) => SftpError::Remote(error.to_string()),
+            // The server went away: keep what arrived, for the next try to continue.
+            (Err(Copy::Write(error)), _) | (_, Err(error)) => {
+                return Err(SftpError::Remote(error.to_string()));
+            }
         };
         let _ = self.session.remove_file(part.as_str()).await;
         Err(failure)
+    }
+
+    /// The remote part file for an upload of `name` into `dir` (`stamp` is the local size
+    /// and time): a kept one to continue, else a new one. Returns it open for writing at
+    /// the end of what it holds, where to start, and the claim on it.
+    async fn remote_part(
+        &self,
+        dir: &str,
+        name: &str,
+        stamp: &str,
+        total: u64,
+    ) -> Result<(String, russh_sftp::client::fs::File, u64, Busy<'_>), SftpError> {
+        let kept = join(dir, &part_name(name, stamp, 0));
+        if let Ok(attrs) = self.session.metadata(kept.as_str()).await
+            && attrs.is_regular()
+            && attrs.len() <= total
+            && let Some(busy) = self.claim(&kept)
+        {
+            let mut file = self
+                .session
+                .open_with_flags(kept.as_str(), OpenFlags::WRITE)
+                .await?;
+            let start = attrs.len();
+            file.seek(io::SeekFrom::Start(start))
+                .await
+                .map_err(|error| SftpError::Remote(error.to_string()))?;
+            return Ok((kept, file, start, busy));
+        }
+        for n in 0..KEEP_BOTH_TRIES {
+            let path = join(dir, &part_name(name, stamp, n));
+            let Some(busy) = self.claim(&path) else {
+                continue;
+            };
+            if self.session.try_exists(path.as_str()).await? {
+                continue;
+            }
+            let flags = OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE;
+            let file = self.session.open_with_flags(path.as_str(), flags).await?;
+            return Ok((path, file, 0, busy));
+        }
+        Err(SftpError::UnsafeName(name.to_owned()))
     }
 
     /// Where an upload of `name` into `dir` lands under `conflict`; `None` to skip.
@@ -420,12 +540,14 @@ fn place(
     }
 }
 
-/// The hidden name a transfer of `name` writes to until it is complete.
-fn part_name(name: &str, n: u32) -> String {
+/// The hidden name a transfer of `name` writes to until it is complete. `stamp` is the
+/// source's size and modification time, so a kept part is continued only for the same,
+/// unchanged source.
+fn part_name(name: &str, stamp: &str, n: u32) -> String {
     if n == 0 {
-        format!(".{name}.annulus-part")
+        format!(".{name}.{stamp}.annulus-part")
     } else {
-        format!(".{name}.{n}.annulus-part")
+        format!(".{name}.{stamp}.{n}.annulus-part")
     }
 }
 
@@ -439,6 +561,7 @@ enum Copy {
 async fn copy<R, W>(
     source: &mut R,
     sink: &mut W,
+    start: u64,
     total: u64,
     progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
 ) -> Result<u64, Copy>
@@ -447,7 +570,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut buffer = vec![0; CHUNK];
-    let mut done = 0u64;
+    let mut done = start;
     loop {
         let read = source.read(&mut buffer).await.map_err(Copy::Read)?;
         if read == 0 {

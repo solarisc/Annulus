@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
-use annulus_sftp::{Conflict, Outcome, Sftp};
+use annulus_sftp::{Conflict, Outcome, Sftp, SftpError};
 use annulus_ssh::forward::{self, ForwardError, Rule};
 use annulus_ssh::{
     Connection, HostKeyQuestion, Output, Prompt, SshError, Target, connect, connect_via,
@@ -508,4 +508,73 @@ async fn an_exit_ends_the_session_but_a_killed_server_is_a_lost_connection() {
     let mut shell = connection.shell(80, 24).await.unwrap();
     shell.write(b"kill -9 $PPID\n").await.unwrap();
     assert_eq!(end_of(&mut shell).await, Output::Lost);
+}
+
+/// A fresh local folder for one test.
+fn empty_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("annulus-e2e-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test]
+#[ignore = "needs the test servers"]
+async fn a_download_cut_off_by_the_server_continues_where_it_stopped() {
+    let env = env();
+    let admin = with_key(&env, &env.vm1, "resume-admin").await;
+    run(
+        &admin,
+        "head -c 32000000 /dev/urandom > ~/annulus-resume.bin",
+    )
+    .await;
+
+    // The server's SFTP process is killed a quarter of the way in.
+    let cut = empty_dir("resume-cut");
+    let connection = with_key(&env, &env.vm1, "resume").await;
+    let sftp = Sftp::open(&connection).await.unwrap();
+    let remote = format!("{}/annulus-resume.bin", sftp.home().await.unwrap());
+    let target = format!("{}@{}", env.user, env.vm1);
+    let mut killed = false;
+    let mut cutter = |done: u64, _: u64| {
+        if !killed && done > 8_000_000 {
+            killed = true;
+            let status = std::process::Command::new("ssh")
+                .args(["-o", "BatchMode=yes", &target, "pkill -9 -x sftp-server"])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        true
+    };
+    let failed = sftp
+        .download(&remote, &cut, Conflict::KeepBoth, &mut cutter)
+        .await;
+    assert!(matches!(failed, Err(SftpError::Remote(_))), "{failed:?}");
+    drop(sftp);
+
+    // A new connection continues from the kept part.
+    let again = with_key(&env, &env.vm1, "resume").await;
+    let sftp = Sftp::open(&again).await.unwrap();
+    let mut first = None;
+    let mut watch = |done: u64, _: u64| {
+        first.get_or_insert(done);
+        true
+    };
+    sftp.download(&remote, &cut, Conflict::KeepBoth, &mut watch)
+        .await
+        .unwrap();
+    assert!(first.unwrap() > 8_000_000, "resumed, not restarted");
+
+    // Byte for byte the same as a download that was never cut.
+    let whole = empty_dir("resume-whole");
+    sftp.download(&remote, &whole, Conflict::KeepBoth, &mut |_, _| true)
+        .await
+        .unwrap();
+    let resumed = std::fs::read(cut.join("annulus-resume.bin")).unwrap();
+    assert_eq!(resumed.len(), 32_000_000);
+    // Compared without printing 32 MB on a mismatch.
+    let same = resumed == std::fs::read(whole.join("annulus-resume.bin")).unwrap();
+    assert!(same, "the resumed copy differs from a whole one");
+    run(&again, "rm -f ~/annulus-resume.bin").await;
 }

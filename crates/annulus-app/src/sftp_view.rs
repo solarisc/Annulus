@@ -1,6 +1,8 @@
 //! An SFTP tab (F-SFTP-002…005): browse a host's files, download, upload by dropping
 //! files on the window, make folders, rename and delete. The connection runs on its own
-//! thread; the tab sends it commands and draws what comes back.
+//! thread; the tab sends it commands and draws what comes back. After a failure the thread
+//! checks the session before the next command and reconnects if it is gone, so Retry on a
+//! failed transfer continues it (F-SFTP-004).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,36 +105,46 @@ impl Worker {
             .name("sftp session".into())
             .spawn(move || {
                 runtime.block_on(async move {
-                    let notify = send.clone();
-                    let notify: Arc<dyn Fn(SessionEvent) + std::marker::Send + Sync> =
-                        Arc::new(move |event| notify(Reply::Session(event)));
-                    let failed =
-                        |message: String| send(Reply::Session(SessionEvent::Failed(message)));
-                    let (via, last, files) = login;
-                    let connection = match annulus_session::connect_chain(
-                        &via,
-                        &last,
-                        &files,
-                        &prompt_answers,
-                        notify,
-                    )
-                    .await
-                    {
-                        Ok(connection) => connection,
-                        Err(message) => return failed(message),
+                    let open = Opener {
+                        login,
+                        answers: prompt_answers,
+                        send: send.clone(),
                     };
-                    let sftp = match Sftp::open(&connection).await {
-                        Ok(sftp) => Arc::new(sftp),
-                        Err(error) => return failed(format!("SFTP is not available: {error}")),
+                    let mut session = match open.open().await {
+                        Ok(session) => session,
+                        Err(message) => {
+                            return send(Reply::Session(SessionEvent::Failed(message)));
+                        }
                     };
-                    let home = sftp.home().await.unwrap_or_else(|_| "/".to_owned());
+                    let home = session.1.home().await.unwrap_or_else(|_| "/".to_owned());
                     send(Reply::Ready { home });
+                    let suspect = Arc::new(AtomicBool::new(false));
                     // Each command runs as its own task, so a long transfer does not hold up
                     // browsing. The loop ends when the tab closes.
                     while let Some(command) = incoming.recv().await {
-                        tokio::spawn(run(sftp.clone(), command, send.clone()));
+                        let alive = !session.0.is_closed()
+                            && (!suspect.swap(false, Ordering::Relaxed)
+                                || session.1.home().await.is_ok());
+                        if !alive {
+                            match open.open().await {
+                                Ok(fresh) => session = fresh,
+                                Err(message) => {
+                                    refuse(
+                                        command,
+                                        &format!("Reconnecting failed: {message}"),
+                                        &send,
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        tokio::spawn(run(
+                            session.1.clone(),
+                            command,
+                            send.clone(),
+                            suspect.clone(),
+                        ));
                     }
-                    drop(connection);
                 });
             })?;
         Ok(Self {
@@ -143,7 +155,62 @@ impl Worker {
     }
 }
 
-async fn run(sftp: Arc<Sftp>, command: Command, send: Send) {
+/// Logs in again whenever the session is gone.
+struct Opener {
+    login: Login,
+    answers: Answers,
+    send: Send,
+}
+
+impl Opener {
+    /// A connection and SFTP on it, or why not.
+    async fn open(&self) -> Result<(annulus_ssh::Connection, Arc<Sftp>), String> {
+        let notify = self.send.clone();
+        let notify: Arc<dyn Fn(SessionEvent) + std::marker::Send + Sync> =
+            Arc::new(move |event| notify(Reply::Session(event)));
+        let (via, last, files) = &self.login;
+        let connection =
+            annulus_session::connect_chain(via, last, files, &self.answers, notify).await?;
+        let sftp = Sftp::open(&connection)
+            .await
+            .map_err(|error| format!("SFTP is not available: {error}"))?;
+        Ok((connection, Arc::new(sftp)))
+    }
+}
+
+/// Answers `command` with `message` as its failure, without running it.
+fn refuse(command: Command, message: &str, send: &Send) {
+    send(match command {
+        Command::List(dir, request) => Reply::ListFailed {
+            dir,
+            request,
+            message: message.to_owned(),
+        },
+        Command::Download { id, .. } | Command::Upload { id, .. } => Reply::Finished {
+            id,
+            result: Err(message.to_owned()),
+        },
+        Command::CreateDir(_) | Command::Rename(..) | Command::Remove(_) => Reply::Changed {
+            error: Some(message.to_owned()),
+        },
+    });
+}
+
+/// Runs `command`; a failure marks the session `suspect`, so it is checked before the next.
+async fn run(sftp: Arc<Sftp>, command: Command, send: Send, suspect: Arc<AtomicBool>) {
+    let failed = move |reply: Reply| {
+        let bad = matches!(
+            &reply,
+            Reply::ListFailed { .. }
+                | Reply::Finished { result: Err(_), .. }
+                | Reply::Changed { error: Some(_) }
+        );
+        if bad {
+            suspect.store(true, Ordering::Relaxed);
+        }
+        send(reply);
+    };
+    let send: Send = Arc::new(failed);
     let changed = |result: Result<(), annulus_sftp::SftpError>| Reply::Changed {
         error: result.err().map(|error| error.to_string()),
     };
@@ -214,6 +281,53 @@ struct Transfer {
     total: u64,
     state: TransferState,
     cancel: Arc<AtomicBool>,
+    /// How to start it again.
+    recipe: Recipe,
+}
+
+/// What a transfer copies, so Retry can send it again.
+#[derive(Clone)]
+enum Recipe {
+    Download {
+        remote: String,
+        to: PathBuf,
+        conflict: Conflict,
+    },
+    Upload {
+        local: PathBuf,
+        dir: String,
+        conflict: Conflict,
+    },
+}
+
+impl Recipe {
+    /// The command for transfer `id`.
+    fn command(&self, id: u64, cancel: Arc<AtomicBool>) -> Command {
+        match self.clone() {
+            Recipe::Download {
+                remote,
+                to,
+                conflict,
+            } => Command::Download {
+                id,
+                remote,
+                to,
+                conflict,
+                cancel,
+            },
+            Recipe::Upload {
+                local,
+                dir,
+                conflict,
+            } => Command::Upload {
+                id,
+                local,
+                dir,
+                conflict,
+                cancel,
+            },
+        }
+    }
 }
 
 enum TransferState {
@@ -402,39 +516,42 @@ impl SftpTab {
         }
     }
 
-    fn start_transfer(
-        &mut self,
-        label: String,
-        upload: bool,
-        command: impl FnOnce(u64, Arc<AtomicBool>) -> Command,
-    ) {
+    fn start_transfer(&mut self, label: String, recipe: Recipe) {
         self.next_id += 1;
         let cancel = Arc::new(AtomicBool::new(false));
+        let command = recipe.command(self.next_id, cancel.clone());
         self.transfers.push(Transfer {
             id: self.next_id,
             label,
-            upload,
+            upload: matches!(recipe, Recipe::Upload { .. }),
             done: 0,
             total: 0,
             state: TransferState::Running,
-            cancel: cancel.clone(),
+            cancel,
+            recipe,
         });
-        self.send(command(self.next_id, cancel));
+        self.send(command);
+    }
+
+    /// Sends failed transfer `id` again; it continues from what arrived before.
+    fn retry(&mut self, id: u64) {
+        let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        transfer.cancel = Arc::new(AtomicBool::new(false));
+        transfer.state = TransferState::Running;
+        let command = transfer.recipe.command(id, transfer.cancel.clone());
+        self.send(command);
     }
 
     fn download(&mut self, entry: &Entry) {
         let Some(cwd) = self.cwd.clone() else { return };
-        let remote = join(&cwd, &entry.name);
-        let (to, conflict) = (self.local.dir.clone(), self.conflict);
-        self.start_transfer(format!("\u{2193} {}", entry.name), false, |id, cancel| {
-            Command::Download {
-                id,
-                remote,
-                to,
-                conflict,
-                cancel,
-            }
-        });
+        let recipe = Recipe::Download {
+            remote: join(&cwd, &entry.name),
+            to: self.local.dir.clone(),
+            conflict: self.conflict,
+        };
+        self.start_transfer(format!("\u{2193} {}", entry.name), recipe);
     }
 
     fn upload(&mut self, local: PathBuf) {
@@ -449,16 +566,12 @@ impl SftpTab {
             ));
             return;
         }
-        let conflict = self.conflict;
-        self.start_transfer(format!("\u{2191} {name}"), true, |id, cancel| {
-            Command::Upload {
-                id,
-                local,
-                dir,
-                conflict,
-                cancel,
-            }
-        });
+        let recipe = Recipe::Upload {
+            local,
+            dir,
+            conflict: self.conflict,
+        };
+        self.start_transfer(format!("\u{2191} {name}"), recipe);
     }
 
     /// Draws the tab.
@@ -705,6 +818,7 @@ impl SftpTab {
                     .retain(|transfer| matches!(transfer.state, TransferState::Running));
             }
         });
+        let mut retry = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for transfer in self.transfers.iter().rev() {
                 ui.horizontal(|ui| {
@@ -736,11 +850,21 @@ impl SftpTab {
                         }
                         TransferState::Failed(message) => {
                             ui.colored_label(theme::color(palette.status_error), message);
+                            if ui
+                                .button("Retry")
+                                .on_hover_text("Continue from where it stopped")
+                                .clicked()
+                            {
+                                retry = Some(transfer.id);
+                            }
                         }
                     }
                 });
             }
         });
+        if let Some(id) = retry {
+            self.retry(id);
+        }
     }
 
     fn dialog_ui(&mut self, ctx: &egui::Context) {
@@ -888,6 +1012,113 @@ fn format_time(seconds: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Waits for the reply to transfer `id`, answering host-key questions; returns the
+    /// first progress it reported and how it ended.
+    fn finish(worker: &Worker, id: u64, on_progress: &mut dyn FnMut(u64)) -> (u64, Reply) {
+        let mut first = None;
+        loop {
+            let reply = worker
+                .replies
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("a reply within a minute");
+            match reply {
+                Reply::Session(SessionEvent::HostKey(_)) => worker.answers.host_key(true),
+                Reply::Progress { id: of, done, .. } if of == id => {
+                    first.get_or_insert(done);
+                    on_progress(done);
+                }
+                Reply::Finished { id: of, .. } if of == id => return (first.unwrap_or(0), reply),
+                _ => {}
+            }
+        }
+    }
+
+    /// End to end on test VM 1: the server cuts a download off; Retry through the same tab
+    /// reconnects SFTP and continues where it stopped.
+    #[test]
+    #[ignore = "needs the test servers"]
+    fn e2e_retry_after_the_server_cut_a_download_reconnects_and_resumes() {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+        let (vm1, user) = (var("ANNULUS_E2E_VM1"), var("ANNULUS_E2E_USER"));
+        let target = format!("{user}@{vm1}");
+        let remote_shell = |command: &str| {
+            let status = std::process::Command::new("ssh")
+                .args(["-o", "BatchMode=yes", &target, command])
+                .status()
+                .unwrap();
+            assert!(status.success(), "{command}");
+        };
+        remote_shell("head -c 150000000 /dev/urandom > ~/annulus-retry.bin");
+        let key = std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap();
+        let dir = std::env::temp_dir().join(format!("annulus-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hop = Hop {
+            target: Target {
+                host: vm1.clone(),
+                port: 22,
+                user: user.clone(),
+            },
+            password: None,
+            identity: Some(annulus_session::Password::new(&key)),
+            proxy: None,
+        };
+        let files = SshFiles {
+            known_hosts: dir.join("known_hosts"),
+            key_dir: None,
+        };
+        let worker = Worker::start((Vec::new(), hop, files), || {}).unwrap();
+        let home = loop {
+            match worker
+                .replies
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap()
+            {
+                Reply::Session(SessionEvent::HostKey(_)) => worker.answers.host_key(true),
+                Reply::Ready { home } => break home,
+                Reply::Session(SessionEvent::Failed(why)) => panic!("{why}"),
+                _ => {}
+            }
+        };
+        let recipe = Recipe::Download {
+            remote: join(&home, "annulus-retry.bin"),
+            to: dir.clone(),
+            conflict: Conflict::KeepBoth,
+        };
+        let send = |id| {
+            let command = recipe.command(id, Arc::new(AtomicBool::new(false)));
+            worker.commands.send(command).unwrap();
+        };
+
+        send(1);
+        let mut cut = false;
+        let (_, ended) = finish(&worker, 1, &mut |done| {
+            if !cut && done > 1_000_000 {
+                cut = true;
+                remote_shell("pkill -9 -x sftp-server");
+            }
+        });
+        assert!(
+            matches!(ended, Reply::Finished { result: Err(_), .. }),
+            "the cut fails it"
+        );
+
+        send(1);
+        let (first, ended) = finish(&worker, 1, &mut |_| {});
+        assert!(
+            matches!(ended, Reply::Finished { result: Ok(_), .. }),
+            "the retry works"
+        );
+        assert!(first > 1_000_000, "it continued instead of starting over");
+        assert_eq!(
+            std::fs::metadata(dir.join("annulus-retry.bin"))
+                .unwrap()
+                .len(),
+            150_000_000
+        );
+        remote_shell("rm -f ~/annulus-retry.bin");
+    }
 
     #[test]
     fn sizes_read_like_a_file_manager() {
