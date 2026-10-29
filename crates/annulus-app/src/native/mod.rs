@@ -627,6 +627,22 @@ impl NativeApp {
         if ui.had_input() || self.last_input == 0.0 {
             self.last_input = now;
         }
+        // Tabs not on screen keep their dots current and reconnect dropped sessions.
+        let active = self.active;
+        let waker = self.waker.clone();
+        let next_try = self
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .filter(|(index, _)| *index != active)
+            .filter_map(|(_, tab)| match &mut tab.terminal {
+                Some(TermView::Live(panes)) => panes.poll(now, waker.as_ref()),
+                _ => None,
+            })
+            .min_by(f64::total_cmp);
+        if let Some(wait) = next_try {
+            ui.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        }
         let Some(vault) = self.vault.as_mut() else {
             return;
         };

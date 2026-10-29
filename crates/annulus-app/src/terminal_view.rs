@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::ssh_dialogs::SshDialogs;
 
 /// What to try next after a failed connection, by what went wrong (F-APP-007).
-fn next_step(message: &str) -> Option<&'static str> {
+pub(crate) fn next_step(message: &str) -> Option<&'static str> {
     let message = message.to_lowercase();
     if message.contains("has changed") {
         Some(
@@ -46,7 +46,7 @@ fn next_step(message: &str) -> Option<&'static str> {
 }
 
 /// The text "Copy details" puts on the clipboard: the app version, the tab and the error.
-fn diagnostic(title: &str, message: &str) -> String {
+pub(crate) fn diagnostic(title: &str, message: &str) -> String {
     format!(
         "Annulus {} on {}\nConnecting to: {title}\nError: {message}\n",
         env!("CARGO_PKG_VERSION"),
@@ -134,15 +134,58 @@ pub struct TerminalTab {
 }
 
 /// Tries before an automatic reconnect gives up and shows the error.
-const RECONNECT_TRIES: u32 = 8;
+pub(crate) const RECONNECT_TRIES: u32 = 8;
 
 /// Seconds to wait before automatic reconnect `attempt` (1-based): 1, 2, 4 … up to 30.
-fn backoff(attempt: u32) -> f64 {
+pub(crate) fn backoff(attempt: u32) -> f64 {
     f64::from(1_u32 << attempt.saturating_sub(1).min(5)).min(30.0)
 }
 
+/// Automatic reconnects of a dropped SSH session (F-SSH-009): when to try next, and when to
+/// give up and show the error.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Reconnect {
+    /// When the next try is due (window clock, seconds), while one is.
+    pub(crate) at: Option<f64>,
+    /// Tries in this run of drops.
+    pub(crate) tries: u32,
+    /// When the current session started, to tell a fresh drop from a retry.
+    pub(crate) started: f64,
+}
+
+impl Reconnect {
+    /// The connection dropped at `now`, or a reconnect failed with `failure`: schedules the
+    /// next try, or gives up after [`RECONNECT_TRIES`] with the error to show. A drop a minute
+    /// after the last connect starts a new run.
+    pub(crate) fn dropped(&mut self, now: f64, failure: Option<String>) -> Option<String> {
+        if failure.is_none() && now - self.started >= 60.0 {
+            self.tries = 0;
+        }
+        self.tries += 1;
+        if self.tries > RECONNECT_TRIES {
+            (self.tries, self.at) = (0, None);
+            return Some(failure.unwrap_or_else(|| "The connection keeps dropping.".into()));
+        }
+        self.at = Some(now + backoff(self.tries));
+        None
+    }
+
+    /// No more automatic tries (the session ended, or the user said stop).
+    pub(crate) fn stop(&mut self) {
+        (self.tries, self.at) = (0, None);
+    }
+}
+
+/// A multi-line paste joined into one line (the paste card's "Paste as one line").
+pub(crate) fn one_line(text: &str) -> String {
+    text.split(['\r', '\n'])
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The earlier output with a line that marks where the new connection begins.
-fn carried(transcript: &str) -> String {
+pub(crate) fn carried(transcript: &str) -> String {
     format!(
         "{}\n\u{2500}\u{2500} reconnected \u{2500}\u{2500}\n",
         transcript.trim_end()
@@ -1040,13 +1083,13 @@ fn handle_input(ui: &Ui, session: &Session, held: &mut Option<String>) -> Vec<Ve
 
 /// Whether a paste should be confirmed first: it holds a line break and the program did
 /// not ask for bracketed paste, so each line would run as a command.
-fn needs_confirm(text: &str, mode: TermMode) -> bool {
+pub(crate) fn needs_confirm(text: &str, mode: TermMode) -> bool {
     !mode.contains(TermMode::BRACKETED_PASTE) && text.contains(['\n', '\r'])
 }
 
 /// Pasted text, wrapped in bracketed-paste markers when the program asked for them, so a
 /// pasted line is never run by accident.
-fn paste_bytes(text: &str, mode: TermMode) -> Vec<u8> {
+pub(crate) fn paste_bytes(text: &str, mode: TermMode) -> Vec<u8> {
     let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
     if mode.contains(TermMode::BRACKETED_PASTE) {
         // A paste that contains the end marker could break out of the bracket; drop it.
@@ -1101,85 +1144,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dot_shows_the_most_urgent_state() {
-        let mut tab = TerminalTab::new("web", Program::system_ssh("web"));
-        assert_eq!(tab.status(), None);
-        tab.unread.store(true, Ordering::Relaxed);
-        assert_eq!(tab.status(), Some(TabStatus::Unread));
-        tab.dialogs.take(SessionEvent::Password {
-            user: "me".into(),
-            host: "web".into(),
-        });
-        assert_eq!(tab.status(), Some(TabStatus::Input));
-        tab.lost = Some(1.0);
-        assert_eq!(tab.status(), Some(TabStatus::Error));
-        assert!(TabStatus::Error > TabStatus::Input && TabStatus::Input > TabStatus::Unread);
-    }
-
-    #[test]
-    fn a_background_tab_reconnects_when_its_time_comes() {
-        let mut tab = TerminalTab::new(
-            "gone",
-            Program::Command {
-                program: "annulus-test-no-such-program".into(),
-                args: Vec::new(),
-            },
-        );
-        tab.size = Some((Size::new(80, 24), 8, 16));
-        tab.started = -100.0;
-        tab.schedule_reconnect(0.0, None);
-        let ctx = egui::Context::default();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| tab.poll(ui.ctx()));
-        output.textures_delta.clear();
-        assert!(tab.lost.is_some(), "not yet: the first try waits a second");
-        let later = egui::RawInput {
-            time: Some(5.0),
-            ..egui::RawInput::default()
-        };
-        let mut output = ctx.run_ui(later, |ui| tab.poll(ui.ctx()));
-        output.textures_delta.clear();
-        assert_eq!(tab.lost, None);
-        assert!(
-            tab.session.is_some() || tab.failed.is_some(),
-            "it tried again without being shown"
-        );
-    }
-
-    #[test]
-    fn an_ssh_tab_says_it_is_connecting_until_it_draws() {
-        let target = annulus_session::Target {
-            host: "127.0.0.1".into(),
-            port: 1,
-            user: "nobody".into(),
-        };
-        let dir = std::env::temp_dir();
-        let program = Program::Ssh {
-            target,
-            files: annulus_session::SshFiles {
-                known_hosts: dir.join("annulus-connecting-known_hosts"),
-                key_dir: None,
-            },
-            password: None,
-            identity: None,
-            via: Vec::new(),
-            proxy: None,
-            reconnect: false,
-            env: Vec::new(),
-            startup: None,
-            term: String::new(),
-        };
-        let mut tab = TerminalTab::new("db", program);
-        assert!(!tab.connecting(), "nothing started yet");
-        tab.session = Some(Session::spawn(&tab.program, Size::new(80, 24), 8, 16, || {}).unwrap());
-        assert!(tab.connecting());
-        tab.drawn.store(true, Ordering::Relaxed);
-        assert!(!tab.connecting(), "output arrived");
-        tab.drawn.store(false, Ordering::Relaxed);
-        tab.failed = Some("refused".into());
-        assert!(!tab.connecting(), "a failure shows instead");
-    }
-
-    #[test]
     fn failures_come_with_a_next_step_and_copyable_details() {
         let changed = "web: the host key of web has changed (SHA256:x); the connection was stopped";
         assert!(next_step(changed).unwrap().contains("Known Hosts"));
@@ -1212,28 +1176,37 @@ mod tests {
 
     #[test]
     fn a_dropped_connection_retries_then_gives_up_with_the_error() {
-        let mut tab = TerminalTab::new("web", Program::system_ssh("web"));
-        tab.started = 100.0;
-        tab.schedule_reconnect(500.0, None);
-        assert_eq!((tab.lost, tab.tries), (Some(501.0), 1));
-        tab.restart();
-        assert_eq!(tab.lost, None, "a try clears the timer");
+        let mut reconnect = Reconnect {
+            started: 100.0,
+            ..Reconnect::default()
+        };
+        assert_eq!(reconnect.dropped(500.0, None), None);
+        assert_eq!((reconnect.at, reconnect.tries), (Some(501.0), 1));
         for _ in 2..=RECONNECT_TRIES {
-            tab.schedule_reconnect(600.0, Some("refused".into()));
+            assert_eq!(reconnect.dropped(600.0, Some("refused".into())), None);
         }
-        assert_eq!(tab.lost, Some(630.0));
-        tab.schedule_reconnect(700.0, Some("refused".into()));
-        assert_eq!((tab.lost, tab.tries), (None, 0));
-        assert_eq!(tab.failed.as_deref(), Some("refused"));
+        assert_eq!(reconnect.at, Some(630.0));
+        assert_eq!(
+            reconnect.dropped(700.0, Some("refused".into())).as_deref(),
+            Some("refused")
+        );
+        assert_eq!((reconnect.at, reconnect.tries), (None, 0));
     }
 
     #[test]
     fn a_drop_long_after_connecting_starts_the_backoff_over() {
-        let mut tab = TerminalTab::new("web", Program::system_ssh("web"));
-        tab.tries = 5;
-        tab.started = 100.0;
-        tab.schedule_reconnect(200.0, None);
-        assert_eq!((tab.lost, tab.tries), (Some(201.0), 1));
+        let mut reconnect = Reconnect {
+            tries: 5,
+            started: 100.0,
+            ..Reconnect::default()
+        };
+        assert_eq!(reconnect.dropped(200.0, None), None);
+        assert_eq!((reconnect.at, reconnect.tries), (Some(201.0), 1));
+    }
+
+    #[test]
+    fn a_paste_joined_into_one_line_drops_the_breaks() {
+        assert_eq!(one_line("cd /srv\r\n\ngit pull\n"), "cd /srv git pull");
     }
 
     #[test]

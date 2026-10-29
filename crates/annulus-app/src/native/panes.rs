@@ -219,6 +219,15 @@ impl Panes {
             .collect()
     }
 
+    /// Takes in every pane's news while the tab is not shown, and reconnects dropped ones
+    /// when their time comes; returns the seconds until the soonest next try.
+    pub fn poll(&mut self, now: f64, waker: Option<&Waker>) -> Option<f64> {
+        self.terminals
+            .iter_mut()
+            .filter_map(|(_, pane)| pane.poll(now, waker))
+            .min_by(f64::total_cmp)
+    }
+
     /// Types `bytes` into the focused pane (a snippet from the side panel).
     pub fn write_focused(&self, bytes: &[u8]) {
         if let Some(pane) = self.focused_pane() {

@@ -1,7 +1,9 @@
 //! A live terminal in the new UI: a local shell or an SSH session from
 //! `annulus-session`, drawn by our renderers. Keys go through the xterm encoder, pastes use
-//! bracketed paste when the program asks for it, and SSH questions (a new host key, a
-//! password) are answered inline over the terminal.
+//! bracketed paste when the program asks for it (and a paste of several lines is confirmed
+//! first when it does not), SSH questions (a new host key, a password) are answered inline
+//! over the terminal, and a dropped SSH session reconnects by itself with a growing pause,
+//! keeping its earlier output (F-SSH-009).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,12 +19,15 @@ use annulus_term::{Palette, Size};
 use annulus_ui::gfx::{Align, Font, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Typed, Ui};
-use annulus_ui::widgets::{BODY, BODY_STRONG, FieldStyle, Kind, button_width};
-use zeroize::Zeroizing;
+use annulus_ui::widgets::{
+    BODY, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, button_width,
+};
 
 use super::ask::{self, Ask};
 use super::terminal;
-use crate::terminal_view::TabStatus;
+use crate::terminal_view::{
+    Reconnect, TabStatus, carried, diagnostic, needs_confirm, next_step, one_line, paste_bytes,
+};
 
 /// One live session and what the tab shows about it.
 pub struct LiveTerminal {
@@ -42,6 +47,16 @@ pub struct LiveTerminal {
     find: Option<FindBar>,
     /// What the keyboard sent this frame, for broadcast to other panes.
     pub sent: Vec<Vec<u8>>,
+    /// Automatic reconnects of a dropped SSH session.
+    reconnect: Reconnect,
+    /// Earlier output to show again once the next session starts.
+    carry: Option<String>,
+    /// Cell size in device pixels, for a reconnect while the tab is not drawn.
+    cell: Option<(u16, u16)>,
+    /// The current session has drawn something (cleared when it starts again).
+    drawn: Arc<AtomicBool>,
+    /// A paste of several lines waiting for a yes, since each line would run (F-TERM-006).
+    held_paste: Option<String>,
 }
 
 /// The find bar of a terminal (Ctrl+Shift+F).
@@ -70,7 +85,69 @@ impl LiveTerminal {
             wheel: 0.0,
             find: None,
             sent: Vec::new(),
+            reconnect: Reconnect::default(),
+            carry: None,
+            cell: None,
+            drawn: Arc::new(AtomicBool::new(false)),
+            held_paste: None,
         }
+    }
+
+    /// An SSH session that has not drawn anything yet: the tab says it is connecting.
+    fn connecting(&self) -> bool {
+        matches!(self.program, Program::Ssh { .. })
+            && self.session.is_some()
+            && self.failed.is_none()
+            && !self.exited
+            && !self.drawn.load(Ordering::Relaxed)
+    }
+
+    /// Takes in the session's news while the tab is not shown, so its dot stays current, and
+    /// reconnects a dropped session when its time comes, at the size it last had. Returns
+    /// the seconds until the next try, while one waits.
+    pub fn poll(&mut self, now: f64, waker: Option<&Waker>) -> Option<f64> {
+        self.drain(now);
+        let at = self.reconnect.at?;
+        if now < at {
+            return Some(at - now);
+        }
+        self.restart();
+        if let (Some(grid), Some(cell)) = (self.grid, self.cell) {
+            self.spawn(grid, cell, waker, now);
+        }
+        None
+    }
+
+    /// Starts the program again: an SSH reconnect keeps the earlier output above a line.
+    fn restart(&mut self) {
+        if matches!(self.program, Program::Ssh { .. })
+            && let Some(text) = self.transcript().filter(|text| !text.trim().is_empty())
+        {
+            self.carry = Some(carried(&text));
+        }
+        self.reconnect.at = None;
+        self.session = None;
+        self.failed = None;
+        self.exited = false;
+        self.ask = None;
+        self.held_paste = None;
+    }
+
+    /// The connection dropped at `now`, or a reconnect failed: tries again after a pause, or
+    /// gives up with the error.
+    fn dropped(&mut self, now: f64, failure: Option<String>) {
+        match self.reconnect.dropped(now, failure) {
+            Some(error) => self.failed = Some(error),
+            None => self.exited = true,
+        }
+    }
+
+    /// The name the failure details give the tab.
+    fn name(&self) -> String {
+        self.title.clone().unwrap_or_else(|| match &self.program {
+            Program::Ssh { target, .. } => format!("{}@{}", target.user, target.host),
+            _ => "Local terminal".to_owned(),
+        })
     }
 
     /// The program this terminal runs (a split pane runs it again).
@@ -190,6 +267,8 @@ impl LiveTerminal {
                 Typed::Key(Key::Backspace, modifiers) if modifiers == Modifiers::CTRL_SHIFT => {
                     session.clear_scrollback();
                 }
+                // Each line would run as it arrives: ask first.
+                Typed::Paste(text) if needs_confirm(&text, mode) => self.held_paste = Some(text),
                 typed => {
                     if let Some(bytes) = encode(&typed, mode) {
                         session.scroll_to_bottom();
@@ -298,7 +377,7 @@ impl LiveTerminal {
     /// The tab's status dot.
     #[must_use]
     pub fn status(&self) -> Option<TabStatus> {
-        if self.failed.is_some() {
+        if self.failed.is_some() || self.reconnect.at.is_some() {
             Some(TabStatus::Error)
         } else if self.ask.is_some() {
             Some(TabStatus::Input)
@@ -319,11 +398,26 @@ impl LiveTerminal {
         let (cell_w, cell_h) = terminal::cell_size(ui, font);
         let scale = ui.gfx.scale();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Small pixels.
-        let (cell_w, cell_h) = ((cell_w * scale) as u16, (cell_h * scale) as u16);
+        let cell = ((cell_w * scale) as u16, (cell_h * scale) as u16);
+        self.spawn((columns, rows), cell, waker, ui.time());
+    }
+
+    /// Starts the session in a grid of `columns` x `rows` cells `cell` device pixels large,
+    /// showing any output carried over from before a reconnect.
+    fn spawn(
+        &mut self,
+        (columns, rows): (usize, usize),
+        cell: (u16, u16),
+        waker: Option<&Waker>,
+        now: f64,
+    ) {
         let unread = self.unread.clone();
+        self.drawn = Arc::new(AtomicBool::new(false));
+        let drawn = self.drawn.clone();
         let waker = waker.cloned();
         let wake = move || {
             unread.store(true, Ordering::Relaxed);
+            drawn.store(true, Ordering::Relaxed);
             if let Some(waker) = &waker {
                 waker();
             }
@@ -331,31 +425,49 @@ impl LiveTerminal {
         match Session::spawn(
             &self.program,
             Size::new(columns, rows),
-            cell_w,
-            cell_h,
+            cell.0,
+            cell.1,
             wake,
         ) {
-            Ok(session) => self.session = Some(session),
+            Ok(session) => {
+                if let Some(text) = self.carry.take() {
+                    session.show(&text);
+                }
+                self.session = Some(session);
+                self.reconnect.started = now;
+            }
             Err(error) => self.failed = Some(format!("Could not start: {error}")),
         }
         self.grid = Some((columns, rows));
+        self.cell = Some(cell);
     }
 
-    fn drain(&mut self) {
+    fn drain(&mut self, now: f64) {
         let Some(session) = &self.session else { return };
-        for event in session.take_events() {
+        let events = session.take_events();
+        let reconnects = matches!(
+            self.program,
+            Program::Ssh {
+                reconnect: true,
+                ..
+            }
+        );
+        for event in events {
             match event {
                 SessionEvent::Title(title) => self.title = Some(title),
                 SessionEvent::Bell => {}
-                SessionEvent::Exited => self.exited = true,
+                SessionEvent::Exited => {
+                    self.exited = true;
+                    self.reconnect.stop();
+                }
+                SessionEvent::Lost if reconnects => self.dropped(now, None),
                 SessionEvent::Lost => self.failed = Some("The connection dropped.".into()),
-                SessionEvent::HostKey(question) => self.ask = Some(Ask::HostKey(question)),
-                SessionEvent::Password { user, host } => {
-                    self.ask = Some(Ask::Password {
-                        user,
-                        host,
-                        secret: Zeroizing::new(String::new()),
-                    });
+                SessionEvent::HostKey(_) | SessionEvent::Password { .. } => {
+                    self.ask = Ask::from_event(event);
+                }
+                // A reconnect that fails waits and tries again.
+                SessionEvent::Failed(message) if self.reconnect.tries > 0 => {
+                    self.dropped(now, Some(message));
                 }
                 SessionEvent::Failed(message) => self.failed = Some(message),
             }
@@ -392,7 +504,9 @@ impl LiveTerminal {
         if let Some(session) = &mut self.session {
             session.set_palette(palette);
         }
-        self.drain();
+        if let Some(wait) = self.poll(ui.time(), waker) {
+            ui.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        }
         // The find bar takes the bottom of the tab while open.
         let mut inner = inner;
         let bar = self.find.is_some().then(|| inner.take_bottom(44.0));
@@ -413,7 +527,15 @@ impl LiveTerminal {
             self.mouse(ui, &session, &response, id, cell_at);
             self.session = Some(session);
         }
-        if response.focused && self.ask.is_none() {
+        if response.focused && self.exited && self.failed.is_none() {
+            // Enter starts an ended session again; Escape stops a waiting reconnect.
+            if ui.key(Key::Enter, Modifiers::NONE) {
+                self.restart();
+            } else if ui.key(Key::Escape, Modifiers::NONE) {
+                self.reconnect.stop();
+            }
+        }
+        if response.focused && self.ask.is_none() && self.held_paste.is_none() {
             self.unread.store(false, Ordering::Relaxed);
             self.keyboard(ui);
         }
@@ -439,11 +561,111 @@ impl LiveTerminal {
                 ui.pop_clip();
             }
         }
+        if self.connecting() {
+            let t = ui.theme;
+            let line = Rect::new(inner.x, inner.y, inner.w, 20.0);
+            ui.gfx.text(
+                line,
+                &format!("Connecting to {}\u{2026}", self.name()),
+                BODY,
+                t.text2,
+                Align::Start,
+            );
+        }
         if let Some(bar) = bar {
             self.find_bar(ui, bar);
         }
         self.ask_card(ui, rect);
+        self.paste_card(ui, rect, id);
         self.ended_banner(ui, rect);
+    }
+
+    /// Asks before pasting several lines into a program that did not ask for bracketed
+    /// paste: each line would run as soon as it arrives.
+    fn paste_card(&mut self, ui: &mut Ui<'_>, rect: Rect, terminal: Id) {
+        let Some(text) = &self.held_paste else { return };
+        let t = ui.theme;
+        let lines = text.lines().count().max(1);
+        ui.gfx.fill_rect(rect, 0.0, t.scrim);
+        ui.zone(Id::new("live.paste.backdrop"), rect, Role::Backdrop, "");
+        let card = rect.centered(rect.w.min(480.0), 186.0);
+        ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
+        ui.gfx.fill_rect(card, 14.0, t.raised);
+        ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
+        let mut column = card.inset(space::XL, space::XL);
+        ui.strict_text(
+            column.take_top(24.0),
+            "Paste several lines?",
+            HEADING,
+            t.text,
+            Align::Start,
+        );
+        column.take_top(space::XS);
+        ui.gfx.text(
+            column.take_top(20.0),
+            &format!(
+                "The text has {lines} lines. Each one runs as a command as soon as it is pasted."
+            ),
+            SMALL,
+            t.text2,
+            Align::Start,
+        );
+        column.take_top(space::L);
+        let mut row = column.take_top(CONTROL);
+        let paste = row.take_right(button_width(ui.gfx, "Paste", None).max(80.0));
+        row.take_right(space::S);
+        let one = row.take_right(button_width(ui.gfx, "Paste as one line", None));
+        row.take_right(space::S);
+        let cancel = row.take_right(button_width(ui.gfx, "Cancel", None));
+        let mut choice = None;
+        // Drawn left to right, so Tab follows the eye.
+        if ui
+            .button(
+                Id::new("live.paste.cancel"),
+                cancel,
+                "Cancel",
+                None,
+                Kind::Ghost,
+            )
+            .clicked
+            || ui.key(Key::Escape, Modifiers::NONE)
+        {
+            choice = Some(None);
+        }
+        if ui
+            .button(
+                Id::new("live.paste.one"),
+                one,
+                "Paste as one line",
+                None,
+                Kind::Secondary,
+            )
+            .clicked
+        {
+            choice = Some(Some(one_line(text)));
+        }
+        if ui
+            .button(
+                Id::new("live.paste.go"),
+                paste,
+                "Paste",
+                None,
+                Kind::Primary,
+            )
+            .clicked
+        {
+            choice = Some(Some(text.clone()));
+        }
+        let Some(choice) = choice else { return };
+        self.held_paste = None;
+        // The keyboard goes back to the terminal.
+        ui.state.set_focus(Some(terminal), false);
+        if let (Some(text), Some(session)) = (choice, &self.session) {
+            let bytes = paste_bytes(&text, session.mode());
+            session.scroll_to_bottom();
+            self.sent.push(bytes.clone());
+            session.write(bytes);
+        }
     }
 
     fn ask_card(&mut self, ui: &mut Ui<'_>, rect: Rect) {
@@ -455,21 +677,32 @@ impl LiveTerminal {
         }
     }
 
+    /// The bar over a session that ended, dropped or failed: why, what to try, and a way to
+    /// start again.
+    #[allow(clippy::too_many_lines)] // Three states of one bar, laid out once.
     fn ended_banner(&mut self, ui: &mut Ui<'_>, rect: Rect) {
         if self.failed.is_none() && !self.exited {
             return;
         }
         let t = ui.theme;
+        let now = ui.time();
         let error = self.failed.is_some();
-        let message = self
-            .failed
-            .clone()
-            .unwrap_or_else(|| "The session ended.".into());
+        let waiting = self.reconnect.at;
+        let message = match (&self.failed, waiting) {
+            (Some(failed), _) => failed.clone(),
+            (None, Some(at)) => format!(
+                "Connection lost \u{2014} reconnecting in {:.0} s",
+                (at - now).max(0.0).ceil()
+            ),
+            (None, None) => "The session ended. Press Enter to start it again.".into(),
+        };
+        let step = self.failed.as_deref().and_then(next_step);
+        let height = if step.is_some() { 64.0 } else { 44.0 };
         let bar = Rect::new(
             rect.x + space::L,
-            rect.b() - 56.0,
+            rect.b() - height - 12.0,
             rect.w - 2.0 * space::L,
-            44.0,
+            height,
         );
         ui.gfx.shadow(bar, 10.0, 14.0, 4.0, t.shadow);
         ui.gfx.fill_rect(bar, 10.0, t.raised);
@@ -483,30 +716,73 @@ impl LiveTerminal {
             if error { t.error } else { t.text2 },
         );
         inner.take_left(space::S);
-        let again = inner.take_right(button_width(ui.gfx, "Reconnect", Some(icons::SYNC)));
+        let ssh = matches!(self.program, Program::Ssh { .. });
+        let again_label = match (waiting, ssh) {
+            (Some(_), _) => "Reconnect now",
+            (None, true) => "Reconnect",
+            (None, false) => "Start again",
+        };
+        let again = inner.take_right(button_width(ui.gfx, again_label, Some(icons::SYNC)));
         let again = again.centered(again.w, 30.0);
         inner.take_right(space::S);
-        ui.gfx.text(
-            inner,
-            &message,
-            if error { BODY_STRONG } else { BODY },
-            t.text,
-            Align::Start,
-        );
+        let second = if waiting.is_some() {
+            Some("Stop")
+        } else if error {
+            Some("Copy details")
+        } else {
+            None
+        };
+        let second_rect = second.map(|label| {
+            let slot = inner.take_right(button_width(ui.gfx, label, None));
+            inner.take_right(space::S);
+            slot.centered(slot.w, 30.0)
+        });
+        match step {
+            Some(step) => {
+                let top = Rect::new(inner.x, inner.center().y - 19.0, inner.w, 20.0);
+                let bottom = Rect::new(inner.x, inner.center().y + 1.0, inner.w, 18.0);
+                ui.gfx
+                    .text(top, &message, BODY_STRONG, t.text, Align::Start);
+                ui.gfx.text(bottom, step, SMALL, t.text2, Align::Start);
+            }
+            None => {
+                ui.gfx.text(
+                    inner,
+                    &message,
+                    if error { BODY_STRONG } else { BODY },
+                    t.text,
+                    Align::Start,
+                );
+            }
+        }
+        if waiting.is_some() {
+            ui.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        // Drawn left to right, so Tab follows the eye.
+        if let (Some(label), Some(slot)) = (second, second_rect)
+            && ui
+                .button(Id::new("live.second"), slot, label, None, Kind::Ghost)
+                .clicked
+        {
+            if waiting.is_some() {
+                self.reconnect.stop();
+            } else if let Some(failed) = &self.failed {
+                // For a bug report: the version, the tab and the error; no secrets.
+                ui.copy(diagnostic(&self.name(), failed));
+            }
+        }
         if ui
             .button(
                 Id::new("live.again"),
                 again,
-                "Reconnect",
+                again_label,
                 Some(icons::SYNC),
                 Kind::Secondary,
             )
             .clicked
         {
-            self.session = None;
-            self.failed = None;
-            self.exited = false;
-            self.ask = None;
+            self.reconnect.stop();
+            self.restart();
         }
     }
 }
@@ -515,14 +791,8 @@ impl LiveTerminal {
 fn encode(typed: &Typed, mode: TermMode) -> Option<Vec<u8>> {
     match typed {
         Typed::Text(text) => Some(text.as_bytes().to_vec()),
-        Typed::Paste(text) => {
-            let text = text.replace("\r\n", "\r").replace('\n', "\r");
-            Some(if mode.contains(TermMode::BRACKETED_PASTE) {
-                format!("\x1b[200~{text}\x1b[201~").into_bytes()
-            } else {
-                text.into_bytes()
-            })
-        }
+        // Wrapped when the program asked for it, and never able to end the bracket early.
+        Typed::Paste(text) => Some(paste_bytes(text, mode)),
         Typed::Key(key, modifiers) => {
             let held = Mods {
                 shift: modifiers.shift,
@@ -640,6 +910,180 @@ mod tests {
         );
     }
 
+    fn shell() -> Program {
+        if cfg!(windows) {
+            Program::Command {
+                program: "cmd.exe".into(),
+                args: vec!["/q".into(), "/k".into()],
+            }
+        } else {
+            Program::Command {
+                program: "sh".into(),
+                args: Vec::new(),
+            }
+        }
+    }
+
+    /// Draws `live` once with `events` at `time`; returns the frame's zones.
+    #[allow(clippy::unwrap_used)]
+    fn frame(
+        live: &mut LiveTerminal,
+        state: &mut UiState,
+        events: &[Event],
+        time: f64,
+    ) -> Vec<annulus_ui::kit::Zone> {
+        let mut canvas = CpuCanvas::new(800, 400, 1.0, TextEngine::new()).unwrap();
+        state.begin_frame(events, time);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            state,
+            Rect::new(0.0, 0.0, 800.0, 400.0),
+        );
+        let palette = Palette::annulus_dark();
+        live.draw(
+            &mut ui,
+            Rect::new(0.0, 0.0, 800.0, 400.0),
+            (Font::mono(13.0), &palette),
+            None,
+            Id::new("live-test"),
+        );
+        state.end_frame().zones
+    }
+
+    fn click(zones: &[annulus_ui::kit::Zone], name: &str) -> Vec<Event> {
+        let zone = zones
+            .iter()
+            .rev()
+            .find(|zone| zone.label == name)
+            .unwrap_or_else(|| panic!("no zone {name:?}"));
+        vec![
+            Event::PointerMoved(zone.rect.center()),
+            Event::PointerDown(annulus_ui::kit::Button::Primary),
+            Event::PointerUp(annulus_ui::kit::Button::Primary),
+        ]
+    }
+
+    #[test]
+    fn the_dot_shows_the_most_urgent_state() {
+        let mut live = LiveTerminal::new(Program::system_ssh("web"));
+        assert_eq!(live.status(), None);
+        live.unread.store(true, Ordering::Relaxed);
+        assert_eq!(live.status(), Some(TabStatus::Unread));
+        live.ask = Ask::from_event(SessionEvent::Password {
+            user: "me".into(),
+            host: "web".into(),
+        });
+        assert_eq!(live.status(), Some(TabStatus::Input));
+        live.reconnect.at = Some(1.0);
+        assert_eq!(live.status(), Some(TabStatus::Error));
+        assert!(TabStatus::Error > TabStatus::Input && TabStatus::Input > TabStatus::Unread);
+    }
+
+    #[test]
+    fn a_background_tab_reconnects_when_its_time_comes() {
+        let mut live = LiveTerminal::new(Program::Command {
+            program: "annulus-test-no-such-program".into(),
+            args: Vec::new(),
+        });
+        // It ran before, at this size.
+        (live.grid, live.cell) = (Some((80, 24)), Some((8, 16)));
+        live.reconnect.started = -100.0;
+        live.dropped(0.0, None);
+        assert_eq!(
+            live.poll(0.5, None),
+            Some(0.5),
+            "the first try waits a second"
+        );
+        assert_eq!(live.poll(5.0, None), None);
+        assert_eq!(live.reconnect.at, None);
+        assert!(
+            live.session.is_some() || live.failed.is_some(),
+            "it tried again without being drawn"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn an_ssh_tab_says_it_is_connecting_until_it_draws() {
+        let program = Program::Ssh {
+            target: annulus_session::Target {
+                host: "127.0.0.1".into(),
+                port: 1,
+                user: "nobody".into(),
+            },
+            files: annulus_session::SshFiles {
+                known_hosts: std::env::temp_dir().join("annulus-native-connecting-known_hosts"),
+                key_dir: None,
+            },
+            password: None,
+            identity: None,
+            via: Vec::new(),
+            proxy: None,
+            reconnect: false,
+            env: Vec::new(),
+            startup: None,
+            term: String::new(),
+        };
+        let mut live = LiveTerminal::new(program);
+        assert!(!live.connecting(), "nothing started yet");
+        live.spawn((80, 24), (8, 16), None, 0.0);
+        assert!(live.session.is_some());
+        assert!(live.connecting());
+        assert_eq!(live.name(), "nobody@127.0.0.1");
+        live.drawn.store(true, Ordering::Relaxed);
+        assert!(!live.connecting(), "output arrived");
+        live.drawn.store(false, Ordering::Relaxed);
+        live.failed = Some("refused".into());
+        assert!(!live.connecting(), "a failure shows instead");
+    }
+
+    #[test]
+    fn a_reconnect_keeps_the_earlier_output_above_a_line() {
+        let mut live = LiveTerminal::new(Program::system_ssh("web"));
+        live.restart();
+        assert_eq!(live.carry, None, "nothing was shown yet");
+        live.reconnect.at = Some(3.0);
+        live.restart();
+        assert_eq!(live.reconnect.at, None, "a try clears the timer");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_paste_of_several_lines_waits_for_a_yes() {
+        let mut live = LiveTerminal::new(shell());
+        let mut state = UiState::default();
+        let started = std::time::Instant::now();
+        let clock = || started.elapsed().as_secs_f64();
+        frame(&mut live, &mut state, &[], clock());
+        let mode = live.session.as_ref().unwrap().mode();
+        if mode.contains(TermMode::BRACKETED_PASTE) {
+            // This shell brackets pastes: nothing would run, so nothing is asked.
+            return;
+        }
+        let paste = [Event::Paste("echo one\necho two".into())];
+        let mut zones = frame(&mut live, &mut state, &paste, clock());
+        zones = frame(&mut live, &mut state, &[], clock())
+            .into_iter()
+            .chain(zones)
+            .collect();
+        assert!(live.held_paste.is_some(), "the paste waits");
+        assert!(live.sent.is_empty(), "nothing reached the shell yet");
+        frame(&mut live, &mut state, &click(&zones, "Cancel"), clock());
+        assert_eq!(live.held_paste, None);
+        assert!(live.sent.is_empty(), "Cancel sends nothing");
+        frame(&mut live, &mut state, &paste, clock());
+        let zones = frame(&mut live, &mut state, &[], clock());
+        frame(
+            &mut live,
+            &mut state,
+            &click(&zones, "Paste as one line"),
+            clock(),
+        );
+        assert_eq!(live.held_paste, None);
+        assert_eq!(live.sent, [b"echo one echo two".to_vec()]);
+    }
+
     #[test]
     fn keys_text_and_pastes_become_the_bytes_a_program_expects() {
         let plain = TermMode::empty();
@@ -680,6 +1124,14 @@ mod tests {
         assert_eq!(
             encode(&Typed::Paste("a".into()), TermMode::BRACKETED_PASTE),
             Some(b"\x1b[200~a\x1b[201~".to_vec())
+        );
+        // A pasted end marker cannot close the bracket early and run what follows.
+        assert_eq!(
+            encode(
+                &Typed::Paste("x\x1b[201~; reboot".into()),
+                TermMode::BRACKETED_PASTE
+            ),
+            Some(b"\x1b[200~x; reboot\x1b[201~".to_vec())
         );
     }
 }
