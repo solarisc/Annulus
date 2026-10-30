@@ -1,8 +1,47 @@
 //! Every keyboard shortcut (UI-SPEC §7) in one table: the app checks for each one through it,
 //! and Settings → Shortcuts lists it, so what the list says is what the keys do. On Windows
 //! and Linux, Ctrl with a letter belongs to the shell, so app chords add Shift.
+//!
+//! Settings can give a shortcut other keys (F-SET-004). The table stays constant; the keys
+//! chosen sit beside it for the UI thread, read through [`Shortcut::current`].
 
+use std::cell::RefCell;
+
+use annulus_config::settings::KeyBinding;
 use annulus_ui::kit::{Key, Modifiers, Ui};
+
+/// The keys chosen in Settings as they were last taken, and what they mean.
+#[derive(Default)]
+struct Chosen {
+    bindings: Vec<KeyBinding>,
+    chords: Vec<(&'static str, (Key, Modifiers))>,
+}
+
+thread_local! {
+    static CHOSEN: RefCell<Chosen> = RefCell::new(Chosen::default());
+}
+
+/// Takes the keys chosen in Settings: each shortcut named answers to its new keys from now on,
+/// and no longer to its own. A name that is no shortcut here, or keys that do not read, are
+/// left out. Cheap when nothing changed, so the app calls it every frame.
+pub fn choose(bindings: &[KeyBinding]) {
+    CHOSEN.with(|chosen| {
+        let mut chosen = chosen.borrow_mut();
+        if chosen.bindings == bindings {
+            return;
+        }
+        chosen.bindings = bindings.to_vec();
+        chosen.chords = bindings
+            .iter()
+            .filter_map(|binding| {
+                let shortcut = ALL
+                    .iter()
+                    .find(|shortcut| shortcut.chord.is_some() && shortcut.id == binding.action)?;
+                Some((shortcut.id, parse_chord(&binding.keys)?))
+            })
+            .collect();
+    });
+}
 
 /// One shortcut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,26 +100,139 @@ impl Shortcut {
         }
     }
 
+    /// Its chord now: the keys chosen in Settings, or its own.
+    #[must_use]
+    pub fn current(&self) -> Option<(Key, Modifiers)> {
+        let own = self.chord?;
+        let chosen = CHOSEN.with(|chosen| {
+            chosen
+                .borrow()
+                .chords
+                .iter()
+                .find(|(id, _)| *id == self.id)
+                .map(|(_, chord)| *chord)
+        });
+        Some(chosen.unwrap_or(own))
+    }
+
+    /// Whether Settings gave it other keys than its own.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.current() != self.chord
+    }
+
     /// Whether its chord was pressed this frame (and takes it).
     pub fn pressed(&self, ui: &mut Ui<'_>) -> bool {
-        self.chord
+        self.current()
             .is_some_and(|(key, modifiers)| ui.key(key, modifiers))
     }
 
     /// Whether `key` with `modifiers` is its chord.
     #[must_use]
     pub fn is(&self, key: Key, modifiers: Modifiers) -> bool {
-        self.chord == Some((key, modifiers))
+        self.current() == Some((key, modifiers))
     }
 
     /// The keys as the list shows them: "Ctrl+Shift+T".
     #[must_use]
     pub fn keys(&self) -> String {
-        match self.chord {
+        match self.current() {
             Some((key, modifiers)) => chord_text(key, modifiers),
             None => self.shown.to_owned(),
         }
     }
+}
+
+/// Whether shortcut `id` may answer to `key` with `modifiers`; if not, why, in a few words.
+///
+/// # Errors
+/// The keys would take typing from the terminal, or another shortcut has them.
+pub fn check(id: &str, key: Key, modifiers: Modifiers) -> Result<(), String> {
+    let own = ALL
+        .iter()
+        .find(|shortcut| shortcut.id == id)
+        .and_then(|shortcut| shortcut.chord);
+    let held = modifiers.ctrl || modifiers.alt || modifiers.logo;
+    if !held && !matches!(key, Key::F(_)) {
+        return Err("Hold Ctrl or Alt too, so typing still reaches the terminal.".into());
+    }
+    let shell = modifiers == Modifiers::CTRL && matches!(key, Key::Char(c) if c.is_alphabetic());
+    if shell && own != Some((key, modifiers)) {
+        return Err("Ctrl with a letter belongs to the shell; add Shift.".into());
+    }
+    if let Some(user) = ALL
+        .iter()
+        .find(|shortcut| shortcut.id != id && takes(shortcut, key, modifiers))
+    {
+        return Err(format!("Already used by \u{201c}{}\u{201d}.", user.action));
+    }
+    Ok(())
+}
+
+/// Whether `shortcut` answers to `key` with `modifiers` now, the described ones included.
+fn takes(shortcut: &Shortcut, key: Key, modifiers: Modifiers) -> bool {
+    const ALT: Modifiers = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+    match shortcut.id {
+        "" if shortcut.action == GO_TO_TAB.action => {
+            modifiers == ALT && matches!(key, Key::Char('1'..='9'))
+        }
+        "" if shortcut.action == PANE_FOCUS.action => {
+            modifiers == ALT && matches!(key, Key::Left | Key::Right | Key::Up | Key::Down)
+        }
+        "" => parse_chord(shortcut.shown) == Some((key, modifiers)),
+        _ => shortcut.is(key, modifiers),
+    }
+}
+
+/// The keys [`chord_text`] wrote, read back; `None` for text that is no chord.
+#[must_use]
+pub fn parse_chord(text: &str) -> Option<(Key, Modifiers)> {
+    // The key itself can be "+", which leaves "++" at the end.
+    let (held, key) = match text.strip_suffix("++") {
+        Some(held) => (held, "+"),
+        None => text.rsplit_once('+').unwrap_or(("", text)),
+    };
+    let mut modifiers = Modifiers::NONE;
+    for name in held.split('+').filter(|name| !name.is_empty()) {
+        match name {
+            "Ctrl" => modifiers.ctrl = true,
+            "Alt" => modifiers.alt = true,
+            "Shift" => modifiers.shift = true,
+            "Win" => modifiers.logo = true,
+            _ => return None,
+        }
+    }
+    let named = [
+        Key::Tab,
+        Key::Enter,
+        Key::Escape,
+        Key::Space,
+        Key::Backspace,
+        Key::Delete,
+        Key::Left,
+        Key::Right,
+        Key::Up,
+        Key::Down,
+        Key::Home,
+        Key::End,
+        Key::PageUp,
+        Key::PageDown,
+    ];
+    let key = if let Some(found) = named.into_iter().find(|named| format!("{named:?}") == key) {
+        found
+    } else if let Some(n) = key.strip_prefix('F').and_then(|n| n.parse::<u8>().ok()) {
+        Key::F(n)
+    } else {
+        let mut chars = key.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Key::Char(c.to_lowercase().next().unwrap_or(c)),
+            _ => return None,
+        }
+    };
+    Some((key, modifiers))
 }
 
 /// `key` with `modifiers` written out: "Ctrl+Alt+Shift+B".
@@ -318,6 +470,76 @@ mod tests {
                 shortcut.keys()
             );
         }
+    }
+
+    #[test]
+    fn keys_chosen_in_settings_replace_a_shortcuts_own_until_they_are_dropped() {
+        let binding = |action: &str, keys: &str| KeyBinding {
+            action: action.into(),
+            keys: keys.into(),
+        };
+        choose(&[
+            binding("NEW_TAB", "Ctrl+Alt+N"),
+            binding("NO_SUCH_SHORTCUT", "Ctrl+Alt+X"),
+            binding("LOCAL", "not keys"),
+        ]);
+        assert!(NEW_TAB.is(Key::Char('n'), CTRL_ALT));
+        assert!(
+            !NEW_TAB.is(Key::Char('t'), CTRL_SHIFT),
+            "its own keys no longer"
+        );
+        assert_eq!(NEW_TAB.keys(), "Ctrl+Alt+N");
+        assert!(NEW_TAB.changed());
+        assert!(!LOCAL.changed(), "keys that do not read leave it alone");
+        // The keys it gave up are free; the ones it took are not.
+        assert_eq!(check("LOCAL", Key::Char('t'), CTRL_SHIFT), Ok(()));
+        assert!(
+            check("LOCAL", Key::Char('n'), CTRL_ALT)
+                .unwrap_err()
+                .contains("New tab")
+        );
+        choose(&[]);
+        assert!(NEW_TAB.is(Key::Char('t'), CTRL_SHIFT));
+        assert!(!NEW_TAB.changed());
+    }
+
+    #[test]
+    fn every_chord_reads_back_from_how_it_is_written() {
+        for shortcut in ALL {
+            if let Some((key, modifiers)) = shortcut.chord {
+                assert_eq!(
+                    parse_chord(&chord_text(key, modifiers)),
+                    Some((key, modifiers)),
+                    "{}",
+                    shortcut.action
+                );
+            }
+        }
+        assert_eq!(parse_chord("Ctrl++"), Some((Key::Char('+'), CTRL)));
+        assert_eq!(parse_chord("F5"), Some((Key::F(5), Modifiers::NONE)));
+        assert_eq!(parse_chord("Hyper+K"), None);
+        assert_eq!(parse_chord("Ctrl+Shift+Banana"), None);
+    }
+
+    #[test]
+    fn keys_that_would_take_typing_or_belong_to_another_are_refused() {
+        const ALT: Modifiers = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let refused = |key, modifiers| check("NEW_TAB", key, modifiers).unwrap_err();
+        assert!(refused(Key::Char('k'), CTRL_SHIFT).contains("Command palette"));
+        assert!(refused(Key::Char('n'), Modifiers::SHIFT).contains("typing"));
+        assert!(refused(Key::Char('r'), CTRL).contains("shell"));
+        assert!(refused(Key::Char('3'), ALT).contains("Go to tab"));
+        assert!(refused(Key::Left, ALT).contains("between panes"));
+        assert!(refused(Key::F(10), Modifiers::SHIFT).contains("menu"));
+        assert!(refused(Key::Char('v'), CTRL_SHIFT).contains("Paste"));
+        assert_eq!(check("NEW_TAB", Key::F(6), Modifiers::NONE), Ok(()));
+        assert_eq!(check("NEW_TAB", Key::Char('n'), CTRL_ALT), Ok(()));
+        // A shortcut's own keys clash with nothing, Ctrl+S for saving included.
+        assert_eq!(check("NEW_TAB", Key::Char('t'), CTRL_SHIFT), Ok(()));
+        assert_eq!(check("SAVE", Key::Char('s'), CTRL), Ok(()));
     }
 
     #[test]

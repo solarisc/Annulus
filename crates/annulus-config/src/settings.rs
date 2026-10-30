@@ -39,6 +39,17 @@ pub struct Settings {
     /// (F-APP-004). By vault id and time only: this file is not encrypted, so no name or
     /// address is ever written here.
     pub recent: Vec<Recent>,
+    /// Shortcuts given other keys in Settings (F-SET-004); the others keep their own.
+    pub keys: Vec<KeyBinding>,
+}
+
+/// A shortcut with keys of the user's choosing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyBinding {
+    /// Which shortcut, by its name in the app's table (`NEW_TAB`).
+    pub action: String,
+    /// The keys, as Settings shows them ("Ctrl+Shift+T").
+    pub keys: String,
 }
 
 /// One connection to a saved host, for the New Tab page.
@@ -75,6 +86,7 @@ impl Default for Settings {
             open_tabs: Vec::new(),
             reduce_motion: false,
             recent: Vec::new(),
+            keys: Vec::new(),
         }
     }
 }
@@ -141,6 +153,10 @@ mod tests {
             recent: vec![Recent {
                 host: 7,
                 at: 1_800_000_000,
+            }],
+            keys: vec![KeyBinding {
+                action: "NEW_TAB".into(),
+                keys: "Ctrl+Alt+N".into(),
             }],
         };
         settings.save(&path).unwrap();

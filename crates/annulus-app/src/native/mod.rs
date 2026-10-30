@@ -1066,6 +1066,12 @@ impl NativeApp {
             self.active = 0;
         }
         self.background(ui);
+        shortcuts::choose(&self.settings.keys);
+        // Keys being recorded in Settings reach no shortcut.
+        let in_settings = !locked
+            && self.section == Section::Settings
+            && self.tabs.get(self.active).map(|tab| tab.kind) == Some(TabKind::Vault);
+        self.settings_view.catch_keys(ui, in_settings);
         if !locked && shortcuts::PALETTE.pressed(ui) {
             self.palette = match self.palette.take() {
                 Some(_) => None,

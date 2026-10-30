@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use annulus_config::settings::OpenTab;
+use annulus_config::settings::{KeyBinding, OpenTab};
 use annulus_config::tokens::Appearance;
 use annulus_platform::cpu::{CpuCanvas, TextEngine};
 use annulus_session::{Password, Program};
@@ -847,6 +847,39 @@ const SCENES: &[Scene] = &[
             Act::Click("Shortcuts"),
             Act::Click("Search shortcuts"),
             Act::Type("tab"),
+        ],
+    },
+    Scene {
+        name: "settings-shortcuts-recording",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[
+            Act::Click("Shortcuts"),
+            Act::Click("Change the keys of New tab"),
+            Act::Press(Key::Char('k'), Modifiers::CTRL_SHIFT),
+        ],
+    },
+    Scene {
+        name: "settings-shortcuts-changed",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[
+            Act::Click("Shortcuts"),
+            Act::Click("Change the keys of New tab"),
+            Act::Press(
+                Key::Char('n'),
+                Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
         ],
     },
     Scene {
@@ -3428,6 +3461,89 @@ fn a_log_is_deleted_only_after_a_yes() {
             .iter()
             .all(|log| log.title != "prod-db")
     );
+}
+
+#[test]
+fn a_shortcut_takes_new_keys_in_settings_and_its_own_again_on_reset() {
+    let mut app = NativeApp::new(Some(fixture_vault("rebind", false)));
+    app.section = super::Section::Settings;
+    let mut state = UiState::default();
+    let press = |key, modifiers| vec![Event::Key(key, modifiers)];
+    let ctrl_alt = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::NONE
+    };
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let output = step(&mut app, &mut state, &click_on(&output, "Shortcuts"), 1.0);
+    // Escape stops recording and changes nothing.
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Change the keys of Local terminal"),
+        2.0,
+    );
+    let output = step(
+        &mut app,
+        &mut state,
+        &press(Key::Escape, Modifiers::NONE),
+        3.0,
+    );
+    assert!(
+        output
+            .zones
+            .iter()
+            .all(|zone| !zone.label.starts_with("Recording"))
+    );
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Change the keys of New tab"),
+        4.0,
+    );
+    // Keys another shortcut has are refused, and reach that one no more than any other.
+    step(
+        &mut app,
+        &mut state,
+        &press(Key::Char('k'), Modifiers::CTRL_SHIFT),
+        5.0,
+    );
+    assert!(app.palette.is_none(), "the palette's keys opened nothing");
+    assert_eq!(app.settings.keys, []);
+    let tabs = app.tabs.len();
+    let output = step(&mut app, &mut state, &press(Key::Char('n'), ctrl_alt), 6.0);
+    assert_eq!(app.tabs.len(), tabs, "recorded, not acted on");
+    assert_eq!(
+        app.settings.keys,
+        vec![KeyBinding {
+            action: "NEW_TAB".into(),
+            keys: "Ctrl+Alt+N".into(),
+        }]
+    );
+    let reset = "Reset New tab to Ctrl+Shift+T";
+    assert!(output.zones.iter().any(|zone| zone.label == reset));
+    // The old keys open nothing now; the new ones open a tab.
+    step(
+        &mut app,
+        &mut state,
+        &press(Key::Char('t'), Modifiers::CTRL_SHIFT),
+        7.0,
+    );
+    assert_eq!(app.tabs.len(), tabs);
+    step(&mut app, &mut state, &press(Key::Char('n'), ctrl_alt), 8.0);
+    assert_eq!(app.tabs.len(), tabs + 1);
+    // Back in Settings, Reset gives it its own keys again.
+    app.active = 0;
+    let output = step(&mut app, &mut state, &[], 9.0);
+    step(&mut app, &mut state, &click_on(&output, reset), 10.0);
+    assert_eq!(app.settings.keys, []);
+    step(
+        &mut app,
+        &mut state,
+        &press(Key::Char('t'), Modifiers::CTRL_SHIFT),
+        11.0,
+    );
+    assert_eq!(app.tabs.len(), tabs + 2);
 }
 
 #[test]

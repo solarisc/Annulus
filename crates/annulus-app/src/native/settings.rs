@@ -1,18 +1,20 @@
 //! Settings (UI-SPEC §6): the sections in their own navigation down the left, the chosen
 //! one beside it with a header and its cards. Account & sync comes first when there is a
-//! vault file; Shortcuts lists the app's shortcut table ([`super::shortcuts`]), searchable.
+//! vault file; Shortcuts lists the app's shortcut table ([`super::shortcuts`]), searchable,
+//! and a click on a shortcut's keys records others for it (F-SET-004).
 
-use annulus_config::settings::Settings;
+use annulus_config::settings::{KeyBinding, Settings};
 use annulus_config::tokens::{ThemeMode, space};
 use annulus_session::profiles::Profile;
 use annulus_term::alacritty_terminal::vte::ansi::Rgb;
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
-use annulus_ui::kit::{Cursor, Id, Role, Ui};
+use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Typed, Ui};
 use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, KEYCAP_H, SMALL, TITLE, keys_width,
+    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, KEYCAP_H, Kind, SMALL, TITLE, Tone,
+    keys_width,
 };
 
 use super::pages;
@@ -76,7 +78,7 @@ impl Page {
             Page::Security => "When the vault locks itself.",
             Page::Sessions => "What Annulus keeps of your sessions.",
             Page::Shells => "What a new local terminal runs.",
-            Page::Shortcuts => "Every shortcut, as the keyboard says it.",
+            Page::Shortcuts => "Every shortcut. Click one's keys to give it others.",
             Page::About => "The app, its licenses and where it comes from.",
         }
     }
@@ -104,6 +106,14 @@ pub struct SettingsView {
     search: String,
     /// How tall the page drew last frame, for its scroll.
     content_h: f32,
+    /// The shortcut whose new keys are being recorded, by its id.
+    recording: Option<&'static str>,
+    /// Why the keys pressed last were not taken.
+    refused: Option<String>,
+    /// Refusals so far, so each one shakes the field anew.
+    refusals: u32,
+    /// The keys pressed this frame while recording, before any shortcut saw them.
+    caught: Option<(Key, Modifiers)>,
 }
 
 const LOCK_MINUTES: [(u32, &str); 5] = [
@@ -120,8 +130,72 @@ const NAV_W: f32 = 212.0;
 const ROW: f32 = 60.0;
 /// The widest the section column gets.
 const COLUMN_W: f32 = 780.0;
+/// Height of one shortcut row.
+const KEY_ROW: f32 = 40.0;
+/// Width of the field that waits for new keys.
+const RECORD_W: f32 = 172.0;
 
 impl SettingsView {
+    /// While keys are being recorded, takes every key press of this frame before any shortcut
+    /// can act on it. Recording stops when Settings → Shortcuts is not `showing`.
+    pub fn catch_keys(&mut self, ui: &mut Ui<'_>, showing: bool) {
+        if self.recording.is_none() {
+            return;
+        }
+        if !showing || self.page != Page::Shortcuts {
+            self.stop_recording();
+            return;
+        }
+        for typed in ui.take_typed() {
+            if let Typed::Key(key, modifiers) = typed
+                && self.caught.is_none()
+            {
+                self.caught = Some((key, modifiers));
+            }
+        }
+    }
+
+    fn stop_recording(&mut self) {
+        self.recording = None;
+        self.refused = None;
+        self.caught = None;
+    }
+
+    /// Gives the shortcut being recorded the keys caught this frame, if they may be its;
+    /// Escape stops recording. Returns whether the settings changed.
+    fn take_recorded(&mut self, ui: &mut Ui<'_>, settings: &mut Settings) -> bool {
+        let (Some(id), Some((key, modifiers))) = (self.recording, self.caught.take()) else {
+            return false;
+        };
+        if (key, modifiers) == (Key::Escape, Modifiers::NONE) {
+            self.stop_recording();
+            return false;
+        }
+        if let Err(why) = shortcuts::check(id, key, modifiers) {
+            self.refused = Some(why);
+            self.refusals = self.refusals.wrapping_add(1);
+            return false;
+        }
+        let Some(shortcut) = shortcuts::ALL.iter().find(|shortcut| shortcut.id == id) else {
+            self.stop_recording();
+            return false;
+        };
+        settings.keys.retain(|binding| binding.action != id);
+        // Its own keys again need no entry.
+        if shortcut.chord != Some((key, modifiers)) {
+            settings.keys.push(KeyBinding {
+                action: id.to_owned(),
+                keys: shortcuts::chord_text(key, modifiers),
+            });
+        }
+        shortcuts::choose(&settings.keys);
+        ui.toast(
+            format!("{} is now {}", shortcut.action, shortcut.keys()),
+            Tone::Done,
+        );
+        self.stop_recording();
+        true
+    }
     /// Draws Settings into `rect`, with the account card (`account`, which returns the height
     /// it took) when there is a vault file; `account_h` is that height from the frame before.
     /// Returns whether a setting changed and the account card's height now.
@@ -171,7 +245,7 @@ impl SettingsView {
             Page::Security => changed = security(ui, &mut page, settings),
             Page::Sessions => changed = sessions(ui, &mut page, settings),
             Page::Shells => changed = shells(ui, &mut page, settings, profiles),
-            Page::Shortcuts => shortcuts_page(ui, &mut page, &mut self.search),
+            Page::Shortcuts => changed = self.shortcuts_page(ui, &mut page, settings),
             Page::About => about(ui, &mut page),
         }
         self.content_h = page.y - top + space::XL;
@@ -584,69 +658,250 @@ fn shells(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings, profiles: &
     false
 }
 
-/// Every shortcut, grouped, each with its keys as keycaps; the search keeps those whose name
-/// or keys hold every word typed.
-fn shortcuts_page(ui: &mut Ui<'_>, page: &mut Rect, search: &mut String) {
-    let t = ui.theme;
-    ui.text_field(
-        Id::new("settings.shortcuts.search"),
-        page.take_top(CONTROL),
-        search,
-        FieldStyle {
-            placeholder: "Search shortcuts",
-            icon: Some(icons::SEARCH),
-            ..FieldStyle::default()
-        },
-    );
-    page.take_top(space::L);
-    let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
-    let found: Vec<&shortcuts::Shortcut> = shortcuts::ALL
-        .iter()
-        .filter(|shortcut| {
-            let text = format!("{} {} {}", shortcut.action, shortcut.keys(), shortcut.group)
-                .to_lowercase();
-            words.iter().all(|word| text.contains(word))
-        })
-        .collect();
-    if found.is_empty() {
-        ui.gfx.text(
-            page.take_top(24.0),
-            "No shortcut matches.",
-            BODY,
-            t.text2,
-            Align::Start,
+impl SettingsView {
+    /// Every shortcut, grouped, each with its keys as keycaps; the search keeps those whose
+    /// name or keys hold every word typed. Returns whether the settings changed.
+    fn shortcuts_page(
+        &mut self,
+        ui: &mut Ui<'_>,
+        page: &mut Rect,
+        settings: &mut Settings,
+    ) -> bool {
+        const RESET_ALL: &str = "Reset all";
+        let t = ui.theme;
+        let mut changed = self.take_recorded(ui, settings);
+        let mut bar = page.take_top(CONTROL);
+        let reset = (!settings.keys.is_empty()).then(|| {
+            let width = ui.gfx.measure(RESET_ALL, BODY_MEDIUM).width + 2.0 * space::L;
+            let reset = bar.take_right(width);
+            bar.take_right(space::M);
+            reset
+        });
+        ui.text_field(
+            Id::new("settings.shortcuts.search"),
+            bar,
+            &mut self.search,
+            FieldStyle {
+                placeholder: "Search shortcuts",
+                icon: Some(icons::SEARCH),
+                ..FieldStyle::default()
+            },
         );
-        return;
-    }
-    let mut groups: Vec<&str> = Vec::new();
-    for shortcut in &found {
-        if !groups.contains(&shortcut.group) {
-            groups.push(shortcut.group);
+        let id = Id::new("settings.keys.reset_all");
+        if let Some(reset) = reset
+            && ui
+                .button(id, reset, RESET_ALL, None, Kind::Secondary)
+                .clicked
+        {
+            settings.keys.clear();
+            shortcuts::choose(&settings.keys);
+            self.stop_recording();
+            ui.toast("Every shortcut has its own keys again", Tone::Done);
+            changed = true;
         }
-    }
-    for group in groups {
-        let rows: Vec<&&shortcuts::Shortcut> = found
-            .iter()
-            .filter(|shortcut| shortcut.group == group)
+        page.take_top(space::L);
+        let words: Vec<String> = self
+            .search
+            .split_whitespace()
+            .map(str::to_lowercase)
             .collect();
-        #[allow(clippy::cast_precision_loss)] // A dozen rows.
-        let height = rows.len() as f32 * 40.0 + 2.0 * space::S;
-        let mut card = pages::card(ui, page, group, height);
-        for (index, shortcut) in rows.into_iter().enumerate() {
-            if index > 0 {
-                pages::divider(ui, card.y, card);
+        let found: Vec<&shortcuts::Shortcut> = shortcuts::ALL
+            .iter()
+            .filter(|shortcut| {
+                let text = format!("{} {} {}", shortcut.action, shortcut.keys(), shortcut.group)
+                    .to_lowercase();
+                words.iter().all(|word| text.contains(word))
+            })
+            .collect();
+        if found.is_empty() {
+            ui.gfx.text(
+                page.take_top(24.0),
+                "No shortcut matches.",
+                BODY,
+                t.text2,
+                Align::Start,
+            );
+            return changed;
+        }
+        let mut groups: Vec<&str> = Vec::new();
+        for shortcut in &found {
+            if !groups.contains(&shortcut.group) {
+                groups.push(shortcut.group);
             }
-            let line = card.take_top(40.0);
-            let keys = shortcut.keys();
-            let width = keys_width(&mut ui.gfx, &keys);
-            let mut label = line;
-            let caps = label.take_right(width);
-            label.take_right(space::M);
-            ui.gfx
-                .text(label, shortcut.action, BODY, t.text, Align::Start);
-            ui.keys(Point::new(caps.x, caps.center().y - KEYCAP_H / 2.0), &keys);
+        }
+        for group in groups {
+            let rows: Vec<&&shortcuts::Shortcut> = found
+                .iter()
+                .filter(|shortcut| shortcut.group == group)
+                .collect();
+            let heights: Vec<f32> = rows.iter().map(|shortcut| self.row_h(shortcut)).collect();
+            let height = heights.iter().sum::<f32>() + 2.0 * space::S;
+            let mut card = pages::card(ui, page, group, height);
+            for (index, (shortcut, height)) in rows.into_iter().zip(heights).enumerate() {
+                if index > 0 {
+                    pages::divider(ui, card.y, card);
+                }
+                let line = card.take_top(height);
+                changed |= self.key_row(ui, line, shortcut, settings);
+            }
+        }
+        changed
+    }
+
+    /// A shortcut row's height: taller while it says why keys were refused.
+    fn row_h(&self, shortcut: &shortcuts::Shortcut) -> f32 {
+        if self.recording == Some(shortcut.id) && self.refused.is_some() {
+            KEY_ROW + 18.0
+        } else {
+            KEY_ROW
         }
     }
+
+    /// One shortcut: what it does and its keys, which a click records anew; Reset beside
+    /// keys of the user's choosing. Returns whether the settings changed.
+    fn key_row(
+        &mut self,
+        ui: &mut Ui<'_>,
+        line: Rect,
+        shortcut: &shortcuts::Shortcut,
+        settings: &mut Settings,
+    ) -> bool {
+        let t = ui.theme;
+        let mut head = Rect::new(line.x, line.y, line.w, KEY_ROW);
+        let keys = shortcut.keys();
+        let caps_w = keys_width(&mut ui.gfx, &keys) + 12.0;
+        if shortcut.chord.is_none() {
+            // One a widget or the window handles: listed, not changed here.
+            let caps = head.take_right(caps_w);
+            head.take_right(space::M);
+            ui.gfx
+                .text(head, shortcut.action, BODY, t.text, Align::Start);
+            ui.keys(
+                Point::new(caps.x + 6.0, caps.center().y - KEYCAP_H / 2.0),
+                &keys,
+            );
+            return false;
+        }
+        let recording = self.recording == Some(shortcut.id);
+        let id = Id::new(("settings.keys", shortcut.id));
+        let width = if recording { RECORD_W } else { caps_w };
+        let target = head.take_right(width).centered(width, KEYCAP_H + 10.0);
+        head.take_right(space::M);
+        // What sits left of the keys comes first, so Tab runs left to right.
+        let mut changed = false;
+        if recording {
+            let hint = "Esc cancels";
+            let w = ui.gfx.measure(hint, SMALL).width;
+            ui.gfx
+                .text(head.take_right(w), hint, SMALL, t.text3, Align::End);
+            head.take_right(space::M);
+        } else if shortcut.changed() {
+            changed = reset_keys(ui, &mut head, id, shortcut, settings);
+        }
+        let name = if recording {
+            format!("Recording keys for {}", shortcut.action)
+        } else {
+            format!("Change the keys of {}", shortcut.action)
+        };
+        let response = ui.zone(id, target, Role::Button, &name);
+        if response.clicked {
+            if recording {
+                self.stop_recording();
+            } else {
+                self.stop_recording();
+                self.recording = Some(shortcut.id);
+            }
+        }
+        if response.hovered {
+            ui.set_cursor(Cursor::Pointer);
+        }
+        let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+        if recording {
+            // The field shakes its head at keys it cannot take.
+            let refused = self.refused.is_some();
+            let shake = ui.entrance(id.with(("shake", self.refusals)), Motion::SLOW);
+            let nudge = if refused {
+                5.0 * (1.0 - shake) * (shake * 18.0).sin()
+            } else {
+                0.0
+            };
+            let shown = ui.entrance(id.with("recording"), Motion::FAST);
+            let field = target.offset(nudge, 0.0);
+            let ink = if refused { t.error } else { t.accent };
+            ui.gfx.fill_rect(field, 8.0, ink.alpha(0.12 * shown));
+            ui.gfx
+                .stroke_rect(field, 8.0, 1.0, ink.alpha(0.35 + 0.45 * shown));
+            ui.strict_text(field, "Press the new keys", BODY_MEDIUM, ink, Align::Center);
+        } else {
+            ui.gfx.fill_rect(target, 8.0, t.hover.alpha(hover));
+            ui.gfx
+                .stroke_rect(target, 8.0, 1.0, t.line_strong.alpha(hover));
+            ui.keys(
+                Point::new(target.x + 6.0, target.center().y - KEYCAP_H / 2.0),
+                &keys,
+            );
+        }
+        if response.focus_ring {
+            ui.focus_ring(target, 8.0);
+        }
+        ui.gfx
+            .text(head, shortcut.action, BODY, t.text, Align::Start);
+        if recording && let Some(why) = &self.refused {
+            let shown = ui.entrance(id.with(("why", why.as_str())), Motion::FAST);
+            let below = Rect::new(line.x, line.y + KEY_ROW - 10.0, line.w, 18.0);
+            ui.gfx
+                .text(below, why, SMALL, t.error.alpha(shown), Align::Start);
+        }
+        changed
+    }
+}
+
+/// Reset, at the right of `head`, for a shortcut with keys of the user's choosing: a click
+/// gives it its own again. Returns whether it did.
+fn reset_keys(
+    ui: &mut Ui<'_>,
+    head: &mut Rect,
+    id: Id,
+    shortcut: &shortcuts::Shortcut,
+    settings: &mut Settings,
+) -> bool {
+    let t = ui.theme;
+    let own = shortcut
+        .chord
+        .map(|(key, modifiers)| shortcuts::chord_text(key, modifiers))
+        .unwrap_or_default();
+    let w = ui.gfx.measure("Reset", SMALL).width + 14.0;
+    let reset = head.take_right(w).centered(w, 24.0);
+    head.take_right(space::S);
+    let label = format!("Reset {} to {own}", shortcut.action);
+    let response = ui.zone(id.with("reset"), reset, Role::Button, &label);
+    let lit = ui.ease(
+        id.with("reset.hover"),
+        if response.hovered { 1.0 } else { 0.0 },
+    );
+    ui.gfx.fill_rect(reset, 6.0, t.hover.alpha(lit));
+    ui.strict_text(
+        reset,
+        "Reset",
+        SMALL,
+        t.text2.mix(t.text, lit),
+        Align::Center,
+    );
+    if response.focus_ring {
+        ui.focus_ring(reset, 6.0);
+    }
+    if response.hovered {
+        ui.set_cursor(Cursor::Pointer);
+    }
+    if !response.clicked {
+        return false;
+    }
+    settings
+        .keys
+        .retain(|binding| binding.action != shortcut.id);
+    shortcuts::choose(&settings.keys);
+    ui.toast(format!("{} is {own} again", shortcut.action), Tone::Done);
+    true
 }
 
 fn about(ui: &mut Ui<'_>, page: &mut Rect) {
