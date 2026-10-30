@@ -1057,6 +1057,8 @@ impl NativeApp {
     #[allow(clippy::too_many_lines)] // The window top to bottom: title bar, then the tab in front.
     pub fn frame(&mut self, ui: &mut Ui<'_>) -> Option<WindowAction> {
         ui.state.reduce_motion = self.settings.reduce_motion || self.os_reduces_motion;
+        // Settings → Appearance sets it again while its scheme menu is open and drawn.
+        self.settings_view.previewing = None;
         let t = ui.theme;
         let mut area = ui.viewport;
         ui.gfx.fill_rect(area, 0.0, t.chrome);
@@ -1484,7 +1486,11 @@ impl WindowApp for Preview {
     }
 
     fn theme(&self) -> Theme {
-        colors::app_theme(&self.app.settings, self.theme)
+        colors::previewed_theme(
+            &self.app.settings,
+            self.app.settings_view.previewing,
+            self.theme,
+        )
     }
 }
 

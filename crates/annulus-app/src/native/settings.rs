@@ -114,6 +114,9 @@ pub struct SettingsView {
     refusals: u32,
     /// The keys pressed this frame while recording, before any shortcut saw them.
     caught: Option<(Key, Modifiers)>,
+    /// The entry of the window's scheme menu under the pointer this frame: the window shows
+    /// it until the menu closes ([`super::colors::previewed_theme`]).
+    pub previewing: Option<usize>,
 }
 
 const LOCK_MINUTES: [(u32, &str); 5] = [
@@ -240,7 +243,9 @@ impl SettingsView {
                     page.take_top(drawn_h);
                 }
             }
-            Page::Appearance => changed = appearance(ui, &mut page, settings),
+            Page::Appearance => {
+                changed = appearance(ui, &mut page, settings, &mut self.previewing);
+            }
             Page::Terminal => changed = terminal(ui, &mut page, settings),
             Page::Security => changed = security(ui, &mut page, settings),
             Page::Sessions => changed = sessions(ui, &mut page, settings),
@@ -404,7 +409,12 @@ fn segmented(
     chosen
 }
 
-fn appearance(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
+fn appearance(
+    ui: &mut Ui<'_>,
+    page: &mut Rect,
+    settings: &mut Settings,
+    previewing: &mut Option<usize>,
+) -> bool {
     let mut changed = false;
     let mut card = card(ui, page, "Look", 3);
     let control = row(
@@ -444,14 +454,19 @@ fn appearance(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool
         .app_scheme
         .as_ref()
         .map_or(Some(0), |name| schemes.iter().position(|s| s == name));
-    if let Some(chosen) = ui.select(
-        Id::new("settings.scheme"),
+    let id = Id::new("settings.scheme");
+    // The window takes the colors under the pointer, so each can be seen before it is chosen.
+    *previewing = ui.menu_hot(id);
+    if let Some(chosen) = ui.select_with_swatches(
+        id,
         control,
         schemes,
+        super::colors::app_swatches(),
         at,
         super::colors::OWN_COLORS,
     ) {
         settings.app_scheme = (chosen > 0).then(|| schemes[chosen].clone());
+        *previewing = None;
         changed = true;
     }
     let control = row(
@@ -489,10 +504,15 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
     let at = themes
         .iter()
         .position(|name| *name == settings.terminal_theme);
-    if let Some(chosen) = ui.select(
-        Id::new("settings.colors"),
+    let id = Id::new("settings.colors");
+    // The preview below shows the colors under the pointer before they are chosen.
+    let hovered = ui.menu_hot(id).and_then(|index| themes.get(index));
+    let shown = hovered.unwrap_or(&settings.terminal_theme).clone();
+    if let Some(chosen) = ui.select_with_swatches(
+        id,
         control,
         themes,
+        super::colors::terminal_swatches(),
         at,
         "Annulus Dark",
     ) {
@@ -515,14 +535,14 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         settings.font_size = size;
         changed = true;
     }
-    preview(ui, page, settings);
+    preview(ui, page, &shown, settings.font_size);
     changed
 }
 
-/// What a terminal looks like in the chosen colors and size: a prompt, a listing and the
-/// sixteen colors.
-fn preview(ui: &mut Ui<'_>, page: &mut Rect, settings: &Settings) {
-    let palette = super::colors::terminal_palette(&settings.terminal_theme);
+/// What a terminal looks like in the colors called `theme` at `font_size`: a prompt, a
+/// listing and the sixteen colors.
+fn preview(ui: &mut Ui<'_>, page: &mut Rect, theme: &str, font_size: f32) {
+    let palette = super::colors::terminal_palette(theme);
     let rgb = |c: Rgb| Color::rgba(c.r, c.g, c.b, 255);
     ui.section_label(page.take_top(18.0), "Preview");
     page.take_top(space::S);
@@ -532,7 +552,7 @@ fn preview(ui: &mut Ui<'_>, page: &mut Rect, settings: &Settings) {
         .shadow(shape, 12.0, 14.0, 4.0, ui.theme.shadow.alpha(0.6));
     ui.gfx.fill_rect(shape, 12.0, rgb(palette.background));
     ui.gfx.stroke_rect(shape, 12.0, 1.0, ui.theme.line);
-    let font = Font::mono(settings.font_size.clamp(8.0, 20.0));
+    let font = Font::mono(font_size.clamp(8.0, 20.0));
     let line_h = ui.gfx.measure("M", font).height;
     let mut y = shape.y + space::L;
     let x = shape.x + space::L;

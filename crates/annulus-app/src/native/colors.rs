@@ -8,6 +8,7 @@ use annulus_config::settings::Settings;
 use annulus_config::tokens::{Rgb, ThemeMode};
 use annulus_term::Palette;
 use annulus_term::alacritty_terminal::vte::ansi::Rgb as TermRgb;
+use annulus_ui::gfx::Color;
 use annulus_ui::kit::Theme;
 
 /// The first entry of the window's scheme menu: no scheme, our own theme.
@@ -17,7 +18,21 @@ pub const OWN_COLORS: &str = "Annulus";
 /// `system` is ours as the OS currently wants it.
 #[must_use]
 pub fn app_theme(settings: &Settings, system: Theme) -> Theme {
-    if let Some(scheme) = settings.app_scheme.as_deref().and_then(Scheme::find) {
+    scheme_theme(settings.app_scheme.as_deref(), settings, system)
+}
+
+/// [`app_theme`] while the window's scheme menu has the pointer on entry `hovered` of
+/// [`app_schemes`]: the window shows that one until the menu closes.
+#[must_use]
+pub fn previewed_theme(settings: &Settings, hovered: Option<usize>, system: Theme) -> Theme {
+    match hovered.and_then(|index| app_schemes().get(index)) {
+        Some(name) => scheme_theme(Some(name), settings, system),
+        None => app_theme(settings, system),
+    }
+}
+
+fn scheme_theme(scheme: Option<&str>, settings: &Settings, system: Theme) -> Theme {
+    if let Some(scheme) = scheme.and_then(Scheme::find) {
         return Theme::from_palette(&scheme.palette(), scheme.dark());
     }
     match settings.theme {
@@ -33,6 +48,49 @@ pub fn app_schemes() -> &'static [String] {
     NAMES.get_or_init(|| {
         std::iter::once(OWN_COLORS.to_owned())
             .chain(SCHEMES.iter().map(|scheme| scheme.name.to_owned()))
+            .collect()
+    })
+}
+
+/// What each entry of [`app_schemes`] looks like in small: the window's background, then its
+/// text, accent, success and error colors.
+pub fn app_swatches() -> &'static [Vec<Color>] {
+    static SWATCHES: OnceLock<Vec<Vec<Color>>> = OnceLock::new();
+    SWATCHES.get_or_init(|| {
+        let own = Theme::new(annulus_config::tokens::Appearance::Dark);
+        std::iter::once(vec![own.chrome, own.text, own.accent, own.ok, own.error])
+            // The scheme's own colors, as the window takes them (`Scheme::palette`), without
+            // deriving every palette just to open the menu.
+            .chain(SCHEMES.iter().map(|scheme| {
+                [0x00, 0x05, 0x0D, 0x0B, 0x08]
+                    .map(|slot: usize| {
+                        let [r, g, b] = scheme.base[slot];
+                        Color::from(Rgb::new(r, g, b))
+                    })
+                    .to_vec()
+            }))
+            .collect()
+    })
+}
+
+/// What each entry of [`terminal_themes`] looks like in small: the background, then the text,
+/// red, green and blue.
+pub fn terminal_swatches() -> &'static [Vec<Color>] {
+    static SWATCHES: OnceLock<Vec<Vec<Color>>> = OnceLock::new();
+    SWATCHES.get_or_init(|| {
+        terminal_themes()
+            .iter()
+            .map(|name| {
+                let palette = terminal_palette(name);
+                let color = |c: TermRgb| Color::rgba(c.r, c.g, c.b, 255);
+                vec![
+                    color(palette.background),
+                    color(palette.foreground),
+                    color(palette.ansi[1]),
+                    color(palette.ansi[2]),
+                    color(palette.ansi[4]),
+                ]
+            })
             .collect()
     })
 }
@@ -109,6 +167,51 @@ mod tests {
         // A scheme this version does not know falls back to our own.
         settings.app_scheme = Some("Gone".into());
         assert_eq!(app_theme(&settings, system), system);
+    }
+
+    #[test]
+    fn the_hovered_scheme_shows_until_the_menu_lets_go_and_each_entry_has_a_swatch() {
+        let system = Theme::new(Appearance::Light);
+        let settings = Settings {
+            theme: ThemeMode::Dark,
+            app_scheme: Some("Solarized Light".into()),
+            ..Settings::default()
+        };
+        let names = app_schemes();
+        let dracula = names.iter().position(|name| name == "Dracula").unwrap();
+        let shown = previewed_theme(&settings, Some(dracula), system);
+        assert!(shown.dark);
+        assert_eq!(
+            shown,
+            app_theme(
+                &Settings {
+                    app_scheme: Some("Dracula".into()),
+                    ..settings.clone()
+                },
+                system
+            )
+        );
+        // Our own colors under the pointer show our own theme, in the chosen mode.
+        assert_eq!(
+            previewed_theme(&settings, Some(0), system),
+            Theme::new(Appearance::Dark)
+        );
+        assert_eq!(
+            previewed_theme(&settings, None, system),
+            app_theme(&settings, system)
+        );
+
+        assert_eq!(app_swatches().len(), names.len());
+        assert_eq!(terminal_swatches().len(), terminal_themes().len());
+        let ayu = terminal_themes()
+            .iter()
+            .position(|name| name == "Ayu Dark")
+            .unwrap();
+        let background = terminal_palette("Ayu Dark").background;
+        assert_eq!(
+            terminal_swatches()[ayu][0],
+            Color::rgba(background.r, background.g, background.b, 255)
+        );
     }
 
     #[test]

@@ -3,6 +3,8 @@
 //! the rectangle it fills; views lay rectangles out with [`Rect`]'s cutting helpers and the
 //! `*_width` measurements here.
 
+use std::sync::Arc;
+
 use zeroize::Zeroizing;
 
 use crate::gfx::{Align, Canvas, Color, Font, Point, Rect, Weight};
@@ -224,14 +226,99 @@ pub(crate) struct Toast {
 pub(crate) struct Popup {
     pub(crate) owner: Id,
     anchor: Rect,
-    items: Vec<String>,
+    items: Arc<[String]>,
+    /// A few colors per item, drawn as dots beside its name (a color scheme's); may be empty.
+    swatches: Arc<[Vec<Color>]>,
     selected: Option<usize>,
     width: f32,
     /// The menu was drawn once (it scrolls to the current choice when it first opens).
     shown: bool,
+    /// What the search at the top of a long menu holds.
+    query: String,
+    /// The item under the pointer, else the one the keyboard is on, as last drawn.
+    hot: Option<usize>,
+    /// The item Enter in the search picked, handed to the owner next frame.
+    picked: Option<usize>,
+}
+
+impl Popup {
+    fn new(owner: Id, anchor: Rect, items: &[String], selected: Option<usize>, width: f32) -> Self {
+        Popup {
+            owner,
+            anchor,
+            items: items.into(),
+            swatches: Arc::new([]),
+            selected,
+            width,
+            shown: false,
+            query: String::new(),
+            hot: None,
+            picked: None,
+        }
+    }
+
+    /// Whether the menu has a search: it is too long to read through.
+    fn searchable(&self) -> bool {
+        self.items.len() > SEARCH_FROM
+    }
+
+    /// The items the search keeps, in order: those whose name holds every word typed, in any
+    /// case.
+    fn matches(&self) -> Vec<usize> {
+        let words: Vec<String> = self
+            .query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        (0..self.items.len())
+            .filter(|index| {
+                let name = self.items[*index].to_lowercase();
+                words.iter().all(|word| name.contains(word.as_str()))
+            })
+            .collect()
+    }
+}
+
+/// The height of a menu's search row.
+const SEARCH_H: f32 = CONTROL + 4.0;
+
+/// Menus longer than this get a search at the top.
+const SEARCH_FROM: usize = 12;
+
+/// The width of the dots [`swatch`] draws for `colors`.
+fn swatch_width(colors: &[Color]) -> f32 {
+    #[allow(clippy::cast_precision_loss)] // A handful of dots.
+    let dots = colors.len().saturating_sub(1) as f32;
+    dots * 11.0 + 7.0
+}
+
+/// A color scheme in small: a pill in its first color holding a dot of each of the others.
+fn swatch(canvas: &mut dyn Canvas, rect: Rect, colors: &[Color], line: Color) {
+    let Some((&back, dots)) = colors.split_first() else {
+        return;
+    };
+    let pill = rect.centered(swatch_width(colors), 16.0);
+    canvas.fill_rect(pill, 8.0, back);
+    canvas.stroke_rect(pill, 8.0, 1.0, line);
+    for (index, dot) in dots.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let x = pill.x + 8.0 + index as f32 * 11.0;
+        canvas.fill_circle(Point::new(x, pill.center().y), 3.5, *dot);
+    }
 }
 
 impl Ui<'_> {
+    /// The item of the open menu of `id` under the pointer, else the one the keyboard is on:
+    /// what a choice would look like can be shown before it is made.
+    #[must_use]
+    pub fn menu_hot(&self, id: Id) -> Option<usize> {
+        self.state
+            .popup
+            .as_ref()
+            .filter(|popup| popup.owner == id)
+            .and_then(|popup| popup.hot)
+    }
+
     /// Whether the menu of the select or menu button `id` is open.
     #[must_use]
     pub fn menu_open(&self, id: Id) -> bool {
@@ -808,6 +895,21 @@ impl Ui<'_> {
         selected: Option<usize>,
         placeholder: &str,
     ) -> Option<usize> {
+        self.select_with_swatches(id, rect, items, &[], selected, placeholder)
+    }
+
+    /// A [`Self::select`] whose items each show `swatches[index]`: a pill in the first color
+    /// holding a dot of each of the others (a color scheme in small). The current choice
+    /// shows its swatch in the box too.
+    pub fn select_with_swatches(
+        &mut self,
+        id: Id,
+        rect: Rect,
+        items: &[String],
+        swatches: &[Vec<Color>],
+        selected: Option<usize>,
+        placeholder: &str,
+    ) -> Option<usize> {
         let current = selected
             .and_then(|index| items.get(index))
             .map_or(placeholder, String::as_str);
@@ -831,12 +933,39 @@ impl Ui<'_> {
         let chevron = inner.take_right(16.0);
         self.gfx
             .icon(icons::CHEVRON_DOWN, chevron.centered(14.0, 14.0), t.text2);
+        if let Some(colors) = selected.and_then(|index| swatches.get(index)) {
+            let dots = inner.take_right(swatch_width(colors) + space::S);
+            swatch(&mut self.gfx, dots, colors, t.line_strong);
+        }
         let ink = if selected.is_some() { t.text } else { t.text3 };
         self.gfx.text(inner, current, BODY, ink, Align::Start);
         if response.hovered {
             self.set_cursor(Cursor::Pointer);
         }
-        self.popup_toggle(id, &response, rect, items, selected, rect.w)
+        // Wide enough for the longest name beside its swatch; measured only as it opens.
+        let width = if response.clicked && !swatches.is_empty() {
+            let dots = swatches.iter().map(|c| swatch_width(c)).fold(0.0, f32::max);
+            items
+                .iter()
+                .map(|item| self.gfx.measure(item, BODY).width)
+                .fold(0.0, f32::max)
+                + dots
+                + 2.0 * space::S
+                + 2.0 * space::M
+                + 24.0
+        } else {
+            0.0
+        };
+        let chosen = self.popup_toggle(id, &response, rect, items, selected, rect.w.max(width));
+        if let Some(popup) = self
+            .state
+            .popup
+            .as_mut()
+            .filter(|p| p.owner == id && !p.shown)
+        {
+            popup.swatches = swatches.into();
+        }
+        chosen
     }
 
     /// A button that opens a menu of `items` below it. Returns the index chosen this frame.
@@ -871,6 +1000,7 @@ impl Ui<'_> {
             (0..items.len()).find(|index| self.state.was_clicked(owner.with(("item", *index))));
         if chosen.is_some() {
             self.state.popup = None;
+            self.state.move_focus_to(owner);
             return chosen;
         }
         let keyboard = response.focused && self.key(Key::F(10), Modifiers::SHIFT);
@@ -893,14 +1023,7 @@ impl Ui<'_> {
                 .iter()
                 .map(|item| self.gfx.measure(item, BODY).width + 2.0 * space::L + 16.0)
                 .fold(200.0, f32::max);
-            self.state.popup = Some(Popup {
-                owner,
-                anchor,
-                items: items.to_vec(),
-                selected: None,
-                width,
-                shown: false,
-            });
+            self.state.popup = Some(Popup::new(owner, anchor, items, None, width));
         }
         None
     }
@@ -914,23 +1037,25 @@ impl Ui<'_> {
         selected: Option<usize>,
         width: f32,
     ) -> Option<usize> {
-        let chosen =
-            (0..items.len()).find(|index| self.state.was_clicked(id.with(("item", *index))));
+        let picked = self
+            .state
+            .popup
+            .as_ref()
+            .filter(|p| p.owner == id)
+            .and_then(|p| p.picked);
+        let chosen = picked.or_else(|| {
+            (0..items.len()).find(|index| self.state.was_clicked(id.with(("item", *index))))
+        });
         if chosen.is_some() {
             self.state.popup = None;
+            // Back on the control the menu came from, as the keyboard left it.
+            self.state.move_focus_to(id);
             return chosen;
         }
         if response.clicked {
             let open = self.state.popup.as_ref().is_some_and(|p| p.owner == id);
             let anchor = self.gfx.to_screen(anchor);
-            self.state.popup = (!open).then(|| Popup {
-                owner: id,
-                anchor,
-                items: items.to_vec(),
-                selected,
-                width,
-                shown: false,
-            });
+            self.state.popup = (!open).then(|| Popup::new(id, anchor, items, selected, width));
         }
         None
     }
@@ -944,6 +1069,7 @@ impl Ui<'_> {
         };
         if self.key(Key::Escape, Modifiers::NONE) {
             self.state.popup = None;
+            self.state.move_focus_to(popup.owner);
             return;
         }
         // Clicking anywhere outside the menu closes it.
@@ -957,8 +1083,11 @@ impl Ui<'_> {
             self.state.popup = None;
             return;
         }
-        #[allow(clippy::cast_precision_loss)] // Menus hold dozens of items at most.
-        let content = popup.items.len() as f32 * MENU_ITEM + 8.0;
+        // Sized for every item, so the menu holds still while the search narrows it.
+        #[allow(clippy::cast_precision_loss)] // Menus hold hundreds of items at most.
+        let content = popup.items.len() as f32 * MENU_ITEM
+            + 8.0
+            + if popup.searchable() { SEARCH_H } else { 0.0 };
         // Below the widget when it fits, else above; when neither side holds it all, the side
         // with more room, and the menu scrolls.
         let below = popup.anchor.b() + 4.0;
@@ -969,7 +1098,7 @@ impl Ui<'_> {
         } else if content <= room_above {
             (popup.anchor.y - 4.0 - content, content)
         } else if room_below >= room_above {
-            (below, room_below.max(MENU_ITEM + 8.0))
+            (below, room_below.max(MENU_ITEM + 8.0 + SEARCH_H))
         } else {
             (popup.anchor.y - 4.0 - room_above, room_above)
         };
@@ -995,26 +1124,104 @@ impl Ui<'_> {
             0.9,
             if below { -6.0 } else { 6.0 },
         ));
-        self.draw_menu(&popup, menu, content, height);
+        self.draw_menu(&popup, menu);
         self.pop_layer();
     }
 
-    /// The open menu `popup`'s surface and items in `menu`.
-    fn draw_menu(&mut self, popup: &Popup, menu: Rect, content: f32, height: f32) {
+    /// The search at the top of the open menu `popup`, in `rect`: it has the keyboard as the
+    /// menu opens, and Enter in it picks the first item it keeps.
+    fn menu_search(&mut self, popup: &Popup, rect: Rect, first: Option<usize>) {
+        let id = popup.owner.with("menu.search");
+        if !popup.shown {
+            self.state.move_focus_to(id);
+        }
+        let mut query = popup.query.clone();
+        let field = self.text_field(
+            id,
+            rect,
+            &mut query,
+            FieldStyle {
+                placeholder: "Search",
+                icon: Some(icons::SEARCH),
+                ..FieldStyle::default()
+            },
+        );
+        let Some(open) = self.state.popup.as_mut() else {
+            return;
+        };
+        let submitted = field.submitted.then_some(first).flatten();
+        if field.changed {
+            open.query = query;
+        }
+        if submitted.is_some() {
+            open.picked = submitted;
+        }
+        if field.changed {
+            // A new list starts at its top.
+            self.set_scroll_offset(popup.owner.with("menu.scroll"), 0.0);
+        }
+        if submitted.is_some() {
+            self.request_repaint();
+        }
+    }
+
+    /// Item `index` of the open menu `popup` in `row`: its name, its swatch, and a check mark
+    /// when it is the current choice.
+    fn menu_row(&mut self, popup: &Popup, index: usize, row: Rect) -> Response {
+        let t = self.theme;
+        let item = &popup.items[index];
+        let response = self.zone(popup.owner.with(("item", index)), row, Role::MenuItem, item);
+        if response.hovered || response.focus_ring {
+            self.gfx.fill_rect(row, radius::SMALL, t.hover);
+        }
+        let mut inner = row.inset(space::S + 2.0, 0.0);
+        let check = inner.take_right(16.0);
+        if popup.selected == Some(index) {
+            self.gfx
+                .icon(icons::CHECK, check.centered(14.0, 14.0), t.accent);
+        }
+        if let Some(colors) = popup.swatches.get(index) {
+            let dots = inner.take_right(swatch_width(colors) + space::S);
+            swatch(&mut self.gfx, dots, colors, t.line_strong);
+        }
+        self.gfx.text(inner, item, BODY, t.text, Align::Start);
+        if response.hovered {
+            self.set_cursor(Cursor::Pointer);
+        }
+        response
+    }
+
+    /// The open menu `popup`'s surface, its search when it is long, and the items the search
+    /// keeps, in `menu`.
+    fn draw_menu(&mut self, popup: &Popup, menu: Rect) {
         let t = self.theme;
         self.gfx.shadow(menu, radius::MEDIUM, 16.0, 6.0, t.shadow);
         self.gfx.fill_rect(menu, radius::MEDIUM, t.raised);
         self.gfx.stroke_rect(menu, radius::MEDIUM, 1.0, t.line);
-        let list = menu.inset(4.0, 4.0);
+        let mut list = menu.inset(4.0, 4.0);
+        let shown = popup.matches();
+        if popup.searchable() {
+            let search = list.take_top(SEARCH_H).inset(2.0, 0.0);
+            let search = Rect::new(search.x, search.y + 2.0, search.w, CONTROL - 4.0);
+            self.menu_search(popup, search, shown.first().copied());
+        }
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let content = shown.len() as f32 * MENU_ITEM;
         let scroll_id = popup.owner.with("menu.scroll");
-        let offset = if content > height {
+        // The wheel over the menu is the menu's, whatever scrolls under it.
+        self.state.wheel.1 = std::mem::take(&mut self.state.menu_wheel);
+        let offset = if content > list.h {
             // In view: the item the keyboard is on, or the current choice as the menu opens.
-            let focused = (0..popup.items.len())
-                .find(|index| self.state.focus() == Some(popup.owner.with(("item", *index))));
-            let keep = focused.or(popup.selected.filter(|_| !popup.shown));
-            if let Some(index) = keep {
+            let focused = shown
+                .iter()
+                .position(|index| self.state.focus() == Some(popup.owner.with(("item", *index))));
+            let current = popup
+                .selected
+                .filter(|_| !popup.shown)
+                .and_then(|selected| shown.iter().position(|index| *index == selected));
+            if let Some(at) = focused.or(current) {
                 #[allow(clippy::cast_precision_loss)] // As above.
-                let top = index as f32 * MENU_ITEM;
+                let top = at as f32 * MENU_ITEM;
                 // A row either side stays in view too, so Tab always has a drawn item to go to
                 // next and the menu scrolls ahead of it.
                 let highest = (top - MENU_ITEM).max(0.0);
@@ -1022,7 +1229,7 @@ impl Ui<'_> {
                 let now = self.scroll_offset(scroll_id);
                 self.set_scroll_offset(scroll_id, now.clamp(lowest, highest));
             }
-            self.scroll_view(scroll_id, list, content - 8.0)
+            self.scroll_view(scroll_id, list, content)
         } else {
             0.0
         };
@@ -1030,34 +1237,51 @@ impl Ui<'_> {
             open.shown = true;
         }
         self.push_clip(list);
-        for (index, item) in popup.items.iter().enumerate() {
+        let (mut hovered, mut focused) = (None, None);
+        // Rows stop short of the scroll bar, so it never runs over a swatch or a highlight.
+        let row_w = if content > list.h {
+            list.w - 8.0
+        } else {
+            list.w
+        };
+        for (at, &index) in shown.iter().enumerate() {
             #[allow(clippy::cast_precision_loss)] // As above.
             let row = Rect::new(
                 list.x,
-                list.y - offset + index as f32 * MENU_ITEM,
-                list.w,
+                list.y - offset + at as f32 * MENU_ITEM,
+                row_w,
                 MENU_ITEM,
             );
             if row.b() < list.y || row.y > list.b() {
                 continue;
             }
-            let id = popup.owner.with(("item", index));
-            let response = self.zone(id, row, Role::MenuItem, item);
-            if response.hovered || response.focus_ring {
-                self.gfx.fill_rect(row, radius::SMALL, t.hover);
-            }
-            let mut inner = row.inset(space::S + 2.0, 0.0);
-            let check = inner.take_right(16.0);
-            if popup.selected == Some(index) {
-                self.gfx
-                    .icon(icons::CHECK, check.centered(14.0, 14.0), t.accent);
-            }
-            self.gfx.text(inner, item, BODY, t.text, Align::Start);
+            let response = self.menu_row(popup, index, row);
             if response.hovered {
-                self.set_cursor(Cursor::Pointer);
+                hovered = Some(index);
+            }
+            if response.focused {
+                focused = Some(index);
             }
         }
+        if shown.is_empty() {
+            let note = Rect::new(list.x, list.y, list.w, MENU_ITEM);
+            self.gfx.text(
+                note.inset(space::S + 2.0, 0.0),
+                "No matches",
+                BODY,
+                t.text2,
+                Align::Start,
+            );
+        }
         self.pop_clip();
+        // A new hot item changes what the owner previews: draw it at once.
+        let hot = hovered.or(focused);
+        if let Some(open) = self.state.popup.as_mut()
+            && open.hot != hot
+        {
+            open.hot = hot;
+            self.request_repaint();
+        }
     }
 
     /// Shows `text` in a toast at the window's bottom right for a few seconds (something done
@@ -1803,6 +2027,106 @@ mod tests {
         );
         draw(&mut state, &[key(Key::Enter, Modifiers::NONE)]);
         assert_eq!(chosen, Some(40));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_an_open_menu_and_not_the_page_under_it() {
+        let mut state = UiState::default();
+        let (id, page) = (Id::new("scheme"), Id::new("page"));
+        let items: Vec<String> = (0..500).map(|n| format!("scheme-{n}")).collect();
+        let field = Rect::new(10.0, 40.0, 200.0, 32.0);
+        let draw = |state: &mut UiState, events: &[Event]| {
+            frame(state, events, |ui| {
+                // A page taller than the window, scrolling under the menu.
+                ui.scroll_view(page, Rect::new(0.0, 0.0, 400.0, 300.0), 2000.0);
+                ui.select(id, field, &items, Some(0), "Scheme");
+            });
+        };
+        draw(&mut state, &[]);
+        draw(
+            &mut state,
+            &[
+                Event::PointerMoved(field.center()),
+                Event::PointerDown(crate::kit::Button::Primary),
+                Event::PointerUp(crate::kit::Button::Primary),
+            ],
+        );
+        draw(&mut state, &[]);
+        let over_menu = Point::new(field.center().x, field.b() + 120.0);
+        draw(
+            &mut state,
+            &[
+                Event::PointerMoved(over_menu),
+                Event::Wheel { x: 0.0, y: -90.0 },
+            ],
+        );
+        let scrolled = |state: &UiState, id: Id| state.scroll.get(&id).copied().unwrap_or(0.0);
+        assert!((scrolled(&state, id.with("menu.scroll")) - 90.0).abs() < 0.5);
+        assert!(scrolled(&state, page).abs() < 0.5, "the page stays put");
+        // Closed, the wheel is the page's again.
+        draw(&mut state, &[key(Key::Escape, Modifiers::NONE)]);
+        draw(&mut state, &[Event::Wheel { x: 0.0, y: -90.0 }]);
+        assert!((scrolled(&state, page) - 90.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_long_menu_searches_as_you_type_enter_picks_and_hover_is_reported() {
+        let mut state = UiState::default();
+        let id = Id::new("scheme");
+        let items: Vec<String> = (0..500).map(|n| format!("Scheme {n}")).collect();
+        let swatches: Vec<Vec<Color>> = items
+            .iter()
+            .map(|_| vec![Color::BLACK, Color::WHITE])
+            .collect();
+        let field = Rect::new(10.0, 40.0, 200.0, 32.0);
+        let chosen = std::cell::Cell::new(None);
+        let hot = std::cell::Cell::new(None);
+        let draw = |state: &mut UiState, events: &[Event]| {
+            frame(state, events, |ui| {
+                hot.set(ui.menu_hot(id));
+                if let Some(index) =
+                    ui.select_with_swatches(id, field, &items, &swatches, Some(0), "Scheme")
+                {
+                    chosen.set(Some(index));
+                }
+            });
+        };
+        draw(&mut state, &[]);
+        state.set_focus(Some(id), true);
+        draw(&mut state, &[key(Key::Enter, Modifiers::NONE)]);
+        draw(&mut state, &[]);
+        assert_eq!(
+            state.focus(),
+            Some(id.with("menu.search")),
+            "the search has the keyboard"
+        );
+        // Case and word order do not matter.
+        draw(&mut state, &[Event::Text("EME 17".into())]);
+        draw(&mut state, &[]);
+        let drawn: Vec<String> = state
+            .zones()
+            .iter()
+            .filter(|zone| zone.role == Role::MenuItem)
+            .map(|zone| zone.label.clone())
+            .collect();
+        assert_eq!(drawn.first().map(String::as_str), Some("Scheme 17"));
+        assert!(drawn.iter().all(|name| name.contains("17")), "{drawn:?}");
+        // The pointer on an item makes it the one to preview.
+        let second = state
+            .zones()
+            .iter()
+            .find(|zone| zone.label == "Scheme 117")
+            .map(|zone| zone.rect.center())
+            .expect("drawn");
+        draw(&mut state, &[Event::PointerMoved(second)]);
+        draw(&mut state, &[]);
+        assert_eq!(hot.get(), Some(117));
+        draw(&mut state, &[Event::PointerLeft]);
+        draw(&mut state, &[key(Key::Enter, Modifiers::NONE)]);
+        draw(&mut state, &[]);
+        assert_eq!(chosen.get(), Some(17), "Enter picks the first match");
+        assert_eq!(state.focus(), Some(id), "back on the select");
+        assert_eq!(hot.get(), None, "nothing to preview once closed");
     }
 
     #[test]

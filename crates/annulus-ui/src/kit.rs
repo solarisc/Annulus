@@ -449,13 +449,15 @@ pub struct UiState {
     activated: Option<Id>,
     typed: Vec<Typed>,
     input_seen: bool,
-    wheel: (f32, f32),
+    pub(crate) wheel: (f32, f32),
+    /// The wheel of a frame with a menu open: the menu's, not that of what scrolls under it.
+    pub(crate) menu_wheel: f32,
     time: f64,
     /// The time of the frame before this one.
     prev_time: f64,
     tweens: HashMap<Id, Tween>,
     springs: HashMap<Id, Spring>,
-    scroll: HashMap<Id, f32>,
+    pub(crate) scroll: HashMap<Id, f32>,
     repaint: bool,
     repaint_after: Option<std::time::Duration>,
     cursor: Cursor,
@@ -547,7 +549,9 @@ impl UiState {
                 Event::Key(Key::Escape, modifiers)
                     if *modifiers == Modifiers::NONE && self.popup.is_some() =>
                 {
-                    self.popup = None;
+                    if let Some(popup) = self.popup.take() {
+                        self.move_focus_to(popup.owner);
+                    }
                 }
                 Event::Key(Key::Tab, modifiers)
                     if !modifiers.ctrl
@@ -572,6 +576,18 @@ impl UiState {
                 Event::FilesDropped(paths) => self.dropped.extend(paths.iter().cloned()),
             }
         }
+        // What is drawn first (the page under the menu) would take it otherwise.
+        self.menu_wheel = if self.popup.is_some() {
+            std::mem::take(&mut self.wheel.1)
+        } else {
+            0.0
+        };
+    }
+
+    /// Gives `id` keyboard focus, with the focus ring as it was: back on a select as its
+    /// menu closes, or on a menu's search as it opens.
+    pub(crate) fn move_focus_to(&mut self, id: Id) {
+        self.focus = Some(id);
     }
 
     /// A button came up: a click on the zone it went down on, unless the pointer was dragged

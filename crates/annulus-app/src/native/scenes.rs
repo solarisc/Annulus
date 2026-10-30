@@ -841,6 +841,20 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
+        // The scheme menu searched, its swatches, and the window previewing the one hovered.
+        name: "scheme-menu-search",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: scheme_light,
+        acts: &[
+            Act::Click("Solarized Light"),
+            Act::Type("gruvbox"),
+            Act::Hover("Gruvbox dark, hard"),
+        ],
+    },
+    Scene {
         name: "scheme-dark-terminal",
         width: 1100,
         height: 720,
@@ -1239,8 +1253,9 @@ fn render(
     );
     let mut app = NativeApp::new(Some(vault));
     (scene.setup)(&mut app);
-    // A scene that picks a color scheme draws in it, like the window would.
-    let theme = super::colors::app_theme(&app.settings, Theme::new(appearance));
+    // A scene that picks a color scheme draws in it, like the window would, and so does one
+    // whose scheme menu has the pointer on an entry.
+    let system = Theme::new(appearance);
     let mut state = UiState::default();
     #[allow(
         clippy::cast_possible_truncation,
@@ -1258,6 +1273,8 @@ fn render(
         let mut output = FrameOutput::default();
         let png = renderer.frame(size, keep, &mut |canvas| {
             state.begin_frame(events, time);
+            let theme =
+                super::colors::previewed_theme(&app.settings, app.settings_view.previewing, system);
             let mut ui = Ui::new(canvas, theme, &mut state, viewport);
             app.frame(&mut ui);
             output = state.end_frame();
