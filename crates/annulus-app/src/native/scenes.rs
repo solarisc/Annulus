@@ -3547,6 +3547,57 @@ fn a_shortcut_takes_new_keys_in_settings_and_its_own_again_on_reset() {
 }
 
 #[test]
+fn a_reset_that_would_share_keys_is_refused_and_reset_all_puts_everything_back() {
+    let mut app = NativeApp::new(Some(fixture_vault("rebind-clash", false)));
+    app.section = super::Section::Settings;
+    let mut state = UiState::default();
+    let press = |key, modifiers| vec![Event::Key(key, modifiers)];
+    let ctrl_alt = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::NONE
+    };
+    let output = step(&mut app, &mut state, &[], 0.0);
+    step(&mut app, &mut state, &click_on(&output, "Shortcuts"), 1.0);
+    // New tab moves away and Local terminal takes its old keys: New tab's Reset would make
+    // the two share them.
+    let mut time = 2.0;
+    for (name, keys) in [
+        ("Change the keys of New tab", (Key::Char('n'), ctrl_alt)),
+        (
+            "Change the keys of Local terminal",
+            (Key::Char('t'), Modifiers::CTRL_SHIFT),
+        ),
+    ] {
+        let output = step(&mut app, &mut state, &[], time);
+        step(&mut app, &mut state, &click_on(&output, name), time + 0.5);
+        step(&mut app, &mut state, &press(keys.0, keys.1), time + 1.0);
+        time += 2.0;
+    }
+    assert_eq!(app.settings.keys.len(), 2);
+    let output = step(&mut app, &mut state, &[], time);
+    let reset = "Reset New tab to Ctrl+Shift+T";
+    step(&mut app, &mut state, &click_on(&output, reset), time + 1.0);
+    assert_eq!(app.settings.keys.len(), 2, "no reset into a clash");
+    assert_eq!(super::shortcuts::NEW_TAB.keys(), "Ctrl+Alt+N");
+    let output = step(&mut app, &mut state, &[], time + 2.0);
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Reset all"),
+        time + 3.0,
+    );
+    assert_eq!(app.settings.keys, []);
+    assert_eq!(
+        (
+            super::shortcuts::NEW_TAB.keys(),
+            super::shortcuts::LOCAL.keys()
+        ),
+        ("Ctrl+Shift+T".to_owned(), "Ctrl+Shift+L".to_owned())
+    );
+}
+
+#[test]
 fn many_tabs_share_the_strip_and_none_shrinks_to_nothing() {
     let mut app = NativeApp::new(Some(fixture_vault("many-tabs", false)));
     for index in 0..6 {

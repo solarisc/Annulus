@@ -720,8 +720,9 @@ impl Panes {
         if broadcasting {
             ui.gfx.icon(icons::WARNING, icon, t.warn);
             let words = format!(
-                "Typing into {} panes \u{b7} Ctrl+Shift+B to stop",
-                self.receivers().len() + 1
+                "Typing into {} panes \u{b7} {} to stop",
+                self.receivers().len() + 1,
+                super::shortcuts::BROADCAST.keys()
             );
             ui.gfx.text(inner, &words, SMALL, t.text, Align::Start);
         } else {
@@ -857,9 +858,10 @@ impl Panes {
         let heading = inner.take_top(24.0);
         ui.section_label(heading.inset(space::XS, 0.0), "Sessions");
         let hint = inner.take_bottom(24.0);
+        let back = format!("{}: back to split", super::shortcuts::FOCUS_MODE.keys());
         ui.gfx.text(
             hint.inset(space::XS, 0.0),
-            "Ctrl+Shift+M: back to split",
+            &back,
             SMALL,
             t.text3,
             Align::Start,

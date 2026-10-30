@@ -473,6 +473,57 @@ mod tests {
     }
 
     #[test]
+    fn no_screen_writes_out_the_keys_of_a_shortcut_that_can_change() {
+        // Words naming such keys ask the table, or they go stale once Settings changes them.
+        let sources = [
+            ("account.rs", include_str!("account.rs")),
+            ("ask.rs", include_str!("ask.rs")),
+            ("hosts.rs", include_str!("hosts.rs")),
+            ("live.rs", include_str!("live.rs")),
+            ("lock.rs", include_str!("lock.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("pages.rs", include_str!("pages.rs")),
+            ("palette.rs", include_str!("palette.rs")),
+            ("panes.rs", include_str!("panes.rs")),
+            ("screens.rs", include_str!("screens.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("sftp.rs", include_str!("sftp.rs")),
+            ("start.rs", include_str!("start.rs")),
+            ("terminal.rs", include_str!("terminal.rs")),
+            ("titlebar.rs", include_str!("titlebar.rs")),
+            ("command_palette.rs", include_str!("../command_palette.rs")),
+            ("sync_screen.rs", include_str!("../sync_screen.rs")),
+            ("terminal_view.rs", include_str!("../terminal_view.rs")),
+        ];
+        for (file, source) in sources {
+            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+            let lines = code.lines().enumerate();
+            for (number, line) in lines.filter(|(_, line)| !line.trim_start().starts_with("//")) {
+                for shortcut in ALL {
+                    let Some((key, modifiers)) = shortcut.chord else {
+                        continue;
+                    };
+                    let keys = chord_text(key, modifiers);
+                    let mut rest = line;
+                    while let Some(at) = rest.find(&keys) {
+                        let before = rest[..at].chars().next_back();
+                        let after = rest[at + keys.len()..].chars().next();
+                        let joined = before.is_some_and(|c| c.is_alphanumeric() || c == '+')
+                            || after.is_some_and(char::is_alphanumeric);
+                        assert!(
+                            joined,
+                            "{file}:{}: {keys} written out; ask shortcuts::{}.keys()",
+                            number + 1,
+                            shortcut.id
+                        );
+                        rest = &rest[at + keys.len()..];
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn keys_chosen_in_settings_replace_a_shortcuts_own_until_they_are_dropped() {
         let binding = |action: &str, keys: &str| KeyBinding {
             action: action.into(),

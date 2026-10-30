@@ -477,16 +477,13 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         settings.terminal_theme.clone_from(&themes[chosen]);
         changed = true;
     }
-    let control = row(
-        ui,
-        &mut card,
-        false,
-        (
-            "Text size",
-            "Ctrl+= and Ctrl+- change it; Ctrl+0 resets it.",
-        ),
-        260.0,
+    let how = format!(
+        "{} and {} change it; {} resets it.",
+        shortcuts::ZOOM_IN.keys(),
+        shortcuts::ZOOM_OUT.keys(),
+        shortcuts::ZOOM_RESET.keys()
     );
+    let control = row(ui, &mut card, false, ("Text size", &how), 260.0);
     let sizes: Vec<String> = (11..=20).map(|size| format!("{size} pt")).collect();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 8 to 32.
     let at = (settings.font_size.round() as usize).checked_sub(11);
@@ -559,16 +556,11 @@ fn preview(ui: &mut Ui<'_>, page: &mut Rect, settings: &Settings) {
 
 fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
     let mut card = card(ui, page, "Vault", 1);
-    let control = row(
-        ui,
-        &mut card,
-        true,
-        (
-            "Lock the vault",
-            "When you have been away from the keyboard. Ctrl+Alt+L locks it now.",
-        ),
-        260.0,
+    let when = format!(
+        "When you have been away from the keyboard. {} locks it now.",
+        shortcuts::LOCK.keys()
     );
+    let control = row(ui, &mut card, true, ("Lock the vault", &when), 260.0);
     let items: Vec<String> = LOCK_MINUTES
         .iter()
         .map(|(_, name)| (*name).to_owned())
@@ -627,16 +619,11 @@ fn sessions(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
 
 fn shells(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings, profiles: &[Profile]) -> bool {
     let mut card = card(ui, page, "New terminals", 1);
-    let control = row(
-        ui,
-        &mut card,
-        true,
-        (
-            "New terminals open",
-            "Ctrl+Shift+L, and Local terminal on a new tab.",
-        ),
-        260.0,
+    let which = format!(
+        "{}, and Local terminal on a new tab.",
+        shortcuts::LOCAL.keys()
     );
+    let control = row(ui, &mut card, true, ("New terminals open", &which), 260.0);
     let names: Vec<String> = profiles
         .iter()
         .map(|profile| profile.name.clone())
@@ -804,11 +791,13 @@ impl SettingsView {
             format!("Change the keys of {}", shortcut.action)
         };
         let response = ui.zone(id, target, Role::Button, &name);
+        // A screen reader hears why keys were refused, not only the sighted.
+        if recording && let Some(why) = &self.refused {
+            ui.set_value(id, why);
+        }
         if response.clicked {
-            if recording {
-                self.stop_recording();
-            } else {
-                self.stop_recording();
+            self.stop_recording();
+            if !recording {
                 self.recording = Some(shortcut.id);
             }
         }
@@ -894,6 +883,16 @@ fn reset_keys(
         ui.set_cursor(Cursor::Pointer);
     }
     if !response.clicked {
+        return false;
+    }
+    // Another shortcut may have taken its own keys meanwhile.
+    if let Some((key, modifiers)) = shortcut.chord
+        && let Err(why) = shortcuts::check(shortcut.id, key, modifiers)
+    {
+        ui.toast(
+            format!("Can't reset {}. {why}", shortcut.action),
+            Tone::Problem,
+        );
         return false;
     }
     settings

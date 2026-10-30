@@ -179,7 +179,8 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         }
         let id = Id::new("tab.new");
         let response = ui.zone(id, slot, Role::Button, "New tab");
-        ui.tooltip(id, slot, "New tab (Ctrl+Shift+T)");
+        let tip = format!("New tab ({})", super::shortcuts::NEW_TAB.keys());
+        ui.tooltip(id, slot, &tip);
         plus_button(ui, Rect::new(at, slot.y, slot.w, slot.h), &response);
         if response.clicked {
             app.open_new_tab();
@@ -500,7 +501,8 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
             // In the slot, where it stays while the tab glides.
             let target = Rect::new(close.x - x + slot.x, close.y, close.w, close.h);
             let button = ui.zone(close_id, target, Role::Button, "Close tab");
-            ui.tooltip(close_id, target, "Close tab (Ctrl+Shift+W)");
+            let tip = format!("Close tab ({})", super::shortcuts::CLOSE.keys());
+            ui.tooltip(close_id, target, &tip);
             let over = ui.ease(
                 close_id.with("hover"),
                 if button.hovered { 1.0 } else { 0.0 },
