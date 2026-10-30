@@ -3020,7 +3020,9 @@ fn e2e_closing_terminals_sftp_and_forwards_leaves_nothing_on_the_server() {
         &click_within(&output, "ssh through test-1", "Run this rule"),
         clock(),
     );
-    while app.tabs.len() > 1 {
+    // The fixed tabs (Vault, SFTP) never close.
+    while app.tabs.len() > super::FIXED_TABS {
+        assert!(clock() < 90.0, "{} tabs left open", app.tabs.len());
         app.close_tab(app.tabs.len() - 1);
         drive(&mut app, &mut state, &[], clock());
     }
