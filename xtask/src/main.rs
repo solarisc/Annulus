@@ -7,6 +7,7 @@
 
 mod ci;
 mod docs_check;
+mod icon;
 mod repo;
 mod themes;
 
@@ -19,13 +20,15 @@ commands:
   ci            fmt, clippy, tests, cargo deny, cargo machete, docs-check
   docs-check    links and anchors, ADR index, FEATURES test names, to-do markers,
                 Last verified lines, crate dependency rules
-  themes <dir>  regenerate the color scheme catalog from a tinted-theming/schemes checkout";
+  themes <dir>  regenerate the color scheme catalog from a tinted-theming/schemes checkout
+  icon          redraw the app icon (annulus.ico and the exe's annulus.res) from our mark";
 
 fn main() -> ExitCode {
     let command = std::env::args().nth(1);
     let result = match command.as_deref() {
         Some("ci") => ci::run(),
         Some("docs-check") => docs_check::run(),
+        Some("icon") => icon::run(),
         Some("themes") => themes::run(std::env::args().nth(2).as_deref()),
         _ => {
             eprintln!("{USAGE}");

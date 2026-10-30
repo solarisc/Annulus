@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Developer automation for the Annulus workspace: ci, docs-check and the theme import."
+description = "Developer automation for the Annulus workspace: ci, docs-check, the theme import and the app icon."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
+tiny-skia.workspace = true
 
 [lints]
 workspace = true
