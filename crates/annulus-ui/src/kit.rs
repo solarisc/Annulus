@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use annulus_config::tokens::{Appearance, Palette};
+use annulus_config::tokens::{Appearance, Palette, Rgb};
 
 use crate::gfx::{Canvas, Color, Point, Rect};
 use crate::motion::{FRAME, Layer, Layers, Motion, Spring, Tween};
@@ -313,31 +313,53 @@ impl Theme {
     /// The theme for `appearance`.
     #[must_use]
     pub fn new(appearance: Appearance) -> Self {
-        let p = Palette::for_appearance(appearance);
-        let dark = appearance == Appearance::Dark;
+        Self::from_palette(
+            &Palette::for_appearance(appearance),
+            appearance == Appearance::Dark,
+        )
+    }
+
+    /// The theme for the tokens of a color scheme (F-SET-002): `dark` when its text is light.
+    #[must_use]
+    pub fn from_palette(p: &Palette, dark: bool) -> Self {
         let surface = Color::from(p.bg_surface);
         let text2 = Color::from(p.text_secondary);
         let accent = Color::from(p.accent);
         let white = Color::WHITE;
         let black = Color::BLACK;
+        // Our own themes put the window color (dark) or white (light) on the accent; a scheme's
+        // accent may be too light or dark for that, and then gets whichever reads best.
+        let preferred = if dark {
+            p.bg_app
+        } else {
+            Rgb::new(0xFF, 0xFF, 0xFF)
+        };
+        let on_accent = if preferred.contrast(p.accent) >= 4.5 {
+            preferred
+        } else {
+            [preferred, Rgb::new(0xFF, 0xFF, 0xFF), Rgb::new(0, 0, 0)]
+                .into_iter()
+                .max_by(|a, b| a.contrast(p.accent).total_cmp(&b.contrast(p.accent)))
+                .unwrap_or(preferred)
+        };
         Self {
             dark,
             chrome: p.bg_app.into(),
             bg: if dark {
                 surface
             } else {
-                Color::from(p.bg_app).mix(white, 0.55)
+                Color::from(p.bg_app).mix(surface, 0.55)
             },
-            surface: if dark { p.bg_raised.into() } else { white },
+            surface: p.bg_raised.into(),
             raised: if dark {
                 Color::from(p.bg_raised).mix(white, 0.03)
             } else {
-                white
+                p.bg_raised.into()
             },
             field: if dark {
                 Color::from(p.bg_app).mix(surface, 0.5)
             } else {
-                white
+                surface
             },
             hover: p.bg_hover.into(),
             press: Color::from(p.bg_hover).mix(if dark { white } else { black }, 0.06),
@@ -349,7 +371,7 @@ impl Theme {
             text3: text2.mix(surface, 0.35),
             accent,
             accent_hover: accent.mix(if dark { white } else { black }, 0.12),
-            on_accent: if dark { Color::from(p.bg_app) } else { white },
+            on_accent: on_accent.into(),
             warn: p.status_warn.into(),
             error: p.status_error.into(),
             ok: p.status_ok.into(),
@@ -1699,9 +1721,33 @@ mod tests {
     }
 
     #[test]
+    fn our_light_theme_keeps_white_cards_menus_and_fields() {
+        let theme = Theme::new(Appearance::Light);
+        for (name, color) in [
+            ("surface", theme.surface),
+            ("raised", theme.raised),
+            ("field", theme.field),
+            ("on_accent", theme.on_accent),
+        ] {
+            assert_eq!(color, Color::WHITE, "{name}");
+        }
+        assert_eq!(
+            Theme::new(Appearance::Dark).on_accent,
+            Color::from(annulus_config::tokens::DARK.bg_app)
+        );
+    }
+
+    #[test]
     fn both_themes_keep_text_readable_on_every_surface() {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let theme = Theme::new(appearance);
+        let ours = [Appearance::Dark, Appearance::Light]
+            .map(|appearance| (format!("{appearance:?}"), Theme::new(appearance)));
+        let schemes = annulus_config::schemes::SCHEMES.iter().map(|scheme| {
+            (
+                scheme.name.to_owned(),
+                Theme::from_palette(&scheme.palette(), scheme.dark()),
+            )
+        });
+        for (appearance, theme) in ours.into_iter().chain(schemes) {
             let rgb = |c: Color| annulus_config::tokens::Rgb::new(c.r, c.g, c.b);
             for surface in [
                 theme.chrome,
@@ -1719,7 +1765,10 @@ mod tests {
                     "{appearance:?}"
                 );
             }
-            assert!(rgb(theme.on_accent).contrast(rgb(theme.accent)) >= 4.5);
+            assert!(
+                rgb(theme.on_accent).contrast(rgb(theme.accent)) >= 4.5,
+                "{appearance}"
+            );
         }
     }
 }

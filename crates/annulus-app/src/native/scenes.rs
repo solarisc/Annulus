@@ -153,6 +153,19 @@ fn terminal_tab(app: &mut NativeApp) {
     app.active = super::FIXED_TABS;
 }
 
+/// The window and the terminal in two different dark community schemes.
+fn scheme_dark(app: &mut NativeApp) {
+    terminal_tab(app);
+    app.settings.app_scheme = Some("Gruvbox Dark".into());
+    "Tokyo Night Storm".clone_into(&mut app.settings.terminal_theme);
+}
+
+/// The Look settings in a light community scheme.
+fn scheme_light(app: &mut NativeApp) {
+    settings(app);
+    app.settings.app_scheme = Some("Solarized Light".into());
+}
+
 /// A New Tab page after a few connections from this device.
 fn new_tab(app: &mut NativeApp) {
     with_tabs(app);
@@ -819,6 +832,24 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
+        name: "scheme-light-settings",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: scheme_light,
+        acts: &[],
+    },
+    Scene {
+        name: "scheme-dark-terminal",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: scheme_dark,
+        acts: &[],
+    },
+    Scene {
         name: "settings-terminal",
         width: 1100,
         height: 760,
@@ -1208,7 +1239,8 @@ fn render(
     );
     let mut app = NativeApp::new(Some(vault));
     (scene.setup)(&mut app);
-    let theme = Theme::new(appearance);
+    // A scene that picks a color scheme draws in it, like the window would.
+    let theme = super::colors::app_theme(&app.settings, Theme::new(appearance));
     let mut state = UiState::default();
     #[allow(
         clippy::cast_possible_truncation,

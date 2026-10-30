@@ -280,6 +280,19 @@ mod tests {
     }
 
     #[test]
+    fn every_scheme_meets_wcag_aa() {
+        let failed: Vec<String> = crate::schemes::SCHEMES
+            .iter()
+            .flat_map(|scheme| {
+                failures(&scheme.palette())
+                    .into_iter()
+                    .map(move |failure| format!("{}: {failure}", scheme.name))
+            })
+            .collect();
+        assert_eq!(failed, Vec::<String>::new());
+    }
+
+    #[test]
     fn white_initials_are_readable_on_every_host_tile() {
         let white = Rgb::new(0xFF, 0xFF, 0xFF);
         for tile in TILES {

@@ -406,7 +406,7 @@ fn segmented(
 
 fn appearance(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
     let mut changed = false;
-    let mut card = card(ui, page, "Look", 2);
+    let mut card = card(ui, page, "Look", 3);
     let control = row(
         ui,
         &mut card,
@@ -427,6 +427,31 @@ fn appearance(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool
         at,
     ) {
         settings.theme = modes[chosen];
+        changed = true;
+    }
+    let control = row(
+        ui,
+        &mut card,
+        false,
+        (
+            "Color scheme",
+            "Recolors the whole window; Annulus is our own.",
+        ),
+        260.0,
+    );
+    let schemes = super::colors::app_schemes();
+    let at = settings
+        .app_scheme
+        .as_ref()
+        .map_or(Some(0), |name| schemes.iter().position(|s| s == name));
+    if let Some(chosen) = ui.select(
+        Id::new("settings.scheme"),
+        control,
+        schemes,
+        at,
+        super::colors::OWN_COLORS,
+    ) {
+        settings.app_scheme = (chosen > 0).then(|| schemes[chosen].clone());
         changed = true;
     }
     let control = row(
@@ -460,17 +485,14 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         ("Colors", "The palette programs draw with."),
         260.0,
     );
-    let themes: Vec<String> = annulus_term::themes::THEMES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect();
+    let themes = super::colors::terminal_themes();
     let at = themes
         .iter()
         .position(|name| *name == settings.terminal_theme);
     if let Some(chosen) = ui.select(
         Id::new("settings.colors"),
         control,
-        &themes,
+        themes,
         at,
         "Annulus Dark",
     ) {
@@ -500,8 +522,7 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
 /// What a terminal looks like in the chosen colors and size: a prompt, a listing and the
 /// sixteen colors.
 fn preview(ui: &mut Ui<'_>, page: &mut Rect, settings: &Settings) {
-    let palette = annulus_term::themes::theme(&settings.terminal_theme)
-        .unwrap_or_else(annulus_term::Palette::annulus_dark);
+    let palette = super::colors::terminal_palette(&settings.terminal_theme);
     let rgb = |c: Rgb| Color::rgba(c.r, c.g, c.b, 255);
     ui.section_label(page.take_top(18.0), "Preview");
     page.take_top(space::S);

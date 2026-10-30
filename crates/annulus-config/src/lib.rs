@@ -4,5 +4,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod schemes;
 pub mod settings;
 pub mod tokens;

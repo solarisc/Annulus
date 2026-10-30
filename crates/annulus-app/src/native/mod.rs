@@ -5,6 +5,7 @@
 
 mod account;
 mod ask;
+mod colors;
 pub mod demo;
 pub mod hosts;
 mod live;
@@ -24,7 +25,7 @@ mod terminal;
 mod titlebar;
 
 use annulus_config::settings::{OpenTab, Settings};
-use annulus_config::tokens::{Appearance, ThemeMode, space};
+use annulus_config::tokens::{Appearance, space};
 use annulus_platform::window::{Waker, WindowApp, WindowError, WindowRequest, run};
 use annulus_session::profiles::{self, Profile};
 use annulus_session::{Program, SshFiles};
@@ -1144,8 +1145,7 @@ impl NativeApp {
             && let Some(view) = tab.terminal.as_mut()
         {
             let font = Font::mono(self.settings.font_size.clamp(8.0, 32.0));
-            let palette = annulus_term::themes::theme(&self.settings.terminal_theme)
-                .unwrap_or_else(annulus_term::Palette::annulus_dark);
+            let palette = colors::terminal_palette(&self.settings.terminal_theme);
             let background = Color::rgba(
                 palette.background.r,
                 palette.background.g,
@@ -1179,6 +1179,7 @@ impl NativeApp {
                     let inner = content.inset(space::L, space::M);
                     let (columns, rows) = terminal::grid_size(ui, inner, font);
                     emulator.resize(columns, rows);
+                    emulator.set_palette(&palette);
                     let screen = emulator.screen();
                     terminal::draw(ui, inner, &screen, font, true);
                 }
@@ -1483,11 +1484,7 @@ impl WindowApp for Preview {
     }
 
     fn theme(&self) -> Theme {
-        match self.app.settings.theme {
-            ThemeMode::Light => Theme::new(Appearance::Light),
-            ThemeMode::Dark => Theme::new(Appearance::Dark),
-            ThemeMode::System => self.theme,
-        }
+        colors::app_theme(&self.app.settings, self.theme)
     }
 }
 

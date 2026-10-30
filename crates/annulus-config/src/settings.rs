@@ -17,6 +17,9 @@ pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 pub struct Settings {
     /// Light, dark or follow the system.
     pub theme: ThemeMode,
+    /// A color scheme for the whole window, by name ([`crate::schemes`]); `None` draws our
+    /// own light or dark theme as `theme` says. A scheme is light or dark by itself.
+    pub app_scheme: Option<String>,
     /// Terminal font size in points.
     pub font_size: f32,
     /// Lock the vault after this many idle minutes; 0 never locks.
@@ -77,6 +80,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::System,
+            app_scheme: None,
             font_size: DEFAULT_FONT_SIZE,
             auto_lock_minutes: 15,
             default_profile: None,
@@ -142,6 +146,7 @@ mod tests {
 
         let settings = Settings {
             theme: ThemeMode::Dark,
+            app_scheme: Some("Gruvbox Dark".into()),
             font_size: 16.0,
             auto_lock_minutes: 5,
             default_profile: Some("PowerShell 7".into()),
@@ -166,6 +171,17 @@ mod tests {
         std::fs::write(&path, br#"{"font_size": 12.0, "future": true}"#).unwrap();
         let loaded = Settings::load(&path);
         assert_eq!((loaded.font_size, loaded.auto_lock_minutes), (12.0, 15));
+        // A file from before color schemes keeps its theme and draws our own colors.
+        std::fs::write(&path, br#"{"theme": "light", "terminal_theme": "Nord"}"#).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(
+            (
+                loaded.theme,
+                loaded.app_scheme,
+                loaded.terminal_theme.as_str()
+            ),
+            (ThemeMode::Light, None, "Nord")
+        );
 
         std::fs::write(&path, b"not json").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());

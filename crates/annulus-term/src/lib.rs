@@ -104,6 +104,13 @@ impl Emulator {
         snapshot(&self.term, &self.palette)
     }
 
+    /// Draws with `palette` from now on (the terminal theme chosen in Settings).
+    pub fn set_palette(&mut self, palette: &Palette) {
+        if &self.palette != palette {
+            self.palette = palette.clone();
+        }
+    }
+
     /// The terminal itself, for selection and search.
     pub fn term_mut(&mut self) -> &mut Term<VoidListener> {
         &mut self.term
@@ -158,6 +165,21 @@ mod tests {
                 .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR),
             "modes are back to their defaults"
         );
+    }
+
+    #[test]
+    fn a_replayed_terminal_draws_in_the_chosen_theme() {
+        let mut emulator = Emulator::new(10, 2);
+        emulator.advance(b"\x1b[31mred");
+        let nord = themes::theme("Nord").unwrap();
+        assert_eq!(
+            emulator.screen().background,
+            Palette::annulus_dark().background
+        );
+        emulator.set_palette(&nord);
+        let screen = emulator.screen();
+        assert_eq!(screen.background, nord.background);
+        assert_eq!(screen.rows[0][0].fg, nord.ansi[1]);
     }
 
     #[test]
