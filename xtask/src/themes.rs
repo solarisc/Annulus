@@ -335,3 +335,58 @@ fn license(source: &Path, schemes: &[Imported], commit: &str) -> Result<String> 
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn values_lose_their_quotes_escapes_and_trailing_comments() {
+        assert_eq!(scalar(r#" "Say \"hi\"" # note"#), r#"Say "hi""#);
+        assert_eq!(scalar(" 'it''s' "), "it's");
+        assert_eq!(scalar(" #ff5555  # Red"), "#ff5555");
+        assert_eq!(scalar(" plain words "), "plain words");
+    }
+
+    #[test]
+    fn only_the_palette_map_is_read_as_colors() {
+        let (fields, palette) = parse(
+            "---\n\
+             system: \"base16\"\n\
+             name: \"Test\"\n\
+             # a comment\n\
+             description: |\n  \
+               base00: not a color\n\
+             palette:\n  \
+               base00: \"#000000\" # Background\n  \
+               base05: '#FFFFFF'\n\
+             variant: dark\n  \
+               base07: \"#123456\"\n",
+        );
+        let get =
+            |pairs: &Pairs, key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert_eq!(get(&fields, "name").as_deref(), Some("Test"));
+        assert_eq!(get(&fields, "variant").as_deref(), Some("dark"));
+        assert_eq!(get(&palette, "base00").as_deref(), Some("#000000"));
+        assert_eq!(get(&palette, "base05").as_deref(), Some("#FFFFFF"));
+        assert_eq!(palette.len(), 2, "nothing outside palette: counts");
+    }
+
+    #[test]
+    fn untrusted_names_colors_and_file_names_are_checked() {
+        assert!(is_slug("gruvbox-dark-hard"));
+        for bad in ["", "Gruvbox", "a--b", "-a", "a-", "a_b", "../x"] {
+            assert!(!is_slug(bad), "{bad}");
+        }
+        assert_eq!(color("#FF5500"), Some([0xFF, 0x55, 0x00]));
+        for bad in ["FF5500", "#FF550", "#FF55001", "#GG5500", ""] {
+            assert_eq!(color(bad), None, "{bad}");
+        }
+        assert_eq!(clean("a\u{7}\n  b\tc", 80), "a b c");
+        assert_eq!(clean("abcdef", 4), "abc…");
+        assert_eq!(
+            name_key("Gruvbox dark, hard"),
+            name_key("gruvbox-dark-hard")
+        );
+    }
+}

@@ -310,6 +310,22 @@ mod tests {
     }
 
     #[test]
+    fn a_step_reaches_its_contrast_and_no_further() {
+        let surface = Rgb::new(0x28, 0x2A, 0x36);
+        let deeper = step_away(surface, BLACK, 1.08).unwrap();
+        let ratio = surface.contrast(deeper);
+        assert!((1.08..1.12).contains(&ratio), "{ratio:.3}");
+        assert!(deeper.luminance() < surface.luminance());
+        // Black has no deeper step to give.
+        assert_eq!(step_away(BLACK, BLACK, 1.08), None);
+        // A dark scheme's window sits below its panels, and its hover above them.
+        let dracula = Scheme::find("Dracula").unwrap().palette();
+        assert!(dracula.bg_app.luminance() < dracula.bg_surface.luminance());
+        assert!(dracula.bg_hover.luminance() > dracula.bg_surface.luminance());
+        assert_eq!(dracula.bg_surface, surface);
+    }
+
+    #[test]
     fn nudging_moves_a_color_only_as_far_as_it_must() {
         let bg = Rgb::new(0x20, 0x20, 0x20);
         let readable = Rgb::new(0xE0, 0xE0, 0xE0);

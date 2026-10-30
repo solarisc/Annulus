@@ -1015,8 +1015,12 @@ impl Ui<'_> {
             if let Some(index) = keep {
                 #[allow(clippy::cast_precision_loss)] // As above.
                 let top = index as f32 * MENU_ITEM;
+                // A row either side stays in view too, so Tab always has a drawn item to go to
+                // next and the menu scrolls ahead of it.
+                let highest = (top - MENU_ITEM).max(0.0);
+                let lowest = (top + 2.0 * MENU_ITEM - list.h).min(highest);
                 let now = self.scroll_offset(scroll_id);
-                self.set_scroll_offset(scroll_id, now.clamp(top + MENU_ITEM - list.h, top));
+                self.set_scroll_offset(scroll_id, now.clamp(lowest, highest));
             }
             self.scroll_view(scroll_id, list, content - 8.0)
         } else {
@@ -1738,6 +1742,67 @@ mod tests {
             menu.iter().any(|zone| zone.label == "host-25"),
             "opened at the choice"
         );
+    }
+
+    #[test]
+    fn the_keyboard_reaches_every_item_of_a_long_menu_and_enter_picks_it() {
+        let mut state = UiState::default();
+        let id = Id::new("scheme");
+        let items: Vec<String> = (0..500).map(|n| format!("scheme-{n}")).collect();
+        let field = Rect::new(10.0, 40.0, 200.0, 32.0);
+        let mut chosen = None;
+        // Time moves, so the menu's scrolling glide arrives as it would in a window.
+        let mut time = 0.0;
+        let mut draw = |state: &mut UiState, events: &[Event]| {
+            time += 0.5;
+            let mut canvas = Recorder::default();
+            state.begin_frame(events, time);
+            let mut ui = Ui::new(
+                &mut canvas,
+                Theme::new(Appearance::Dark),
+                state,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+            );
+            if let Some(index) = ui.select(id, field, &items, Some(0), "Scheme") {
+                chosen = Some(index);
+            }
+            ui.overlays();
+            state.end_frame();
+        };
+        draw(&mut state, &[]);
+        state.set_focus(Some(id), true);
+        draw(&mut state, &[key(Key::Enter, Modifiers::NONE)]);
+        draw(&mut state, &[]);
+        let target = id.with(("item", 40_usize));
+        for _ in 0..60 {
+            if state.focus() == Some(target) {
+                break;
+            }
+            draw(&mut state, &[key(Key::Tab, Modifiers::NONE)]);
+            draw(&mut state, &[]);
+        }
+        let on = state
+            .zones()
+            .iter()
+            .find(|zone| Some(zone.id) == state.focus())
+            .map(|zone| zone.label.clone());
+        assert_eq!(
+            state.focus(),
+            Some(target),
+            "Tab walks past the first screen: on {on:?}"
+        );
+        let window = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let zone = state
+            .zones()
+            .iter()
+            .find(|zone| zone.id == target)
+            .expect("the focused item is drawn");
+        assert!(
+            zone.rect.y >= window.y && zone.rect.b() <= window.b(),
+            "and in view"
+        );
+        draw(&mut state, &[key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(chosen, Some(40));
     }
 
     #[test]

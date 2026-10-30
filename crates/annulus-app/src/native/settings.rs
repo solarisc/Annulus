@@ -411,7 +411,7 @@ fn appearance(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool
         ui,
         &mut card,
         true,
-        ("Theme", "Follow the system, or always light or dark."),
+        ("Theme", "Light or dark for Annulus's own colors."),
         300.0,
     );
     let modes = [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark];
