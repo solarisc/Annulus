@@ -155,6 +155,7 @@ async fn accept(
     wake: Wake,
 ) {
     let room = Arc::new(tokio::sync::Semaphore::new(CLIENTS_MAX));
+    #[cfg(windows)]
     let mut listener = listener;
     loop {
         #[cfg(windows)]
@@ -341,7 +342,10 @@ mod unix {
     pub(super) fn folder() -> std::io::Result<PathBuf> {
         let base =
             std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-        let folder = base.join(format!("annulus-{}", super::hex(&super::random::<8>()?)));
+        let folder = base.join(format!(
+            "annulus-{}",
+            super::hex(&*super::random::<8>()?).as_str()
+        ));
         std::fs::DirBuilder::new().mode(0o700).create(&folder)?;
         Ok(folder)
     }
