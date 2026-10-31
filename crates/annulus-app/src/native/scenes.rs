@@ -3992,7 +3992,9 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
         let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
         let tab = client.open(None).map_err(|e| e.to_string())?;
         let out = client
-            .run(tab.id, ticking, Some(3))
+            // A wait shorter than the quiet that counts as done: it always runs out, however
+            // slowly a busy runner draws frames.
+            .run(tab.id, ticking, Some(1))
             .map_err(|e| e.to_string())?;
         client.interrupt(tab.id).map_err(|e| e.to_string())?;
         // Answered only once this one settles, which Stop never lets happen.
