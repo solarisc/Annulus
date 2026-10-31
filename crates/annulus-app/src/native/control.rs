@@ -416,7 +416,8 @@ pub fn agent_panel(
 fn list_commands(ui: &mut Ui<'_>, list: Rect, log: &mut AgentLog) -> Option<PanelAction> {
     let t = ui.theme;
     let char_w = ui.gfx.measure("M", MONO_SMALL).width.max(1.0);
-    let text_w = list.w - space::M * 2.0 - MARK_COLUMN - space::S;
+    // Room on the right for Copy, which shows on the hovered and the picked row.
+    let text_w = list.w - space::M * 2.0 - MARK_COLUMN - space::S - 24.0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Characters on a line.
     let per_line = (text_w / char_w).floor().max(8.0) as usize;
     let rows: Vec<Vec<String>> = log
