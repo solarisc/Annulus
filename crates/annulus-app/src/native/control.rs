@@ -70,6 +70,28 @@ impl AgentLog {
             picked,
         }
     }
+
+    /// Settles the commands before `entry` still going, now that the one at `entry` has
+    /// `ending`: all of them when its shell ended, and when it is done, those whose own prompt
+    /// is back (the `ssh` an `exit` came back from, the `sudo` a password went to). `text` is
+    /// the terminal's text now.
+    fn settle_before(&mut self, entry: usize, text: &str, ending: Ending) {
+        let now = crate::sync_screen::now_secs();
+        let last = text.trim_end().lines().next_back().unwrap_or_default();
+        for command in self.commands.iter_mut().take(entry) {
+            if !command.state.going() {
+                continue;
+            }
+            let took = Duration::from_secs(now.saturating_sub(command.at));
+            match ending {
+                Ending::Ended => command.state = Ran::Ended { took },
+                Ending::Done if prompt_back(last, &command.typed.prompt) => {
+                    command.state = ran(&output_of(text, &command.typed), took, Ending::Done);
+                }
+                Ending::Done | Ending::Waiting | Ending::TimedOut => {}
+            }
+        }
+    }
 }
 
 /// One command an agent typed.
@@ -154,6 +176,9 @@ pub struct Typed {
     /// The shell prompt that comes back once it is done: that line, unless the command
     /// answered a question (a password, a yes or no) of the one before.
     prompt: String,
+    /// Other prompts its tab showed before: one of them back ends it too (the local shell's,
+    /// after `exit` from an `ssh`).
+    known: Vec<String>,
 }
 
 impl Typed {
@@ -170,6 +195,7 @@ impl Typed {
                 .collect(),
             prompt: line.clone(),
             line,
+            known: Vec::new(),
         }
     }
 
@@ -194,13 +220,34 @@ impl Typed {
             .or_else(|| (expected <= last && above_at(expected)).then_some(expected))
     }
 
-    /// Typed while the command before still went on. At a question of its (a password, a
-    /// yes or no) it ends when that one's prompt comes back; at a prompt of its own (the
-    /// remote shell `ssh` opened, `sudo -i`, a REPL) when that prompt does.
-    fn answering(&mut self, before: &Typed) {
-        if !looks_like_prompt(&self.line) {
+    /// Typed after `before` (`busy`: while it still went on), in a tab whose commands were
+    /// typed at `earlier`, newest last. Its line may be that one's prompt behind output with
+    /// no newline (`okuser@box:~$`): it ends at the prompt itself. Typed at a question of a
+    /// command still going (a password, a yes or no), it ends when that one's prompt comes
+    /// back; at a prompt of its own (the remote shell `ssh` opened, `sudo -i`, a REPL), when
+    /// that prompt does.
+    fn following(&mut self, before: &Typed, busy: bool, earlier: &[AgentCommand]) {
+        let behind_output =
+            before.prompt.chars().count() > 2 && self.line.ends_with(before.prompt.as_str());
+        if behind_output || (busy && !looks_like_prompt(&self.line)) {
             self.prompt.clone_from(&before.prompt);
         }
+        // The tab's other prompts, newest first and a few at most.
+        for command in earlier.iter().rev() {
+            let prompt = &command.typed.prompt;
+            if self.known.len() < 4
+                && !prompt.is_empty()
+                && *prompt != self.prompt
+                && !self.known.contains(prompt)
+            {
+                self.known.push(prompt.clone());
+            }
+        }
+    }
+
+    /// Whether `line`, the terminal's last line, is its prompt or one its tab showed before.
+    fn prompt_back(&self, line: &str) -> bool {
+        prompt_back(line, &self.prompt) || self.known.iter().any(|known| prompt_back(line, known))
     }
 }
 
@@ -235,10 +282,7 @@ fn after(text: &str, typed: &Typed) -> After {
     };
     After {
         lines: count,
-        prompt: count > 0
-            && lines
-                .last()
-                .is_some_and(|last| prompt_back(last, &typed.prompt)),
+        prompt: count > 0 && lines.last().is_some_and(|last| typed.prompt_back(last)),
     }
 }
 
@@ -560,8 +604,8 @@ impl NativeApp {
                 let mut typed = Typed::of(&text);
                 let at = crate::sync_screen::now_secs();
                 let log = tab.agent.get_or_insert_with(|| Box::new(AgentLog::new(at)));
-                if busy && let Some(before) = log.commands.last() {
-                    typed.answering(&before.typed);
+                if let Some(before) = log.commands.last() {
+                    typed.following(&before.typed, busy, &log.commands);
                 }
                 run.entry = log.commands.len();
                 log.commands.push(AgentCommand {
@@ -653,22 +697,22 @@ impl NativeApp {
             Ending::Done | Ending::Waiting => run.output.1.duration_since(run.asked),
             Ending::TimedOut | Ending::Ended => now.duration_since(run.asked),
         };
-        let out = output_of(&panes.focused_transcript().unwrap_or_default(), &typed);
+        let text = panes.focused_transcript().unwrap_or_default();
+        let out = output_of(&text, &typed);
         let state = ran(&out, took, ending);
         let mut heard = state.state();
         let mut by_hand = false;
-        if let Some(command) = tab
-            .agent
-            .as_mut()
-            .and_then(|log| log.commands.get_mut(run.entry))
-        {
-            // Ctrl+C or Stop already said how it ended.
-            by_hand = matches!(command.state, Ran::Interrupted { .. } | Ran::Cut { .. });
-            if by_hand {
-                heard = RunState::Interrupted;
-            } else {
-                command.state = state;
+        if let Some(log) = tab.agent.as_mut() {
+            if let Some(command) = log.commands.get_mut(run.entry) {
+                // Ctrl+C or Stop already said how it ended.
+                by_hand = matches!(command.state, Ran::Interrupted { .. } | Ran::Cut { .. });
+                if by_hand {
+                    heard = RunState::Interrupted;
+                } else {
+                    command.state = state;
+                }
             }
+            log.settle_before(run.entry, &text, ending);
         }
         run.answer(Ok(Response::Ran(RunOutput {
             output: out,
@@ -1709,11 +1753,15 @@ mod tests {
         // A password typed at sudo's question ends at the shell prompt from before.
         let shell = Typed::of("user@box:~$");
         let mut answer = Typed::of("user@box:~$ sudo ls\n[sudo] password for me:");
-        answer.answering(&shell);
+        answer.following(&shell, true, &[]);
         // A command typed in the shell `ssh` opened ends at that shell's prompt.
         let mut remote = Typed::of("user@box:~$ ssh web-1\ndeploy@web-1:~$");
-        remote.answering(&shell);
+        remote.following(&shell, true, &[]);
         assert_eq!(remote.prompt, "deploy@web-1:~$");
+        // Typed at the prompt behind output with no newline: it ends at the prompt itself.
+        let mut behind = Typed::of("user@box:~$ printf ok\nokuser@box:~$");
+        behind.following(&shell, false, &[]);
+        assert_eq!(behind.prompt, "user@box:~$");
         let now = "user@box:~$ sudo ls\n[sudo] password for me:\nfile\nuser@box:~$\n";
         assert_eq!(
             after(now, &answer),
@@ -1753,6 +1801,49 @@ mod tests {
             None,
             "waited on again, only output since then counts"
         );
+    }
+
+    #[test]
+    fn an_exit_from_ssh_is_done_at_the_local_prompt_and_settles_the_ssh_before_it() {
+        let local = r"PS C:\Windows>";
+        let command = |text: &str, typed: Typed, state| AgentCommand {
+            text: text.into(),
+            at: 0,
+            line: 0,
+            state,
+            typed,
+        };
+        let waiting = || Ran::Waiting {
+            took: Duration::from_millis(600),
+            lines: 30,
+        };
+        let mut log = AgentLog::new(0);
+        log.commands
+            .push(command("ssh web-1", Typed::of(local), waiting()));
+        let screen = format!("{local} ssh web-1\nWelcome\ndeploy@web-1:~$");
+        let mut exit = Typed::of(&screen);
+        exit.following(&log.commands[0].typed, true, &log.commands);
+        assert_eq!(exit.prompt, "deploy@web-1:~$", "typed in the remote shell");
+        let now = format!("{screen} exit\nlogout\n{local}\n");
+        assert_eq!(
+            after(&now, &exit),
+            After {
+                lines: 2,
+                prompt: true
+            },
+            "the local prompt the tab showed before counts as back"
+        );
+        log.commands
+            .push(command("exit", exit, Ran::Running(Instant::now())));
+        log.settle_before(1, &now, Ending::Done);
+        assert!(
+            matches!(log.commands[0].state, Ran::Done { .. }),
+            "the ssh it left is done too"
+        );
+        // A shell that ended takes everything still going with it.
+        log.commands[0].state = waiting();
+        log.settle_before(1, &now, Ending::Ended);
+        assert!(matches!(log.commands[0].state, Ran::Ended { .. }));
     }
 
     #[test]
