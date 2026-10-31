@@ -258,7 +258,7 @@ mod tests {
         assert!(refused.contains("shorten"), "{refused}");
         // A record from before notes has none, and none are written for it.
         let old: Host = serde_json::from_str(r#"{"id":1,"label":"a","address":"x"}"#).unwrap();
-        assert!(old.notes.is_empty());
+        assert_eq!(old.notes, "", "a record from before notes has none");
         assert!(!serde_json::to_string(&old).unwrap().contains("notes"));
     }
 
