@@ -327,6 +327,14 @@ fn has_tags(host: &Host, filter: &[String]) -> bool {
 }
 
 impl HostsView {
+    /// Opens the `ssh_config` import preview, or says why it cannot (the New Tab page's welcome).
+    pub fn start_import(&mut self, vault: &Vault) {
+        match crate::import_dialog::ImportPreview::load(vault) {
+            Ok(preview) => self.import = Some(preview),
+            Err(problem) => self.notice = Some(problem),
+        }
+    }
+
     /// Opens the editor on a new host.
     pub fn new_host(&mut self, vault: &Vault) {
         let mut host = vault.draft_host();
@@ -370,10 +378,7 @@ impl HostsView {
         }
         if action == Some(HostsAction::ImportSshConfig) {
             action = None;
-            match crate::import_dialog::ImportPreview::load(vault) {
-                Ok(preview) => self.import = Some(preview),
-                Err(problem) => self.notice = Some(problem),
-            }
+            self.start_import(vault);
         }
         if let Some(panel) = panel {
             // The panel slides in from the right edge and fades up as it opens.

@@ -44,6 +44,9 @@ pub struct Settings {
     /// (F-APP-004). By vault id and time only: this file is not encrypted, so no name or
     /// address is ever written here.
     pub recent: Vec<Recent>,
+    /// Saved hosts pinned to the top of the New Tab page (F-APP-004), in the order pinned.
+    /// By vault id only, as `recent`.
+    pub pinned: Vec<u64>,
     /// Shortcuts given other keys in Settings (F-SET-004); the others keep their own.
     pub keys: Vec<KeyBinding>,
     /// Let the `annulus` command and AI agents drive the app while the vault is unlocked
@@ -95,6 +98,7 @@ impl Default for Settings {
             open_tabs: Vec::new(),
             reduce_motion: false,
             recent: Vec::new(),
+            pinned: Vec::new(),
             keys: Vec::new(),
             automation: false,
         }
@@ -102,6 +106,15 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Pins host `host` to the top of the New Tab page, last among the pinned, or unpins it.
+    pub fn toggle_pin(&mut self, host: u64) {
+        if let Some(at) = self.pinned.iter().position(|pinned| *pinned == host) {
+            self.pinned.remove(at);
+        } else {
+            self.pinned.push(host);
+        }
+    }
+
     /// Notes a connection to host `host` at `at`: it goes to the front of the recent ones, once,
     /// and the oldest beyond [`RECENT_KEPT`] are forgotten.
     pub fn connected(&mut self, host: u64, at: u64) {
@@ -165,6 +178,7 @@ mod tests {
                 host: 7,
                 at: 1_800_000_000,
             }],
+            pinned: vec![7, 3],
             keys: vec![KeyBinding {
                 action: "NEW_TAB".into(),
                 keys: "Ctrl+Alt+N".into(),

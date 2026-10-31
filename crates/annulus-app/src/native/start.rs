@@ -40,41 +40,65 @@ pub enum Choice {
     Sftp,
     /// Add a host in the vault.
     NewHost,
+    /// Bring hosts in from `~/.ssh/config` (the welcome of an empty vault).
+    Import,
+    /// Pin saved host `id` to the top of the page, or unpin it; the page stays.
+    TogglePin(u64),
 }
 
 /// The hosts the page lists.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Listing {
-    /// Recent connections that still name a saved host: id and when, the latest first.
+    /// Pinned hosts that still exist, in the order pinned.
+    pub pinned: Vec<u64>,
+    /// Recent connections that still name a saved host and are not pinned: id and when, the
+    /// latest first.
     pub recent: Vec<(u64, u64)>,
-    /// Then saved hosts, the newest first, none of them already among the recent ones.
+    /// Then saved hosts, the newest first, none of them pinned or among the recent ones.
     pub saved: Vec<u64>,
 }
 
-/// What the page lists for `query`: up to [`RECENT_SHOWN`] recent connections, then saved hosts
-/// newest first. With no query the saved hosts fill what is left of `room` rows, so the page
-/// is never half empty; a query lists every host that matches.
+/// What the page lists for `query`: the pinned hosts, up to [`RECENT_SHOWN`] recent
+/// connections, then saved hosts newest first. With no query the saved hosts fill what is left
+/// of `room` rows, so the page is never half empty; a query lists every host that matches.
 #[must_use]
-pub fn listing(recent: &[Recent], hosts: &[Host], query: &str, room: usize) -> Listing {
+pub fn listing(
+    (recent, pinned): (&[Recent], &[u64]),
+    hosts: &[Host],
+    query: &str,
+    room: usize,
+) -> Listing {
     let host = |id: u64| hosts.iter().find(|host| host.id == id);
+    let pinned: Vec<u64> = pinned
+        .iter()
+        .copied()
+        .filter(|id| host(*id).is_some_and(|host| host.matches(query)))
+        .collect();
     let recent: Vec<(u64, u64)> = recent
         .iter()
-        .filter(|seen| host(seen.host).is_some_and(|host| host.matches(query)))
+        .filter(|seen| {
+            !pinned.contains(&seen.host) && host(seen.host).is_some_and(|host| host.matches(query))
+        })
         .take(RECENT_SHOWN)
         .map(|seen| (seen.host, seen.at))
         .collect();
     let mut saved: Vec<&Host> = hosts
         .iter()
-        .filter(|host| host.matches(query) && !recent.iter().any(|(id, _)| *id == host.id))
+        .filter(|host| {
+            host.matches(query)
+                && !pinned.contains(&host.id)
+                && !recent.iter().any(|(id, _)| *id == host.id)
+        })
         .collect();
     // Ids only grow, so the highest is the newest saved on this device.
     saved.sort_by_key(|host| std::cmp::Reverse(host.id));
     let keep = if query.trim().is_empty() {
-        room.saturating_sub(recent.len())
+        room.saturating_sub(recent.len() + pinned.len())
     } else {
         saved.len()
     };
     Listing {
+        pinned,
         recent,
         saved: saved.into_iter().take(keep).map(|host| host.id).collect(),
     }
@@ -105,6 +129,8 @@ struct Row {
     detail: String,
     os: Option<&'static os::Os>,
     when: Option<String>,
+    /// For a saved host: whether it is pinned (its pin shows at all times, lit).
+    pinned: Option<bool>,
 }
 
 /// The New Tab page's state.
@@ -127,7 +153,7 @@ impl StartView {
         ui: &mut Ui<'_>,
         rect: Rect,
         uid: u64,
-        (hosts, recent, now): (&[Host], &[Recent], u64),
+        (hosts, recent, pinned, now): (&[Host], &[Recent], &[u64], u64),
         files: bool,
     ) -> Option<Choice> {
         let t = ui.theme;
@@ -214,7 +240,7 @@ impl StartView {
         } else {
             room_for(column.h)
         };
-        let found = listing(recent, hosts, &self.query, room);
+        let found = listing((recent, pinned), hosts, &self.query, room);
         let host = |id: u64| hosts.iter().find(|host| host.id == id);
         let row_for = |id: u64, when: Option<String>| {
             host(id).map(|host| Row {
@@ -223,8 +249,15 @@ impl StartView {
                 detail: host.target(),
                 os: os::of(host),
                 when,
+                // The SFTP tab's picker pins nothing.
+                pinned: (!files).then(|| pinned.contains(&id)),
             })
         };
+        let pinned_rows: Vec<Row> = found
+            .pinned
+            .iter()
+            .filter_map(|id| row_for(*id, None))
+            .collect();
         let recent_rows: Vec<Row> = found
             .recent
             .iter()
@@ -239,6 +272,7 @@ impl StartView {
         // A typed target no saved host matches: a one-time connection, under its own heading.
         let mut quick_rows = Vec::new();
         if !files
+            && pinned_rows.is_empty()
             && recent_rows.is_empty()
             && saved_rows.is_empty()
             && Target::parse(query, "").is_some()
@@ -249,9 +283,10 @@ impl StartView {
                 detail: "Not saved: a one-time SSH connection".to_owned(),
                 os: None,
                 when: None,
+                pinned: None,
             });
         }
-        let count = recent_rows.len() + saved_rows.len() + quick_rows.len();
+        let count = pinned_rows.len() + recent_rows.len() + saved_rows.len() + quick_rows.len();
         self.highlight = self.highlight.min(count.saturating_sub(1));
         if ui.key(Key::Down, Modifiers::NONE) && count > 0 {
             self.highlight = (self.highlight + 1).min(count - 1);
@@ -260,7 +295,9 @@ impl StartView {
             self.highlight = self.highlight.saturating_sub(1);
         }
 
-        if count == 0 {
+        if count == 0 && hosts.is_empty() && !files && query.is_empty() {
+            chosen = welcome(ui, base, column).or(chosen);
+        } else if count == 0 {
             let line = if hosts.is_empty() {
                 "Saved hosts and your recent connections show here."
             } else {
@@ -269,6 +306,7 @@ impl StartView {
             empty(ui, column, line);
         } else {
             let sections = [
+                ("Pinned", pinned_rows),
                 ("Recent connections", recent_rows),
                 (
                     if query.is_empty() && !files {
@@ -329,6 +367,11 @@ impl StartView {
                     match draw_row(ui, base, place, row, highlighted) {
                         RowEvent::Chosen => chosen = Some(row.choice.clone()),
                         RowEvent::Hovered => self.highlight = index,
+                        RowEvent::Pin => {
+                            if let Choice::Host(id) = row.choice {
+                                chosen = Some(Choice::TogglePin(id));
+                            }
+                        }
                         RowEvent::None => {}
                     }
                     ui.pop_layer();
@@ -349,10 +392,10 @@ impl StartView {
     }
 }
 
-/// How many rows the list shows without scrolling in `height`, both sections' labels counted.
+/// How many rows the list shows without scrolling in `height`, the sections' labels counted.
 fn room_for(height: f32) -> usize {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Small, positive.
-    let rows = ((height - 2.0 * (LABEL_H + space::M)) / ROW_H)
+    let rows = ((height - 3.0 * (LABEL_H + space::M)) / ROW_H)
         .floor()
         .max(0.0) as usize;
     rows
@@ -362,6 +405,8 @@ enum RowEvent {
     None,
     Hovered,
     Chosen,
+    /// Its pin was clicked.
+    Pin,
 }
 
 fn draw_row(ui: &mut Ui<'_>, base: Id, rect: Rect, row: &Row, highlighted: bool) -> RowEvent {
@@ -372,6 +417,36 @@ fn draw_row(ui: &mut Ui<'_>, base: Id, rect: Rect, row: &Row, highlighted: bool)
         ui.focus_ring(rect, 10.0);
     }
     let mut inner = rect.inset(space::M, 0.0);
+    // A saved host's pin, at its right end: always on a pinned host, else while the row is
+    // under the pointer or the keyboard.
+    let pin_id = id.with("pin");
+    let pin_slot = row
+        .pinned
+        .map(|_| inner.take_right(28.0).centered(28.0, 28.0));
+    let mut pin_clicked = false;
+    if let (Some(slot), Some(pinned)) = (pin_slot, row.pinned) {
+        inner.take_right(space::S);
+        let near = response.hovered || highlighted || ui.hover_within(rect);
+        if pinned || near {
+            let name = if pinned {
+                "Unpin from New Tab"
+            } else {
+                "Pin to the top of New Tab"
+            };
+            let pin = ui.zone(pin_id, slot, Role::Button, name);
+            ui.tooltip(pin_id, slot, name);
+            if pin.hovered {
+                ui.gfx.fill_rect(slot, 7.0, t.hover);
+                ui.set_cursor(Cursor::Pointer);
+            }
+            if pin.focus_ring {
+                ui.focus_ring(slot, 7.0);
+            }
+            let ink = if pinned { t.accent } else { t.text2 };
+            ui.gfx.icon(icons::PIN, slot.centered(15.0, 15.0), ink);
+            pin_clicked = pin.clicked;
+        }
+    }
     let tile = inner.take_left(32.0).centered(32.0, 32.0);
     if matches!(row.choice, Choice::Quick(_)) {
         ui.gfx.fill_rect(tile, 9.0, t.accent.alpha(0.16));
@@ -406,7 +481,9 @@ fn draw_row(ui: &mut Ui<'_>, base: Id, rect: Rect, row: &Row, highlighted: bool)
     if response.hovered {
         ui.set_cursor(Cursor::Pointer);
     }
-    if response.clicked {
+    if pin_clicked {
+        RowEvent::Pin
+    } else if response.clicked {
         RowEvent::Chosen
     } else if response.hovered {
         RowEvent::Hovered
@@ -424,6 +501,67 @@ impl Row {
             other => format!("{other:?}"),
         }
     }
+}
+
+/// What a new tab shows while the vault holds no host yet: where to start. Returns what was
+/// chosen.
+fn welcome(ui: &mut Ui<'_>, base: Id, rect: Rect) -> Option<Choice> {
+    let t = ui.theme;
+    let mut column = Rect::new(rect.x, rect.y + space::L, rect.w, 220.0);
+    let badge = column.take_top(56.0).centered(56.0, 56.0);
+    ui.gfx.fill_rect(badge, 16.0, t.accent.alpha(0.14));
+    ui.gfx
+        .icon(icons::SERVER, badge.centered(24.0, 24.0), t.accent);
+    column.take_top(space::L);
+    ui.strict_text(
+        column.take_top(24.0),
+        "Welcome to Annulus",
+        HEADING,
+        t.text,
+        Align::Center,
+    );
+    column.take_top(space::XS);
+    for line in [
+        "Bring in the servers you already use from ~/.ssh/config,",
+        "add one by hand, or type user@host above to connect once.",
+    ] {
+        ui.gfx
+            .text(column.take_top(20.0), line, BODY, t.text2, Align::Center);
+    }
+    column.take_top(space::L);
+    let import_w = button_width(&mut ui.gfx, "Import ssh_config", Some(icons::DOWNLOAD));
+    let new_w = button_width(&mut ui.gfx, "New host", Some(icons::PLUS));
+    let mut line = column
+        .take_top(32.0)
+        .centered(import_w + space::S + new_w, 32.0);
+    let import = line.take_left(import_w);
+    line.take_left(space::S);
+    let mut chosen = None;
+    if ui
+        .button(
+            base.with("welcome.import"),
+            import,
+            "Import ssh_config",
+            Some(icons::DOWNLOAD),
+            Kind::Primary,
+        )
+        .clicked
+    {
+        chosen = Some(Choice::Import);
+    }
+    if ui
+        .button(
+            base.with("welcome.new"),
+            line,
+            "New host",
+            Some(icons::PLUS),
+            Kind::Secondary,
+        )
+        .clicked
+    {
+        chosen = Some(Choice::NewHost);
+    }
+    chosen
 }
 
 /// What the page shows when it lists nothing.
@@ -478,7 +616,7 @@ mod tests {
                 at: 100,
             },
         ];
-        let found = listing(&recent, &hosts, "", 6);
+        let found = listing((&recent, &[]), &hosts, "", 6);
         assert_eq!(found.recent, [(id("grafana"), 300), (id("prod-db"), 100)]);
         assert_eq!(found.saved.len(), 4, "the rest of the room");
         // Newest first, and never one already among the recent.
@@ -486,8 +624,47 @@ mod tests {
         assert!(found.saved.windows(2).all(|pair| pair[0] > pair[1]));
         assert!(!found.saved.contains(&id("grafana")));
         // No room: the recent ones still show.
-        let tight = listing(&recent, &hosts, "", 1);
+        let tight = listing((&recent, &[]), &hosts, "", 1);
         assert_eq!((tight.recent.len(), tight.saved.len()), (2, 0));
+    }
+
+    #[test]
+    fn pinned_hosts_head_the_page_in_pin_order_and_are_listed_nowhere_else() {
+        let hosts = hosts("start-pinned");
+        let id = |label: &str| hosts.iter().find(|host| host.label == label).unwrap().id;
+        let recent = [
+            Recent {
+                host: id("grafana"),
+                at: 300,
+            },
+            Recent {
+                host: id("prod-db"),
+                at: 100,
+            },
+        ];
+        // Pinned last first; one deleted since is left out.
+        let pinned = [id("router"), 9999, id("grafana")];
+        let found = listing((&recent, &pinned), &hosts, "", 6);
+        assert_eq!(found.pinned, [id("router"), id("grafana")]);
+        assert_eq!(
+            found.recent,
+            [(id("prod-db"), 100)],
+            "not again among the recent"
+        );
+        assert!(!found.saved.contains(&id("router")) && !found.saved.contains(&id("grafana")));
+        assert_eq!(
+            found.pinned.len() + found.recent.len() + found.saved.len(),
+            6,
+            "together they fill the room"
+        );
+        // A search narrows the pinned too.
+        let searched = listing((&recent, &pinned), &hosts, "graf", 6);
+        assert_eq!(searched.pinned, [id("grafana")]);
+        let mut settings = annulus_config::settings::Settings::default();
+        settings.toggle_pin(4);
+        settings.toggle_pin(9);
+        settings.toggle_pin(4);
+        assert_eq!(settings.pinned, [9], "a second click unpins");
     }
 
     #[test]
@@ -501,10 +678,13 @@ mod tests {
                 at: at as u64,
             })
             .collect();
-        assert_eq!(listing(&recent, &hosts, "", 40).recent.len(), RECENT_SHOWN);
-        let found = listing(&[], &hosts, "api", 2);
+        assert_eq!(
+            listing((&recent, &[]), &hosts, "", 40).recent.len(),
+            RECENT_SHOWN
+        );
+        let found = listing((&[], &[]), &hosts, "api", 2);
         assert_eq!(found.saved.len(), 2, "both api hosts, whatever the room");
-        let found = listing(&[], &hosts, "deploy", 1);
+        let found = listing((&[], &[]), &hosts, "deploy", 1);
         assert!(found.saved.len() > 1);
     }
 

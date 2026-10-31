@@ -328,6 +328,13 @@ icons! {
         Move(1.75, 5.0), Line(14.25, 5.0), Line(14.25, 11.0), Line(1.75, 11.0), Close,
         Dot(4.5, 8.0, 0.75), Dot(7.0, 8.0, 0.75), Dot(9.5, 8.0, 0.75), Dot(12.0, 8.0, 0.75),
     ];
+    /// Pinned hosts: a push pin.
+    PIN = 54, "pin", [
+        Move(5.0, 2.5), Line(11.0, 2.5),
+        Move(6.5, 2.5), Line(6.5, 7.0), Line(4.5, 9.5), Line(11.5, 9.5), Line(9.5, 7.0),
+        Line(9.5, 2.5),
+        Move(8.0, 9.5), Line(8.0, 14.0),
+    ];
 }
 
 /// The geometry of `id`, or `None` for an unknown id.
