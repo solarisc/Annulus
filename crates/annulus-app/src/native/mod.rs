@@ -523,6 +523,20 @@ impl NativeApp {
                     self.hosts.new_host(vault);
                 }
             }
+            start::Choice::Import => {
+                self.tabs.remove(index);
+                self.active = 0;
+                self.section = Section::Hosts;
+                if let Some(vault) = &self.vault {
+                    self.hosts.start_import(vault);
+                }
+            }
+            start::Choice::TogglePin(id) => {
+                self.settings.toggle_pin(id);
+                if let Some(path) = &self.settings_path {
+                    let _ = self.settings.save(path);
+                }
+            }
         }
     }
 
@@ -1117,7 +1131,14 @@ impl NativeApp {
             let uid = tab.uid;
             let files = tab.kind == TabKind::Files;
             let chosen = tab.start.as_mut().and_then(|start| {
-                start.draw(ui, content, uid, (hosts, &self.settings.recent, now), files)
+                let settings = &self.settings;
+                start.draw(
+                    ui,
+                    content,
+                    uid,
+                    (hosts, &settings.recent, &settings.pinned, now),
+                    files,
+                )
             });
             if let Some(choice) = chosen {
                 self.start_choice(uid, choice);

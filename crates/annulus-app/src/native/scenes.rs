@@ -202,6 +202,22 @@ fn new_tab(app: &mut NativeApp) {
     app.open_new_tab();
 }
 
+/// A New Tab page with two hosts pinned to its top.
+fn new_tab_pinned(app: &mut NativeApp) {
+    new_tab(app);
+    for label in ["bastion", "nas"] {
+        if let Some(id) = app.vault.as_ref().and_then(|vault| {
+            vault
+                .hosts()
+                .iter()
+                .find(|host| host.label == label)
+                .map(|host| host.id)
+        }) {
+            app.settings.toggle_pin(id);
+        }
+    }
+}
+
 fn sftp_picker(app: &mut NativeApp) {
     app.active = 1;
 }
@@ -407,6 +423,15 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: new_tab,
         acts: &[Act::Type("root@10.9.8.7")],
+    },
+    Scene {
+        name: "new-tab-pinned",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: new_tab_pinned,
+        acts: &[],
     },
     Scene {
         name: "new-tab-empty",
@@ -3722,6 +3747,80 @@ fn tabs_past_the_strips_end_wait_in_the_all_tabs_menu_and_come_back_when_picked(
         on_strip(&output)
     );
     assert_eq!(app.tabs.len(), super::FIXED_TABS + 16, "no tab lost");
+}
+
+#[test]
+fn a_host_pinned_from_a_new_tab_heads_the_next_one_and_a_second_click_unpins_it() {
+    let mut app = NativeApp::new(Some(fixture_vault("new-tab-pin", true)));
+    app.open_new_tab();
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    // The highlighted (first) row shows its pin.
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Pin to the top of New Tab"),
+        1.0,
+    );
+    assert_eq!(app.settings.pinned.len(), 1, "pinned");
+    let pinned = app.settings.pinned[0];
+    assert_eq!(
+        app.tabs[app.active].kind,
+        super::TabKind::NewTab,
+        "the page stays to pin more"
+    );
+    let output = step(&mut app, &mut state, &[], 2.0);
+    let label = app
+        .vault
+        .as_ref()
+        .unwrap()
+        .hosts()
+        .iter()
+        .find(|host| host.id == pinned)
+        .unwrap()
+        .label
+        .clone();
+    let first = output
+        .zones
+        .iter()
+        .find(|zone| zone.role == Role::ListItem)
+        .map(|zone| zone.label.clone());
+    assert_eq!(first, Some(label), "it heads the list");
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Unpin from New Tab"),
+        3.0,
+    );
+    assert!(app.settings.pinned.is_empty(), "and unpins");
+}
+
+#[test]
+fn an_empty_vaults_new_tab_welcomes_and_offers_the_ssh_config_import() {
+    let mut app = NativeApp::new(Some(fixture_vault("new-tab-welcome", false)));
+    app.open_new_tab();
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "New host" && zone.role == Role::Button)
+    );
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Import ssh_config"),
+        1.0,
+    );
+    assert_eq!(app.active, 0, "to the vault");
+    assert_eq!(app.section, super::Section::Hosts);
+    assert!(
+        !app.tabs
+            .iter()
+            .any(|tab| tab.kind == super::TabKind::NewTab),
+        "the new tab gave way"
+    );
 }
 
 #[test]
