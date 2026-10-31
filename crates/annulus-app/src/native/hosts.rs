@@ -1232,7 +1232,7 @@ impl HostsView {
             "editor.notes",
             "Notes",
             &mut editor.notes,
-            "What it is for, how it is set up, what to watch out for. Agents read these too.",
+            "What it is for, what to watch out for",
         );
 
         form.gap(space::S);

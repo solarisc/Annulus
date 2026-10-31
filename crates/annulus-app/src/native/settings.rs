@@ -549,10 +549,7 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         ui,
         &mut history,
         true,
-        (
-            "Lines each tab keeps",
-            "How far back a tab scrolls. Fewer drops the oldest at once.",
-        ),
+        ("Lines each tab keeps", "How far back each tab scrolls."),
         260.0,
     );
     let names: Vec<String> = SCROLLBACK

@@ -977,6 +977,16 @@ const SCENES: &[Scene] = &[
         setup: settings,
         acts: &[Act::Click("Terminal")],
     },
+    // The vault's lock and the Automation card with the agent settings (F-AUTO-006).
+    Scene {
+        name: "settings-security",
+        width: 1100,
+        height: 760,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Click("Security")],
+    },
     Scene {
         name: "settings-shortcuts",
         width: 1100,
