@@ -145,6 +145,40 @@ impl Client {
     pub fn read(&mut self, tab: u64, lines: Option<usize>) -> Result<String, ClientError> {
         self.call(Request::Read { tab, lines })
     }
+
+    /// Opens a terminal tab of the agent's own: a session to saved host `host`, or a local
+    /// shell.
+    ///
+    /// # Errors
+    /// As [`Self::call`].
+    pub fn open(&mut self, host: Option<u64>) -> Result<TabInfo, ClientError> {
+        self.call(Request::Open { host })
+    }
+
+    /// Runs `command` in agent tab `tab` and returns its output, waiting `wait` seconds at most.
+    ///
+    /// # Errors
+    /// As [`Self::call`].
+    pub fn run(
+        &mut self,
+        tab: u64,
+        command: &str,
+        wait: Option<u64>,
+    ) -> Result<String, ClientError> {
+        self.call(Request::Run {
+            tab,
+            command: command.to_owned(),
+            wait,
+        })
+    }
+
+    /// Closes agent tab `tab`.
+    ///
+    /// # Errors
+    /// As [`Self::call`].
+    pub fn close(&mut self, tab: u64) -> Result<(), ClientError> {
+        self.call(Request::Close { tab })
+    }
 }
 
 #[cfg(windows)]
@@ -251,6 +285,34 @@ mod tests {
             "closed, the door file is gone"
         );
         assert!(matches!(Client::connect(&dir), Err(ClientError::Closed)));
+    }
+
+    #[test]
+    fn past_eight_clients_the_newest_is_turned_away_until_one_leaves() {
+        let dir = temp_dir("cap");
+        let door = Door::open(&dir, Arc::new(|| {})).unwrap();
+        let held: Vec<Client> = (0..8).map(|_| Client::connect(&dir).unwrap()).collect();
+        // Give the door a moment to seat all eight before the ninth knocks.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut ninth = Client::connect(&dir).unwrap();
+        assert!(ninth.status().is_err(), "the ninth gets no answer");
+        drop(held);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let asking = std::thread::spawn({
+            let dir = dir.clone();
+            move || {
+                Client::connect(&dir)
+                    .unwrap()
+                    .status()
+                    .map(|status| status.tabs)
+            }
+        });
+        answer(&door, 1);
+        assert_eq!(
+            asking.join().unwrap().unwrap(),
+            2,
+            "with room again, one gets in"
+        );
     }
 
     #[test]

@@ -227,6 +227,12 @@ impl LiveTerminal {
         self.session.as_ref().map(Session::transcript)
     }
 
+    /// Whether its program has started (typing reaches it).
+    #[must_use]
+    pub fn started(&self) -> bool {
+        self.session.is_some()
+    }
+
     /// Sends bytes typed in another pane (broadcast input).
     pub fn write(&self, bytes: &[u8]) {
         if let Some(session) = &self.session {

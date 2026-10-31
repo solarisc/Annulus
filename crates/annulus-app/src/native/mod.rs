@@ -6,7 +6,7 @@
 mod account;
 mod ask;
 mod colors;
-mod control;
+pub mod control;
 pub mod demo;
 pub mod hosts;
 mod live;
@@ -36,7 +36,7 @@ use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
 use annulus_ui::motion::{Layer, Motion};
-use annulus_ui::widgets::{BODY, BODY_MEDIUM, Kind};
+use annulus_ui::widgets::{BODY, BODY_MEDIUM, Kind, Tone};
 use annulus_vault::vault::Vault;
 
 use crate::connect;
@@ -145,6 +145,8 @@ pub struct Tab {
     pub start: Option<Box<start::StartView>>,
     /// What to reopen at the next start (F-APP-008).
     pub origin: Option<OpenTab>,
+    /// What an agent typed here, when an agent opened it (ADR-0020); in memory only.
+    pub agent: Option<Box<control::AgentLog>>,
 }
 
 impl Tab {
@@ -159,6 +161,7 @@ impl Tab {
             sftp: None,
             start: None,
             origin: None,
+            agent: None,
         }
     }
 
@@ -271,6 +274,8 @@ pub struct NativeApp {
     door: Option<annulus_control::door::Door>,
     /// Opening the door failed; it is not tried again until the switch or the vault changes.
     door_failed: bool,
+    /// Agents' commands waiting to be typed or for their output to settle.
+    runs: Vec<control::Running>,
 }
 
 impl NativeApp {
@@ -324,6 +329,7 @@ impl NativeApp {
             os_reduces_motion: false,
             door: None,
             door_failed: false,
+            runs: Vec::new(),
         }
     }
 
@@ -407,6 +413,22 @@ impl NativeApp {
             ..Tab::new(uid, TabKind::NewTab, "New Tab")
         });
         self.active = self.tabs.len() - 1;
+    }
+
+    /// Opens a live terminal tab running `program` now, in front (last, or where the new tab
+    /// it was chosen from was); returns its uid.
+    fn open_terminal(&mut self, title: String, program: Program, origin: Option<OpenTab>) -> u64 {
+        let mut terminal = live::LiveTerminal::new(program);
+        // A saved host's tab connects under its name and its server's mark.
+        if let (Some(OpenTab::Host(id)), Some(vault)) = (&origin, &self.vault)
+            && let Some(host) = vault.hosts().iter().find(|host| host.id == *id)
+        {
+            terminal.identity = Some((host.label.clone(), os::of(host)));
+        }
+        self.push_terminal(title, TermView::Live(Box::new(panes::Panes::new(terminal))));
+        let tab = &mut self.tabs[self.active];
+        tab.origin = origin;
+        tab.uid
     }
 
     /// Opens a live terminal tab running `program` after this frame.
@@ -1050,9 +1072,11 @@ impl NativeApp {
         }
         self.palette = None;
         self.vault = None;
-        // Nothing drives the app while it is locked: the door closes now, not next frame.
+        // Nothing drives the app while it is locked: the door closes now, not next frame, and
+        // no waiting command is typed later.
         self.door = None;
         self.door_failed = false;
+        self.runs.clear();
         self.lock = lock::LockView::new(lock::Mode::Unlock);
         self.hosts = hosts::HostsView::default();
         self.forwards = screens::ForwardsView::default();
@@ -1079,7 +1103,10 @@ impl NativeApp {
             self.active = 0;
         }
         self.background(ui);
-        self.control();
+        if self.control() {
+            // A command's output is settling: look again soon.
+            ui.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         shortcuts::choose(&self.settings.keys);
         // Keys being recorded in Settings reach no shortcut.
         let in_settings = !locked
@@ -1174,7 +1201,23 @@ impl NativeApp {
                 };
             }
             let side = self.snippet_panel.is_some().then(|| area.take_right(300.0));
+            // An agent's tab shows what the agent typed beside it (ADR-0020 §6).
+            let strip = tab
+                .agent
+                .as_deref()
+                .map(|log| (area.take_right(control::STRIP_W), log));
             let content = panel_filled(ui, area, background);
+            if let Some((rect, log)) = strip
+                && control::agent_strip(ui, rect, log)
+            {
+                self.settings.automation = false;
+                self.door = None;
+                self.runs.clear();
+                if let Some(path) = &self.settings_path {
+                    let _ = self.settings.save(path);
+                }
+                ui.toast("Automation is off: every agent is cut off", Tone::Info);
+            }
             if let (Some(side), Some(search), TermView::Live(panes)) =
                 (side, self.snippet_panel.as_mut(), &*view)
             {
@@ -1222,18 +1265,7 @@ impl NativeApp {
         }
         self.learn_server_os();
         for (title, program, origin) in std::mem::take(&mut self.opens) {
-            let mut terminal = live::LiveTerminal::new(program);
-            // A saved host's tab connects under its name and its server's mark.
-            if let (Some(OpenTab::Host(id)), Some(vault)) = (&origin, &self.vault)
-                && let Some(host) = vault.hosts().iter().find(|host| host.id == *id)
-            {
-                terminal.identity = Some((host.label.clone(), os::of(host)));
-            }
-            self.push_terminal(title, TermView::Live(Box::new(panes::Panes::new(terminal))));
-            // In front: last, or where the new tab it was chosen from was.
-            if let Some(tab) = self.tabs.get_mut(self.active) {
-                tab.origin = origin;
-            }
+            self.open_terminal(title, program, origin);
             ui.request_repaint();
         }
         if let Some((title, programs)) = self.open_split.take()

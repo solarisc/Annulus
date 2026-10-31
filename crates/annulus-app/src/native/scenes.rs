@@ -153,6 +153,21 @@ fn terminal_tab(app: &mut NativeApp) {
     app.active = super::FIXED_TABS;
 }
 
+/// An agent's tab (ADR-0020): marked AI, with the commands it typed beside its terminal.
+fn agent_tab(app: &mut NativeApp) {
+    terminal_tab(app);
+    let now = crate::sync_screen::now_secs();
+    let tab = &mut app.tabs[super::FIXED_TABS];
+    "deploy-check".clone_into(&mut tab.title);
+    tab.agent = Some(Box::new(super::control::AgentLog {
+        commands: vec![
+            (now - 300, "systemctl status nginx".into()),
+            (now - 120, "df -h /var".into()),
+            (now - 20, "journalctl -u app -n 50 --no-pager".into()),
+        ],
+    }));
+}
+
 /// The window and the terminal in two different dark community schemes.
 fn scheme_dark(app: &mut NativeApp) {
     terminal_tab(app);
@@ -1010,6 +1025,15 @@ const SCENES: &[Scene] = &[
             Act::Click("Master password (10+ characters)"),
             Act::Type("Summer2024!!"),
         ],
+    },
+    Scene {
+        name: "agent-tab",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: agent_tab,
+        acts: &[],
     },
     Scene {
         name: "terminal",
@@ -3722,6 +3746,54 @@ fn tabs_past_the_strips_end_wait_in_the_all_tabs_menu_and_come_back_when_picked(
         on_strip(&output)
     );
     assert_eq!(app.tabs.len(), super::FIXED_TABS + 16, "no tab lost");
+}
+
+#[test]
+fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output() {
+    use annulus_control::client::Client;
+    let mut app = NativeApp::new(Some(fixture_vault("agent-run", false)));
+    app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
+    let dir = app
+        .vault_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_path_buf)
+        .unwrap();
+    app.waker = Some(std::sync::Arc::new(|| {}));
+    app.settings.automation = true;
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    let agent = std::thread::spawn(move || {
+        let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
+        let tab = client.open(None).map_err(|e| e.to_string())?;
+        let out = client
+            .run(tab.id, "echo agent-was-here", Some(30))
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>((tab.id, out))
+    });
+    let started = std::time::Instant::now();
+    let mut time = 1.0;
+    while !agent.is_finished() && started.elapsed() < std::time::Duration::from_secs(90) {
+        step(&mut app, &mut state, &[], time);
+        time += 0.05;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let (tab, out) = agent.join().unwrap().unwrap();
+    assert!(
+        out.lines().any(|line| line.trim() == "agent-was-here"),
+        "the echo's answer comes back:\n{out}"
+    );
+    let log = app
+        .tabs
+        .iter()
+        .find(|open| open.uid == tab)
+        .and_then(|open| open.agent.as_ref())
+        .unwrap();
+    assert_eq!(log.commands.len(), 1);
+    assert_eq!(
+        log.commands[0].1, "echo agent-was-here",
+        "listed beside the tab"
+    );
 }
 
 #[test]

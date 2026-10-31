@@ -6,11 +6,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A client's first line: the token from the door file.
-#[derive(Debug, Serialize, Deserialize)]
+/// A client's first line: the token from the door file. `Debug` never shows the token.
+#[derive(Serialize, Deserialize)]
 pub struct Hello {
     /// The door's token.
     pub token: String,
+}
+
+impl std::fmt::Debug for Hello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hello { token: <hidden> }")
+    }
 }
 
 /// One request, with the id its reply carries back.
@@ -40,6 +46,29 @@ pub enum Request {
         /// How many of the last lines; all of them when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lines: Option<usize>,
+    },
+    /// Opens a terminal tab of the agent's own, in front: an SSH session to saved host `host`,
+    /// or the default local shell when `None`.
+    Open {
+        /// The saved host's id, from `hosts`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<u64>,
+    },
+    /// Types `command` and Enter into agent tab `tab`, then answers with the output once it
+    /// has been quiet a moment, or after `wait` seconds at most.
+    Run {
+        /// The agent tab's id.
+        tab: u64,
+        /// What to type; each line is entered in turn.
+        command: String,
+        /// The most seconds to wait for output; 30 when `None`, 300 at most.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<u64>,
+    },
+    /// Closes agent tab `tab`.
+    Close {
+        /// The agent tab's id.
+        tab: u64,
     },
 }
 
@@ -72,6 +101,8 @@ impl Outcome {
             Ok(Response::Hosts(hosts)) => Self::ok(&hosts),
             Ok(Response::Tabs(tabs)) => Self::ok(&tabs),
             Ok(Response::Text(text)) => Self::Ok(serde_json::Value::String(text)),
+            Ok(Response::Tab(tab)) => Self::ok(&tab),
+            Ok(Response::Done) => Self::Ok(serde_json::Value::Null),
             Err(error) => Self::Error(error),
         }
     }
@@ -90,8 +121,12 @@ pub enum Response {
     Hosts(Vec<HostInfo>),
     /// For [`Request::Tabs`].
     Tabs(Vec<TabInfo>),
-    /// A terminal's text, for [`Request::Read`].
+    /// A terminal's text, for [`Request::Read`] and [`Request::Run`].
     Text(String),
+    /// The tab [`Request::Open`] opened.
+    Tab(TabInfo),
+    /// Done, with nothing to say ([`Request::Close`]).
+    Done,
 }
 
 /// The app's state.
@@ -137,10 +172,12 @@ pub struct TabInfo {
     pub status: String,
     /// It is the tab in front.
     pub active: bool,
+    /// An agent opened it: `run` and `close` work in it.
+    #[serde(default)]
+    pub agent: bool,
 }
 
 /// One line of JSON for `value`, without its newline.
-///
 #[must_use]
 pub fn encode<T: Serialize>(value: &T) -> String {
     // The protocol's types have only string keys, so they always serialize.

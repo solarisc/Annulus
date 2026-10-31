@@ -63,7 +63,7 @@ impl Door {
     /// # Errors
     /// When the pipe or socket cannot be made, or the door file cannot be written.
     pub fn open(dir: &Path, wake: Wake) -> io::Result<Self> {
-        let token = Zeroizing::new(hex(&random::<32>()?));
+        let token = hex(&*random::<32>()?);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -78,7 +78,7 @@ impl Door {
             let _entered = runtime.enter();
             #[cfg(windows)]
             {
-                pipe = format!(r"\\.\pipe\annulus-{}", hex(&random::<12>()?));
+                pipe = format!(r"\\.\pipe\annulus-{}", hex(&*random::<12>()?).as_str());
                 listener = windows::listen(&pipe)?;
             }
             #[cfg(unix)]
@@ -95,7 +95,12 @@ impl Door {
                 pipe: pipe.clone(),
                 token: token.to_string(),
             },
-        )?;
+        )
+        .inspect_err(|_| {
+            // The socket's folder goes with the door that could not be opened.
+            #[cfg(unix)]
+            let _ = std::fs::remove_dir_all(&folder);
+        })?;
         let token = Arc::new(token);
         let thread = std::thread::Builder::new()
             .name("annulus-door".into())
@@ -139,7 +144,9 @@ impl Drop for Door {
     }
 }
 
-/// Accepts connections until the door closes; each is served on its own task.
+/// Accepts connections until the door closes; each is served on its own task, at most
+/// [`CLIENTS_MAX`] at once. A failed accept (out of file handles) waits and tries again
+/// rather than leaving a door file that nothing answers.
 async fn accept(
     listener: Listener,
     pipe: &str,
@@ -147,38 +154,52 @@ async fn accept(
     calls: mpsc::Sender<Pending>,
     wake: Wake,
 ) {
-    #[cfg(windows)]
-    let _ = &pipe;
+    let room = Arc::new(tokio::sync::Semaphore::new(CLIENTS_MAX));
     let mut listener = listener;
     loop {
         #[cfg(windows)]
         let connection = {
-            if listener.connect().await.is_err() {
-                return;
-            }
+            let connected = listener.connect().await;
             // The next client gets a fresh instance; this one is the connected client's.
-            let Ok(next) = windows::next(pipe) else {
+            let Some(next) = windows::next_retrying(pipe).await else {
                 return;
             };
-            std::mem::replace(&mut listener, next)
+            let connection = std::mem::replace(&mut listener, next);
+            if connected.is_err() {
+                continue;
+            }
+            connection
         };
         #[cfg(unix)]
-        let connection = {
-            let _ = &pipe;
-            match listener.accept().await {
-                Ok((stream, _)) if unix::same_user(&stream, pipe) => stream,
-                Ok(_) => continue,
-                Err(_) => return,
+        let connection = match listener.accept().await {
+            Ok((stream, _)) if unix::same_user(&stream, pipe) => stream,
+            Ok(_) => continue,
+            Err(_) => {
+                tokio::time::sleep(RETRY).await;
+                continue;
             }
         };
-        tokio::spawn(serve(
-            connection,
-            Arc::clone(&token),
-            calls.clone(),
-            Arc::clone(&wake),
-        ));
+        // Full: the newest is turned away, so a pile of idle connections cannot crowd out
+        // the ones already working.
+        let Ok(seat) = Arc::clone(&room).try_acquire_owned() else {
+            continue;
+        };
+        let (token, calls, wake) = (Arc::clone(&token), calls.clone(), Arc::clone(&wake));
+        tokio::spawn(async move {
+            serve(connection, token, calls, wake).await;
+            drop(seat);
+        });
     }
 }
+
+/// How many clients may be connected at once.
+const CLIENTS_MAX: usize = 8;
+/// How long a client has to show its token.
+const HELLO_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a client may sit without asking anything before it is let go.
+const IDLE_MAX: std::time::Duration = std::time::Duration::from_mins(30);
+/// The wait before trying again after a failed accept.
+const RETRY: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// One client: its token first, then a reply for each request.
 async fn serve<S: AsyncRead + AsyncWrite>(
@@ -189,15 +210,17 @@ async fn serve<S: AsyncRead + AsyncWrite>(
 ) {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
-    let Some(hello) = read_line(&mut read, HELLO_MAX).await else {
+    let Ok(Some(hello)) = tokio::time::timeout(HELLO_WITHIN, read_line(&mut read, HELLO_MAX)).await
+    else {
         return;
     };
+    let hello = Zeroizing::new(hello);
     let shown = protocol::decode::<Hello>(&hello).map(|hello| Zeroizing::new(hello.token));
-    drop(Zeroizing::new(hello));
     if !shown.is_ok_and(|shown| same(shown.as_bytes(), token.as_bytes())) {
         return;
     }
-    while let Some(line) = read_line(&mut read, CALL_MAX).await {
+    while let Ok(Some(line)) = tokio::time::timeout(IDLE_MAX, read_line(&mut read, CALL_MAX)).await
+    {
         let reply = match protocol::decode::<Call>(&line) {
             Ok(Call { id, request }) => {
                 let (reply, answer) = tokio::sync::oneshot::channel();
@@ -241,24 +264,35 @@ fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn random<const N: usize>() -> io::Result<[u8; N]> {
-    let mut bytes = [0u8; N];
-    getrandom::fill(&mut bytes).map_err(|_| io::Error::other("no randomness"))?;
+/// `N` random bytes, wiped when dropped.
+fn random<const N: usize>() -> io::Result<Zeroizing<[u8; N]>> {
+    let mut bytes = Zeroizing::new([0u8; N]);
+    getrandom::fill(&mut *bytes).map_err(|_| io::Error::other("no randomness"))?;
     Ok(bytes)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+/// `bytes` in hex, in a string sized for it at once (no copies left behind as it grows) and
+/// wiped when dropped.
+fn hex(bytes: &[u8]) -> Zeroizing<String> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Zeroizing::new(String::with_capacity(bytes.len() * 2));
+    for byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0xf)]));
+    }
+    out
 }
 
+/// Writes the door file afresh: whatever was at `path` (a file left by a crash, a link) goes
+/// first, and the new file is made new, owner-only on Unix.
 fn write_door_file(path: &Path, door: &DoorFile) -> io::Result<()> {
     use std::io::Write as _;
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let text = Zeroizing::new(protocol::encode(door));
@@ -282,11 +316,19 @@ mod windows {
             .create(name)
     }
 
-    /// One more instance, for the next client.
-    pub(super) fn next(name: &str) -> std::io::Result<NamedPipeServer> {
-        ServerOptions::new()
-            .reject_remote_clients(true)
-            .create(name)
+    /// One more instance, for the next client; tried a few times when the system is short of
+    /// handles, and `None` if it never comes (the door then stops answering).
+    pub(super) async fn next_retrying(name: &str) -> Option<NamedPipeServer> {
+        for _ in 0..50 {
+            match ServerOptions::new()
+                .reject_remote_clients(true)
+                .create(name)
+            {
+                Ok(next) => return Some(next),
+                Err(_) => tokio::time::sleep(super::RETRY).await,
+            }
+        }
+        None
     }
 }
 

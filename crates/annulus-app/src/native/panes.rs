@@ -477,6 +477,25 @@ impl Panes {
         }
     }
 
+    /// Types `bytes` into the focused pane only (an agent's command, ADR-0020); `false` while
+    /// its program has not started yet.
+    pub fn type_focused(&self, bytes: &[u8]) -> bool {
+        let Some(pane) = self.pane(self.focused) else {
+            return false;
+        };
+        if !pane.terminal.started() {
+            return false;
+        }
+        pane.terminal.write(bytes);
+        true
+    }
+
+    /// The focused pane's text, scrollback included; `None` before its program starts.
+    #[must_use]
+    pub fn focused_transcript(&self) -> Option<String> {
+        self.pane(self.focused)?.terminal.transcript()
+    }
+
     /// Closes the focused pane; `false` when it is the last (the tab closes instead). The
     /// pane before it takes the keyboard, and the closed pane's transcript goes to `closed`.
     /// Broadcast and focus mode end when one pane is left.

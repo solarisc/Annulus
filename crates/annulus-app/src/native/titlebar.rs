@@ -189,7 +189,7 @@ fn slots_for(
     let syncs = app.sync_badge() != SyncBadge::Local;
     let wanted: Vec<f32> = (0..shown)
         .map(|index| {
-            let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind);
+            let width = tab_width(ui, &app.tabs[index]);
             if index == 0 && syncs {
                 width + CLOUD_W
             } else {
@@ -456,7 +456,14 @@ fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
 
 /// The width a tab wants: fixed tabs fit their name, the others have a close button too and
 /// stay between a narrowest and a widest.
-fn tab_width(ui: &mut Ui<'_>, title: &str, kind: TabKind) -> f32 {
+fn tab_width(ui: &mut Ui<'_>, tab: &super::Tab) -> f32 {
+    let (title, kind) = (tab.title.as_str(), tab.kind);
+    // Room for the AI mark on an agent's tab.
+    let mark = if tab.agent.is_some() { 30.0 } else { 0.0 };
+    label_width(ui, title, kind) + mark
+}
+
+fn label_width(ui: &mut Ui<'_>, title: &str, kind: TabKind) -> f32 {
     let text = ui.gfx.measure(title, BODY_MEDIUM).width;
     match kind {
         TabKind::Vault | TabKind::Files => (text + 16.0 + 8.0 + 2.0 * space::M).ceil(),
@@ -503,11 +510,14 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     let tab = &app.tabs[index];
     let id = Id::new(("tab", tab.uid));
     let active = app.active == index;
-    // A screen reader hears the dot too: "web-1, New output".
-    let name = match tab.status {
+    // A screen reader hears the dot too: "web-1, New output", and whose tab it is.
+    let mut name = match tab.status {
         Some(status) => format!("{}, {}", tab.title, status.describe()),
         None => tab.title.clone(),
     };
+    if tab.agent.is_some() {
+        name.push_str(", an AI agent's tab");
+    }
     let response = ui.zone(id, slot, Role::Tab, &name);
     let t = ui.theme;
     // Still hovered on its close button.
@@ -564,6 +574,11 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
         ui.gfx.fill_circle(at, 3.0, color);
     }
     inner.take_left(8.0);
+    // An agent's tab says so before its name (ADR-0020 §6).
+    if tab.agent.is_some() {
+        let chip = ui.chip(Point::new(inner.x, inner.center().y - 10.0), "AI", t.accent);
+        inner.take_left(chip + 6.0);
+    }
     let mut event = if response.clicked {
         TabEvent::Select
     } else {
