@@ -387,32 +387,6 @@ mod tests {
         assert_eq!(parse(&args("")), Ok((Command::Help, false)));
         assert_eq!(parse(&args("hosts --json")), Ok((Command::Hosts, true)));
         assert_eq!(
-            parse(&args("notes 3")),
-            Ok((Command::Notes { host: 3, set: None }, false))
-        );
-        assert_eq!(
-            parse(&args("notes 3 --set nginx front end")),
-            Ok((
-                Command::Notes {
-                    host: 3,
-                    set: Some("nginx front end".into())
-                },
-                false
-            ))
-        );
-        assert_eq!(
-            parse(&args("notes 3 --set")),
-            Ok((
-                Command::Notes {
-                    host: 3,
-                    set: Some(String::new())
-                },
-                false
-            )),
-            "--set alone clears them"
-        );
-        assert!(parse(&args("notes web-1")).is_err());
-        assert_eq!(
             parse(&args("read 7 40")),
             Ok((
                 Command::Read {
@@ -491,6 +465,35 @@ mod tests {
         assert!(parse(&args("read web-1")).is_err());
         assert!(parse(&args("read 7 40 9")).is_err());
         assert!(parse(&args("delete everything")).is_err());
+    }
+
+    #[test]
+    fn a_hosts_notes_are_printed_or_set_and_set_alone_clears_them() {
+        assert_eq!(
+            parse(&args("notes 3")),
+            Ok((Command::Notes { host: 3, set: None }, false))
+        );
+        assert_eq!(
+            parse(&args("notes 3 --set nginx front end")),
+            Ok((
+                Command::Notes {
+                    host: 3,
+                    set: Some("nginx front end".into())
+                },
+                false
+            ))
+        );
+        assert_eq!(
+            parse(&args("notes 3 --set")),
+            Ok((
+                Command::Notes {
+                    host: 3,
+                    set: Some(String::new())
+                },
+                false
+            ))
+        );
+        assert!(parse(&args("notes web-1")).is_err());
     }
 
     #[test]
