@@ -174,7 +174,7 @@ fn tools() -> Value {
         },
         {
             "name": "annulus_read",
-            "description": "The text of a terminal tab, scrollback included (any tab, yours or the owner's).",
+            "description": "The text of a terminal tab, scrollback included: one of yours, or the owner's unless the owner switched that off.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

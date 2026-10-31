@@ -10,6 +10,9 @@ use crate::tokens::ThemeMode;
 /// The default terminal font size, in points.
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 
+/// Lines of scrollback each terminal keeps unless the user picks another number (F-TERM-004).
+pub const DEFAULT_SCROLLBACK: usize = 10_000;
+
 /// This device's settings. Unknown or missing fields take their defaults, so older and
 /// newer files both load.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,6 +55,18 @@ pub struct Settings {
     /// Let the `annulus` command and AI agents drive the app while the vault is unlocked
     /// (F-AUTO-001). Off by default.
     pub automation: bool,
+    /// Lines of scrollback each terminal keeps (F-TERM-004).
+    pub scrollback: usize,
+    /// A tab an agent opens comes to the front; off, it opens behind the one in use
+    /// (F-AUTO-006).
+    pub agent_tabs_in_front: bool,
+    /// Agents may read the user's own terminal tabs; off, only the tabs they opened.
+    pub agents_read_my_tabs: bool,
+    /// An agent's tab closes once its shell or connection has ended; off, it stays with
+    /// Start again.
+    pub close_ended_agent_tabs: bool,
+    /// The panel beside a new agent tab starts folded to its rail.
+    pub agent_panel_folded: bool,
 }
 
 /// A shortcut with keys of the user's choosing.
@@ -101,6 +116,11 @@ impl Default for Settings {
             pinned: Vec::new(),
             keys: Vec::new(),
             automation: false,
+            scrollback: DEFAULT_SCROLLBACK,
+            agent_tabs_in_front: true,
+            agents_read_my_tabs: true,
+            close_ended_agent_tabs: false,
+            agent_panel_folded: false,
         }
     }
 }
@@ -184,6 +204,11 @@ mod tests {
                 keys: "Ctrl+Alt+N".into(),
             }],
             automation: true,
+            scrollback: 50_000,
+            agent_tabs_in_front: false,
+            agents_read_my_tabs: false,
+            close_ended_agent_tabs: true,
+            agent_panel_folded: true,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -192,6 +217,17 @@ mod tests {
         std::fs::write(&path, br#"{"font_size": 12.0, "future": true}"#).unwrap();
         let loaded = Settings::load(&path);
         assert_eq!((loaded.font_size, loaded.auto_lock_minutes), (12.0, 15));
+        // A file from before the scrollback and agent settings keeps today's behavior.
+        assert_eq!(
+            (
+                loaded.scrollback,
+                loaded.agent_tabs_in_front,
+                loaded.agents_read_my_tabs,
+                loaded.close_ended_agent_tabs,
+                loaded.agent_panel_folded
+            ),
+            (DEFAULT_SCROLLBACK, true, true, false, false)
+        );
         // A file from before color schemes keeps its theme and draws our own colors.
         std::fs::write(&path, br#"{"theme": "light", "terminal_theme": "Nord"}"#).unwrap();
         let loaded = Settings::load(&path);

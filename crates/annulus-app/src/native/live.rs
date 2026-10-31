@@ -387,6 +387,28 @@ impl LiveTerminal {
         self.session.as_ref().map_or(0, Session::output)
     }
 
+    /// Keeps `lines` of scrollback from now on (Settings, F-TERM-004).
+    pub fn keep_scrollback(&mut self, lines: usize) {
+        if let Some(session) = &mut self.session {
+            session.keep_scrollback(lines);
+        }
+    }
+
+    /// Starts its program before it was ever drawn (an agent's tab opened behind), in a usual
+    /// 120 x 30 grid until it is drawn at its real size.
+    pub fn start_unseen(&mut self, waker: Option<&Waker>, now: f64) {
+        /// A cell's size in device pixels until the terminal is drawn and knows its font.
+        const UNSEEN_CELL: (u16, u16) = (9, 19);
+        if self.session.is_none()
+            && self.failed.is_none()
+            && !self.exited
+            && self.reconnect.at.is_none()
+        {
+            let cell = self.cell.unwrap_or(UNSEEN_CELL);
+            self.spawn(start_grid((0, 0)), cell, waker, now);
+        }
+    }
+
     /// Scrolls the view so `row` (counted from the oldest row of the scrollback) is at the top.
     pub fn scroll_to_row(&self, row: usize) {
         if let Some(session) = &self.session {

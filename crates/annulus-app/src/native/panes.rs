@@ -496,6 +496,29 @@ impl Panes {
         self.pane(self.focused)?.terminal.transcript()
     }
 
+    /// Keeps `lines` of scrollback in every pane from now on (Settings, F-TERM-004).
+    pub fn keep_scrollback(&mut self, lines: usize) {
+        for pane in &mut self.all {
+            pane.terminal.keep_scrollback(lines);
+        }
+    }
+
+    /// Starts the programs of panes never drawn yet (an agent's tab opened behind).
+    pub fn start_unseen(&mut self, waker: Option<&Waker>, now: f64) {
+        for pane in &mut self.all {
+            pane.terminal.start_unseen(waker, now);
+        }
+    }
+
+    /// Whether every pane's program has ended: its shell exited, or its connection failed
+    /// for good.
+    #[must_use]
+    pub fn all_ended(&self) -> bool {
+        self.all
+            .iter()
+            .all(|pane| pane.terminal.ended() || pane.terminal.failure().is_some())
+    }
+
     /// Whether the focused pane's program has ended (its shell exited).
     #[must_use]
     pub fn focused_ended(&self) -> bool {

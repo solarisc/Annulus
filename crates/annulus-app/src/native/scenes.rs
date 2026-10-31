@@ -4199,6 +4199,59 @@ fn an_agents_silent_command_is_not_done_until_its_prompt_is_back_and_wait_follow
 }
 
 #[test]
+fn an_agents_tab_opened_behind_starts_unseen_and_closes_once_its_shell_ends() {
+    use annulus_control::client::Client;
+    use annulus_control::protocol::RunState;
+    let mut app = NativeApp::new(Some(fixture_vault("agent-behind", false)));
+    app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
+    let dir = app
+        .vault_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_path_buf)
+        .unwrap();
+    app.waker = Some(std::sync::Arc::new(|| {}));
+    app.settings.automation = true;
+    app.settings.agent_tabs_in_front = false;
+    app.settings.close_ended_agent_tabs = true;
+    let mut state = UiState::default();
+    // The first frame opens the door.
+    step(&mut app, &mut state, &[], 0.0);
+    let in_use = app.tabs[app.active].uid;
+    let agent = std::thread::spawn(move || {
+        let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
+        let tab = client.open(None).map_err(|e| e.to_string())?;
+        let said = client
+            .run(tab.id, "echo unseen-ok", Some(30))
+            .map_err(|e| e.to_string())?;
+        let left = client
+            .run(tab.id, "exit", Some(30))
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>((tab.id, said, left))
+    });
+    let started = std::time::Instant::now();
+    let mut time = 0.05;
+    while !agent.is_finished() && started.elapsed() < std::time::Duration::from_secs(90) {
+        step(&mut app, &mut state, &[], time);
+        time += 0.05;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let (tab, said, left) = agent.join().unwrap().unwrap();
+    assert_eq!(app.tabs[app.active].uid, in_use, "it never came in front");
+    assert_eq!(said.state, RunState::Done, "its shell ran unseen: {said:?}");
+    assert!(
+        said.output.lines().any(|line| line.trim() == "unseen-ok"),
+        "{said:?}"
+    );
+    assert_eq!(left.state, RunState::Ended, "{left:?}");
+    step(&mut app, &mut state, &[], time);
+    assert!(
+        !app.tabs.iter().any(|open| open.uid == tab),
+        "closed once its shell ended"
+    );
+}
+
+#[test]
 fn the_folded_agent_rail_is_a_card_clear_of_the_window_edge_and_its_tally_opens_the_panel() {
     let mut app = NativeApp::new(Some(fixture_vault("agent-rail", false)));
     agent_tab_folded(&mut app);

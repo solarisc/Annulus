@@ -119,6 +119,14 @@ pub struct SettingsView {
     pub previewing: Option<usize>,
 }
 
+/// The scrollback choices (F-TERM-004), each with what a full tab 120 columns wide costs.
+const SCROLLBACK: [(usize, &str); 4] = [
+    (1_000, "1,000 lines (about 3 MB)"),
+    (10_000, "10,000 lines (about 30 MB)"),
+    (50_000, "50,000 lines (about 150 MB)"),
+    (100_000, "100,000 lines (about 300 MB)"),
+];
+
 const LOCK_MINUTES: [(u32, &str); 5] = [
     (0, "Never"),
     (5, "After 5 minutes"),
@@ -536,6 +544,34 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         changed = true;
     }
     preview(ui, page, &shown, settings.font_size);
+    let mut history = self::card(ui, page, "History", 1);
+    let control = row(
+        ui,
+        &mut history,
+        true,
+        (
+            "Lines each tab keeps",
+            "How far back a tab scrolls. Fewer drops the oldest at once.",
+        ),
+        260.0,
+    );
+    let names: Vec<String> = SCROLLBACK
+        .iter()
+        .map(|(_, name)| (*name).to_owned())
+        .collect();
+    let at = SCROLLBACK
+        .iter()
+        .position(|(lines, _)| *lines == settings.scrollback);
+    if let Some(chosen) = ui.select(
+        Id::new("settings.scrollback"),
+        control,
+        &names,
+        at,
+        "Custom",
+    ) {
+        settings.scrollback = SCROLLBACK[chosen].0;
+        changed = true;
+    }
     changed
 }
 
@@ -614,7 +650,7 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         settings.auto_lock_minutes = LOCK_MINUTES[chosen].0;
         changed = true;
     }
-    let mut automation = self::card(ui, page, "Automation", 1);
+    let mut automation = self::card(ui, page, "Automation", 5);
     let control = row(
         ui,
         &mut automation,
@@ -634,6 +670,37 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
             "Allow the command line and AI agents",
         )
         .clicked;
+    // How agents' tabs behave (F-AUTO-006).
+    let switches = [
+        (
+            "settings.agent.front",
+            "Agents' tabs open in front",
+            "Off, they open behind the tab you are in, with their AI mark.",
+            &mut settings.agent_tabs_in_front,
+        ),
+        (
+            "settings.agent.read",
+            "Agents may read my tabs",
+            "Off, agents read only the tabs they opened.",
+            &mut settings.agents_read_my_tabs,
+        ),
+        (
+            "settings.agent.close",
+            "Close an agent's tab when its shell ends",
+            "Off, it stays open with Start again.",
+            &mut settings.close_ended_agent_tabs,
+        ),
+        (
+            "settings.agent.folded",
+            "Agent panel starts folded",
+            "New agent tabs show the slim rail, not the list.",
+            &mut settings.agent_panel_folded,
+        ),
+    ];
+    for (id, name, about, value) in switches {
+        let control = row(ui, &mut automation, false, (name, about), 60.0);
+        changed |= ui.switch(Id::new(id), control, value, name).clicked;
+    }
     changed
 }
 

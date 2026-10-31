@@ -1021,13 +1021,25 @@ impl NativeApp {
             self.active
         };
         let waker = self.waker.clone();
+        let (scrollback, unlocked) = (self.settings.scrollback, self.vault.is_some());
+        for tab in &mut self.tabs {
+            if let Some(TermView::Live(panes)) = &mut tab.terminal {
+                panes.keep_scrollback(scrollback);
+            }
+        }
         let next_try = self
             .tabs
             .iter_mut()
             .enumerate()
             .filter(|(index, _)| *index != active)
             .filter_map(|(_, tab)| match &mut tab.terminal {
-                Some(TermView::Live(panes)) => panes.poll(now, waker.as_ref()),
+                Some(TermView::Live(panes)) => {
+                    // An agent's tab opened behind starts its shell unseen, so it can run.
+                    if unlocked && tab.agent.is_some() {
+                        panes.start_unseen(waker.as_ref(), now);
+                    }
+                    panes.poll(now, waker.as_ref())
+                }
                 _ => None,
             })
             .min_by(f64::total_cmp);

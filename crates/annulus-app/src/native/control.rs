@@ -473,9 +473,34 @@ impl NativeApp {
             }
         }
         self.move_runs(now);
+        if self.settings.close_ended_agent_tabs {
+            self.close_ended_agent_tabs();
+        }
         self.runs
             .iter()
             .any(|run| run.call.is_some() || now.duration_since(run.output.1) < QUIET * 2)
+    }
+
+    /// Closes agents' tabs whose shells have all ended, once no answer waits on them
+    /// (Settings > Security > Automation, F-AUTO-006).
+    fn close_ended_agent_tabs(&mut self) {
+        let ended: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| {
+                tab.agent.is_some()
+                    && matches!(&tab.terminal, Some(TermView::Live(panes)) if panes.all_ended())
+                    && !self
+                        .runs
+                        .iter()
+                        .any(|run| run.tab == tab.uid && run.call.is_some())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in ended.into_iter().rev() {
+            self.close_tab(index);
+        }
     }
 
     /// Takes up a `wait` for the last command in agent tab `uid`: answered once it settles,
@@ -1371,6 +1396,8 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
                 .collect(),
         )),
         Request::Open { host } => {
+            // The tab in use, which stays in front when agents' tabs open behind it.
+            let in_use = app.tabs.get(app.active).map(|tab| tab.uid);
             match host {
                 Some(id) => {
                     if !vault.hosts().iter().any(|host| host.id == *id) {
@@ -1385,9 +1412,17 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
                 opened = Some(app.open_terminal(title, program, origin));
             }
             let uid = opened.ok_or("nothing opened")?;
+            if !app.settings.agent_tabs_in_front
+                && let Some(at) =
+                    in_use.and_then(|uid| app.tabs.iter().position(|tab| tab.uid == uid))
+            {
+                app.active = at;
+            }
             let index = app.tabs.iter().position(|tab| tab.uid == uid).unwrap_or(0);
+            let mut log = AgentLog::new(crate::sync_screen::now_secs());
+            log.folded = app.settings.agent_panel_folded;
             let tab = &mut app.tabs[index];
-            tab.agent = Some(Box::new(AgentLog::new(crate::sync_screen::now_secs())));
+            tab.agent = Some(Box::new(log));
             Ok(Response::Tab(tab_info(tab, index == app.active)))
         }
         Request::Run { tab, .. } => {
@@ -1428,7 +1463,14 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             Ok(Response::Done)
         }
         Request::Read { tab, lines } => {
+            let mine_only = !app.settings.agents_read_my_tabs;
             let found = app.tabs.iter_mut().find(|open| open.uid == *tab);
+            if mine_only && found.as_ref().is_some_and(|open| open.agent.is_none()) {
+                return Err(format!(
+                    "tab {tab} is not an agent's, and reading the owner's tabs is switched off \
+                     (Settings > Security > Automation)"
+                ));
+            }
             let text = match found.and_then(|open| open.terminal.as_mut()) {
                 Some(TermView::Live(panes)) => {
                     let mut all = panes.transcripts();
@@ -1705,6 +1747,51 @@ mod tests {
             Ok(Response::Done)
         );
         assert!(!app.tabs.iter().any(|tab| tab.uid == opened.id));
+    }
+
+    #[test]
+    fn agents_tabs_open_behind_and_folded_and_the_owners_tabs_close_to_them_when_set() {
+        let mut app = NativeApp::new(Some(fixture_vault("control-settings", true)));
+        replay(&mut app, "mine", "owner@box:~$ uptime\r\n");
+        let mine = app.tabs[app.active].uid;
+        app.settings.agent_tabs_in_front = false;
+        app.settings.agent_panel_folded = true;
+        app.settings.agents_read_my_tabs = false;
+        let Ok(Response::Tab(opened)) = handle(&mut app, &Request::Open { host: None }) else {
+            panic!("a local tab opens");
+        };
+        assert!(!opened.active, "behind: {opened:?}");
+        assert_eq!(
+            app.tabs[app.active].uid, mine,
+            "the tab in use stays in front"
+        );
+        let folded = app
+            .tabs
+            .iter()
+            .find(|tab| tab.uid == opened.id)
+            .and_then(|tab| tab.agent.as_ref())
+            .is_some_and(|log| log.folded);
+        assert!(folded, "its panel starts as the rail");
+        let refused = handle(
+            &mut app,
+            &Request::Read {
+                tab: mine,
+                lines: None,
+            },
+        )
+        .unwrap_err();
+        assert!(refused.contains("switched off"), "{refused}");
+        assert!(
+            handle(
+                &mut app,
+                &Request::Read {
+                    tab: opened.id,
+                    lines: None
+                }
+            )
+            .is_ok(),
+            "its own tab it still reads"
+        );
     }
 
     #[test]
