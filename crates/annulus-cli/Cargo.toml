@@ -1,0 +1,20 @@
+[package]
+name = "annulus-cli"
+description = "The annulus command: drives a running, unlocked Annulus through its control door."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "annulus"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+annulus-control = { path = "../annulus-control" }

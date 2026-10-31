@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 directories.workspace = true
 annulus-config = { path = "../annulus-config" }
+annulus-control = { path = "../annulus-control" }
 annulus-session = { path = "../annulus-session" }
 annulus-sftp = { path = "../annulus-sftp" }
 annulus-ssh = { path = "../annulus-ssh" }

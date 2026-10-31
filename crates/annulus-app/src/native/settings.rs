@@ -75,7 +75,7 @@ impl Page {
             Page::Account => "Your own server keeps your vault in sync, end-to-end encrypted.",
             Page::Appearance => "How Annulus looks and moves on this device.",
             Page::Terminal => "The colors programs draw with and the size of their text.",
-            Page::Security => "When the vault locks itself.",
+            Page::Security => "When the vault locks itself, and what else may use Annulus.",
             Page::Sessions => "What Annulus keeps of your sessions.",
             Page::Shells => "What a new local terminal runs.",
             Page::Shortcuts => "Every shortcut. Click one's keys to give it others.",
@@ -609,11 +609,32 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
     let at = LOCK_MINUTES
         .iter()
         .position(|(minutes, _)| *minutes == settings.auto_lock_minutes);
+    let mut changed = false;
     if let Some(chosen) = ui.select(Id::new("settings.lock"), control, &items, at, "Custom") {
         settings.auto_lock_minutes = LOCK_MINUTES[chosen].0;
-        return true;
+        changed = true;
     }
-    false
+    let mut automation = self::card(ui, page, "Automation", 1);
+    let control = row(
+        ui,
+        &mut automation,
+        true,
+        (
+            "Allow the command line and AI agents",
+            "While the vault is unlocked, the annulus command and AI agents can list your hosts \
+             and read your terminals. Locking shuts them out.",
+        ),
+        60.0,
+    );
+    changed |= ui
+        .switch(
+            Id::new("settings.automation"),
+            control,
+            &mut settings.automation,
+            "Allow the command line and AI agents",
+        )
+        .clicked;
+    changed
 }
 
 fn sessions(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {

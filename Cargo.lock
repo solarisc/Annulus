@@ -5416,6 +5416,7 @@ dependencies = [
  "directories",
  "tokio",
  "annulus-config",
+ "annulus-control",
  "annulus-import",
  "annulus-platform",
  "annulus-proto",
@@ -5430,11 +5431,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "annulus-cli"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "annulus-control",
+]
+
+[[package]]
 name = "annulus-config"
 version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "annulus-control"
+version = "0.0.0"
+dependencies = [
+ "directories",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

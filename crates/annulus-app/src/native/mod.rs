@@ -6,6 +6,7 @@
 mod account;
 mod ask;
 mod colors;
+mod control;
 pub mod demo;
 pub mod hosts;
 mod live;
@@ -266,6 +267,10 @@ pub struct NativeApp {
     pub settings_view: settings::SettingsView,
     /// The OS was asked for fewer animations; read when the window opens.
     os_reduces_motion: bool,
+    /// The control door, while automation is allowed and the vault unlocked (ADR-0020).
+    door: Option<annulus_control::door::Door>,
+    /// Opening the door failed; it is not tried again until the switch or the vault changes.
+    door_failed: bool,
 }
 
 impl NativeApp {
@@ -317,6 +322,8 @@ impl NativeApp {
             tab_grab: None,
             settings_view: settings::SettingsView::default(),
             os_reduces_motion: false,
+            door: None,
+            door_failed: false,
         }
     }
 
@@ -1043,6 +1050,9 @@ impl NativeApp {
         }
         self.palette = None;
         self.vault = None;
+        // Nothing drives the app while it is locked: the door closes now, not next frame.
+        self.door = None;
+        self.door_failed = false;
         self.lock = lock::LockView::new(lock::Mode::Unlock);
         self.hosts = hosts::HostsView::default();
         self.forwards = screens::ForwardsView::default();
@@ -1069,6 +1079,7 @@ impl NativeApp {
             self.active = 0;
         }
         self.background(ui);
+        self.control();
         shortcuts::choose(&self.settings.keys);
         // Keys being recorded in Settings reach no shortcut.
         let in_settings = !locked

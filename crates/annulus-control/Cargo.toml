@@ -1,0 +1,21 @@
+[package]
+name = "annulus-control"
+description = "The local control door of a running Annulus: its protocol, the server the app runs and the client the CLI uses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+directories.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# io-util for reading the door's connections line by line.
+tokio = { workspace = true, features = ["io-util", "rt"] }
+zeroize.workspace = true

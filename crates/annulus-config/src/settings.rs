@@ -14,6 +14,8 @@ pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 /// newer files both load.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+// Each is a switch of its own in Settings; no two of them make one state.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Settings {
     /// Light, dark or follow the system.
     pub theme: ThemeMode,
@@ -44,6 +46,9 @@ pub struct Settings {
     pub recent: Vec<Recent>,
     /// Shortcuts given other keys in Settings (F-SET-004); the others keep their own.
     pub keys: Vec<KeyBinding>,
+    /// Let the `annulus` command and AI agents drive the app while the vault is unlocked
+    /// (F-AUTO-001). Off by default.
+    pub automation: bool,
 }
 
 /// A shortcut with keys of the user's choosing.
@@ -91,6 +96,7 @@ impl Default for Settings {
             reduce_motion: false,
             recent: Vec::new(),
             keys: Vec::new(),
+            automation: false,
         }
     }
 }
@@ -163,6 +169,7 @@ mod tests {
                 action: "NEW_TAB".into(),
                 keys: "Ctrl+Alt+N".into(),
             }],
+            automation: true,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

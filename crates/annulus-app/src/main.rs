@@ -26,15 +26,6 @@ mod terminal_view;
 
 use std::process::ExitCode;
 
-/// Where saved data lives: the OS's per-user data folder (ADR-0007 §Data locations), or the
-/// working directory if the OS reports none.
-fn data_dir() -> std::path::PathBuf {
-    directories::ProjectDirs::from("", "", "Annulus").map_or_else(
-        || std::path::PathBuf::from("annulus-data"),
-        |dirs| dirs.data_dir().to_path_buf(),
-    )
-}
-
 fn main() -> ExitCode {
     annulus_platform::process::harden();
     let args: Vec<String> = std::env::args().collect();
@@ -42,7 +33,8 @@ fn main() -> ExitCode {
     let ran = if args.iter().any(|arg| arg == "--preview") {
         native::run_preview(light)
     } else {
-        native::run_native(light, &data_dir())
+        // The same folder the `annulus` command looks in for the control door.
+        native::run_native(light, &annulus_control::data_dir())
     };
     if ran.is_ok() {
         ExitCode::SUCCESS
