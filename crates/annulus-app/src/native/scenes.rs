@@ -1640,12 +1640,11 @@ fn transitions_move_through_frames_and_are_photographed_mid_flight() {
 /// The renderers every scene is drawn with: ours, and Direct2D on Windows. Each thread makes
 /// its own (Direct2D's factory is single-threaded).
 fn renderers() -> Vec<Box<dyn Renderer>> {
-    let mut renderers: Vec<Box<dyn Renderer>> = vec![Box::new(Cpu(None))];
-    #[cfg(windows)]
-    renderers.push(Box::new(Direct2D(
-        annulus_platform::d2d::D2d::new().unwrap(),
-    )));
-    renderers
+    vec![
+        Box::new(Cpu(None)),
+        #[cfg(windows)]
+        Box::new(Direct2D(annulus_platform::d2d::D2d::new().unwrap())),
+    ]
 }
 
 /// How many threads a heavy test spreads its independent work over: every core, but no more
