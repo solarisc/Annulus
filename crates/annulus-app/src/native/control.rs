@@ -13,20 +13,80 @@ use annulus_control::protocol::{HostInfo, Request, Response, Status, TabInfo};
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Point, Rect};
 use annulus_ui::icons;
-use annulus_ui::kit::{Id, Ui};
-use annulus_ui::widgets::{BODY_MEDIUM, CONTROL, Kind, SMALL};
+use annulus_ui::kit::{Id, Role, Ui};
+use annulus_ui::widgets::{BODY_MEDIUM, CONTROL, Kind, SMALL, Tone, button_width};
 use annulus_vault::groups::Group;
 use annulus_vault::hosts::Host;
 use annulus_vault::vault::Vault;
 
+use super::live::AgentMarks;
 use super::{NativeApp, Tab, TabKind, TermView};
 use crate::terminal_view::TabStatus;
 
-/// What an agent typed into its tab, newest last. In memory only: it can hold secrets.
-#[derive(Default)]
+/// What an agent typed into its tab, newest last, and how its panel stands (F-AUTO-004). In
+/// memory only: it can hold secrets.
 pub struct AgentLog {
-    /// Each command and when it was typed (seconds since the Unix epoch).
-    pub commands: Vec<(u64, String)>,
+    /// When the agent opened the tab (seconds since the Unix epoch).
+    pub since: u64,
+    pub commands: Vec<AgentCommand>,
+    /// The command picked in the panel: the terminal shows it, its lines tinted.
+    pub picked: Option<usize>,
+    /// The panel is folded to a narrow rail.
+    pub folded: bool,
+    /// How many commands the list showed last frame: a new one scrolls it to the bottom.
+    listed: usize,
+}
+
+impl AgentLog {
+    /// The log of a tab an agent opened at `since`.
+    #[must_use]
+    pub fn new(since: u64) -> Self {
+        Self {
+            since,
+            commands: Vec::new(),
+            picked: None,
+            folded: false,
+            listed: 0,
+        }
+    }
+
+    /// Where the agent typed, for the terminal's margin: each command's line, and the lines
+    /// from the picked command's to the next one's.
+    #[must_use]
+    pub fn marks(&self) -> AgentMarks {
+        let picked = self.picked.and_then(|index| {
+            let from = self.commands.get(index)?.line;
+            let to = self
+                .commands
+                .get(index + 1)
+                .map_or(usize::MAX, |next| next.line);
+            Some(from..to)
+        });
+        AgentMarks {
+            lines: self.commands.iter().map(|command| command.line).collect(),
+            picked,
+        }
+    }
+}
+
+/// One command an agent typed.
+pub struct AgentCommand {
+    pub text: String,
+    /// When it was typed (seconds since the Unix epoch).
+    pub at: u64,
+    /// The transcript line it was typed on.
+    pub line: usize,
+    pub state: Ran,
+}
+
+/// How far a command got.
+pub enum Ran {
+    /// Typed at this instant; its output has not settled yet.
+    Running(Instant),
+    /// Its output settled after `took`, `lines` long.
+    Done { took: Duration, lines: usize },
+    /// Its wait ran out after `took` with output still coming, `lines` long so far.
+    TimedOut { took: Duration, lines: usize },
 }
 
 /// An agent's command on its way: waiting for its terminal to start, then for its output to
@@ -44,6 +104,8 @@ pub struct Running {
     seen: (usize, Instant),
     /// The length of the text when the command was typed: quiet counts only after it grew.
     typed_at: usize,
+    /// Its place in its tab's [`AgentLog`], once typed.
+    entry: usize,
 }
 
 /// Output quiet this long counts as finished.
@@ -93,6 +155,7 @@ impl NativeApp {
                         wait,
                         seen: (0, Instant::now()),
                         typed_at: 0,
+                        entry: 0,
                     }),
                     Err(why) => call.answer(Err(why)),
                 }
@@ -134,13 +197,20 @@ impl NativeApp {
                 typed.push('\r');
                 if ready && panes.type_focused(typed.as_bytes()) {
                     let text = panes.focused_transcript().unwrap_or_default();
-                    run.before = Some(text.trim_end().lines().count());
+                    let before = text.trim_end().lines().count();
+                    run.before = Some(before);
                     run.seen = (text.len(), now);
                     run.typed_at = text.len();
                     run.asked = now;
-                    let log = tab.agent.get_or_insert_with(Box::default);
-                    log.commands
-                        .push((crate::sync_screen::now_secs(), run.command.clone()));
+                    let at = crate::sync_screen::now_secs();
+                    let log = tab.agent.get_or_insert_with(|| Box::new(AgentLog::new(at)));
+                    run.entry = log.commands.len();
+                    log.commands.push(AgentCommand {
+                        text: run.command.clone(),
+                        at,
+                        line: before.saturating_sub(1),
+                        state: Ran::Running(now),
+                    });
                     self.runs.push(run);
                 } else if now.duration_since(run.asked) > START_WITHIN {
                     run.call
@@ -158,8 +228,16 @@ impl NativeApp {
             // is waiting, not done, so only the wait ends it.
             let settled = text.len() != run.typed_at && now.duration_since(run.seen.1) >= QUIET;
             if settled || now.duration_since(run.asked) >= run.wait {
-                run.call
-                    .answer(Ok(Response::Text(new_output(&text, before))));
+                let out = new_output(&text, before);
+                let took = now.duration_since(run.asked);
+                if let Some(command) = tab
+                    .agent
+                    .as_mut()
+                    .and_then(|log| log.commands.get_mut(run.entry))
+                {
+                    command.state = ran(&out, took, settled);
+                }
+                run.call.answer(Ok(Response::Text(out)));
             } else {
                 self.runs.push(run);
             }
@@ -167,100 +245,457 @@ impl NativeApp {
     }
 }
 
-/// How wide the strip beside an agent's terminal is.
-pub const STRIP_W: f32 = 280.0;
+/// How wide the panel beside an agent's terminal is, open and folded.
+const PANEL_W: f32 = 320.0;
+const RAIL_W: f32 = 44.0;
 
-/// The strip beside an agent's terminal (ADR-0020 §6): what it is, each command it typed with
-/// when, newest last, and Stop. Returns whether Stop was pressed: automation goes off and every
-/// agent is shut out.
-pub fn agent_strip(ui: &mut Ui<'_>, rect: Rect, log: &AgentLog) -> bool {
+/// The width the panel beside an agent's terminal takes.
+#[must_use]
+pub fn panel_width(log: &AgentLog) -> f32 {
+    if log.folded { RAIL_W } else { PANEL_W }
+}
+
+/// What the panel beside an agent's terminal asks of the window.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PanelAction {
+    /// Stop all agents: automation goes off and every agent is cut off.
+    Stop,
+    /// Show this transcript line at the top of the terminal (a command was picked).
+    Show(usize),
+    /// Back to the newest output (the picked command was let go).
+    Newest,
+}
+
+/// Commands in the panel: monospace, a touch smaller than the terminal's.
+const MONO_SMALL: annulus_ui::gfx::Font = annulus_ui::gfx::Font::mono(12.0);
+/// One wrapped line of a command, and the line under it saying how it ran.
+const COMMAND_LINE: f32 = 17.0;
+const META_LINE: f32 = 18.0;
+/// The most lines a command wraps to before it is cut short (all of it is in its tooltip).
+const COMMAND_LINES: usize = 3;
+/// Room on a row's left for its status mark.
+const MARK_COLUMN: f32 = 22.0;
+
+/// The panel beside an agent's terminal (ADR-0020 §6, F-AUTO-004). On top: the AI mark,
+/// Stop, fold, and what it is connected to since when. Then every command the agent typed,
+/// newest last and kept in view, each with whether it is running, done or out of time, when
+/// in the session, how long it took and how many lines it printed; picking one shows it in
+/// the terminal. `tab` is the tab's title and status dot.
+#[allow(clippy::too_many_lines)] // The panel top to bottom: head, list, foot.
+pub fn agent_panel(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    log: &mut AgentLog,
+    tab: (&str, Option<TabStatus>),
+) -> Option<PanelAction> {
     let t = ui.theme;
     ui.gfx.fill_rect(rect, 0.0, t.chrome);
     ui.gfx
         .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
+    if log.folded {
+        return rail(ui, rect, log);
+    }
+    let mut action = None;
     let mut column = rect.inset(space::M, space::M);
-    let head = column.take_top(22.0);
-    let chip = ui.chip(Point::new(head.x, head.y + 1.0), "AI", t.accent);
-    let mut title = head;
-    title.take_left(chip + space::S);
-    ui.gfx.text(
-        title,
-        "An agent is at work",
-        BODY_MEDIUM,
-        t.text,
-        Align::Start,
-    );
-    column.take_top(space::XS);
-    ui.gfx.text(
-        column.take_top(18.0),
-        "It types only in this tab.",
-        SMALL,
-        t.text2,
-        Align::Start,
-    );
-    ui.gfx.text(
-        column.take_top(18.0),
-        "Your other tabs are read-only to it.",
-        SMALL,
-        t.text2,
-        Align::Start,
-    );
-    let stop_row = column.take_bottom(CONTROL);
-    let stop = ui
+
+    let mut head = column.take_top(CONTROL);
+    let fold = head.take_right(CONTROL);
+    head.take_right(space::XS);
+    let stop = head.take_right(button_width(&mut ui.gfx, "Stop", Some(icons::CLOSE)));
+    // Stop, then fold: the keyboard goes left to right.
+    if ui
         .button(
             Id::new("agent.stop"),
-            stop_row,
-            "Stop all agents",
+            stop,
+            "Stop",
             Some(icons::CLOSE),
             Kind::Danger,
         )
-        .clicked;
+        .clicked
+    {
+        action = Some(PanelAction::Stop);
+    }
     ui.tooltip(
         Id::new("agent.stop"),
-        stop_row,
-        "Turns automation off: every agent is cut off now",
+        stop,
+        "Stop all agents: automation goes off and every agent is cut off now",
     );
-    column.take_bottom(space::M);
+    if ui
+        .icon_button(
+            Id::new("agent.fold"),
+            fold,
+            icons::CHEVRON_RIGHT,
+            "Fold the agent panel",
+            false,
+        )
+        .clicked
+    {
+        log.folded = true;
+    }
+    let chip = ui.chip(Point::new(head.x, head.center().y - 10.0), "AI", t.accent);
+    head.take_left(chip + space::S);
+    ui.gfx
+        .text(head, "Agent session", BODY_MEDIUM, t.text, Align::Start);
+
+    column.take_top(space::S);
+    let mut about = column.take_top(18.0);
+    let (dot, state) = match tab.1 {
+        Some(TabStatus::Error) => (t.error, "dropped"),
+        Some(TabStatus::Input) => (t.warn, "waiting for an answer"),
+        _ => (t.ok, "connected"),
+    };
+    ui.gfx
+        .fill_circle(Point::new(about.x + 4.0, about.center().y), 3.5, dot);
+    about.take_left(14.0);
+    let count = log.commands.len();
+    let line = format!(
+        "{} · opened {} · {count} {}",
+        tab.0,
+        super::start::ago(log.since, crate::sync_screen::now_secs()),
+        if count == 1 { "command" } else { "commands" },
+    );
+    let fitted = annulus_ui::gfx::fit(&mut ui.gfx, &line, SMALL, about.w);
+    ui.gfx.text(about, &fitted, SMALL, t.text2, Align::Start);
+    ui.tooltip(Id::new("agent.about"), about, &format!("{state}: {line}"));
+
+    let mut foot = column.take_bottom(18.0);
+    ui.gfx.icon(
+        icons::LOCK,
+        Rect::new(foot.x, foot.center().y - 6.0, 12.0, 12.0),
+        t.text3,
+    );
+    foot.take_left(18.0);
+    ui.gfx.text(
+        foot,
+        "Types only in this tab. Yours are read-only to it.",
+        SMALL,
+        t.text3,
+        Align::Start,
+    );
+    column.take_bottom(space::S);
+    ui.gfx.fill_rect(
+        Rect::new(rect.x + 1.0, column.b(), rect.w - 1.0, 1.0),
+        0.0,
+        t.line,
+    );
+
     column.take_top(space::M);
-    ui.section_label(column.take_top(18.0), "Commands");
-    column.take_top(space::XS);
+    ui.gfx.fill_rect(
+        Rect::new(rect.x + 1.0, column.y, rect.w - 1.0, 1.0),
+        0.0,
+        t.line,
+    );
+    let list = Rect::new(rect.x + 1.0, column.y + 1.0, rect.w - 1.0, column.h - 1.0);
     if log.commands.is_empty() {
+        let mut empty = list.inset(space::M, space::M);
         ui.gfx.text(
-            column.take_top(20.0),
-            "Nothing typed yet.",
+            empty.take_top(20.0),
+            "Nothing typed yet",
+            BODY_MEDIUM,
+            t.text2,
+            Align::Start,
+        );
+        ui.gfx.text(
+            empty.take_top(18.0),
+            "Each command the agent runs shows here.",
             SMALL,
             t.text3,
             Align::Start,
         );
-        return stop;
+        return action;
     }
-    // The newest at the bottom; as many of the latest as fit.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // A count of rows.
-    let fit = (column.h / STRIP_ROW).floor().max(0.0) as usize;
-    let now = crate::sync_screen::now_secs();
-    let shown = &log.commands[log.commands.len().saturating_sub(fit)..];
-    for (at, command) in shown {
-        let mut row = column.take_top(STRIP_ROW);
-        let when = row.take_top(16.0);
-        ui.gfx.text(
-            when,
-            &super::start::ago(*at, now),
-            SMALL,
-            t.text3,
-            Align::Start,
-        );
-        let first = command.lines().next().unwrap_or_default();
-        ui.gfx
-            .text(row.take_top(20.0), first, MONO_SMALL, t.text, Align::Start);
+    if let Some(picked) = list_commands(ui, list, log) {
+        action = Some(picked);
     }
-    stop
+    action
 }
 
-/// The height of one command in the strip: when, then the command.
-const STRIP_ROW: f32 = 40.0;
+/// The commands of `log` in `list`, scrolled to the newest when one arrives. Returns what
+/// picking one asks for.
+#[allow(clippy::too_many_lines)] // Measure, scroll, then each row top to bottom.
+fn list_commands(ui: &mut Ui<'_>, list: Rect, log: &mut AgentLog) -> Option<PanelAction> {
+    let t = ui.theme;
+    let char_w = ui.gfx.measure("M", MONO_SMALL).width.max(1.0);
+    let text_w = list.w - space::M * 2.0 - MARK_COLUMN - space::S;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Characters on a line.
+    let per_line = (text_w / char_w).floor().max(8.0) as usize;
+    let rows: Vec<Vec<String>> = log
+        .commands
+        .iter()
+        .map(|command| wrap_command(&command.text, per_line, COMMAND_LINES))
+        .collect();
+    let height = |lines: &Vec<String>| {
+        #[allow(clippy::cast_precision_loss)] // A few lines.
+        let text = lines.len() as f32 * COMMAND_LINE;
+        space::S * 2.0 + text + META_LINE
+    };
+    let content: f32 = rows.iter().map(height).sum();
+    let id = Id::new("agent.list");
+    if log.commands.len() != log.listed {
+        // A new command: show it.
+        ui.set_scroll_offset(id, content);
+        log.listed = log.commands.len();
+    }
+    let offset = ui.scroll_view(id, list, content);
+    let now = Instant::now();
+    let mut action = None;
+    ui.push_clip(list);
+    let mut y = list.y - offset;
+    for (index, (command, lines)) in log.commands.iter().zip(&rows).enumerate() {
+        let row = Rect::new(list.x, y, list.w - 8.0, height(lines));
+        y += row.h;
+        if row.b() < list.y || row.y > list.b() {
+            continue;
+        }
+        let row_id = Id::new(("agent.command", index));
+        let response = ui.zone(row_id, row, Role::Button, &command.text);
+        let picked = log.picked == Some(index);
+        if picked {
+            ui.gfx.fill_rect(row, 0.0, t.selected);
+            ui.gfx
+                .fill_rect(Rect::new(row.x, row.y, 2.0, row.h), 0.0, t.accent);
+        } else if response.hovered {
+            ui.gfx.fill_rect(row, 0.0, t.hover);
+        }
+        if response.focus_ring {
+            ui.focus_ring(row.inset(2.0, 2.0), 4.0);
+        }
+        ui.gfx.fill_rect(
+            Rect::new(row.x + space::M, row.b() - 1.0, row.w - space::M, 1.0),
+            0.0,
+            t.line,
+        );
+        let mut inner = row.inset(space::M, space::S);
+        let mark = inner.take_left(MARK_COLUMN);
+        status_mark(ui, Point::new(mark.x + 7.0, mark.y + 8.5), &command.state);
+        for (n, text) in lines.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // A few lines.
+            let line = Rect::new(
+                inner.x,
+                inner.y + n as f32 * COMMAND_LINE,
+                inner.w,
+                COMMAND_LINE,
+            );
+            ui.gfx.text(line, text, MONO_SMALL, t.text, Align::Start);
+        }
+        let meta = Rect::new(inner.x, inner.b() - META_LINE, inner.w, META_LINE);
+        let (said, ink) = describe_run(command, log.since, now);
+        let color = match ink {
+            Ink::Accent => t.accent,
+            Ink::Warn => t.warn,
+            Ink::Quiet => t.text3,
+        };
+        ui.gfx.text(meta, &said, SMALL, color, Align::Start);
+        if response.hovered || picked {
+            let copy = Rect::new(row.r() - space::S - 24.0, row.y + space::XS, 24.0, 24.0);
+            ui.gfx.fill_rect(copy, 4.0, t.chrome);
+            if ui
+                .icon_button(
+                    row_id.with("copy"),
+                    copy,
+                    icons::COPY,
+                    "Copy the command",
+                    false,
+                )
+                .clicked
+            {
+                ui.copy(command.text.clone());
+                ui.toast("Command copied", Tone::Info);
+                continue;
+            }
+        }
+        if response.clicked {
+            if picked {
+                log.picked = None;
+                action = Some(PanelAction::Newest);
+            } else {
+                log.picked = Some(index);
+                action = Some(PanelAction::Show(command.line));
+            }
+        }
+    }
+    ui.pop_clip();
+    action
+}
 
-/// Commands in the strip: monospace, a touch smaller than the terminal's.
-const MONO_SMALL: annulus_ui::gfx::Font = annulus_ui::gfx::Font::mono(12.0);
+/// The panel folded to a rail: unfold, the AI mark, a spinner while a command runs, how many
+/// commands so far, and Stop.
+fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog) -> Option<PanelAction> {
+    let t = ui.theme;
+    let mut column = rect.inset(space::S, space::M);
+    let unfold = column.take_top(CONTROL).centered(CONTROL, CONTROL);
+    if ui
+        .icon_button(
+            Id::new("agent.fold"),
+            unfold,
+            icons::CHEVRON_LEFT,
+            "Open the agent panel",
+            false,
+        )
+        .clicked
+    {
+        log.folded = false;
+    }
+    column.take_top(space::S);
+    let chip_row = column.take_top(20.0);
+    let chip_w = ui.gfx.measure("AI", SMALL).width + 12.0;
+    ui.chip(
+        Point::new(chip_row.center().x - chip_w / 2.0, chip_row.y),
+        "AI",
+        t.accent,
+    );
+    column.take_top(space::S);
+    let count = column.take_top(18.0);
+    ui.gfx.text(
+        count,
+        &log.commands.len().to_string(),
+        SMALL,
+        t.text2,
+        Align::Center,
+    );
+    if let Some(last) = log.commands.last()
+        && matches!(last.state, Ran::Running(_))
+    {
+        let spin = column.take_top(20.0);
+        status_mark(
+            ui,
+            Point::new(spin.center().x, spin.center().y),
+            &last.state,
+        );
+    }
+    let stop = column.take_bottom(CONTROL).centered(CONTROL, CONTROL);
+    let stopped = ui
+        .icon_button(
+            Id::new("agent.stop"),
+            stop,
+            icons::CLOSE,
+            "Stop all agents",
+            false,
+        )
+        .clicked;
+    stopped.then_some(PanelAction::Stop)
+}
+
+/// The mark at `center` for how a command ran: a check once done, a clock when its wait ran
+/// out, a turning arc while it runs.
+fn status_mark(ui: &mut Ui<'_>, center: Point, state: &Ran) {
+    let t = ui.theme;
+    let icon = |icon, color, ui: &mut Ui<'_>| {
+        ui.gfx.icon(
+            icon,
+            Rect::new(center.x - 7.0, center.y - 7.0, 14.0, 14.0),
+            color,
+        );
+    };
+    match state {
+        Ran::Done { .. } => icon(icons::CHECK, t.ok, ui),
+        Ran::TimedOut { .. } => icon(icons::CLOCK, t.warn, ui),
+        Ran::Running(_) => {
+            ui.gfx.stroke_circle(center, 6.0, 1.5, t.accent.alpha(0.25));
+            #[allow(clippy::cast_possible_truncation)] // An angle for drawing.
+            let turn = (ui.time() * 300.0 % 360.0) as f32;
+            let arc: Vec<Point> =
+                icons::Segment::arc_points(center.x, center.y, 6.0, turn, turn + 100.0)
+                    .into_iter()
+                    .map(|(x, y)| Point::new(x, y))
+                    .collect();
+            ui.gfx.polyline(&arc, false, 1.5, t.accent);
+            ui.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+}
+
+/// How the line under a command is colored: quiet once done, the accent while it runs, a
+/// warning when its wait ran out.
+#[derive(Debug, PartialEq, Eq)]
+enum Ink {
+    Quiet,
+    Accent,
+    Warn,
+}
+
+/// The line under a command and its color: when in the session it was typed, how long it
+/// took (or has run so far) and how many lines it printed.
+fn describe_run(command: &AgentCommand, since: u64, now: Instant) -> (String, Ink) {
+    let at = clock(command.at.saturating_sub(since));
+    match &command.state {
+        Ran::Running(started) => (
+            format!("{at} · running {}", took(now.duration_since(*started))),
+            Ink::Accent,
+        ),
+        Ran::Done { took: spent, lines } => (
+            format!("{at} · {} · {}", took(*spent), lines_said(*lines)),
+            Ink::Quiet,
+        ),
+        Ran::TimedOut { took: spent, lines } => (
+            format!(
+                "{at} · still printing after {} · {}",
+                took(*spent),
+                lines_said(*lines)
+            ),
+            Ink::Warn,
+        ),
+    }
+}
+
+/// `seconds` into the session as m:ss (h:mm:ss past an hour).
+fn clock(seconds: u64) -> String {
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if h > 0 {
+        format!("+{h}:{m:02}:{s:02}")
+    } else {
+        format!("+{m}:{s:02}")
+    }
+}
+
+/// A command's run time, as short as it reads well: 0.4 s, 12 s, 2 min 5 s.
+fn took(spent: Duration) -> String {
+    let seconds = spent.as_secs_f64();
+    if seconds < 10.0 {
+        format!("{seconds:.1} s")
+    } else if seconds < 60.0 {
+        format!("{} s", spent.as_secs())
+    } else {
+        format!("{} min {} s", spent.as_secs() / 60, spent.as_secs() % 60)
+    }
+}
+
+fn lines_said(lines: usize) -> String {
+    match lines {
+        0 => "no output".to_owned(),
+        1 => "1 line".to_owned(),
+        n => format!("{n} lines"),
+    }
+}
+
+/// `text` in lines of at most `per_line` characters, at most `most` of them, the last cut
+/// short with an ellipsis when there is more. A command of several lines runs on, its lines
+/// two spaces apart.
+fn wrap_command(text: &str, per_line: usize, most: usize) -> Vec<String> {
+    let flat = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ");
+    let chars: Vec<char> = flat.chars().collect();
+    let per_line = per_line.max(1);
+    let mut lines: Vec<String> = chars
+        .chunks(per_line)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    if lines.len() > most {
+        lines.truncate(most);
+        if let Some(last) = lines.last_mut() {
+            let kept: String = last.chars().take(per_line.saturating_sub(1)).collect();
+            *last = kept + "…";
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
 
 /// Agent tab `uid`, or why it is not one.
 fn agent_tab(app: &mut NativeApp, uid: u64) -> Result<&mut Tab, String> {
@@ -290,6 +725,24 @@ fn new_output(text: &str, before: usize) -> String {
     let mut out = lines[from..].join("\n");
     out.push('\n');
     out
+}
+
+/// How a command that answered with `out` after `took` ran: done when its output `settled`,
+/// timed out otherwise. Its lines leave out the command's own line and, once done, the prompt
+/// that came back after it.
+fn ran(out: &str, took: Duration, settled: bool) -> Ran {
+    let shown = out.trim_end().lines().count();
+    if settled {
+        Ran::Done {
+            took,
+            lines: shown.saturating_sub(2),
+        }
+    } else {
+        Ran::TimedOut {
+            took,
+            lines: shown.saturating_sub(1),
+        }
+    }
 }
 
 /// The most lines one read returns: enough for any command's output, little enough that a
@@ -335,7 +788,7 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             let uid = opened.ok_or("nothing opened")?;
             let index = app.tabs.iter().position(|tab| tab.uid == uid).unwrap_or(0);
             let tab = &mut app.tabs[index];
-            tab.agent = Some(Box::default());
+            tab.agent = Some(Box::new(AgentLog::new(crate::sync_screen::now_secs())));
             Ok(Response::Tab(tab_info(tab, index == app.active)))
         }
         Request::Run { tab, .. } => {
@@ -633,6 +1086,96 @@ mod tests {
         );
         // Cleared meanwhile (fewer lines than before): its last lines instead.
         assert_eq!(new_output("fresh\n", 40), "fresh\n");
+    }
+
+    #[test]
+    fn a_finished_command_counts_its_output_and_a_timed_out_one_keeps_its_lines_so_far() {
+        let out = "user@box:~$ uptime\n 10:00 up 2 days\nuser@box:~$\n";
+        let took = Duration::from_millis(400);
+        assert!(matches!(ran(out, took, true), Ran::Done { lines: 1, .. }));
+        let going = "user@box:~$ tail -f log\none\ntwo\n";
+        assert!(matches!(
+            ran(going, took, false),
+            Ran::TimedOut { lines: 2, .. }
+        ));
+        assert!(matches!(
+            ran("user@box:~$ true\nuser@box:~$\n", took, true),
+            Ran::Done { lines: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn each_command_says_when_in_the_session_how_long_and_how_much() {
+        let command = |state| AgentCommand {
+            text: "uptime".into(),
+            at: 1_000 + 84,
+            line: 0,
+            state,
+        };
+        let done = command(Ran::Done {
+            took: Duration::from_millis(400),
+            lines: 1,
+        });
+        let now = Instant::now();
+        assert_eq!(
+            describe_run(&done, 1_000, now),
+            ("+1:24 · 0.4 s · 1 line".to_owned(), Ink::Quiet)
+        );
+        let late = command(Ran::TimedOut {
+            took: Duration::from_secs(125),
+            lines: 48,
+        });
+        assert_eq!(
+            describe_run(&late, 1_000, now),
+            (
+                "+1:24 · still printing after 2 min 5 s · 48 lines".to_owned(),
+                Ink::Warn
+            )
+        );
+        let running = command(Ran::Running(now));
+        let (said, ink) = describe_run(&running, 1_000, now);
+        assert!(said.starts_with("+1:24 · running "), "{said}");
+        assert_eq!(ink, Ink::Accent);
+        assert_eq!(clock(3_725), "+1:02:05");
+        assert_eq!(lines_said(0), "no output");
+    }
+
+    #[test]
+    fn a_long_command_wraps_to_three_lines_and_the_rest_is_cut_short() {
+        assert_eq!(wrap_command("ls -la", 10, 3), vec!["ls -la"]);
+        assert_eq!(wrap_command("abcdefghij", 4, 3), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(
+            wrap_command("abcdefghijklmnop", 4, 3),
+            vec!["abcd", "efgh", "ijk…"]
+        );
+        assert_eq!(
+            wrap_command("cd /srv\nmake\n", 40, 3),
+            vec!["cd /srv  make"],
+            "the lines of one command run on"
+        );
+    }
+
+    #[test]
+    fn the_margin_marks_every_command_and_tints_the_picked_one_up_to_the_next() {
+        let mut log = AgentLog::new(0);
+        for line in [3, 9, 20] {
+            log.commands.push(AgentCommand {
+                text: "true".into(),
+                at: 0,
+                line,
+                state: Ran::Running(Instant::now()),
+            });
+        }
+        assert_eq!(log.marks().lines, vec![3, 9, 20]);
+        assert_eq!(log.marks().picked, None);
+        log.picked = Some(1);
+        assert_eq!(log.marks().picked, Some(9..20));
+        log.picked = Some(2);
+        assert_eq!(
+            log.marks().picked,
+            Some(20..usize::MAX),
+            "the newest runs on"
+        );
     }
 
     #[test]

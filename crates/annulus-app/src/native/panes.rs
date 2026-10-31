@@ -496,6 +496,23 @@ impl Panes {
         self.pane(self.focused)?.terminal.transcript()
     }
 
+    /// Marks where an agent typed in the focused pane, the one it types into (F-AUTO-004).
+    pub fn mark_focused(&mut self, marks: &super::live::AgentMarks) {
+        let focused = self.focused;
+        if let Some(pane) = self.all.iter_mut().find(|pane| pane.id == focused)
+            && pane.terminal.marks != *marks
+        {
+            marks.clone_into(&mut pane.terminal.marks);
+        }
+    }
+
+    /// Scrolls the focused pane so transcript line `line` is at the top.
+    pub fn scroll_focused_to(&self, line: usize) {
+        if let Some(pane) = self.pane(self.focused) {
+            pane.terminal.scroll_to_line(line);
+        }
+    }
+
     /// Closes the focused pane; `false` when it is the last (the tab closes instead). The
     /// pane before it takes the keyboard, and the closed pane's transcript goes to `closed`.
     /// Broadcast and focus mode end when one pane is left.

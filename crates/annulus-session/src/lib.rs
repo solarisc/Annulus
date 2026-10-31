@@ -611,6 +611,18 @@ impl Session {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 
+    /// Scrolls the view so transcript line `line` is at the top (an agent's command picked
+    /// in its panel).
+    pub fn scroll_to_line(&self, line: usize) {
+        annulus_term::transcript::scroll_to_line(&mut self.term.lock(), line);
+    }
+
+    /// The transcript line at the top of the screen now.
+    #[must_use]
+    pub fn top_line(&self) -> usize {
+        annulus_term::transcript::top_line(&self.term.lock())
+    }
+
     /// Forgets the scrollback (Ctrl+Shift+Backspace).
     pub fn clear_scrollback(&self) {
         annulus_term::clear_scrollback(&mut self.term.lock());

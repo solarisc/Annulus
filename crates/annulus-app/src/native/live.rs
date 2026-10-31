@@ -70,9 +70,20 @@ pub struct LiveTerminal {
     show_log: bool,
     /// The saved host this connects to: its name and its server's OS, for the connecting card.
     pub identity: Option<(String, Option<&'static super::os::Os>)>,
+    /// Where an agent typed into this terminal, marked beside its lines (F-AUTO-004).
+    pub marks: AgentMarks,
     /// Held connecting, never started (the scenes).
     #[cfg(test)]
     held: bool,
+}
+
+/// Where an agent typed into a terminal (F-AUTO-004): the transcript line each of its
+/// commands went in on, marked in the margin, and the lines of the one picked in its panel,
+/// tinted.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct AgentMarks {
+    pub lines: Vec<usize>,
+    pub picked: Option<std::ops::Range<usize>>,
 }
 
 /// The step of Server, Key, Login, Shell under way (4 once all passed) at connecting `stage`:
@@ -126,6 +137,7 @@ impl LiveTerminal {
             log: Vec::new(),
             show_log: false,
             identity: None,
+            marks: AgentMarks::default(),
             #[cfg(test)]
             held: false,
         }
@@ -231,6 +243,51 @@ impl LiveTerminal {
     #[must_use]
     pub fn started(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// Scrolls the view so transcript line `line` is at the top.
+    pub fn scroll_to_line(&self, line: usize) {
+        if let Some(session) = &self.session {
+            session.scroll_to_line(line);
+        }
+    }
+
+    /// Marks the agent's lines on screen, whose top shows transcript line `top`: a bar in the
+    /// margin beside each command's line, and a tint over the picked command's lines.
+    fn draw_marks(&self, ui: &mut Ui<'_>, inner: Rect, top: usize, (rows, cell_h): (usize, f32)) {
+        if self.marks.lines.is_empty() {
+            return;
+        }
+        let t = ui.theme;
+        let shown = top..top + rows;
+        #[allow(clippy::cast_precision_loss)] // A screen row.
+        let row_y = |line: usize| inner.y + (line - top) as f32 * cell_h;
+        if let Some(picked) = &self.marks.picked {
+            let from = picked.start.max(shown.start);
+            let to = picked.end.min(shown.end);
+            if from < to {
+                let y = row_y(from);
+                #[allow(clippy::cast_precision_loss)] // Screen rows.
+                let h = (to - from) as f32 * cell_h;
+                ui.gfx.fill_rect(
+                    Rect::new(inner.x - space::S, y, inner.w + space::S, h),
+                    2.0,
+                    t.accent.alpha(0.10),
+                );
+            }
+        }
+        for &line in self.marks.lines.iter().filter(|line| shown.contains(*line)) {
+            ui.gfx.fill_rect(
+                Rect::new(
+                    inner.x - space::S - 1.0,
+                    row_y(line) + 2.0,
+                    3.0,
+                    cell_h - 4.0,
+                ),
+                1.5,
+                t.accent,
+            );
+        }
     }
 
     /// Sends bytes typed in another pane (broadcast input).
@@ -659,6 +716,7 @@ impl LiveTerminal {
         if let Some(session) = &self.session {
             let screen = session.screen();
             terminal::draw(ui, inner, &screen, font, response.focused);
+            self.draw_marks(ui, inner, session.top_line(), (grid.1, cell_h));
             if let Some(find) = &mut self.find
                 && let Some(search) = &mut find.search
             {

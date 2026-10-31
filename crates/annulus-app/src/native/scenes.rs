@@ -153,19 +153,61 @@ fn terminal_tab(app: &mut NativeApp) {
     app.active = super::FIXED_TABS;
 }
 
-/// An agent's tab (ADR-0020): marked AI, with the commands it typed beside its terminal.
+/// An agent's tab (ADR-0020, F-AUTO-004): marked AI, with the commands it typed beside its
+/// terminal: done, out of time, a long one wrapped, one picked and the newest still running.
 fn agent_tab(app: &mut NativeApp) {
+    use super::control::{AgentCommand, AgentLog, Ran};
+    use std::time::{Duration, Instant};
     terminal_tab(app);
     let now = crate::sync_screen::now_secs();
     let tab = &mut app.tabs[super::FIXED_TABS];
     "deploy-check".clone_into(&mut tab.title);
-    tab.agent = Some(Box::new(super::control::AgentLog {
-        commands: vec![
-            (now - 300, "systemctl status nginx".into()),
-            (now - 120, "df -h /var".into()),
-            (now - 20, "journalctl -u app -n 50 --no-pager".into()),
-        ],
-    }));
+    let command = |text: &str, ago: u64, line, state| AgentCommand {
+        text: text.into(),
+        at: now - ago,
+        line,
+        state,
+    };
+    let done = |millis, lines| Ran::Done {
+        took: Duration::from_millis(millis),
+        lines,
+    };
+    let mut log = AgentLog::new(now - 330);
+    log.commands = vec![
+        command("systemctl is-active nginx", 300, 0, done(210, 1)),
+        command("df -h /var", 280, 2, done(380, 2)),
+        command(
+            "docker ps -a --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\"",
+            200,
+            5,
+            done(640, 6),
+        ),
+        command(
+            "journalctl -u app -f",
+            120,
+            12,
+            Ran::TimedOut {
+                took: Duration::from_secs(30),
+                lines: 48,
+            },
+        ),
+        command(
+            "curl -s http://127.0.0.1:8080/healthz",
+            4,
+            61,
+            Ran::Running(Instant::now()),
+        ),
+    ];
+    log.picked = Some(2);
+    tab.agent = Some(Box::new(log));
+}
+
+/// The same tab with its agent panel folded to a rail.
+fn agent_tab_folded(app: &mut NativeApp) {
+    agent_tab(app);
+    if let Some(log) = app.tabs[super::FIXED_TABS].agent.as_mut() {
+        log.folded = true;
+    }
 }
 
 /// The window and the terminal in two different dark community schemes.
@@ -1058,6 +1100,15 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: agent_tab,
+        acts: &[],
+    },
+    Scene {
+        name: "agent-tab-folded",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: agent_tab_folded,
         acts: &[],
     },
     Scene {
@@ -3815,10 +3866,47 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
         .and_then(|open| open.agent.as_ref())
         .unwrap();
     assert_eq!(log.commands.len(), 1);
-    assert_eq!(
-        log.commands[0].1, "echo agent-was-here",
-        "listed beside the tab"
+    let command = &log.commands[0];
+    assert_eq!(command.text, "echo agent-was-here", "listed beside the tab");
+    assert!(
+        matches!(command.state, super::control::Ran::Done { lines: 1.., .. }),
+        "done, with the lines it printed"
     );
+    let line = command.line;
+    assert_eq!(log.marks().lines, vec![line], "marked in the margin");
+
+    // Picking it in the panel shows it; picking it again lets it go.
+    let output = step(&mut app, &mut state, &[], time);
+    let output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "echo agent-was-here"),
+        time + 0.1,
+    );
+    let log = app
+        .tabs
+        .iter()
+        .find(|open| open.uid == tab)
+        .and_then(|open| open.agent.as_ref());
+    assert_eq!(log.and_then(|log| log.picked), Some(0));
+    assert_eq!(
+        log.and_then(|log| log.marks().picked)
+            .map(|lines| lines.start),
+        Some(line),
+        "its lines are tinted from the one it was typed on"
+    );
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "echo agent-was-here"),
+        time + 0.2,
+    );
+    let log = app
+        .tabs
+        .iter()
+        .find(|open| open.uid == tab)
+        .and_then(|open| open.agent.as_ref());
+    assert_eq!(log.and_then(|log| log.picked), None);
 }
 
 #[test]

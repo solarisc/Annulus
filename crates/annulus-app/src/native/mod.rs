@@ -1222,15 +1222,27 @@ impl NativeApp {
                 };
             }
             let side = self.snippet_panel.is_some().then(|| area.take_right(300.0));
-            // An agent's tab shows what the agent typed beside it (ADR-0020 §6).
+            // An agent's tab shows what the agent typed beside it (ADR-0020 §6, F-AUTO-004).
             let strip = tab
                 .agent
                 .as_deref()
-                .map(|log| (area.take_right(control::STRIP_W), log));
+                .map(|log| area.take_right(control::panel_width(log)));
             let content = panel_filled(ui, area, background);
-            if let Some((rect, log)) = strip
-                && control::agent_strip(ui, rect, log)
-            {
+            let agent_action = match (strip, tab.agent.as_deref_mut()) {
+                (Some(rect), Some(log)) => {
+                    control::agent_panel(ui, rect, log, (&tab.title, tab.status))
+                }
+                _ => None,
+            };
+            if let (Some(log), TermView::Live(panes)) = (tab.agent.as_deref(), &mut *view) {
+                panes.mark_focused(&log.marks());
+                match agent_action {
+                    Some(control::PanelAction::Show(line)) => panes.scroll_focused_to(line),
+                    Some(control::PanelAction::Newest) => panes.scroll_focused_to(usize::MAX),
+                    _ => {}
+                }
+            }
+            if agent_action == Some(control::PanelAction::Stop) {
                 self.settings.automation = false;
                 self.door = None;
                 self.runs.clear();
