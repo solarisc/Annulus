@@ -1028,6 +1028,21 @@ impl Ui<'_> {
         None
     }
 
+    /// The menu of `items` that a click on control `id` (its `response` this frame) opens
+    /// under `anchor`, `width` wide, with `selected` checked; a control drawn its own way (an
+    /// icon button) uses it as [`Self::menu_button`] does. Returns the index chosen this frame.
+    pub fn menu_for(
+        &mut self,
+        id: Id,
+        response: &Response,
+        anchor: Rect,
+        items: &[String],
+        selected: Option<usize>,
+        width: f32,
+    ) -> Option<usize> {
+        self.popup_toggle(id, response, anchor, items, selected, width)
+    }
+
     fn popup_toggle(
         &mut self,
         id: Id,
@@ -1195,6 +1210,9 @@ impl Ui<'_> {
     /// keeps, in `menu`.
     fn draw_menu(&mut self, popup: &Popup, menu: Rect) {
         let t = self.theme;
+        // A click on the menu between its items (its edge, its scroll bar) stays in the menu
+        // rather than reaching the backdrop and closing it.
+        self.zone(popup.owner.with("menu.surface"), menu, Role::Backdrop, "");
         self.gfx.shadow(menu, radius::MEDIUM, 16.0, 6.0, t.shadow);
         self.gfx.fill_rect(menu, radius::MEDIUM, t.raised);
         self.gfx.stroke_rect(menu, radius::MEDIUM, 1.0, t.line);
@@ -1439,22 +1457,69 @@ impl Ui<'_> {
     }
 
     /// A vertical scroll view: handles the wheel, clips to `rect` and draws a thin scroll bar
-    /// while the content is taller than the view. Returns the content offset to draw at.
+    /// while the content is taller than the view. The bar's thumb drags, and a press on its
+    /// track brings the thumb under the pointer. Returns the content offset to draw at.
     pub fn scroll_view(&mut self, id: Id, rect: Rect, content_height: f32) -> f32 {
         let max = (content_height - rect.h).max(0.0);
-        let target = (self.scroll_offset(id) - self.take_wheel(rect)).clamp(0.0, max);
+        let mut target = (self.scroll_offset(id) - self.take_wheel(rect)).clamp(0.0, max);
+        let track = Rect::new(rect.r() - 6.0, rect.y + 2.0, 4.0, rect.h - 4.0);
+        let thumb_h = (rect.h / content_height * track.h).max(24.0).min(track.h);
+        let bar = id.with("bar");
+        let grab = id.with("grab");
+        let (mut held, mut hot) = (false, false);
+        if max > 0.0 {
+            // Wider than it is drawn, so it is easy to hit.
+            let response = self.zone(
+                bar,
+                Rect::new(rect.r() - 8.0, rect.y, 8.0, rect.h),
+                Role::ScrollView,
+                "",
+            );
+            held = self.dragging(bar);
+            if let (true, Some(pointer)) = (held, self.pointer()) {
+                let screen = self.gfx.to_screen(track);
+                let scale = screen.h / track.h;
+                // Where on the thumb it was taken: kept for the whole drag, so the thumb does
+                // not jump under the pointer; a press on the track takes it by its middle.
+                let taken = if let Some(taken) = self.state.scroll.get(&grab) {
+                    *taken
+                } else {
+                    let thumb_y = screen.y + (screen.h - thumb_h * scale) * (target / max);
+                    let at = self.pressed_at().map_or(pointer.y, |at| at.y);
+                    let on_thumb = (thumb_y..=thumb_y + thumb_h * scale).contains(&at);
+                    let taken = if on_thumb {
+                        (at - thumb_y) / scale
+                    } else {
+                        thumb_h / 2.0
+                    };
+                    self.state.scroll.insert(grab, taken);
+                    taken
+                };
+                let room = track.h - thumb_h;
+                if room > 0.0 {
+                    let top = (pointer.y - screen.y) / scale - taken;
+                    target = (top / room * max).clamp(0.0, max);
+                }
+            }
+            hot = response.hovered || held;
+        }
+        if !held {
+            self.state.scroll.remove(&grab);
+        }
         self.set_scroll_offset(id, target);
-        // The content glides to where the wheel or the keyboard sent it.
+        // The content glides to where the wheel or the keyboard sent it, and follows a
+        // dragged thumb at once.
+        if held {
+            self.spring_set(id.with("glide"), target);
+        }
         let offset = self.spring(id.with("glide"), target).clamp(0.0, max);
         if max > 0.0 {
             let t = self.theme;
-            let track = Rect::new(rect.r() - 6.0, rect.y + 2.0, 4.0, rect.h - 4.0);
-            let thumb_h = (rect.h / content_height * track.h).max(24.0);
             let thumb_y = track.y + (track.h - thumb_h) * (offset / max);
             self.gfx.fill_rect(
                 Rect::new(track.x, thumb_y, track.w, thumb_h),
                 2.0,
-                t.text2.alpha(0.4),
+                t.text2.alpha(if hot { 0.7 } else { 0.4 }),
             );
         }
         offset
@@ -2067,6 +2132,77 @@ mod tests {
         draw(&mut state, &[key(Key::Escape, Modifiers::NONE)]);
         draw(&mut state, &[Event::Wheel { x: 0.0, y: -90.0 }]);
         assert!((scrolled(&state, page) - 90.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_menus_scroll_bar_drags_and_jumps_and_keeps_the_menu_open() {
+        let mut state = UiState::default();
+        let id = Id::new("scheme");
+        let items: Vec<String> = (0..500).map(|n| format!("scheme-{n}")).collect();
+        let field = Rect::new(10.0, 40.0, 200.0, 32.0);
+        let draw = |state: &mut UiState, events: &[Event]| {
+            frame(state, events, |ui| {
+                ui.select(id, field, &items, Some(0), "Scheme");
+            });
+        };
+        draw(&mut state, &[]);
+        draw(
+            &mut state,
+            &[
+                Event::PointerMoved(field.center()),
+                Event::PointerDown(crate::kit::Button::Primary),
+                Event::PointerUp(crate::kit::Button::Primary),
+            ],
+        );
+        draw(&mut state, &[]);
+        let scroll = id.with("menu.scroll");
+        let bar = state
+            .zones()
+            .iter()
+            .find(|zone| zone.id == scroll.with("bar"))
+            .map(|zone| zone.rect)
+            .expect("a long menu's scroll bar takes the pointer");
+        let scrolled = |state: &UiState| state.scroll.get(&scroll).copied().unwrap_or(0.0);
+        let open = |state: &UiState| state.popup.is_some();
+        // The thumb, at the top, dragged to the bottom: the menu reaches its last items.
+        let thumb = Point::new(bar.center().x, bar.y + 6.0);
+        let bottom = Point::new(bar.center().x, bar.b() + 40.0);
+        draw(
+            &mut state,
+            &[
+                Event::PointerMoved(thumb),
+                Event::PointerDown(crate::kit::Button::Primary),
+            ],
+        );
+        draw(&mut state, &[Event::PointerMoved(bottom)]);
+        draw(&mut state, &[]);
+        assert!(
+            state.zones().iter().any(|zone| zone.label == "scheme-499"),
+            "dragged to the end: {}",
+            scrolled(&state)
+        );
+        let max = scrolled(&state);
+        draw(&mut state, &[Event::PointerUp(crate::kit::Button::Primary)]);
+        assert!(open(&state), "a drag on the bar keeps the menu open");
+        // A click on the track halfway down brings the thumb there.
+        draw(&mut state, &[Event::PointerMoved(bar.center())]);
+        draw(
+            &mut state,
+            &[Event::PointerDown(crate::kit::Button::Primary)],
+        );
+        draw(&mut state, &[Event::PointerUp(crate::kit::Button::Primary)]);
+        let half = scrolled(&state) / max;
+        assert!((0.4..0.6).contains(&half), "halfway: {half}");
+        assert!(open(&state), "a click on the bar keeps the menu open");
+        // A click on the menu's own edge, between its items, keeps it open too.
+        let edge = Point::new(bar.x - 100.0, bar.b() + 2.0);
+        draw(&mut state, &[Event::PointerMoved(edge)]);
+        draw(
+            &mut state,
+            &[Event::PointerDown(crate::kit::Button::Primary)],
+        );
+        draw(&mut state, &[Event::PointerUp(crate::kit::Button::Primary)]);
+        assert!(open(&state), "a click on the menu's edge keeps it open");
     }
 
     #[test]

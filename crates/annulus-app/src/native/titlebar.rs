@@ -9,7 +9,7 @@ use annulus_ui::gfx::{Align, Color, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
-use annulus_ui::widgets::BODY_MEDIUM;
+use annulus_ui::widgets::{BODY, BODY_MEDIUM};
 
 use super::{FIXED_TABS, NativeApp, SyncBadge, TabKind, WindowAction};
 use crate::terminal_view::TabStatus;
@@ -81,51 +81,18 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     };
     // Where each tab belongs, left to right. Tabs glide to their places (a tab closed, moved
     // or renamed), but take clicks in them, so what is clicked never moves under the pointer.
-    let mut slots: Vec<Rect> = Vec::with_capacity(shown);
-    // The Vault tab holds the sync mark too, while the vault syncs with a server.
-    let syncs = app.sync_badge() != SyncBadge::Local;
-    let wanted: Vec<f32> = (0..shown)
-        .map(|index| {
-            let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind);
-            if index == 0 && syncs {
-                width + CLOUD_W
-            } else {
-                width
-            }
-        })
-        .collect();
-    // Too many sessions for the strip: they share it evenly, down to a narrowest width,
-    // rather than the last one shrinking to nothing.
-    let fixed: f32 = wanted
-        .iter()
-        .take(FIXED_TABS)
-        .map(|width| width + 2.0)
-        .sum();
-    let room = row.w - PLUS_W - space::S - fixed - DIVIDER;
-    let sessions = shown.saturating_sub(FIXED_TABS);
-    let asked: f32 = wanted
-        .iter()
-        .skip(FIXED_TABS)
-        .map(|width| width + 2.0)
-        .sum();
-    #[allow(clippy::cast_precision_loss)] // A few dozen tabs.
-    let share = (asked > room && sessions > 0).then(|| (room / sessions as f32 - 2.0).max(MIN_TAB));
-    let mut x = row.x;
-    for (index, mut width) in wanted.into_iter().enumerate() {
-        if index == FIXED_TABS {
-            x += DIVIDER;
+    let mut layout = slots_for(app, ui, row, shown, 0.0);
+    // More tabs than the strip holds: the ones past its end wait in the all-tabs menu, and
+    // the tab in front is always on the strip, in its last place.
+    let overflow = layout.0.len() < shown;
+    if overflow {
+        layout = slots_for(app, ui, row, shown, MORE_W);
+        let last = layout.0.len().saturating_sub(1);
+        if app.active > last && last >= FIXED_TABS {
+            app.move_tab(app.active, last);
         }
-        if index >= FIXED_TABS
-            && let Some(share) = share
-        {
-            width = width.min(share);
-        }
-        if x + width > row.r() - PLUS_W - space::S + 0.5 {
-            break;
-        }
-        slots.push(Rect::new(x, row.center().y - TAB_H / 2.0, width, TAB_H));
-        x += width + 2.0;
     }
+    let (slots, x) = layout;
     if slots.len() > FIXED_TABS {
         // The fixed tabs, then a hairline, then the sessions.
         let line = Rect::new(
@@ -185,6 +152,12 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         if response.clicked {
             app.open_new_tab();
         }
+        if overflow {
+            let more = Rect::new(slot.r() + 2.0, slot.y, 30.0, 30.0);
+            if let Some(index) = all_tabs(app, ui, more, slots.len()) {
+                app.active = index;
+            }
+        }
     }
     if let Some(index) = close_tab {
         app.close_tab(index);
@@ -196,8 +169,120 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
 const DIVIDER: f32 = 13.0;
 /// Room kept for the + button after the tabs.
 const PLUS_W: f32 = 36.0;
+/// Room kept, besides, for the all-tabs button while some tabs do not fit.
+const MORE_W: f32 = 32.0;
 /// The narrowest a session tab gets when many share the strip.
 const MIN_TAB: f32 = 96.0;
+
+/// The places of the first `shown` tabs of `app` in `row`, with `reserve` kept at the end
+/// besides the + button: as many as fit, and the x where the + button goes after them.
+fn slots_for(
+    app: &NativeApp,
+    ui: &mut Ui<'_>,
+    row: Rect,
+    shown: usize,
+    reserve: f32,
+) -> (Vec<Rect>, f32) {
+    let end = row.r() - PLUS_W - space::S - reserve;
+    let mut slots: Vec<Rect> = Vec::with_capacity(shown);
+    // The Vault tab holds the sync mark too, while the vault syncs with a server.
+    let syncs = app.sync_badge() != SyncBadge::Local;
+    let wanted: Vec<f32> = (0..shown)
+        .map(|index| {
+            let width = tab_width(ui, &app.tabs[index].title, app.tabs[index].kind);
+            if index == 0 && syncs {
+                width + CLOUD_W
+            } else {
+                width
+            }
+        })
+        .collect();
+    // Too many sessions for the strip: they share it evenly, down to a narrowest width,
+    // rather than the last one shrinking to nothing.
+    let fixed: f32 = wanted
+        .iter()
+        .take(FIXED_TABS)
+        .map(|width| width + 2.0)
+        .sum();
+    let room = end - row.x - fixed - DIVIDER;
+    let sessions = shown.saturating_sub(FIXED_TABS);
+    let asked: f32 = wanted
+        .iter()
+        .skip(FIXED_TABS)
+        .map(|width| width + 2.0)
+        .sum();
+    #[allow(clippy::cast_precision_loss)] // A few dozen tabs.
+    let share = (asked > room && sessions > 0).then(|| (room / sessions as f32 - 2.0).max(MIN_TAB));
+    let mut x = row.x;
+    for (index, mut width) in wanted.into_iter().enumerate() {
+        if index == FIXED_TABS {
+            x += DIVIDER;
+        }
+        if index >= FIXED_TABS
+            && let Some(share) = share
+        {
+            width = width.min(share);
+        }
+        if x + width > end + 0.5 {
+            break;
+        }
+        slots.push(Rect::new(x, row.center().y - TAB_H / 2.0, width, TAB_H));
+        x += width + 2.0;
+    }
+    (slots, x)
+}
+
+/// The all-tabs button in `rect`, shown while some tabs do not fit on the strip (the first
+/// `on_strip` do): a menu of every tab, the one in front checked, with a search when it is
+/// long. A dot on it says a tab off the strip wants attention. Returns the tab picked.
+fn all_tabs(app: &NativeApp, ui: &mut Ui<'_>, rect: Rect, on_strip: usize) -> Option<usize> {
+    let t = ui.theme;
+    let id = Id::new("tab.all");
+    let response = ui.zone(id, rect, Role::Button, "All tabs");
+    ui.tooltip(id, rect, "All tabs");
+    let hover = ui.ease(
+        id.with("hover"),
+        if response.hovered || ui.menu_open(id) {
+            1.0
+        } else {
+            0.0
+        },
+    );
+    ui.gfx.fill_rect(rect, 8.0, t.hover.alpha(hover));
+    if response.focus_ring {
+        ui.focus_ring(rect, 8.0);
+    }
+    let glyph = rect.centered(16.0, 16.0);
+    ui.gfx.icon(icons::MORE, glyph, t.text2.mix(t.text, hover));
+    // The most urgent status among the tabs out of sight.
+    let waiting = app.tabs[on_strip.min(app.tabs.len())..]
+        .iter()
+        .filter_map(|tab| tab.status)
+        .max_by_key(|status| match status {
+            TabStatus::Unread => 0,
+            TabStatus::Input => 1,
+            TabStatus::Error => 2,
+        });
+    if let Some(status) = waiting {
+        let color = match status {
+            TabStatus::Unread => t.accent,
+            TabStatus::Input => t.warn,
+            TabStatus::Error => t.error,
+        };
+        let at = Point::new(glyph.r(), glyph.y);
+        ui.gfx.fill_circle(at, 4.5, t.chrome);
+        ui.gfx.fill_circle(at, 3.0, color);
+    }
+    if response.hovered {
+        ui.set_cursor(Cursor::Pointer);
+    }
+    let items: Vec<String> = app.tabs.iter().map(|tab| tab.title.clone()).collect();
+    let width = items
+        .iter()
+        .map(|item| ui.gfx.measure(item, BODY).width + 2.0 * space::L + 24.0)
+        .fold(240.0, f32::max);
+    ui.menu_for(id, &response, rect, &items, Some(app.active), width)
+}
 
 /// The + button: a quiet square that lights on hover, its plus turning a little as it does.
 fn plus_button(ui: &mut Ui<'_>, rect: Rect, response: &annulus_ui::kit::Response) {

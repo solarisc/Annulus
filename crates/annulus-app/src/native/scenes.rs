@@ -3676,6 +3676,56 @@ fn many_tabs_share_the_strip_and_none_shrinks_to_nothing() {
 }
 
 #[test]
+fn tabs_past_the_strips_end_wait_in_the_all_tabs_menu_and_come_back_when_picked() {
+    let mut app = NativeApp::new(Some(fixture_vault("all-tabs", false)));
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    assert!(
+        !output.zones.iter().any(|zone| zone.label == "All tabs"),
+        "no menu while every tab fits"
+    );
+    for index in 0..16 {
+        replay(&mut app, &format!("session {index:02}"));
+    }
+    app.active = 2;
+    let output = step(&mut app, &mut state, &[], 1.0);
+    let on_strip = |output: &annulus_ui::kit::FrameOutput| -> Vec<String> {
+        output
+            .zones
+            .iter()
+            .filter(|zone| zone.role == Role::Tab && zone.label.starts_with("session"))
+            .map(|zone| zone.label.clone())
+            .collect()
+    };
+    assert!(
+        on_strip(&output).len() < 16,
+        "not every tab fits: {:?}",
+        on_strip(&output)
+    );
+    assert!(!on_strip(&output).contains(&"session 15".to_owned()));
+    let output = step(&mut app, &mut state, &click_on(&output, "All tabs"), 2.0);
+    let listed = output
+        .zones
+        .iter()
+        .filter(|zone| zone.role == Role::MenuItem)
+        .count();
+    assert!(listed > 0, "the menu lists the tabs");
+    let output = step(&mut app, &mut state, &click_on(&output, "session 15"), 3.0);
+    assert_eq!(
+        app.tabs[app.active].title, "session 15",
+        "picked, it is in front"
+    );
+    let output = step(&mut app, &mut state, &[], 4.0);
+    let output = step(&mut app, &mut state, &[], 5.0);
+    assert!(
+        on_strip(&output).contains(&"session 15".to_owned()),
+        "and on the strip: {:?}",
+        on_strip(&output)
+    );
+    assert_eq!(app.tabs.len(), super::FIXED_TABS + 16, "no tab lost");
+}
+
+#[test]
 fn a_tabs_menu_closes_the_tabs_to_its_right_or_all_the_others() {
     let mut app = NativeApp::new(Some(fixture_vault("tab-menu", false)));
     for title in ["a", "b", "c", "d"] {
