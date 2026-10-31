@@ -1637,37 +1637,69 @@ fn transitions_move_through_frames_and_are_photographed_mid_flight() {
     assert!(still.is_empty(), "these did not move: {still:?}");
 }
 
-#[test]
-fn every_scene_renders_without_layout_faults() {
-    let dir = out_dir();
-    std::fs::create_dir_all(&dir).unwrap();
+/// The renderers every scene is drawn with: ours, and Direct2D on Windows. Each thread makes
+/// its own (Direct2D's factory is single-threaded).
+fn renderers() -> Vec<Box<dyn Renderer>> {
     let mut renderers: Vec<Box<dyn Renderer>> = vec![Box::new(Cpu(None))];
     #[cfg(windows)]
     renderers.push(Box::new(Direct2D(
         annulus_platform::d2d::D2d::new().unwrap(),
     )));
-    let mut failures = Vec::new();
+    renderers
+}
+
+/// How many threads a heavy test spreads its independent work over: every core, but no more
+/// than 8, since the CI runner runs other jobs beside this one.
+fn workers() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get().min(8))
+}
+
+#[test]
+fn every_scene_renders_without_layout_faults() {
+    let dir = out_dir();
+    std::fs::create_dir_all(&dir).unwrap();
     // `ANNULUS_SCENES=forwards` renders only the scenes whose names contain it.
     let only = std::env::var("ANNULUS_SCENES").ok();
-    for renderer in &mut renderers {
-        for scene in SCENES
-            .iter()
-            .filter(|scene| only.as_deref().is_none_or(|part| scene.name.contains(part)))
-        {
-            for appearance in [Appearance::Dark, Appearance::Light] {
-                let (png, faults) = render(scene, appearance, renderer.as_mut());
-                let theme = match appearance {
-                    Appearance::Dark => "dark",
-                    Appearance::Light => "light",
-                };
-                let name = format!("{}-{theme}{}", scene.name, renderer.suffix());
-                std::fs::write(dir.join(format!("{name}.png")), png).unwrap();
-                for fault in faults {
-                    failures.push(format!("{name}: {fault}"));
-                }
-            }
-        }
-    }
+    let jobs: Vec<(&Scene, Appearance, usize)> = (0..renderers().len())
+        .flat_map(|renderer| {
+            SCENES
+                .iter()
+                .filter(|scene| only.as_deref().is_none_or(|part| scene.name.contains(part)))
+                .flat_map(move |scene| {
+                    [Appearance::Dark, Appearance::Light].map(|look| (scene, look, renderer))
+                })
+        })
+        .collect();
+    // Each render has its own vault (named by scene, look and renderer), so they run side by
+    // side: thread n takes every n-th one, which spreads the heavy scenes out.
+    let threads = workers();
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|first| {
+                let (jobs, dir) = (&jobs, &dir);
+                scope.spawn(move || {
+                    let mut renderers = renderers();
+                    let mut failures = Vec::new();
+                    for &(scene, appearance, index) in jobs.iter().skip(first).step_by(threads) {
+                        let renderer = renderers[index].as_mut();
+                        let (png, faults) = render(scene, appearance, renderer);
+                        let theme = match appearance {
+                            Appearance::Dark => "dark",
+                            Appearance::Light => "light",
+                        };
+                        let name = format!("{}-{theme}{}", scene.name, renderer.suffix());
+                        std::fs::write(dir.join(format!("{name}.png")), png).unwrap();
+                        failures.extend(faults.into_iter().map(|fault| format!("{name}: {fault}")));
+                    }
+                    failures
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect()
+    });
     assert!(
         failures.is_empty(),
         "layout faults:
@@ -1977,11 +2009,14 @@ fn random_input_finds_no_panic_or_fault() {
         Ok(seed) => vec![seed.parse().expect("ANNULUS_MONKEY_SEED is a number")],
         Err(_) => vec![1, 2, 3],
     };
-    for seed in seeds {
-        random_user(seed, steps, (1100.0, 760.0));
-        // The smallest window the app allows, where layouts break first.
-        random_user(seed + 1000, steps / 2, (640.0, 420.0));
-    }
+    // Each run has its own app and vault: they run side by side.
+    std::thread::scope(|scope| {
+        for seed in seeds {
+            scope.spawn(move || random_user(seed, steps, (1100.0, 760.0)));
+            // The smallest window the app allows, where layouts break first.
+            scope.spawn(move || random_user(seed + 1000, steps / 2, (640.0, 420.0)));
+        }
+    });
 }
 
 /// A click on the zone named `name` that lies inside the zone named `within` (a button of
