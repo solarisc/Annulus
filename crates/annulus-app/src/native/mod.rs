@@ -1221,12 +1221,16 @@ impl NativeApp {
                     None => Some(String::new()),
                 };
             }
-            let side = self.snippet_panel.is_some().then(|| area.take_right(300.0));
+            // Side panels are cards of their own beside the terminal's, a gap apart.
+            let side = self
+                .snippet_panel
+                .is_some()
+                .then(|| panel(ui, area.take_right(300.0 + PANEL_GAP)));
             // An agent's tab shows what the agent typed beside it (ADR-0020 §6, F-AUTO-004).
             let strip = tab
                 .agent
                 .as_deref()
-                .map(|log| area.take_right(control::panel_width(log)));
+                .map(|log| panel(ui, area.take_right(control::panel_width(log) + PANEL_GAP)));
             let content = panel_filled(ui, area, background);
             let allowed = self.settings.automation;
             let agent_action = match (strip, tab.agent.as_deref_mut()) {

@@ -335,6 +335,10 @@ icons! {
         Line(9.5, 2.5),
         Move(8.0, 9.5), Line(8.0, 14.0),
     ];
+    /// Stopping what runs (agents): a square, so it is never mistaken for closing.
+    STOP = 55, "stop", [
+        Move(4.5, 4.5), Line(11.5, 4.5), Line(11.5, 11.5), Line(4.5, 11.5), Close,
+    ];
 }
 
 /// The geometry of `id`, or `None` for an unknown id.

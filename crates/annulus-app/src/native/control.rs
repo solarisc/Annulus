@@ -345,8 +345,8 @@ const MARK_COLUMN: f32 = 22.0;
 /// whether agents may act (Stop, or Allow again once stopped), fold, what the tab is
 /// connected to, and since when. Then every command the agent typed, newest last and kept in
 /// view, each with how it ran, when in the session, how long it took and how many lines it
-/// printed; picking one shows it in the terminal. `tab` is the tab's title, its status dot
-/// and whether automation is on.
+/// printed; picking one shows it in the terminal. `rect` is the inside of the panel's card;
+/// `tab` is the tab's title, its status dot and whether automation is on.
 #[allow(clippy::too_many_lines)] // The panel top to bottom: head, list, foot.
 pub fn agent_panel(
     ui: &mut Ui<'_>,
@@ -355,9 +355,6 @@ pub fn agent_panel(
     (title, status, allowed): (&str, Option<TabStatus>, bool),
 ) -> Option<PanelAction> {
     let t = ui.theme;
-    ui.gfx.fill_rect(rect, 0.0, t.chrome);
-    ui.gfx
-        .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
     if log.folded {
         return rail(ui, rect, log, allowed);
     }
@@ -370,7 +367,7 @@ pub fn agent_panel(
     let (label, icon, kind, tip, asks) = if allowed {
         (
             "Stop",
-            icons::CLOSE,
+            icons::STOP,
             Kind::Danger,
             "Stop all agents: automation goes off and every agent is cut off now",
             PanelAction::Stop,
@@ -458,19 +455,20 @@ pub fn agent_panel(
         Align::Start,
     );
     column.take_bottom(space::S);
+    // Dividers and the list span the card inside its border.
     ui.gfx.fill_rect(
-        Rect::new(rect.x + 1.0, column.b(), rect.w - 1.0, 1.0),
+        Rect::new(rect.x + 1.0, column.b(), rect.w - 2.0, 1.0),
         0.0,
         t.line,
     );
 
     column.take_top(space::M);
     ui.gfx.fill_rect(
-        Rect::new(rect.x + 1.0, column.y, rect.w - 1.0, 1.0),
+        Rect::new(rect.x + 1.0, column.y, rect.w - 2.0, 1.0),
         0.0,
         t.line,
     );
-    let list = Rect::new(rect.x + 1.0, column.y + 1.0, rect.w - 1.0, column.h - 1.0);
+    let list = Rect::new(rect.x + 1.0, column.y + 1.0, rect.w - 2.0, column.h - 1.0);
     if log.commands.is_empty() {
         let mut empty = list.inset(space::M, space::M);
         ui.gfx.text(
@@ -604,11 +602,11 @@ fn list_commands(ui: &mut Ui<'_>, list: Rect, log: &mut AgentLog) -> Option<Pane
     action
 }
 
-/// The panel folded to a rail: unfold, the AI mark, a spinner while a command runs, how many
-/// commands so far, and Stop.
+/// The panel folded to a rail: unfold, the AI mark, how many commands so far and how the last
+/// one ran (its tooltip says it in words), and Stop at the foot.
 fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog, allowed: bool) -> Option<PanelAction> {
     let t = ui.theme;
-    let mut column = rect.inset(space::S, space::M);
+    let mut column = rect.inset(space::XS, space::S);
     let unfold = column.take_top(CONTROL).centered(CONTROL, CONTROL);
     if ui
         .icon_button(
@@ -631,27 +629,42 @@ fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog, allowed: bool) -> Optio
         if allowed { t.accent } else { t.text3 },
     );
     column.take_top(space::S);
-    let count = column.take_top(18.0);
+    // How many commands and how the last one ran; a click opens the panel on them.
+    let tally = column.take_top(if log.commands.is_empty() { 22.0 } else { 42.0 });
+    let said = if allowed {
+        session_said(log)
+    } else {
+        "Agents are cut off from Annulus".to_owned()
+    };
+    let id = Id::new("agent.tally");
+    let response = ui.zone(id, tally, Role::Button, &said);
+    if response.hovered {
+        ui.gfx.fill_rect(tally, 6.0, t.hover);
+    }
+    if response.focus_ring {
+        ui.focus_ring(tally, 6.0);
+    }
+    ui.tooltip(id, tally, &said);
     ui.gfx.text(
-        count,
+        Rect::new(tally.x, tally.y + 2.0, tally.w, 18.0),
         &log.commands.len().to_string(),
         SMALL,
         t.text2,
         Align::Center,
     );
-    if let Some(last) = log.commands.last()
-        && matches!(last.state, Ran::Running(_))
-    {
-        let spin = column.take_top(20.0);
+    if let Some(last) = log.commands.last() {
         status_mark(
             ui,
-            Point::new(spin.center().x, spin.center().y),
+            Point::new(tally.center().x, tally.y + 30.0),
             &last.state,
         );
     }
+    if response.clicked {
+        log.folded = false;
+    }
     let switch = column.take_bottom(CONTROL).centered(CONTROL, CONTROL);
     let (icon, name, asks) = if allowed {
-        (icons::CLOSE, "Stop all agents", PanelAction::Stop)
+        (icons::STOP, "Stop all agents", PanelAction::Stop)
     } else {
         (
             icons::PLAY,

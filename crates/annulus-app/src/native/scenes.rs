@@ -4110,6 +4110,39 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
 }
 
 #[test]
+fn the_folded_agent_rail_is_a_card_clear_of_the_window_edge_and_its_tally_opens_the_panel() {
+    let mut app = NativeApp::new(Some(fixture_vault("agent-rail", false)));
+    agent_tab_folded(&mut app);
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let stop = output
+        .zones
+        .iter()
+        .find(|zone| zone.label == "Stop all agents")
+        .map(|zone| zone.rect)
+        .expect("Stop sits on the rail");
+    // A card like the terminal's beside it, clear of the window's right and bottom edges
+    // (the drawn window is 1100 by 800).
+    assert!(stop.r() <= 1100.0 - super::PANEL_GAP, "{stop:?}");
+    assert!(stop.b() <= 800.0 - super::PANEL_GAP, "{stop:?}");
+    let tally = output
+        .zones
+        .iter()
+        .find(|zone| zone.label.contains("5 commands"))
+        .map(|zone| zone.label.clone())
+        .expect("the rail says how many commands, and how many still run");
+    assert!(tally.contains("2 running"), "{tally}");
+    step(&mut app, &mut state, &click_on(&output, &tally), 1.0);
+    assert!(
+        app.tabs[super::FIXED_TABS]
+            .agent
+            .as_ref()
+            .is_some_and(|log| !log.folded),
+        "a click on the tally opens the panel"
+    );
+}
+
+#[test]
 fn a_host_pinned_from_a_new_tab_heads_the_next_one_and_a_second_click_unpins_it() {
     let mut app = NativeApp::new(Some(fixture_vault("new-tab-pin", true)));
     app.open_new_tab();

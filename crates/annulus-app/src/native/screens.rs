@@ -1648,7 +1648,8 @@ impl ForwardsView {
 }
 
 /// The snippet panel beside a terminal (Ctrl+Shift+.): search, then Paste types a snippet
-/// into the focused pane and Run types it with Enter. Returns the bytes to type.
+/// into the focused pane and Run types it with Enter. Returns the bytes to type. `rect` is the
+/// inside of the panel's card.
 pub fn snippet_panel(
     ui: &mut Ui<'_>,
     rect: Rect,
@@ -1656,9 +1657,6 @@ pub fn snippet_panel(
     snippets: &[Snippet],
 ) -> Option<Vec<u8>> {
     let t = ui.theme;
-    ui.gfx.fill_rect(rect, 0.0, t.chrome);
-    ui.gfx
-        .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
     let mut column = rect.inset(space::M, space::M);
     ui.section_label(column.take_top(18.0), "Snippets");
     column.take_top(space::S);
