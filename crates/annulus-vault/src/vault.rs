@@ -397,6 +397,7 @@ impl Vault {
             term: String::new(),
             os: String::new(),
             os_by_hand: false,
+            notes: String::new(),
         }
     }
 

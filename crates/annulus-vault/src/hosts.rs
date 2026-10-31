@@ -63,6 +63,36 @@ pub struct Host {
     /// `os` was chosen by hand: what the server says never replaces it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub os_by_hand: bool,
+    /// What a person or an agent should know about the server (F-HOST-011): what it is for,
+    /// how it is set up, what to watch out for. Kept short ([`NOTES_MAX`]); older builds
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+}
+
+/// The most characters a host's notes hold: room for what the next person or agent needs to
+/// know about a server, little enough that the notes stay short and read (F-HOST-011).
+pub const NOTES_MAX: usize = 2_000;
+
+/// `text` as a host's notes: trimmed, its line ends `\n`, and no control characters but line
+/// breaks and tabs.
+///
+/// # Errors
+/// When it is longer than [`NOTES_MAX`] characters, saying by how much.
+pub fn clean_notes(text: &str) -> Result<String, String> {
+    let clean: String = text
+        .replace("\r\n", "\n")
+        .chars()
+        .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
+        .collect();
+    let clean = clean.trim();
+    let count = clean.chars().count();
+    if count > NOTES_MAX {
+        return Err(format!(
+            "notes hold {NOTES_MAX} characters at most and these have {count}: shorten them"
+        ));
+    }
+    Ok(clean.to_owned())
 }
 
 /// A secret string: wiped from memory when dropped, and never shown by `Debug`.
@@ -210,7 +240,26 @@ mod tests {
             term: String::new(),
             os: String::new(),
             os_by_hand: false,
+            notes: String::new(),
         }
+    }
+
+    #[test]
+    fn notes_are_trimmed_and_cleaned_and_refused_past_their_length() {
+        assert_eq!(
+            clean_notes("  web front end\r\n\tnginx \x1b[31m\n\n").as_deref(),
+            Ok("web front end\n\tnginx [31m")
+        );
+        assert_eq!(
+            clean_notes(&"a".repeat(NOTES_MAX)).map(|n| n.len()),
+            Ok(NOTES_MAX)
+        );
+        let refused = clean_notes(&"a".repeat(NOTES_MAX + 1)).unwrap_err();
+        assert!(refused.contains("shorten"), "{refused}");
+        // A record from before notes has none, and none are written for it.
+        let old: Host = serde_json::from_str(r#"{"id":1,"label":"a","address":"x"}"#).unwrap();
+        assert!(old.notes.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("notes"));
     }
 
     #[test]
