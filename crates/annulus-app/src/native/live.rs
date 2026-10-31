@@ -88,6 +88,19 @@ pub struct AgentMarks {
     pub picked: Option<std::ops::Range<usize>>,
 }
 
+/// A grid too small for any real window (the smallest Annulus allows has about 70 x 20): what
+/// a minimized window draws into. A terminal never starts or resizes into one, which would
+/// squeeze its output into a column or two for good.
+fn usable((columns, rows): (usize, usize)) -> bool {
+    columns >= 20 && rows >= 5
+}
+
+/// The grid a terminal starts in: `grid`, or a usual 120 x 30 while the window has no room
+/// (minimized), until it is drawn at its real size.
+fn start_grid(grid: (usize, usize)) -> (usize, usize) {
+    if usable(grid) { grid } else { (120, 30) }
+}
+
 /// The thumb of a terminal's scroll bar on a track `h` tall: its height, the room it moves
 /// in, and where in that room it is (0 at the oldest row, 1 at the newest screen).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -805,9 +818,10 @@ impl LiveTerminal {
         #[cfg(not(test))]
         let held = false;
         if self.session.is_none() && self.failed.is_none() && !self.exited && !held {
-            self.start(ui, font, grid, waker);
+            self.start(ui, font, start_grid(grid), waker);
             ui.state.set_focus(Some(id), false);
-        } else if self.grid != Some(grid)
+        } else if usable(grid)
+            && self.grid != Some(grid)
             && let Some(session) = &self.session
         {
             let (cell_w, cell_h) = terminal::cell_size(ui, font);
@@ -1317,6 +1331,17 @@ mod tests {
     use annulus_ui::kit::{Event, Theme, UiState};
 
     use super::*;
+
+    #[test]
+    fn a_minimized_window_neither_starts_nor_squeezes_a_terminal_into_a_column() {
+        // Minimized: next to no room. The terminal starts at a usual size instead.
+        assert!(!usable((1, 1)));
+        assert_eq!(start_grid((2, 40)), (120, 30));
+        // The smallest real window, and a usual one, are taken as they are.
+        assert!(usable((70, 20)));
+        assert_eq!(start_grid((70, 20)), (70, 20));
+        assert_eq!(start_grid((160, 45)), (160, 45));
+    }
 
     #[test]
     fn the_scroll_bar_thumb_is_the_screens_share_and_a_drag_lands_on_the_matching_row() {
