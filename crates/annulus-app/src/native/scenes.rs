@@ -3975,6 +3975,56 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
 }
 
 #[test]
+fn an_agent_hears_why_its_tab_could_not_connect_and_its_command_is_refused_at_once() {
+    use annulus_control::client::Client;
+    let mut app = NativeApp::new(Some(fixture_vault("agent-failed", false)));
+    app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
+    let dir = app
+        .vault_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_path_buf)
+        .unwrap();
+    app.waker = Some(std::sync::Arc::new(|| {}));
+    app.settings.automation = true;
+    let broken = annulus_session::Program::Command {
+        program: "annulus-no-such-program".into(),
+        args: Vec::new(),
+    };
+    let tab = app.open_terminal("broken".into(), broken, None);
+    if let Some(open) = app.tabs.iter_mut().find(|open| open.uid == tab) {
+        open.agent = Some(Box::new(super::control::AgentLog::new(0)));
+    }
+    let mut state = UiState::default();
+    // The first frame opens the door and tries to start the program.
+    step(&mut app, &mut state, &[], 0.0);
+    let agent = std::thread::spawn(move || {
+        let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
+        let read = client.read(tab, None).map_err(|e| e.to_string())?;
+        let run = client.run(tab, "echo never", Some(30));
+        Ok::<_, String>((read, run.map_err(|e| e.to_string())))
+    });
+    let started = std::time::Instant::now();
+    let mut time = 0.05;
+    while !agent.is_finished() && started.elapsed() < std::time::Duration::from_secs(20) {
+        step(&mut app, &mut state, &[], time);
+        time += 0.05;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let (read, run) = agent.join().unwrap().unwrap();
+    assert!(read.contains("[Annulus] Could not start"), "{read:?}");
+    let refused = run.unwrap_err();
+    assert!(
+        refused.contains("could not connect") && refused.contains("Could not start"),
+        "{refused}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "refused at once, not after the 30 s start wait"
+    );
+}
+
+#[test]
 fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_next() {
     use super::control::Ran;
     use annulus_control::client::Client;

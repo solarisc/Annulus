@@ -218,6 +218,11 @@ impl NativeApp {
                 continue;
             };
             let Some(before) = run.before else {
+                if let Some(why) = panes.focused_failure() {
+                    run.call
+                        .answer(Err(format!("tab {} could not connect: {why}", run.tab)));
+                    continue;
+                }
                 // Typing before the shell's first prompt has it echo the command early and
                 // print its prompt into the answer, so wait for the prompt to settle.
                 let shown = panes.focused_transcript().unwrap_or_default();
@@ -945,14 +950,20 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             let text = match found.and_then(|open| open.terminal.as_mut()) {
                 Some(TermView::Live(panes)) => {
                     let mut all = panes.transcripts();
-                    if all.len() == 1 {
+                    let mut text = if all.len() == 1 {
                         all.remove(0).1
                     } else {
                         all.iter()
                             .map(|(title, text)| format!("--- {title} ---\n{text}"))
                             .collect::<Vec<_>>()
                             .join("\n")
+                    };
+                    // What the tab shows in its own panel, not in the terminal: an agent
+                    // reading a tab that could not connect learns why.
+                    if let Some(why) = panes.focused_failure() {
+                        let _ = writeln!(text, "[Annulus] {why}");
                     }
+                    text
                 }
                 Some(TermView::Replay(emulator)) => {
                     annulus_term::transcript::transcript(emulator.term_mut())

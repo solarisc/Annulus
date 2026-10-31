@@ -363,6 +363,12 @@ impl LiveTerminal {
         self.session.as_ref().map(Session::transcript)
     }
 
+    /// Why its program could not start or its connection ended, as the tab shows it.
+    #[must_use]
+    pub fn failure(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
     /// Whether its program has started (typing reaches it).
     #[must_use]
     pub fn started(&self) -> bool {

@@ -496,6 +496,15 @@ impl Panes {
         self.pane(self.focused)?.terminal.transcript()
     }
 
+    /// Why the focused pane's program could not start or its connection ended, if it did.
+    #[must_use]
+    pub fn focused_failure(&self) -> Option<String> {
+        self.pane(self.focused)?
+            .terminal
+            .failure()
+            .map(str::to_owned)
+    }
+
     /// Marks where an agent typed in the focused pane, the one it types into (F-AUTO-004).
     pub fn mark_focused(&mut self, marks: &super::live::AgentMarks) {
         let focused = self.focused;
