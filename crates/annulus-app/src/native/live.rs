@@ -70,20 +70,130 @@ pub struct LiveTerminal {
     show_log: bool,
     /// The saved host this connects to: its name and its server's OS, for the connecting card.
     pub identity: Option<(String, Option<&'static super::os::Os>)>,
-    /// Where an agent typed into this terminal, marked beside its lines (F-AUTO-004).
+    /// Where an agent typed into this terminal, marked beside its rows (F-AUTO-004).
     pub marks: AgentMarks,
+    /// Where on the scroll bar's thumb a drag took it, while one goes on.
+    bar_grab: Option<f32>,
     /// Held connecting, never started (the scenes).
     #[cfg(test)]
     held: bool,
 }
 
-/// Where an agent typed into a terminal (F-AUTO-004): the transcript line each of its
-/// commands went in on, marked in the margin, and the lines of the one picked in its panel,
-/// tinted.
+/// Where an agent typed into a terminal (F-AUTO-004): the row each of its commands went in
+/// on (counted from the oldest row of the scrollback), marked in the margin and on the
+/// scroll bar, and the rows of the one picked in its panel, tinted.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct AgentMarks {
     pub lines: Vec<usize>,
     pub picked: Option<std::ops::Range<usize>>,
+}
+
+/// The thumb of a terminal's scroll bar on a track `h` tall: its height, the room it moves
+/// in, and where in that room it is (0 at the oldest row, 1 at the newest screen).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bar {
+    thumb_h: f32,
+    room: f32,
+    at: f32,
+}
+
+impl Bar {
+    /// The thumb for `rows` of which `screen_rows` show; `None` while all of them fit.
+    fn new(rows: annulus_session::Rows, screen_rows: usize, h: f32) -> Option<Self> {
+        let most_top = rows.total.saturating_sub(screen_rows);
+        if most_top == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)] // Rows of scrollback, at most a few thousand.
+        let (total, screen, most) = (rows.total as f32, screen_rows as f32, most_top as f32);
+        let thumb_h = (h * screen / total).clamp(24.0_f32.min(h), h);
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let at = rows.top.min(most_top) as f32 / most;
+        Some(Self {
+            thumb_h,
+            room: h - thumb_h,
+            at,
+        })
+    }
+
+    /// The row to show at the top with the thumb's top `top` down the track.
+    fn row_at(self, top: f32, rows: annulus_session::Rows, screen_rows: usize) -> Option<usize> {
+        if self.room <= 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let most = rows.total.saturating_sub(screen_rows) as f32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // A row.
+        let row = ((top / self.room).clamp(0.0, 1.0) * most).round() as usize;
+        Some(row)
+    }
+}
+
+/// The scroll bar down the right of a terminal (F-TERM-017): a thumb as tall as the screen
+/// is of all `rows`, at the view, with a tick for each row in `marks`. Dragging the thumb
+/// scrolls; a press on the track takes the thumb by its middle there. `grab` keeps where the
+/// thumb was taken for the drag. Returns the row to show at the top while dragging. Nothing
+/// shows while all of it fits on the screen.
+fn scrollback_bar(
+    ui: &mut Ui<'_>,
+    id: Id,
+    inner: Rect,
+    (rows, screen_rows): (annulus_session::Rows, usize),
+    marks: &[usize],
+    grab: &mut Option<f32>,
+) -> Option<usize> {
+    let track = Rect::new(inner.r() + 5.0, inner.y + 2.0, 5.0, inner.h - 4.0);
+    let Some(bar) = Bar::new(rows, screen_rows, track.h) else {
+        *grab = None;
+        return None;
+    };
+    let t = ui.theme;
+    let Bar { thumb_h, room, at } = bar;
+    #[allow(clippy::cast_precision_loss)] // Rows of scrollback, at most a few thousand.
+    let total = rows.total as f32;
+    // Wider than it is drawn, so it is easy to hit.
+    let response = ui.zone(
+        id,
+        Rect::new(track.x - 4.0, inner.y, track.w + 8.0, inner.h),
+        Role::ScrollView,
+        "Scrollback",
+    );
+    let held = ui.dragging(id);
+    let mut moved = None;
+    if let (true, Some(pointer)) = (held, ui.pointer()) {
+        let screen_track = ui.gfx.to_screen(track);
+        let scale = screen_track.h / track.h;
+        let taken = *grab.get_or_insert_with(|| {
+            let thumb_y = screen_track.y + room * at * scale;
+            let pressed = ui.pressed_at().map_or(pointer.y, |point| point.y);
+            if (thumb_y..=thumb_y + thumb_h * scale).contains(&pressed) {
+                (pressed - thumb_y) / scale
+            } else {
+                thumb_h / 2.0
+            }
+        });
+        moved = bar.row_at(
+            (pointer.y - screen_track.y) / scale - taken,
+            rows,
+            screen_rows,
+        );
+    } else {
+        *grab = None;
+    }
+    let hot = response.hovered || held;
+    let thumb = Rect::new(track.x, track.y + room * at, track.w, thumb_h);
+    ui.gfx
+        .fill_rect(thumb, 2.5, t.text2.alpha(if hot { 0.65 } else { 0.3 }));
+    for &row in marks {
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let y = track.y + track.h * (row as f32 / total);
+        ui.gfx.fill_rect(
+            Rect::new(track.x - 1.0, y, track.w + 2.0, 2.0),
+            1.0,
+            t.accent,
+        );
+    }
+    moved
 }
 
 /// The step of Server, Key, Login, Shell under way (4 once all passed) at connecting `stage`:
@@ -138,6 +248,7 @@ impl LiveTerminal {
             show_log: false,
             identity: None,
             marks: AgentMarks::default(),
+            bar_grab: None,
             #[cfg(test)]
             held: false,
         }
@@ -245,15 +356,49 @@ impl LiveTerminal {
         self.session.is_some()
     }
 
-    /// Scrolls the view so transcript line `line` is at the top.
-    pub fn scroll_to_line(&self, line: usize) {
+    /// Scrolls the view so `row` (counted from the oldest row of the scrollback) is at the top.
+    pub fn scroll_to_row(&self, row: usize) {
         if let Some(session) = &self.session {
-            session.scroll_to_line(line);
+            session.scroll_to_row(row);
         }
     }
 
-    /// Marks the agent's lines on screen, whose top shows transcript line `top`: a bar in the
-    /// margin beside each command's line, and a tint over the picked command's lines.
+    /// The row the cursor is on, where typing goes in; `None` before the program starts.
+    #[must_use]
+    pub fn cursor_row(&self) -> Option<usize> {
+        self.session.as_ref().map(|session| session.rows().cursor)
+    }
+
+    /// Over the drawn screen: the agent's marks, and the scroll bar (not in a full-screen
+    /// program such as vim or less, which has no scrollback of its own).
+    fn draw_over(
+        &mut self,
+        ui: &mut Ui<'_>,
+        inner: Rect,
+        id: Id,
+        (screen_rows, cell_h): (usize, f32),
+    ) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let rows = session.rows();
+        self.draw_marks(ui, inner, rows.top, (screen_rows, cell_h));
+        if !session.mode().contains(TermMode::ALT_SCREEN)
+            && let Some(top) = scrollback_bar(
+                ui,
+                id.with("scrollbar"),
+                inner,
+                (rows, screen_rows),
+                &self.marks.lines,
+                &mut self.bar_grab,
+            )
+        {
+            session.scroll_to_row(top);
+        }
+    }
+
+    /// Marks the agent's rows on screen, whose top shows row `top`: a bar in the margin beside
+    /// each command's row, and a tint over the picked command's rows.
     fn draw_marks(&self, ui: &mut Ui<'_>, inner: Rect, top: usize, (rows, cell_h): (usize, f32)) {
         if self.marks.lines.is_empty() {
             return;
@@ -716,7 +861,6 @@ impl LiveTerminal {
         if let Some(session) = &self.session {
             let screen = session.screen();
             terminal::draw(ui, inner, &screen, font, response.focused);
-            self.draw_marks(ui, inner, session.top_line(), (grid.1, cell_h));
             if let Some(find) = &mut self.find
                 && let Some(search) = &mut find.search
             {
@@ -736,6 +880,7 @@ impl LiveTerminal {
                 ui.pop_clip();
             }
         }
+        self.draw_over(ui, inner, id, (grid.1, cell_h));
         if self.connecting() {
             self.connect_card(ui, rect, id);
         }
@@ -1172,6 +1317,31 @@ mod tests {
     use annulus_ui::kit::{Event, Theme, UiState};
 
     use super::*;
+
+    #[test]
+    fn the_scroll_bar_thumb_is_the_screens_share_and_a_drag_lands_on_the_matching_row() {
+        let rows = |top, total| annulus_session::Rows {
+            top,
+            cursor: 0,
+            total,
+        };
+        assert_eq!(Bar::new(rows(0, 30), 30, 300.0), None, "it all fits");
+
+        // 40 of 400 rows show: a tenth of the track, at the bottom while following output.
+        let bar = Bar::new(rows(360, 400), 40, 300.0).unwrap();
+        assert_eq!((bar.thumb_h, bar.room, bar.at), (30.0, 270.0, 1.0));
+        let oldest = Bar::new(rows(0, 400), 40, 300.0).unwrap();
+        assert_eq!(oldest.at, 0.0);
+
+        // Dragged to the top, the middle and past the end of the track.
+        assert_eq!(bar.row_at(0.0, rows(360, 400), 40), Some(0));
+        assert_eq!(bar.row_at(135.0, rows(360, 400), 40), Some(180));
+        assert_eq!(bar.row_at(999.0, rows(360, 400), 40), Some(360));
+
+        // A huge scrollback keeps the thumb big enough to take.
+        let long = Bar::new(rows(0, 10_040), 40, 300.0).unwrap();
+        assert_eq!(long.thumb_h, 24.0);
+    }
 
     #[test]
     fn a_link_names_its_real_target_and_whether_a_click_opens_it() {

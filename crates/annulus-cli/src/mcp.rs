@@ -138,6 +138,11 @@ fn tools() -> Value {
             },
         },
         {
+            "name": "annulus_interrupt",
+            "description": "Presses Ctrl+C in one of your tabs, to stop a command that hangs or runs on (one that ran out of its wait is still running).",
+            "inputSchema": { "type": "object", "properties": { "tab": tab }, "required": ["tab"] },
+        },
+        {
             "name": "annulus_close",
             "description": "Closes one of your tabs.",
             "inputSchema": { "type": "object", "properties": { "tab": tab }, "required": ["tab"] },
@@ -189,6 +194,10 @@ fn run_tool(client: &mut Client, name: &str, arguments: &Value) -> Result<String
                 .and_then(Value::as_str)
                 .ok_or_else(|| ClientError::Refused("`command` is needed".into()))?;
             client.run(tab()?, command, number("wait"))?
+        }
+        "annulus_interrupt" => {
+            client.interrupt(tab()?)?;
+            "interrupted".into()
         }
         "annulus_close" => {
             client.close(tab()?)?;
@@ -261,6 +270,7 @@ mod tests {
                 "annulus_read",
                 "annulus_open",
                 "annulus_run",
+                "annulus_interrupt",
                 "annulus_close"
             ]
         );

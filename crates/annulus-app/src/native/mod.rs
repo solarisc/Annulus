@@ -1090,7 +1090,7 @@ impl NativeApp {
         // no waiting command is typed later.
         self.door = None;
         self.door_failed = false;
-        self.runs.clear();
+        self.cut_runs(std::time::Instant::now());
         self.lock = lock::LockView::new(lock::Mode::Unlock);
         self.hosts = hosts::HostsView::default();
         self.forwards = screens::ForwardsView::default();
@@ -1228,9 +1228,10 @@ impl NativeApp {
                 .as_deref()
                 .map(|log| area.take_right(control::panel_width(log)));
             let content = panel_filled(ui, area, background);
+            let allowed = self.settings.automation;
             let agent_action = match (strip, tab.agent.as_deref_mut()) {
                 (Some(rect), Some(log)) => {
-                    control::agent_panel(ui, rect, log, (&tab.title, tab.status))
+                    control::agent_panel(ui, rect, log, (&tab.title, tab.status, allowed))
                 }
                 _ => None,
             };
@@ -1242,14 +1243,26 @@ impl NativeApp {
                     _ => {}
                 }
             }
-            if agent_action == Some(control::PanelAction::Stop) {
-                self.settings.automation = false;
-                self.door = None;
-                self.runs.clear();
+            // Stop closes the door now; the next frame marks what was running as cut off.
+            let switch = match agent_action {
+                Some(control::PanelAction::Stop) => Some(false),
+                Some(control::PanelAction::Allow) => Some(true),
+                _ => None,
+            };
+            if let Some(on) = switch {
+                self.settings.automation = on;
+                if !on {
+                    self.door = None;
+                }
                 if let Some(path) = &self.settings_path {
                     let _ = self.settings.save(path);
                 }
-                ui.toast("Automation is off: every agent is cut off", Tone::Info);
+                let said = if on {
+                    "Agents can use Annulus again"
+                } else {
+                    "Agents stopped: every agent is cut off"
+                };
+                ui.toast(said, Tone::Info);
             }
             if let (Some(side), Some(search), TermView::Live(panes)) =
                 (side, self.snippet_panel.as_mut(), &*view)

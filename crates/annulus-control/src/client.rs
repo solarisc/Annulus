@@ -172,6 +172,14 @@ impl Client {
         })
     }
 
+    /// Presses Ctrl+C in agent tab `tab`.
+    ///
+    /// # Errors
+    /// As [`Self::call`].
+    pub fn interrupt(&mut self, tab: u64) -> Result<(), ClientError> {
+        self.call(Request::Interrupt { tab })
+    }
+
     /// Closes agent tab `tab`.
     ///
     /// # Errors

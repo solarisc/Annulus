@@ -31,6 +31,7 @@ Commands:
                                 (an id from `hosts`), or a local shell
   run <tab> [--wait S] <cmd...> type <cmd> and Enter into your tab <tab> and print what it
                                 printed, once quiet (or after S seconds, 30 by default)
+  interrupt <tab>               press Ctrl+C in your tab <tab> (a command that hangs stops)
   close <tab>                   close your tab <tab>
   mcp                           serve these as MCP tools over stdin and stdout
 
@@ -58,6 +59,9 @@ enum Command {
         tab: u64,
         command: String,
         wait: Option<u64>,
+    },
+    Interrupt {
+        tab: u64,
     },
     Close {
         tab: u64,
@@ -123,6 +127,7 @@ fn parse(args: &[String]) -> Result<(Command, bool), String> {
                 wait,
             }
         }
+        ["interrupt", tab] => Command::Interrupt { tab: tab_id(tab)? },
         ["close", tab] => Command::Close { tab: tab_id(tab)? },
         _ => return Err(format!("not a command: {}\n\n{USAGE}", words.join(" "))),
     };
@@ -211,6 +216,10 @@ fn run(command: Command, json: bool) -> Result<String, ClientError> {
             } else {
                 format!("{}\n", tab.id)
             }
+        }
+        Command::Interrupt { tab } => {
+            client.interrupt(tab)?;
+            String::new()
         }
         Command::Close { tab } => {
             client.close(tab)?;
@@ -332,6 +341,10 @@ mod tests {
         assert_eq!(
             parse(&args("close 9")),
             Ok((Command::Close { tab: 9 }, false))
+        );
+        assert_eq!(
+            parse(&args("interrupt 4")),
+            Ok((Command::Interrupt { tab: 4 }, false))
         );
         assert_eq!(parse(&args("mcp")), Ok((Command::Mcp, false)));
         assert!(parse(&args("run 9")).is_err());

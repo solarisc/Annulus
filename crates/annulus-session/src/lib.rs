@@ -28,6 +28,18 @@ use zeroize::Zeroizing;
 
 pub use annulus_ssh::{HostKeyQuestion, Step, Target};
 
+/// Where a terminal's view and cursor are, in screen rows from the oldest row of its
+/// scrollback (a wrapped line takes a row for each piece).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rows {
+    /// The row at the top of the view.
+    pub top: usize,
+    /// The row the cursor is on.
+    pub cursor: usize,
+    /// Every row: the scrollback and the screen.
+    pub total: usize,
+}
+
 /// What a session tells the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEvent {
@@ -611,16 +623,21 @@ impl Session {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 
-    /// Scrolls the view so transcript line `line` is at the top (an agent's command picked
-    /// in its panel).
-    pub fn scroll_to_line(&self, line: usize) {
-        annulus_term::transcript::scroll_to_line(&mut self.term.lock(), line);
+    /// Scrolls the view so `row` (counted from the oldest row of the scrollback) is at the
+    /// top: an agent's command picked in its panel, the scroll bar.
+    pub fn scroll_to_row(&self, row: usize) {
+        annulus_term::transcript::scroll_to_row(&mut self.term.lock(), row);
     }
 
-    /// The transcript line at the top of the screen now.
+    /// Where the view and the cursor are, in rows from the oldest row of the scrollback.
     #[must_use]
-    pub fn top_line(&self) -> usize {
-        annulus_term::transcript::top_line(&self.term.lock())
+    pub fn rows(&self) -> Rows {
+        let term = self.term.lock();
+        Rows {
+            top: annulus_term::transcript::top_row(&term),
+            cursor: annulus_term::transcript::cursor_row(&term),
+            total: annulus_term::transcript::total_rows(&term),
+        }
     }
 
     /// Forgets the scrollback (Ctrl+Shift+Backspace).

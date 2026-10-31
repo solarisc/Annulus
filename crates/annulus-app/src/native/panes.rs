@@ -506,11 +506,17 @@ impl Panes {
         }
     }
 
-    /// Scrolls the focused pane so transcript line `line` is at the top.
-    pub fn scroll_focused_to(&self, line: usize) {
+    /// Scrolls the focused pane so `row` (from the oldest row of its scrollback) is at the top.
+    pub fn scroll_focused_to(&self, row: usize) {
         if let Some(pane) = self.pane(self.focused) {
-            pane.terminal.scroll_to_line(line);
+            pane.terminal.scroll_to_row(row);
         }
+    }
+
+    /// The row the focused pane's cursor is on; `None` before its program starts.
+    #[must_use]
+    pub fn focused_cursor_row(&self) -> Option<usize> {
+        self.pane(self.focused)?.terminal.cursor_row()
     }
 
     /// Closes the focused pane; `false` when it is the last (the tab closes instead). The

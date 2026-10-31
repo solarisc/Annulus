@@ -5,6 +5,7 @@
 //! An agent opens tabs of its own, marked as its, and types only into those; the owner's
 //! tabs are read-only to it. What it typed is listed beside its tab ([`AgentLog`]).
 
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use annulus_config::tokens::space;
@@ -85,8 +86,21 @@ pub enum Ran {
     Running(Instant),
     /// Its output settled after `took`, `lines` long.
     Done { took: Duration, lines: usize },
-    /// Its wait ran out after `took` with output still coming, `lines` long so far.
+    /// Its wait ran out after `took` with output still coming, `lines` long so far: it may
+    /// still be running.
     TimedOut { took: Duration, lines: usize },
+    /// The agent pressed Ctrl+C on it after `took`.
+    Interrupted { took: Duration },
+    /// Stop (or the vault locking) cut the agent off after `took`, before it settled.
+    Cut { took: Duration },
+}
+
+impl Ran {
+    /// Typed and not known to have ended: running, or out of its wait and maybe still going.
+    #[must_use]
+    pub fn going(&self) -> bool {
+        matches!(self, Self::Running(_) | Self::TimedOut { .. })
+    }
 }
 
 /// An agent's command on its way: waiting for its terminal to start, then for its output to
@@ -129,7 +143,7 @@ impl NativeApp {
         if !wanted {
             self.door = None;
             self.door_failed = false;
-            self.runs.clear();
+            self.cut_runs(Instant::now());
             return false;
         }
         if self.door.is_none() && !self.door_failed {
@@ -168,6 +182,28 @@ impl NativeApp {
         !self.runs.is_empty()
     }
 
+    /// Drops every command on its way, as the door closes: the ones already typed are marked
+    /// cut off in their panels, so none shows as running forever.
+    pub(super) fn cut_runs(&mut self, now: Instant) {
+        for run in std::mem::take(&mut self.runs) {
+            if run.before.is_none() {
+                continue;
+            }
+            if let Some(command) = self
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.uid == run.tab)
+                .and_then(|tab| tab.agent.as_mut())
+                .and_then(|log| log.commands.get_mut(run.entry))
+                .filter(|command| matches!(command.state, Ran::Running(_)))
+            {
+                command.state = Ran::Cut {
+                    took: now.duration_since(run.asked),
+                };
+            }
+        }
+    }
+
     /// Types each waiting command once its terminal has started, and answers each typed one
     /// with its output once that has settled or its wait is up.
     fn move_runs(&mut self, now: Instant) {
@@ -188,11 +224,20 @@ impl NativeApp {
                 if shown.len() != run.seen.0 {
                     run.seen = (shown.len(), now);
                 }
+                // A command that ran out of its wait may still be printing: the next one waits
+                // for it to go quiet rather than land in the middle of its output.
+                let busy = tab
+                    .agent
+                    .as_ref()
+                    .and_then(|log| log.commands.last())
+                    .is_some_and(|last| matches!(last.state, Ran::TimedOut { .. }));
                 let ready = if shown.trim().is_empty() {
                     now.duration_since(run.asked) >= SILENT_PROMPT
                 } else {
-                    now.duration_since(run.seen.1) >= PROMPT_QUIET
+                    let quiet = if busy { QUIET } else { PROMPT_QUIET };
+                    now.duration_since(run.seen.1) >= quiet
                 };
+                let row = panes.focused_cursor_row().unwrap_or(0);
                 let mut typed = run.command.replace("\r\n", "\r").replace('\n', "\r");
                 typed.push('\r');
                 if ready && panes.type_focused(typed.as_bytes()) {
@@ -208,13 +253,21 @@ impl NativeApp {
                     log.commands.push(AgentCommand {
                         text: run.command.clone(),
                         at,
-                        line: before.saturating_sub(1),
+                        line: row,
                         state: Ran::Running(now),
                     });
                     self.runs.push(run);
                 } else if now.duration_since(run.asked) > START_WITHIN {
-                    run.call
-                        .answer(Err("the terminal never started; read it to see why".into()));
+                    let why = if busy {
+                        format!(
+                            "tab {} is still busy with the command before, which ran out of \
+                             its wait: read it, or interrupt it",
+                            run.tab
+                        )
+                    } else {
+                        "the terminal never started; read it to see why".to_owned()
+                    };
+                    run.call.answer(Err(why));
                 } else {
                     self.runs.push(run);
                 }
@@ -229,7 +282,12 @@ impl NativeApp {
             let settled = text.len() != run.typed_at && now.duration_since(run.seen.1) >= QUIET;
             if settled || now.duration_since(run.asked) >= run.wait {
                 let out = new_output(&text, before);
-                let took = now.duration_since(run.asked);
+                // Done when its last output came, not when the quiet after it ran out.
+                let took = if settled {
+                    run.seen.1.duration_since(run.asked)
+                } else {
+                    now.duration_since(run.asked)
+                };
                 if let Some(command) = tab
                     .agent
                     .as_mut()
@@ -260,7 +318,9 @@ pub fn panel_width(log: &AgentLog) -> f32 {
 pub enum PanelAction {
     /// Stop all agents: automation goes off and every agent is cut off.
     Stop,
-    /// Show this transcript line at the top of the terminal (a command was picked).
+    /// Let agents in again: automation goes back on.
+    Allow,
+    /// Show this row at the top of the terminal (a command was picked).
     Show(usize),
     /// Back to the newest output (the picked command was let go).
     Newest,
@@ -277,23 +337,24 @@ const COMMAND_LINES: usize = 3;
 const MARK_COLUMN: f32 = 22.0;
 
 /// The panel beside an agent's terminal (ADR-0020 §6, F-AUTO-004). On top: the AI mark,
-/// Stop, fold, and what it is connected to since when. Then every command the agent typed,
-/// newest last and kept in view, each with whether it is running, done or out of time, when
-/// in the session, how long it took and how many lines it printed; picking one shows it in
-/// the terminal. `tab` is the tab's title and status dot.
+/// whether agents may act (Stop, or Allow again once stopped), fold, what the tab is
+/// connected to, and since when. Then every command the agent typed, newest last and kept in
+/// view, each with how it ran, when in the session, how long it took and how many lines it
+/// printed; picking one shows it in the terminal. `tab` is the tab's title, its status dot
+/// and whether automation is on.
 #[allow(clippy::too_many_lines)] // The panel top to bottom: head, list, foot.
 pub fn agent_panel(
     ui: &mut Ui<'_>,
     rect: Rect,
     log: &mut AgentLog,
-    tab: (&str, Option<TabStatus>),
+    (title, status, allowed): (&str, Option<TabStatus>, bool),
 ) -> Option<PanelAction> {
     let t = ui.theme;
     ui.gfx.fill_rect(rect, 0.0, t.chrome);
     ui.gfx
         .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
     if log.folded {
-        return rail(ui, rect, log);
+        return rail(ui, rect, log, allowed);
     }
     let mut action = None;
     let mut column = rect.inset(space::M, space::M);
@@ -301,25 +362,32 @@ pub fn agent_panel(
     let mut head = column.take_top(CONTROL);
     let fold = head.take_right(CONTROL);
     head.take_right(space::XS);
-    let stop = head.take_right(button_width(&mut ui.gfx, "Stop", Some(icons::CLOSE)));
-    // Stop, then fold: the keyboard goes left to right.
-    if ui
-        .button(
-            Id::new("agent.stop"),
-            stop,
+    let (label, icon, kind, tip, asks) = if allowed {
+        (
             "Stop",
-            Some(icons::CLOSE),
+            icons::CLOSE,
             Kind::Danger,
+            "Stop all agents: automation goes off and every agent is cut off now",
+            PanelAction::Stop,
         )
+    } else {
+        (
+            "Allow again",
+            icons::PLAY,
+            Kind::Secondary,
+            "Let agents use Annulus again (Settings > Security > Automation)",
+            PanelAction::Allow,
+        )
+    };
+    let switch = head.take_right(button_width(&mut ui.gfx, label, Some(icon)));
+    // The switch, then fold: the keyboard goes left to right.
+    if ui
+        .button(Id::new("agent.stop"), switch, label, Some(icon), kind)
         .clicked
     {
-        action = Some(PanelAction::Stop);
+        action = Some(asks);
     }
-    ui.tooltip(
-        Id::new("agent.stop"),
-        stop,
-        "Stop all agents: automation goes off and every agent is cut off now",
-    );
+    ui.tooltip(Id::new("agent.stop"), switch, tip);
     if ui
         .icon_button(
             Id::new("agent.fold"),
@@ -332,31 +400,43 @@ pub fn agent_panel(
     {
         log.folded = true;
     }
-    let chip = ui.chip(Point::new(head.x, head.center().y - 10.0), "AI", t.accent);
+    let chip = ui.chip(
+        Point::new(head.x, head.center().y - 10.0),
+        "AI",
+        if allowed { t.accent } else { t.text3 },
+    );
     head.take_left(chip + space::S);
+    let heading = if allowed {
+        "Agent session"
+    } else {
+        "Agents stopped"
+    };
     ui.gfx
-        .text(head, "Agent session", BODY_MEDIUM, t.text, Align::Start);
+        .text(head, heading, BODY_MEDIUM, t.text, Align::Start);
 
+    // What the tab is connected to, then how the session stands: two lines, so neither is
+    // cut short.
     column.take_top(space::S);
-    let mut about = column.take_top(18.0);
-    let (dot, state) = match tab.1 {
+    let mut host = column.take_top(18.0);
+    let (dot, state) = match status {
         Some(TabStatus::Error) => (t.error, "dropped"),
         Some(TabStatus::Input) => (t.warn, "waiting for an answer"),
         _ => (t.ok, "connected"),
     };
     ui.gfx
-        .fill_circle(Point::new(about.x + 4.0, about.center().y), 3.5, dot);
+        .fill_circle(Point::new(host.x + 4.0, host.center().y), 3.5, dot);
+    host.take_left(14.0);
+    let fitted = annulus_ui::gfx::fit(&mut ui.gfx, title, SMALL, host.w);
+    ui.gfx.text(host, &fitted, SMALL, t.text, Align::Start);
+    ui.tooltip(Id::new("agent.host"), host, &format!("{title}: {state}"));
+    let mut about = column.take_top(18.0);
     about.take_left(14.0);
-    let count = log.commands.len();
-    let line = format!(
-        "{} · opened {} · {count} {}",
-        tab.0,
-        super::start::ago(log.since, crate::sync_screen::now_secs()),
-        if count == 1 { "command" } else { "commands" },
-    );
-    let fitted = annulus_ui::gfx::fit(&mut ui.gfx, &line, SMALL, about.w);
-    ui.gfx.text(about, &fitted, SMALL, t.text2, Align::Start);
-    ui.tooltip(Id::new("agent.about"), about, &format!("{state}: {line}"));
+    let (said, color) = if allowed {
+        (session_said(log), t.text3)
+    } else {
+        ("Agents are cut off from Annulus.".to_owned(), t.warn)
+    };
+    ui.gfx.text(about, &said, SMALL, color, Align::Start);
 
     let mut foot = column.take_bottom(18.0);
     ui.gfx.icon(
@@ -521,7 +601,7 @@ fn list_commands(ui: &mut Ui<'_>, list: Rect, log: &mut AgentLog) -> Option<Pane
 
 /// The panel folded to a rail: unfold, the AI mark, a spinner while a command runs, how many
 /// commands so far, and Stop.
-fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog) -> Option<PanelAction> {
+fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog, allowed: bool) -> Option<PanelAction> {
     let t = ui.theme;
     let mut column = rect.inset(space::S, space::M);
     let unfold = column.take_top(CONTROL).centered(CONTROL, CONTROL);
@@ -543,7 +623,7 @@ fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog) -> Option<PanelAction> 
     ui.chip(
         Point::new(chip_row.center().x - chip_w / 2.0, chip_row.y),
         "AI",
-        t.accent,
+        if allowed { t.accent } else { t.text3 },
     );
     column.take_top(space::S);
     let count = column.take_top(18.0);
@@ -564,21 +644,24 @@ fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog) -> Option<PanelAction> 
             &last.state,
         );
     }
-    let stop = column.take_bottom(CONTROL).centered(CONTROL, CONTROL);
-    let stopped = ui
-        .icon_button(
-            Id::new("agent.stop"),
-            stop,
-            icons::CLOSE,
-            "Stop all agents",
-            false,
+    let switch = column.take_bottom(CONTROL).centered(CONTROL, CONTROL);
+    let (icon, name, asks) = if allowed {
+        (icons::CLOSE, "Stop all agents", PanelAction::Stop)
+    } else {
+        (
+            icons::PLAY,
+            "Let agents use Annulus again",
+            PanelAction::Allow,
         )
+    };
+    let clicked = ui
+        .icon_button(Id::new("agent.stop"), switch, icon, name, false)
         .clicked;
-    stopped.then_some(PanelAction::Stop)
+    clicked.then_some(asks)
 }
 
 /// The mark at `center` for how a command ran: a check once done, a clock when its wait ran
-/// out, a turning arc while it runs.
+/// out, a cross when it was interrupted or cut off, a turning arc while it runs.
 fn status_mark(ui: &mut Ui<'_>, center: Point, state: &Ran) {
     let t = ui.theme;
     let icon = |icon, color, ui: &mut Ui<'_>| {
@@ -591,6 +674,8 @@ fn status_mark(ui: &mut Ui<'_>, center: Point, state: &Ran) {
     match state {
         Ran::Done { .. } => icon(icons::CHECK, t.ok, ui),
         Ran::TimedOut { .. } => icon(icons::CLOCK, t.warn, ui),
+        Ran::Interrupted { .. } => icon(icons::CLOSE, t.warn, ui),
+        Ran::Cut { .. } => icon(icons::CLOSE, t.text3, ui),
         Ran::Running(_) => {
             ui.gfx.stroke_circle(center, 6.0, 1.5, t.accent.alpha(0.25));
             #[allow(clippy::cast_possible_truncation)] // An angle for drawing.
@@ -604,6 +689,26 @@ fn status_mark(ui: &mut Ui<'_>, center: Point, state: &Ran) {
             ui.request_repaint_after(Duration::from_millis(16));
         }
     }
+}
+
+/// How the session stands, in a few words: since when, how many commands, how many still
+/// going.
+fn session_said(log: &AgentLog) -> String {
+    let count = log.commands.len();
+    let going = log
+        .commands
+        .iter()
+        .filter(|command| command.state.going())
+        .count();
+    let mut said = format!(
+        "opened {} · {count} {}",
+        super::start::ago(log.since, crate::sync_screen::now_secs()),
+        if count == 1 { "command" } else { "commands" },
+    );
+    if going > 0 {
+        let _ = write!(said, " · {going} running");
+    }
+    said
 }
 
 /// How the line under a command is colored: quiet once done, the accent while it runs, a
@@ -635,6 +740,14 @@ fn describe_run(command: &AgentCommand, since: u64, now: Instant) -> (String, In
                 lines_said(*lines)
             ),
             Ink::Warn,
+        ),
+        Ran::Interrupted { took: spent } => (
+            format!("{at} · interrupted after {}", took(*spent)),
+            Ink::Warn,
+        ),
+        Ran::Cut { took: spent } => (
+            format!("{at} · cut off by Stop after {}", took(*spent)),
+            Ink::Quiet,
         ),
     }
 }
@@ -795,6 +908,30 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
         Request::Run { tab, .. } => {
             // Typed and answered over the next frames by `NativeApp::control`.
             agent_tab(app, *tab).map(|_| Response::Done)
+        }
+        Request::Interrupt { tab } => {
+            let agent = agent_tab(app, *tab)?;
+            let Some(TermView::Live(panes)) = &agent.terminal else {
+                return Err(format!("tab {tab} holds no terminal"));
+            };
+            if !panes.type_focused(b"\x03") {
+                return Err(format!("tab {tab} has not started yet"));
+            }
+            let at = Instant::now();
+            if let Some(command) = agent
+                .agent
+                .as_mut()
+                .and_then(|log| log.commands.iter_mut().rev().find(|c| c.state.going()))
+            {
+                let started =
+                    Duration::from_secs(crate::sync_screen::now_secs().saturating_sub(command.at));
+                let took = match command.state {
+                    Ran::Running(since) => at.duration_since(since),
+                    _ => started,
+                };
+                command.state = Ran::Interrupted { took };
+            }
+            Ok(Response::Done)
         }
         Request::Close { tab } => {
             agent_tab(app, *tab)?;
@@ -1139,6 +1276,28 @@ mod tests {
         assert_eq!(ink, Ink::Accent);
         assert_eq!(clock(3_725), "+1:02:05");
         assert_eq!(lines_said(0), "no output");
+        let stopped = command(Ran::Interrupted {
+            took: Duration::from_secs(12),
+        });
+        assert_eq!(
+            describe_run(&stopped, 1_000, now),
+            ("+1:24 · interrupted after 12 s".to_owned(), Ink::Warn)
+        );
+        let cut = command(Ran::Cut {
+            took: Duration::from_millis(2_500),
+        });
+        assert_eq!(
+            describe_run(&cut, 1_000, now).0,
+            "+1:24 · cut off by Stop after 2.5 s"
+        );
+
+        let mut log = AgentLog::new(crate::sync_screen::now_secs());
+        log.commands.push(done);
+        log.commands.push(running);
+        assert_eq!(
+            session_said(&log),
+            "opened just now · 2 commands · 1 running"
+        );
     }
 
     #[test]

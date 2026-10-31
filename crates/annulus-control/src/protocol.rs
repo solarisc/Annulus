@@ -65,6 +65,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait: Option<u64>,
     },
+    /// Presses Ctrl+C in agent tab `tab`: a command that hangs or runs on stops.
+    Interrupt {
+        /// The agent tab's id.
+        tab: u64,
+    },
     /// Closes agent tab `tab`.
     Close {
         /// The agent tab's id.

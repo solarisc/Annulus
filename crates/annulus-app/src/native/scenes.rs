@@ -200,6 +200,28 @@ fn agent_tab(app: &mut NativeApp) {
     ];
     log.picked = Some(2);
     tab.agent = Some(Box::new(log));
+    app.settings.automation = true;
+}
+
+/// The same tab after Stop: the panel says agents are cut off and offers to allow them
+/// again, and the command that was running shows as cut off.
+fn agent_tab_stopped(app: &mut NativeApp) {
+    use super::control::Ran;
+    agent_tab(app);
+    app.settings.automation = false;
+    if let Some(log) = app.tabs[super::FIXED_TABS].agent.as_mut() {
+        log.picked = None;
+        if let Some(last) = log.commands.last_mut() {
+            last.state = Ran::Cut {
+                took: std::time::Duration::from_secs(4),
+            };
+        }
+        if let Some(journal) = log.commands.get_mut(3) {
+            journal.state = Ran::Interrupted {
+                took: std::time::Duration::from_secs(41),
+            };
+        }
+    }
 }
 
 /// The same tab with its agent panel folded to a rail.
@@ -1109,6 +1131,15 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: agent_tab_folded,
+        acts: &[],
+    },
+    Scene {
+        name: "agent-tab-stopped",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: agent_tab_stopped,
         acts: &[],
     },
     Scene {
@@ -3907,6 +3938,89 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
         .find(|open| open.uid == tab)
         .and_then(|open| open.agent.as_ref());
     assert_eq!(log.and_then(|log| log.picked), None);
+}
+
+#[test]
+fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_next() {
+    use super::control::Ran;
+    use annulus_control::client::Client;
+    // A line a second for a while, in every local shell the runners have.
+    let ticking = if cfg!(windows) {
+        "ping -n 40 127.0.0.1"
+    } else {
+        "for i in $(seq 40); do echo tick $i; sleep 1; done"
+    };
+    let mut app = NativeApp::new(Some(fixture_vault("agent-stop", false)));
+    app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
+    let dir = app
+        .vault_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_path_buf)
+        .unwrap();
+    app.waker = Some(std::sync::Arc::new(|| {}));
+    app.settings.automation = true;
+    let mut state = UiState::default();
+    // The first frame opens the door.
+    step(&mut app, &mut state, &[], 0.0);
+    let mut time = 0.05;
+    let mut frames = |app: &mut NativeApp, until: &dyn Fn(&NativeApp) -> bool| {
+        let started = std::time::Instant::now();
+        while !until(app) && started.elapsed() < std::time::Duration::from_secs(90) {
+            step(app, &mut state, &[], time);
+            time += 0.05;
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    };
+    let states = |app: &NativeApp| -> Vec<String> {
+        app.tabs
+            .iter()
+            .filter_map(|tab| tab.agent.as_ref())
+            .flat_map(|log| &log.commands)
+            .map(|command| match command.state {
+                Ran::Running(_) => "running",
+                Ran::Done { .. } => "done",
+                Ran::TimedOut { .. } => "timed out",
+                Ran::Interrupted { .. } => "interrupted",
+                Ran::Cut { .. } => "cut",
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+
+    let agent = std::thread::spawn(move || {
+        let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
+        let tab = client.open(None).map_err(|e| e.to_string())?;
+        let out = client
+            .run(tab.id, ticking, Some(3))
+            .map_err(|e| e.to_string())?;
+        client.interrupt(tab.id).map_err(|e| e.to_string())?;
+        // Answered only once this one settles, which Stop never lets happen.
+        let cut = client.run(tab.id, ticking, Some(60));
+        Ok::<_, String>((out, cut.is_err()))
+    });
+    frames(&mut app, &|app| {
+        states(app).len() == 2 || agent.is_finished()
+    });
+    assert!(!agent.is_finished(), "{:?}", agent.join());
+    assert_eq!(states(&app), ["interrupted", "running"]);
+
+    // Stop, as the panel's button does.
+    app.settings.automation = false;
+    frames(&mut app, &|app| {
+        states(app).last().is_some_and(|last| last == "cut")
+    });
+    assert_eq!(
+        states(&app),
+        ["interrupted", "cut"],
+        "nothing is left spinning"
+    );
+    let (out, refused) = agent.join().unwrap().unwrap();
+    assert!(
+        out.lines().count() >= 2,
+        "it printed before its wait ran out:\n{out}"
+    );
+    assert!(refused, "the cut-off agent hears no answer");
 }
 
 #[test]
