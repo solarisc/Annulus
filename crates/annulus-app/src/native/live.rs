@@ -778,7 +778,11 @@ impl LiveTerminal {
         );
         for event in events {
             match event {
-                SessionEvent::Title(title) => self.title = Some(title),
+                SessionEvent::Title(title) => {
+                    if let Some(title) = program_title(&title) {
+                        self.title = Some(title);
+                    }
+                }
                 SessionEvent::Bell => {}
                 SessionEvent::Exited => {
                     self.exited = true;
@@ -1341,6 +1345,30 @@ fn link_hint(url: &str) -> String {
     }
 }
 
+/// The title a program set, as the tab shows it; `None` when it only names the program's
+/// file, as Windows' console does for a shell it starts (`C:\...\pwsh.exe`): the tab keeps
+/// its own name then. A path heading a longer title is cut to its file name
+/// (`cmd.exe - ping host`).
+fn program_title(title: &str) -> Option<String> {
+    let title = title.trim();
+    let bare = title.strip_prefix("Administrator: ").unwrap_or(title);
+    let path_end = bare
+        .to_ascii_lowercase()
+        .find(".exe")
+        .map(|at| at + ".exe".len())
+        .filter(|&end| bare[..end].contains(['\\', '/']));
+    let Some(end) = path_end else {
+        return (!title.is_empty()).then(|| title.to_owned());
+    };
+    let rest = &bare[end..];
+    if rest.trim().is_empty() {
+        return None;
+    }
+    let path = &bare[..end];
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    Some(format!("{name}{rest}"))
+}
+
 #[cfg(test)]
 mod tests {
     use annulus_config::tokens::Appearance;
@@ -1349,6 +1377,32 @@ mod tests {
     use annulus_ui::kit::{Event, Theme, UiState};
 
     use super::*;
+
+    #[test]
+    fn a_console_title_that_only_names_the_shells_file_leaves_the_tab_its_name() {
+        assert_eq!(
+            program_title(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            None
+        );
+        assert_eq!(
+            program_title(r"Administrator: C:\WINDOWS\system32\cmd.exe"),
+            None
+        );
+        assert_eq!(
+            program_title(r"C:\WINDOWS\system32\cmd.exe - ping -n 4 host").as_deref(),
+            Some("cmd.exe - ping -n 4 host"),
+            "a path heading a longer title is cut to the file's name"
+        );
+        assert_eq!(
+            program_title("deploy@web-1: ~/app").as_deref(),
+            Some("deploy@web-1: ~/app")
+        );
+        assert_eq!(
+            program_title("notes.exe.txt - vim").as_deref(),
+            Some("notes.exe.txt - vim"),
+            "a file name with no folder is no program path"
+        );
+    }
 
     #[test]
     fn a_minimized_window_neither_starts_nor_squeezes_a_terminal_into_a_column() {
