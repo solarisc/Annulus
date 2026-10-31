@@ -500,6 +500,8 @@ pub struct Session {
     answers: Answers,
     palette: Palette,
     output: Arc<AtomicU64>,
+    /// Lines of scrollback its terminal keeps.
+    scrollback: usize,
 }
 
 impl Session {
@@ -589,7 +591,17 @@ impl Session {
             answers,
             palette: Palette::annulus_dark(),
             output,
+            scrollback: annulus_term::SCROLLBACK_LINES,
         })
+    }
+
+    /// Keeps `lines` of scrollback from now on (Settings, F-TERM-004); fewer than it holds
+    /// drops the oldest. Nothing happens while the number stays the same.
+    pub fn keep_scrollback(&mut self, lines: usize) {
+        if self.scrollback != lines {
+            self.scrollback = lines;
+            annulus_term::keep_scrollback(&mut self.term.lock(), lines);
+        }
     }
 
     /// Goes up each time the program's output reaches the terminal: unchanged, nothing new

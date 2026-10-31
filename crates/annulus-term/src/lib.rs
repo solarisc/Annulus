@@ -22,8 +22,10 @@ use alacritty_terminal::vte::ansi::Processor;
 pub use palette::Palette;
 pub use snapshot::{Cell, Screen, snapshot};
 
-/// Lines of scrollback kept per terminal.
+/// Lines of scrollback a terminal keeps until it is told another number.
 pub const SCROLLBACK_LINES: usize = 10_000;
+/// The most lines of scrollback a terminal keeps: `alacritty_terminal`'s own limit.
+pub const SCROLLBACK_MAX: usize = 100_000;
 
 /// A terminal size in character cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,10 +64,25 @@ impl Dimensions for Size {
 /// The terminal configuration Annulus uses.
 #[must_use]
 pub fn config() -> Config {
+    config_keeping(SCROLLBACK_LINES)
+}
+
+/// The configuration of a terminal that keeps `lines` of scrollback, at most
+/// [`SCROLLBACK_MAX`].
+fn config_keeping(lines: usize) -> Config {
     Config {
-        scrolling_history: SCROLLBACK_LINES,
+        scrolling_history: lines.min(SCROLLBACK_MAX),
         ..Config::default()
     }
+}
+
+/// Keeps `lines` of scrollback from now on (F-TERM-004): fewer than it holds drops the oldest
+/// at once.
+pub fn keep_scrollback<T: alacritty_terminal::event::EventListener>(
+    term: &mut Term<T>,
+    lines: usize,
+) {
+    term.set_options(config_keeping(lines));
 }
 
 /// A terminal with no program attached: bytes in, screen out. Sessions use
@@ -165,6 +182,31 @@ mod tests {
                 .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR),
             "modes are back to their defaults"
         );
+    }
+
+    #[test]
+    fn the_scrollback_keeps_as_many_lines_as_asked_and_a_smaller_number_drops_the_oldest() {
+        use alacritty_terminal::grid::Dimensions as _;
+        let mut emulator = Emulator::new(20, 4);
+        let print = |emulator: &mut Emulator, from: usize| {
+            for n in from..from + 200 {
+                emulator.advance(format!("line {n}\r\n").as_bytes());
+            }
+        };
+        keep_scrollback(emulator.term_mut(), 50);
+        print(&mut emulator, 0);
+        assert_eq!(emulator.term_mut().grid().history_size(), 50);
+        keep_scrollback(emulator.term_mut(), 10);
+        assert_eq!(emulator.term_mut().grid().history_size(), 10, "cut at once");
+        let text = crate::transcript::transcript(emulator.term_mut());
+        assert!(
+            !text.contains("line 150\n") && text.contains("line 199"),
+            "the newest stay: {text}"
+        );
+        // Asked for more than alacritty keeps, it keeps its most.
+        keep_scrollback(emulator.term_mut(), usize::MAX);
+        print(&mut emulator, 200);
+        assert!(emulator.term_mut().grid().history_size() >= 200);
     }
 
     #[test]
