@@ -83,6 +83,18 @@ print_stderr = "deny"
 undocumented_unsafe_blocks = "deny"
 module_name_repetitions = "allow"
 
+# Tests draw hundreds of frames (the scenes, the random user), so the drawing code and the
+# libraries under it are optimized even in debug and test builds. The app's own logic stays
+# unoptimized, easy to step through.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.annulus-platform]
+opt-level = 2
+
+[profile.dev.package.annulus-ui]
+opt-level = 2
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
