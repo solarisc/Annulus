@@ -42,6 +42,8 @@ pub struct Running {
     wait: Duration,
     /// The length of the text last seen, and when it last changed.
     seen: (usize, Instant),
+    /// The length of the text when the command was typed: quiet counts only after it grew.
+    typed_at: usize,
 }
 
 /// Output quiet this long counts as finished.
@@ -49,7 +51,7 @@ const QUIET: Duration = Duration::from_millis(1200);
 /// How long the terminal's prompt must sit unchanged before a command is typed at it.
 const PROMPT_QUIET: Duration = Duration::from_millis(300);
 /// How long to wait for a prompt from a shell that prints none before typing anyway.
-const SILENT_PROMPT: Duration = Duration::from_secs(5);
+const SILENT_PROMPT: Duration = Duration::from_secs(10);
 /// How long a new terminal may take to start before a command for it is given up.
 const START_WITHIN: Duration = Duration::from_secs(30);
 /// What `run` waits at most when the agent names nothing, and the most it may name.
@@ -90,6 +92,7 @@ impl NativeApp {
                         asked: Instant::now(),
                         wait,
                         seen: (0, Instant::now()),
+                        typed_at: 0,
                     }),
                     Err(why) => call.answer(Err(why)),
                 }
@@ -133,6 +136,7 @@ impl NativeApp {
                     let text = panes.focused_transcript().unwrap_or_default();
                     run.before = Some(text.trim_end().lines().count());
                     run.seen = (text.len(), now);
+                    run.typed_at = text.len();
                     run.asked = now;
                     let log = tab.agent.get_or_insert_with(Box::default);
                     log.commands
@@ -150,7 +154,9 @@ impl NativeApp {
             if text.len() != run.seen.0 {
                 run.seen = (text.len(), now);
             }
-            let settled = now.duration_since(run.seen.1) >= QUIET;
+            // A slow shell or command may say nothing for a while: silence before any output
+            // is waiting, not done, so only the wait ends it.
+            let settled = text.len() != run.typed_at && now.duration_since(run.seen.1) >= QUIET;
             if settled || now.duration_since(run.asked) >= run.wait {
                 run.call
                     .answer(Ok(Response::Text(new_output(&text, before))));
