@@ -1247,12 +1247,28 @@ fn took(spent: Duration) -> String {
     }
 }
 
+/// How many lines a command printed, in words; [`READ_MAX`] or more, as many as its answer
+/// holds and more (its oldest lines were cut).
 fn lines_said(lines: usize) -> String {
     match lines {
         0 => "no output".to_owned(),
         1 => "1 line".to_owned(),
-        n => format!("{n} lines"),
+        n if n >= READ_MAX => format!("{}+ lines", grouped(READ_MAX)),
+        n => format!("{} lines", grouped(n)),
     }
+}
+
+/// `n` with a comma between each three digits (4,998).
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// `text` in lines of at most `per_line` characters, at most `most` of them, the last cut
@@ -1300,21 +1316,29 @@ fn agent_tab(app: &mut NativeApp, uid: u64) -> Result<&mut Tab, String> {
 }
 
 /// How a command answered with `out` after `took` ran, as it ended. Its lines leave out the
-/// command's own line and, once done, the prompt that came back after it.
+/// command's own line and, once done, the prompt that came back after it; an answer cut to
+/// its last [`READ_MAX`] lines counts as that many (the command printed more).
 fn ran(out: &str, took: Duration, ending: Ending) -> Ran {
     let shown = out.trim_end().lines().count();
+    let lines = |besides: usize| {
+        if shown >= READ_MAX {
+            READ_MAX
+        } else {
+            shown.saturating_sub(besides)
+        }
+    };
     match ending {
         Ending::Done => Ran::Done {
             took,
-            lines: shown.saturating_sub(2),
+            lines: lines(2),
         },
         Ending::Waiting => Ran::Waiting {
             took,
-            lines: shown.saturating_sub(1),
+            lines: lines(1),
         },
         Ending::TimedOut => Ran::TimedOut {
             took,
-            lines: shown.saturating_sub(1),
+            lines: lines(1),
         },
         Ending::Ended => Ran::Ended { took },
     }
@@ -1910,6 +1934,13 @@ mod tests {
         assert_eq!(ink, Ink::Accent);
         assert_eq!(clock(3_725), "+1:02:05");
         assert_eq!(lines_said(0), "no output");
+        assert_eq!(lines_said(4_998), "4,998 lines");
+        // An answer cut to its last lines says the command printed more.
+        let cut = "x\n".repeat(READ_MAX);
+        let Ran::Done { lines, .. } = ran(&cut, Duration::ZERO, Ending::Done) else {
+            panic!("done");
+        };
+        assert_eq!(lines_said(lines), "5,000+ lines");
         let stopped = command(Ran::Interrupted {
             took: Duration::from_secs(12),
         });
