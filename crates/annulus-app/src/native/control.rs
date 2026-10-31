@@ -578,20 +578,22 @@ impl NativeApp {
             .as_ref()
             .and_then(|log| log.commands.last())
             .is_some_and(|last| last.state.going());
-        // Typing before the shell's first prompt has it echo the command early and print its
-        // prompt into the answer, so wait for the prompt to settle.
-        let ready = !queued
-            && if count == 0 {
-                now.duration_since(run.asked) >= SILENT_PROMPT
-            } else {
-                now.duration_since(run.output.1) >= if busy { QUIET } else { PROMPT_QUIET }
-            };
-        let text = if ready {
-            panes.focused_transcript()
-        } else {
+        // Typing before the shell's first prompt has it echo the command early, or lose it,
+        // so wait for the prompt to show and settle. Output alone is not enough: a Windows
+        // console clears the screen and places the cursor before the shell says anything.
+        let text = if queued {
             None
+        } else {
+            panes.focused_transcript()
         };
-        if let Some(text) = text {
+        let shown = text.as_deref().is_some_and(|text| !text.trim().is_empty());
+        let ready = !queued
+            && if shown {
+                now.duration_since(run.output.1) >= if busy { QUIET } else { PROMPT_QUIET }
+            } else {
+                now.duration_since(run.asked) >= SILENT_PROMPT
+            };
+        if let Some(text) = text.filter(|_| ready) {
             // A trailing newline would press Enter twice.
             let mut keys = run
                 .command
