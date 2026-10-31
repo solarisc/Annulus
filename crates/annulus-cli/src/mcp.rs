@@ -1,8 +1,11 @@
 //! `annulus mcp` (ADR-0020 §5, F-AUTO-005): an MCP server over stdin and stdout, one JSON-RPC
-//! message per line. It offers the door's requests as tools and connects through the door on
-//! each call, so it can start before Annulus is unlocked and survives a lock.
+//! message per line. It offers the door's requests as tools and connects through the door as
+//! calls come, so it can start before Annulus is unlocked and survives a lock. Tool calls run
+//! side by side: an agent's `annulus_interrupt` is not held back by its own `annulus_run`.
 
 use std::io::{self, BufRead, Write};
+use std::sync::{Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use annulus_control::client::{Client, ClientError};
@@ -11,40 +14,104 @@ use annulus_control::protocol::RunOutput;
 /// The MCP version spoken when the client names none.
 const PROTOCOL: &str = "2025-06-18";
 
-/// What the tools reach: Annulus through its door, or a stand-in in tests.
-pub trait Backend {
+/// Tool calls answered at once at most: well within the door's eight connections, so the
+/// `annulus` command still gets in beside an agent.
+const PARALLEL: usize = 4;
+
+/// What the tools reach: Annulus through its door, or a stand-in in tests. Calls come from
+/// several threads at once.
+pub trait Backend: Sync {
     /// Runs tool `name` with `arguments`; the text to show, or why it failed.
-    fn call(&mut self, name: &str, arguments: &Value) -> Result<String, String>;
+    fn call(&self, name: &str, arguments: &Value) -> Result<String, String>;
 }
 
 /// Serves MCP on `input` and `output` until `input` ends, through Annulus's door.
 ///
 /// # Errors
 /// When reading or writing fails.
-pub fn serve<R: BufRead, W: Write>(input: R, output: W) -> io::Result<()> {
-    serve_with(input, output, &mut DoorBackend::default())
+pub fn serve<R: BufRead, W: Write + Send>(input: R, output: W) -> io::Result<()> {
+    serve_with(input, output, &DoorBackend::default())
 }
 
-fn serve_with<R: BufRead, W: Write>(
+fn serve_with<R: BufRead, W: Write + Send>(
     input: R,
-    mut output: W,
-    backend: &mut dyn Backend,
+    output: W,
+    backend: &dyn Backend,
 ) -> io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let output = Mutex::new(output);
+    let write = |reply: &Value| -> io::Result<()> {
+        let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
+        writeln!(output, "{reply}")?;
+        output.flush()
+    };
+    let slots = Slots::new(PARALLEL);
+    let (write, slots) = (&write, &slots);
+    std::thread::scope(|scope| {
+        for line in input.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if is_tool_call(&line) {
+                // Answered on its own thread, out of order if need be: replies carry their id.
+                slots.take();
+                scope.spawn(move || {
+                    if let Some(reply) = answer(&line, backend) {
+                        // A closed output also ends the input, and with it the server.
+                        let _ = write(&reply);
+                    }
+                    slots.give();
+                });
+            } else if let Some(reply) = answer(&line, backend) {
+                write(&reply)?;
+            }
         }
-        if let Some(reply) = answer(&line, backend) {
-            writeln!(output, "{reply}")?;
-            output.flush()?;
+        Ok(())
+    })
+}
+
+/// Whether `line` asks to call a tool (and wants a reply).
+fn is_tool_call(line: &str) -> bool {
+    serde_json::from_str::<Value>(line).is_ok_and(|message| {
+        message.get("id").is_some()
+            && message.get("method").and_then(Value::as_str) == Some("tools/call")
+    })
+}
+
+/// A count of free places, taken and given back across threads.
+struct Slots {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl Slots {
+    fn new(count: usize) -> Self {
+        Self {
+            free: Mutex::new(count),
+            freed: Condvar::new(),
         }
     }
-    Ok(())
+
+    /// Takes a place, waiting for one to be given back when none is free.
+    fn take(&self) {
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        while *free == 0 {
+            free = self
+                .freed
+                .wait(free)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *free -= 1;
+    }
+
+    fn give(&self) {
+        *self.free.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        self.freed.notify_one();
+    }
 }
 
 /// The reply to one message; `None` for a notification, which gets none.
-fn answer(line: &str, backend: &mut dyn Backend) -> Option<Value> {
+fn answer(line: &str, backend: &dyn Backend) -> Option<Value> {
     let Ok(message) = serde_json::from_str::<Value>(line) else {
         return Some(error(&Value::Null, -32700, "not JSON"));
     };
@@ -165,25 +232,36 @@ fn tools() -> Value {
     ])
 }
 
-/// The tools' backend: Annulus's door, connected on first use and again after it closed.
+/// The door hangs up on a connection idle for 30 minutes: one idle this long is not reused, so
+/// an agent back from a break is not told the door is closed.
+const KEEP_IDLE: Duration = Duration::from_secs(25 * 60);
+
+/// The tools' backend: Annulus's door, a connection for each call in flight. Connections are
+/// kept for the next calls until the door closes them or they sit idle too long.
 #[derive(Default)]
 struct DoorBackend {
-    client: Option<Client>,
+    /// Connections not in use, with when each was last used.
+    idle: Mutex<Vec<(Client, Instant)>>,
 }
 
 impl Backend for DoorBackend {
-    fn call(&mut self, name: &str, arguments: &Value) -> Result<String, String> {
-        if self.client.is_none() {
-            self.client =
-                Some(Client::connect(&annulus_control::data_dir()).map_err(|e| e.to_string())?);
-        }
-        let Some(client) = self.client.as_mut() else {
-            return Err(ClientError::Closed.to_string());
+    fn call(&self, name: &str, arguments: &Value) -> Result<String, String> {
+        let kept = {
+            let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
+            idle.retain(|(_, since)| since.elapsed() < KEEP_IDLE);
+            idle.pop()
         };
-        let done = run_tool(client, name, arguments);
-        if let Err(ClientError::Closed | ClientError::Io(_)) = &done {
-            // Locked, switched off or restarted: the next call knocks again.
-            self.client = None;
+        let mut client = match kept {
+            Some((client, _)) => client,
+            None => Client::connect(&annulus_control::data_dir()).map_err(|e| e.to_string())?,
+        };
+        let done = run_tool(&mut client, name, arguments);
+        // Locked, switched off or restarted: the next call knocks again.
+        if !matches!(done, Err(ClientError::Closed | ClientError::Io(_))) {
+            self.idle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((client, Instant::now()));
         }
         done.map_err(|error| error.to_string())
     }
@@ -241,7 +319,7 @@ mod tests {
     struct Echo;
 
     impl Backend for Echo {
-        fn call(&mut self, name: &str, arguments: &Value) -> Result<String, String> {
+        fn call(&self, name: &str, arguments: &Value) -> Result<String, String> {
             if name == "annulus_fail" {
                 return Err("the door is closed".into());
             }
@@ -249,19 +327,62 @@ mod tests {
         }
     }
 
-    fn talk(lines: &[Value]) -> Vec<Value> {
+    /// The replies to `lines` through `backend`, in id order (tool calls answer as they end).
+    fn talk_to(backend: &dyn Backend, lines: &[Value]) -> Vec<Value> {
         let input = lines
             .iter()
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n");
         let mut output = Vec::new();
-        serve_with(input.as_bytes(), &mut output, &mut Echo).unwrap();
-        String::from_utf8(output)
+        serve_with(input.as_bytes(), &mut output, backend).unwrap();
+        let mut replies: Vec<Value> = String::from_utf8(output)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
+            .collect();
+        replies.sort_by_key(|reply| reply["id"].as_u64());
+        replies
+    }
+
+    fn talk(lines: &[Value]) -> Vec<Value> {
+        talk_to(&Echo, lines)
+    }
+
+    /// Holds each call until a second one is in flight beside it, or 5 s pass.
+    #[derive(Default)]
+    struct Together {
+        inside: Mutex<usize>,
+        arrived: Condvar,
+    }
+
+    impl Backend for Together {
+        fn call(&self, _: &str, _: &Value) -> Result<String, String> {
+            let mut inside = self.inside.lock().unwrap();
+            *inside += 1;
+            self.arrived.notify_all();
+            let (inside, _) = self
+                .arrived
+                .wait_timeout_while(inside, Duration::from_secs(5), |inside| *inside < 2)
+                .unwrap();
+            Ok(if *inside >= 2 { "together" } else { "alone" }.to_owned())
+        }
+    }
+
+    #[test]
+    fn tool_calls_run_side_by_side_so_a_long_run_holds_back_no_interrupt() {
+        let replies = talk_to(
+            &Together::default(),
+            &[
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"annulus_run","arguments":{"tab":4,"command":"make"}}}),
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"annulus_interrupt","arguments":{"tab":4}}}),
+            ],
+        );
+        let said: Vec<&Value> = replies
+            .iter()
+            .map(|reply| &reply["result"]["content"][0]["text"])
+            .collect();
+        assert_eq!(said, [&json!("together"), &json!("together")]);
     }
 
     #[test]
@@ -315,7 +436,7 @@ mod tests {
     fn a_line_that_is_not_json_gets_a_parse_error_and_the_server_goes_on() {
         let input = "{nope\n{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n";
         let mut output = Vec::new();
-        serve_with(input.as_bytes(), &mut output, &mut Echo).unwrap();
+        serve_with(input.as_bytes(), &mut output, &Echo).unwrap();
         let text = String::from_utf8(output).unwrap();
         let replies: Vec<Value> = text
             .lines()

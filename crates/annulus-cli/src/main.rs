@@ -309,7 +309,8 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Command::Mcp => {
-            return match mcp::serve(std::io::stdin().lock(), std::io::stdout().lock()) {
+            // Replies go out from several threads, each whole under the output's lock.
+            return match mcp::serve(std::io::stdin().lock(), std::io::stdout()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("annulus mcp: {error}");
