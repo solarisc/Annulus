@@ -3710,13 +3710,12 @@ fn tabs_past_the_strips_end_wait_in_the_all_tabs_menu_and_come_back_when_picked(
         .filter(|zone| zone.role == Role::MenuItem)
         .count();
     assert!(listed > 0, "the menu lists the tabs");
-    let output = step(&mut app, &mut state, &click_on(&output, "session 15"), 3.0);
+    step(&mut app, &mut state, &click_on(&output, "session 15"), 3.0);
     assert_eq!(
         app.tabs[app.active].title, "session 15",
         "picked, it is in front"
     );
     let output = step(&mut app, &mut state, &[], 4.0);
-    let output = step(&mut app, &mut state, &[], 5.0);
     assert!(
         on_strip(&output).contains(&"session 15".to_owned()),
         "and on the strip: {:?}",
