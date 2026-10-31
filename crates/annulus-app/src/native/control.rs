@@ -1395,6 +1395,32 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
                 .map(|(index, tab)| tab_info(tab, index == app.active))
                 .collect(),
         )),
+        Request::SetNotes { host, notes } => {
+            let notes = annulus_vault::hosts::clean_notes(notes)?;
+            let vault = app.vault.as_mut().ok_or("the vault is locked")?;
+            let mut saved = vault
+                .hosts()
+                .iter()
+                .find(|known| known.id == *host)
+                .cloned()
+                .ok_or_else(|| format!("no saved host {host}: see `annulus hosts`"))?;
+            if saved.notes != notes {
+                saved.notes = notes;
+                let label = saved.label.clone();
+                vault
+                    .upsert_host(saved)
+                    .map_err(|error| format!("the notes could not be saved: {error}"))?;
+                // The owner hears of every change an agent makes to the vault.
+                app.agent_news
+                    .push(format!("An agent updated the notes of {label}"));
+            }
+            let vault = app.vault.as_ref().ok_or("the vault is locked")?;
+            hosts(vault)
+                .into_iter()
+                .find(|info| info.id == *host)
+                .map(Response::Host)
+                .ok_or_else(|| format!("no saved host {host}"))
+        }
         Request::Open { host } => {
             // The tab in use, which stays in front when agents' tabs open behind it.
             let in_use = app.tabs.get(app.active).map(|tab| tab.uid);
@@ -1528,6 +1554,7 @@ fn hosts(vault: &Vault) -> Vec<HostInfo> {
                 user: resolved.username.trim().to_owned(),
                 group: group_path(groups, host.group.as_deref()),
                 os: host.os.clone(),
+                notes: host.notes.clone(),
             }
         })
         .collect()
@@ -1747,6 +1774,56 @@ mod tests {
             Ok(Response::Done)
         );
         assert!(!app.tabs.iter().any(|tab| tab.uid == opened.id));
+    }
+
+    #[test]
+    fn an_agent_reads_a_hosts_notes_and_rewrites_them_within_their_length() {
+        let mut app = NativeApp::new(Some(fixture_vault("control-notes", true)));
+        let web = app
+            .vault
+            .as_ref()
+            .unwrap()
+            .hosts()
+            .iter()
+            .find(|host| host.label == "web-1")
+            .unwrap()
+            .id;
+        let set = |notes: &str| Request::SetNotes {
+            host: web,
+            notes: notes.into(),
+        };
+        let Ok(Response::Host(saved)) = handle(
+            &mut app,
+            &set("  nginx front end\r\nlogs in /var/log/nginx  "),
+        ) else {
+            panic!("the notes are saved");
+        };
+        let clean = "nginx front end\nlogs in /var/log/nginx";
+        assert_eq!(saved.notes, clean);
+        let Ok(Response::Hosts(hosts)) = handle(&mut app, &Request::Hosts) else {
+            panic!("hosts");
+        };
+        let listed = hosts.iter().find(|host| host.id == web).unwrap();
+        assert_eq!(listed.notes, clean, "the next agent reads them");
+        assert_eq!(app.agent_news.len(), 1, "the owner hears of the change");
+        let long = "x".repeat(annulus_vault::hosts::NOTES_MAX + 1);
+        let refused = handle(&mut app, &set(&long)).unwrap_err();
+        assert!(refused.contains("shorten"), "{refused}");
+        assert!(
+            handle(
+                &mut app,
+                &Request::SetNotes {
+                    host: 999,
+                    notes: String::new()
+                }
+            )
+            .is_err()
+        );
+        app.lock_vault();
+        assert!(
+            handle(&mut app, &set("later")).is_err(),
+            "never while locked"
+        );
     }
 
     #[test]

@@ -276,6 +276,8 @@ pub struct NativeApp {
     door_failed: bool,
     /// Agents' commands waiting to be typed or for their output to settle.
     runs: Vec<control::Running>,
+    /// What agents changed, to show as toasts this frame (a host's notes).
+    agent_news: Vec<String>,
 }
 
 impl NativeApp {
@@ -330,6 +332,7 @@ impl NativeApp {
             door: None,
             door_failed: false,
             runs: Vec::new(),
+            agent_news: Vec::new(),
         }
     }
 
@@ -1132,6 +1135,9 @@ impl NativeApp {
         if self.control() {
             // A command's output is settling: look again soon.
             ui.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        for news in std::mem::take(&mut self.agent_news) {
+            ui.toast(news, Tone::Info);
         }
         shortcuts::choose(&self.settings.keys);
         // Keys being recorded in Settings reach no shortcut.

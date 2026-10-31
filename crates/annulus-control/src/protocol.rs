@@ -75,6 +75,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait: Option<u64>,
     },
+    /// Replaces the notes of saved host `host` (F-HOST-011): what the next person or agent
+    /// should know about it, 2,000 characters at most.
+    SetNotes {
+        /// The saved host's id, from `hosts`.
+        host: u64,
+        /// The notes in full; empty clears them.
+        notes: String,
+    },
     /// Presses Ctrl+C in agent tab `tab`: a command that hangs or runs on stops.
     Interrupt {
         /// The agent tab's id.
@@ -114,6 +122,7 @@ impl Outcome {
         match answer {
             Ok(Response::Status(status)) => Self::ok(&status),
             Ok(Response::Hosts(hosts)) => Self::ok(&hosts),
+            Ok(Response::Host(host)) => Self::ok(&host),
             Ok(Response::Tabs(tabs)) => Self::ok(&tabs),
             Ok(Response::Text(text)) => Self::Ok(serde_json::Value::String(text)),
             Ok(Response::Ran(ran)) => Self::ok(&ran),
@@ -135,6 +144,8 @@ pub enum Response {
     Status(Status),
     /// For [`Request::Hosts`].
     Hosts(Vec<HostInfo>),
+    /// A host as it is now, for [`Request::SetNotes`].
+    Host(HostInfo),
     /// For [`Request::Tabs`].
     Tabs(Vec<TabInfo>),
     /// A terminal's text, for [`Request::Read`].
@@ -175,6 +186,9 @@ pub struct HostInfo {
     pub group: String,
     /// Its OS key (`ubuntu`, `debian`, …), empty while unknown.
     pub os: String,
+    /// What to know about the server, by the owner and agents; empty for none.
+    #[serde(default)]
+    pub notes: String,
 }
 
 /// What an agent's command printed, and how far it got.

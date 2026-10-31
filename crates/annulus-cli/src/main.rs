@@ -25,6 +25,8 @@ Usage: annulus [--json] <command>
 Commands:
   status                        Annulus's version and state
   hosts                         the saved hosts (never their passwords or keys)
+  notes <host> [--set <text...>] print saved host <host>'s notes, or replace them (2,000
+                                characters at most; --set alone clears them)
   tabs                          the open tabs (AI marks the ones an agent opened)
   read <tab> [lines]            the text of terminal tab <tab> (an id from `tabs`)
   open [host]                   open a tab of your own: an SSH session to saved host <host>
@@ -54,6 +56,11 @@ enum Command {
     Help,
     Status,
     Hosts,
+    Notes {
+        host: u64,
+        /// The notes to save; `None` prints them.
+        set: Option<String>,
+    },
     Tabs,
     Read {
         tab: u64,
@@ -85,6 +92,11 @@ fn tab_id(word: &str) -> Result<u64, String> {
         .map_err(|_| format!("`{word}` is not a tab id: see `annulus tabs`"))
 }
 
+fn host_id(word: &str) -> Result<u64, String> {
+    word.parse()
+        .map_err(|_| format!("`{word}` is not a host id: see `annulus hosts`"))
+}
+
 /// Reads the arguments after the program's name: the command, and whether to print JSON.
 fn parse(args: &[String]) -> Result<(Command, bool), String> {
     let json = args.iter().any(|arg| arg == "--json");
@@ -97,6 +109,14 @@ fn parse(args: &[String]) -> Result<(Command, bool), String> {
         [] | ["help" | "--help" | "-h"] => Command::Help,
         ["status"] => Command::Status,
         ["hosts"] => Command::Hosts,
+        ["notes", host] => Command::Notes {
+            host: host_id(host)?,
+            set: None,
+        },
+        ["notes", host, "--set", text @ ..] => Command::Notes {
+            host: host_id(host)?,
+            set: Some(text.join(" ")),
+        },
         ["tabs"] => Command::Tabs,
         ["mcp"] => Command::Mcp,
         ["read", tab, rest @ ..] if rest.len() <= 1 => Command::Read {
@@ -112,10 +132,7 @@ fn parse(args: &[String]) -> Result<(Command, bool), String> {
         },
         ["open"] => Command::Open { host: None },
         ["open", host] => Command::Open {
-            host: Some(
-                host.parse()
-                    .map_err(|_| format!("`{host}` is not a host id: see `annulus hosts`"))?,
-            ),
+            host: Some(host_id(host)?),
         },
         ["run", tab, rest @ ..] => {
             let (wait, rest) = match rest {
@@ -256,6 +273,25 @@ fn run(command: Command, json: bool) -> Result<Printed, ClientError> {
                 hosts_table(&hosts)
             }
         }
+        Command::Notes { host, set } => {
+            let found = match set {
+                Some(notes) => client.set_notes(host, &notes)?,
+                None => client
+                    .hosts()?
+                    .into_iter()
+                    .find(|known| known.id == host)
+                    .ok_or_else(|| {
+                        ClientError::Refused(format!("no saved host {host}: see `annulus hosts`"))
+                    })?,
+            };
+            if json {
+                printed(serde_json::json!(found))
+            } else if found.notes.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", found.notes)
+            }
+        }
         Command::Tabs => {
             let tabs = client.tabs()?;
             if json {
@@ -350,6 +386,32 @@ mod tests {
     fn the_command_line_reads_each_command_and_refuses_what_it_does_not_know() {
         assert_eq!(parse(&args("")), Ok((Command::Help, false)));
         assert_eq!(parse(&args("hosts --json")), Ok((Command::Hosts, true)));
+        assert_eq!(
+            parse(&args("notes 3")),
+            Ok((Command::Notes { host: 3, set: None }, false))
+        );
+        assert_eq!(
+            parse(&args("notes 3 --set nginx front end")),
+            Ok((
+                Command::Notes {
+                    host: 3,
+                    set: Some("nginx front end".into())
+                },
+                false
+            ))
+        );
+        assert_eq!(
+            parse(&args("notes 3 --set")),
+            Ok((
+                Command::Notes {
+                    host: 3,
+                    set: Some(String::new())
+                },
+                false
+            )),
+            "--set alone clears them"
+        );
+        assert!(parse(&args("notes web-1")).is_err());
         assert_eq!(
             parse(&args("read 7 40")),
             Ok((
@@ -462,6 +524,7 @@ mod tests {
             user: "deploy".into(),
             group: "Prod".into(),
             os: String::new(),
+            notes: String::new(),
         };
         let table = hosts_table(&[host(22), host(2222)]);
         assert!(

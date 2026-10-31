@@ -132,6 +132,17 @@ impl Client {
         self.call(Request::Hosts)
     }
 
+    /// Replaces the notes of saved host `host`; the host as it is now.
+    ///
+    /// # Errors
+    /// As [`Self::call`]; notes over 2,000 characters are refused.
+    pub fn set_notes(&mut self, host: u64, notes: &str) -> Result<HostInfo, ClientError> {
+        self.call(Request::SetNotes {
+            host,
+            notes: notes.to_owned(),
+        })
+    }
+
     /// The open tabs.
     ///
     /// # Errors
