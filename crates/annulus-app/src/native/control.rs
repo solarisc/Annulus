@@ -46,6 +46,10 @@ pub struct Running {
 
 /// Output quiet this long counts as finished.
 const QUIET: Duration = Duration::from_millis(1200);
+/// How long the terminal's prompt must sit unchanged before a command is typed at it.
+const PROMPT_QUIET: Duration = Duration::from_millis(300);
+/// How long to wait for a prompt from a shell that prints none before typing anyway.
+const SILENT_PROMPT: Duration = Duration::from_secs(5);
 /// How long a new terminal may take to start before a command for it is given up.
 const START_WITHIN: Duration = Duration::from_secs(30);
 /// What `run` waits at most when the agent names nothing, and the most it may name.
@@ -112,9 +116,20 @@ impl NativeApp {
                 continue;
             };
             let Some(before) = run.before else {
+                // Typing before the shell's first prompt has it echo the command early and
+                // print its prompt into the answer, so wait for the prompt to settle.
+                let shown = panes.focused_transcript().unwrap_or_default();
+                if shown.len() != run.seen.0 {
+                    run.seen = (shown.len(), now);
+                }
+                let ready = if shown.trim().is_empty() {
+                    now.duration_since(run.asked) >= SILENT_PROMPT
+                } else {
+                    now.duration_since(run.seen.1) >= PROMPT_QUIET
+                };
                 let mut typed = run.command.replace("\r\n", "\r").replace('\n', "\r");
                 typed.push('\r');
-                if panes.type_focused(typed.as_bytes()) {
+                if ready && panes.type_focused(typed.as_bytes()) {
                     let text = panes.focused_transcript().unwrap_or_default();
                     run.before = Some(text.trim_end().lines().count());
                     run.seen = (text.len(), now);
