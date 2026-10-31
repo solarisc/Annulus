@@ -183,13 +183,21 @@ pub fn fixture_vault(name: &str, populated: bool) -> Vault {
     vault
 }
 
+/// A temporary path for the `what` of demo `name`, never handed out twice in this process:
+/// the scenes render side by side and must not write into each other's files.
+fn scratch(what: &str, name: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("annulus-{what}-{}-{name}-{n}", std::process::id()))
+}
+
 /// A `known_hosts` file in a temporary folder with three made-up servers.
 ///
 /// # Panics
 /// When the temporary folder cannot be written.
 #[must_use]
 pub fn known_hosts(name: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("annulus-known-{}-{name}", std::process::id()));
+    let path = scratch("known", name);
     let lines: Vec<String> = ["bastion.example.com", "10.0.4.12", "[nas.local]:2200"]
         .iter()
         .map(|host| {
@@ -240,7 +248,7 @@ pub fn sftp_tab(name: &str) -> crate::sftp_view::SftpTab {
         entry("README.md", Kind::File, 612, 1_761_478_000, 0o644),
         entry(".env", Kind::File, 214, 1_761_400_000, 0o600),
     ];
-    let local = std::env::temp_dir().join(format!("annulus-sftp-{}-{name}", std::process::id()));
+    let local = scratch("sftp", name);
     let _ = std::fs::remove_dir_all(&local);
     std::fs::create_dir_all(local.join("notes")).expect("a temporary folder");
     std::fs::write(local.join("backup.tar.gz"), vec![0; 4096]).expect("a temporary file");
