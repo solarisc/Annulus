@@ -9,6 +9,7 @@ pub mod profiles;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -331,6 +332,8 @@ struct Listener {
     events: Sender<SessionEvent>,
     wake: Arc<dyn Fn() + Send + Sync>,
     reply: Arc<Mutex<Option<Reply>>>,
+    /// Counts each batch of the program's output that reached the terminal.
+    output: Arc<AtomicU64>,
 }
 
 impl Listener {
@@ -360,8 +363,11 @@ impl EventListener for Listener {
                     sink(reply.into_bytes());
                 }
             }
-            // Wake-ups only need the repaint below. OSC 52 clipboard and other requests are
-            // ignored until F-TERM settings gate them.
+            // The PTY's output was taken in.
+            Event::Wakeup => {
+                self.output.fetch_add(1, Ordering::Relaxed);
+            }
+            // OSC 52 clipboard and other requests are ignored until F-TERM settings gate them.
             _ => {}
         }
         (self.wake)();
@@ -493,6 +499,7 @@ pub struct Session {
     events: Receiver<SessionEvent>,
     answers: Answers,
     palette: Palette,
+    output: Arc<AtomicU64>,
 }
 
 impl Session {
@@ -510,10 +517,12 @@ impl Session {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         let (events_tx, events) = channel();
+        let output = Arc::new(AtomicU64::new(0));
         let listener = Listener {
             events: events_tx,
             wake: Arc::new(wake),
             reply: Arc::new(Mutex::new(None)),
+            output: Arc::clone(&output),
         };
         let term = Arc::new(FairMutex::new(Term::new(config(), &size, listener.clone())));
         let answers = Answers::default();
@@ -579,7 +588,15 @@ impl Session {
             events,
             answers,
             palette: Palette::annulus_dark(),
+            output,
         })
+    }
+
+    /// Goes up each time the program's output reaches the terminal: unchanged, nothing new
+    /// was printed, so its text need not be read again.
+    #[must_use]
+    pub fn output(&self) -> u64 {
+        self.output.load(Ordering::Relaxed)
     }
 
     /// Sends input (typed text, encoded keys, pasted text) to the program.
@@ -852,6 +869,7 @@ fn spawn_ssh(
                         output = shell.next() => match output {
                             Output::Data(bytes) => {
                                 parser.advance(&mut *term.lock(), &bytes);
+                                listener.output.fetch_add(1, Ordering::Relaxed);
                                 (listener.wake)();
                             }
                             Output::Exited => return listener.send(SessionEvent::Exited),
@@ -1072,6 +1090,12 @@ mod tests {
             wait_for(&session, "annulus-ok"),
             "the program's output never appeared"
         );
+        // Counted just after the text lands, so allow it a moment.
+        let counted = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            session.output() > 0
+        });
+        assert!(counted, "and was counted as it came in");
     }
 
     #[test]
