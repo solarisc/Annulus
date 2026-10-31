@@ -4112,14 +4112,13 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
         "nothing is left spinning"
     );
     let (out, refused) = agent.join().unwrap().unwrap();
-    assert!(
-        out.output.lines().count() >= 2,
-        "it printed before its wait ran out: {out:?}"
-    );
+    // Its first line may or may not come within the second a busy runner gives it: what
+    // counts is that the answer starts at the command and says it still runs.
+    assert!(out.output.contains(ticking), "{out:?}");
     assert_eq!(
         out.state,
         annulus_control::protocol::RunState::Running,
-        "and is still running"
+        "out of its wait, it is still running: {out:?}"
     );
     assert!(refused, "the cut-off agent hears no answer");
 }
