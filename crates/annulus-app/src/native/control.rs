@@ -180,8 +180,10 @@ impl Typed {
         let Some(expected) = self.lines.checked_sub(1) else {
             return (!lines.is_empty()).then_some(0);
         };
+        // The lines above it that are still there: near the top, some have dropped off.
         let above_at = |at: usize| {
-            at >= self.above.len() && lines[at - self.above.len()..at] == self.above[..]
+            let kept = self.above.len().min(at);
+            lines[at - kept..at] == self.above[self.above.len() - kept..]
         };
         let last = lines.len().checked_sub(1)?;
         (0..=expected.min(last))
@@ -191,6 +193,28 @@ impl Typed {
             // nothing moved, so the line is where it was.
             .or_else(|| (expected <= last && above_at(expected)).then_some(expected))
     }
+
+    /// Typed while the command before still went on. At a question of its (a password, a
+    /// yes or no) it ends when that one's prompt comes back; at a prompt of its own (the
+    /// remote shell `ssh` opened, `sudo -i`, a REPL) when that prompt does.
+    fn answering(&mut self, before: &Typed) {
+        if !looks_like_prompt(&self.line) {
+            self.prompt.clone_from(&before.prompt);
+        }
+    }
+}
+
+/// Whether `line` is shaped like a shell prompt: it ends with a prompt's character or starts
+/// with a prompt's mark. A question (`Password:`, `[Y/n]`) is not.
+fn looks_like_prompt(line: &str) -> bool {
+    let line = line.trim_end();
+    line.chars()
+        .last()
+        .is_some_and(|end| PROMPT_ENDS.contains(&end))
+        || line
+            .chars()
+            .next()
+            .is_some_and(|mark| PROMPT_MARKS.contains(&mark))
 }
 
 /// What followed a command's line, worked out once its output paused.
@@ -225,14 +249,16 @@ const PROMPT_ENDS: [char; 6] = ['$', '#', '%', '>', '❯', '»'];
 const PROMPT_MARKS: [char; 3] = ['➜', '❯', 'λ'];
 
 /// Whether `line`, the terminal's last line, is a shell prompt like `prompt`, the one the
-/// command was typed at: the same, or the same kind of prompt in another folder (`~$`, then
-/// `/tmp$`). A question (`[Y/n]`, `password:`) or another user's shell is not.
+/// command was typed at: the same (also after output with no newline, `okuser@box:~$`), or
+/// the same kind of prompt in another folder (`~$`, then `/tmp$`). A question (`[Y/n]`,
+/// `password:`) or another user's shell is not.
 fn prompt_back(line: &str, prompt: &str) -> bool {
     let line = line.trim_end();
     if prompt.is_empty() || line.is_empty() {
         return false;
     }
-    if line == prompt {
+    // A one- or two-character prompt (`$`) is too short to tell from output it ends.
+    if line == prompt || (prompt.chars().count() > 2 && line.ends_with(prompt)) {
         return true;
     }
     let shared = line
@@ -534,9 +560,8 @@ impl NativeApp {
                 let mut typed = Typed::of(&text);
                 let at = crate::sync_screen::now_secs();
                 let log = tab.agent.get_or_insert_with(|| Box::new(AgentLog::new(at)));
-                // An answer to the command before ends when that one's prompt comes back.
                 if busy && let Some(before) = log.commands.last() {
-                    typed.prompt.clone_from(&before.typed.prompt);
+                    typed.answering(&before.typed);
                 }
                 run.entry = log.commands.len();
                 log.commands.push(AgentCommand {
@@ -1650,6 +1675,10 @@ mod tests {
                 prompt: true
             }
         );
+        // Output enough to push the command's line to the very top: the lines above it are
+        // gone, and it is still found.
+        let top = "user@box:~$ seq 2\n1\n2\nuser@box:~$\n";
+        assert_eq!(typed.find(&top.lines().collect::<Vec<_>>()), Some(0));
     }
 
     #[test]
@@ -1669,9 +1698,22 @@ mod tests {
             "output that only ends like one"
         );
         assert!(!prompt_back("anything", ""), "no prompt was seen");
+        assert!(
+            prompt_back("okuser@box:~$", "user@box:~$"),
+            "after output with no newline"
+        );
+        assert!(
+            !prompt_back("cost 5$", "$"),
+            "too short a prompt to find in output"
+        );
         // A password typed at sudo's question ends at the shell prompt from before.
+        let shell = Typed::of("user@box:~$");
         let mut answer = Typed::of("user@box:~$ sudo ls\n[sudo] password for me:");
-        answer.prompt = "user@box:~$".into();
+        answer.answering(&shell);
+        // A command typed in the shell `ssh` opened ends at that shell's prompt.
+        let mut remote = Typed::of("user@box:~$ ssh web-1\ndeploy@web-1:~$");
+        remote.answering(&shell);
+        assert_eq!(remote.prompt, "deploy@web-1:~$");
         let now = "user@box:~$ sudo ls\n[sudo] password for me:\nfile\nuser@box:~$\n";
         assert_eq!(
             after(now, &answer),
