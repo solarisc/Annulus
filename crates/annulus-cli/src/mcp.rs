@@ -234,7 +234,7 @@ fn tools() -> Value {
 
 /// The door hangs up on a connection idle for 30 minutes: one idle this long is not reused, so
 /// an agent back from a break is not told the door is closed.
-const KEEP_IDLE: Duration = Duration::from_secs(25 * 60);
+const KEEP_IDLE: Duration = Duration::from_mins(25);
 
 /// The tools' backend: Annulus's door, a connection for each call in flight. Connections are
 /// kept for the next calls until the door closes them or they sit idle too long.
