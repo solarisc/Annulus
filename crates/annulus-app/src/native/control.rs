@@ -1629,8 +1629,10 @@ mod tests {
     fn a_commands_output_is_found_by_its_line_once_the_full_scrollback_drops_lines() {
         // 100 lines and the prompt; the scrollback is full, so as the command prints 6 lines,
         // 6 drop off the top and the count stays the same.
-        let lines =
-            |from: usize| -> String { (from..100).map(|n| format!("line {n}\n")).collect() };
+        let lines = |from: usize| -> String {
+            let numbered: Vec<String> = (from..100).map(|n| format!("line {n}")).collect();
+            numbered.join("\n") + "\n"
+        };
         let typed = Typed::of(&format!("{}user@box:~$", lines(0)));
         let now = format!(
             "{}user@box:~$ seq 5\n1\n2\n3\n4\n5\nuser@box:~$\n",
