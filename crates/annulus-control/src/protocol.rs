@@ -298,9 +298,10 @@ mod tests {
             }))),
         };
         let line = encode(&ran);
+        // Answers pass through a JSON value, whose keys come out sorted.
         assert_eq!(
             line,
-            r#"{"id":3,"ok":{"output":"$ sleep 1\n$\n","state":"done","millis":1004}}"#
+            r#"{"id":3,"ok":{"millis":1004,"output":"$ sleep 1\n$\n","state":"done"}}"#
         );
         assert_eq!(decode::<Reply>(&line), Ok(ran));
         assert_eq!(
