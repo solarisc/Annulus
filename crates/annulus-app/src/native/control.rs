@@ -1288,7 +1288,7 @@ fn grouped(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (at, digit) in digits.chars().enumerate() {
-        if at > 0 && (digits.len() - at) % 3 == 0 {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -1395,61 +1395,14 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
                 .map(|(index, tab)| tab_info(tab, index == app.active))
                 .collect(),
         )),
-        Request::SetNotes { host, notes } => {
-            let notes = annulus_vault::hosts::clean_notes(notes)?;
-            let vault = app.vault.as_mut().ok_or("the vault is locked")?;
-            let mut saved = vault
-                .hosts()
-                .iter()
-                .find(|known| known.id == *host)
-                .cloned()
-                .ok_or_else(|| format!("no saved host {host}: see `annulus hosts`"))?;
-            if saved.notes != notes {
-                saved.notes = notes;
-                let label = saved.label.clone();
-                vault
-                    .upsert_host(saved)
-                    .map_err(|error| format!("the notes could not be saved: {error}"))?;
-                // The owner hears of every change an agent makes to the vault.
-                app.agent_news
-                    .push(format!("An agent updated the notes of {label}"));
-            }
-            let vault = app.vault.as_ref().ok_or("the vault is locked")?;
-            hosts(vault)
-                .into_iter()
-                .find(|info| info.id == *host)
-                .map(Response::Host)
-                .ok_or_else(|| format!("no saved host {host}"))
-        }
+        Request::SetNotes { host, notes } => set_notes(app, *host, notes),
         Request::Open { host } => {
-            // The tab in use, which stays in front when agents' tabs open behind it.
-            let in_use = app.tabs.get(app.active).map(|tab| tab.uid);
-            match host {
-                Some(id) => {
-                    if !vault.hosts().iter().any(|host| host.id == *id) {
-                        return Err(format!("no saved host {id}: see `annulus hosts`"));
-                    }
-                    app.act(super::hosts::HostsAction::Connect(*id));
-                }
-                None => app.open_local(),
-            }
-            let mut opened = None;
-            for (title, program, origin) in std::mem::take(&mut app.opens) {
-                opened = Some(app.open_terminal(title, program, origin));
-            }
-            let uid = opened.ok_or("nothing opened")?;
-            if !app.settings.agent_tabs_in_front
-                && let Some(at) =
-                    in_use.and_then(|uid| app.tabs.iter().position(|tab| tab.uid == uid))
+            if let Some(id) = host
+                && !vault.hosts().iter().any(|host| host.id == *id)
             {
-                app.active = at;
+                return Err(format!("no saved host {id}: see `annulus hosts`"));
             }
-            let index = app.tabs.iter().position(|tab| tab.uid == uid).unwrap_or(0);
-            let mut log = AgentLog::new(crate::sync_screen::now_secs());
-            log.folded = app.settings.agent_panel_folded;
-            let tab = &mut app.tabs[index];
-            tab.agent = Some(Box::new(log));
-            Ok(Response::Tab(tab_info(tab, index == app.active)))
+            open(app, *host)
         }
         Request::Run { tab, .. } => {
             // Typed and answered over the next frames by `NativeApp::control`.
@@ -1488,42 +1441,102 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             }
             Ok(Response::Done)
         }
-        Request::Read { tab, lines } => {
-            let mine_only = !app.settings.agents_read_my_tabs;
-            let found = app.tabs.iter_mut().find(|open| open.uid == *tab);
-            if mine_only && found.as_ref().is_some_and(|open| open.agent.is_none()) {
-                return Err(format!(
-                    "tab {tab} is not an agent's, and reading the owner's tabs is switched off \
-                     (Settings > Security > Automation)"
-                ));
-            }
-            let text = match found.and_then(|open| open.terminal.as_mut()) {
-                Some(TermView::Live(panes)) => {
-                    let mut all = panes.transcripts();
-                    let mut text = if all.len() == 1 {
-                        all.remove(0).1
-                    } else {
-                        all.iter()
-                            .map(|(title, text)| format!("--- {title} ---\n{text}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    };
-                    // What the tab shows in its own panel, not in the terminal: an agent
-                    // reading a tab that could not connect learns why.
-                    if let Some(why) = panes.focused_failure() {
-                        let _ = writeln!(text, "[Annulus] {why}");
-                    }
-                    text
-                }
-                Some(TermView::Replay(emulator)) => {
-                    annulus_term::transcript::transcript(emulator.term_mut())
-                }
-                None => return Err(format!("no terminal tab {tab}: see `annulus tabs`")),
-            };
-            let wanted = lines.unwrap_or(READ_MAX).min(READ_MAX);
-            Ok(Response::Text(last_lines(&text, Some(wanted))))
-        }
+        Request::Read { tab, lines } => read(app, *tab, *lines),
     }
+}
+
+/// Opens an agent's tab: an SSH session to saved host `host` (known to exist), or the default
+/// local shell. In front, or behind the tab in use, and with its panel open or folded, as
+/// Settings say.
+fn open(app: &mut NativeApp, host: Option<u64>) -> Result<Response, String> {
+    let in_use = app.tabs.get(app.active).map(|tab| tab.uid);
+    match host {
+        Some(id) => app.act(super::hosts::HostsAction::Connect(id)),
+        None => app.open_local(),
+    }
+    let mut opened = None;
+    for (title, program, origin) in std::mem::take(&mut app.opens) {
+        opened = Some(app.open_terminal(title, program, origin));
+    }
+    let uid = opened.ok_or("nothing opened")?;
+    if !app.settings.agent_tabs_in_front
+        && let Some(at) = in_use.and_then(|uid| app.tabs.iter().position(|tab| tab.uid == uid))
+    {
+        app.active = at;
+    }
+    let index = app.tabs.iter().position(|tab| tab.uid == uid).unwrap_or(0);
+    let mut log = AgentLog::new(crate::sync_screen::now_secs());
+    log.folded = app.settings.agent_panel_folded;
+    let tab = &mut app.tabs[index];
+    tab.agent = Some(Box::new(log));
+    Ok(Response::Tab(tab_info(tab, index == app.active)))
+}
+
+/// The text of terminal tab `tab`, its last `lines` lines ([`READ_MAX`] at most). The owner's
+/// tabs only while Settings let agents read them.
+fn read(app: &mut NativeApp, tab: u64, lines: Option<usize>) -> Result<Response, String> {
+    let mine_only = !app.settings.agents_read_my_tabs;
+    let found = app.tabs.iter_mut().find(|open| open.uid == tab);
+    if mine_only && found.as_ref().is_some_and(|open| open.agent.is_none()) {
+        return Err(format!(
+            "tab {tab} is not an agent's, and reading the owner's tabs is switched off \
+             (Settings > Security > Automation)"
+        ));
+    }
+    let text = match found.and_then(|open| open.terminal.as_mut()) {
+        Some(TermView::Live(panes)) => {
+            let mut all = panes.transcripts();
+            let mut text = if all.len() == 1 {
+                all.remove(0).1
+            } else {
+                all.iter()
+                    .map(|(title, text)| format!("--- {title} ---\n{text}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            // What the tab shows in its own panel, not in the terminal: an agent reading a
+            // tab that could not connect learns why.
+            if let Some(why) = panes.focused_failure() {
+                let _ = writeln!(text, "[Annulus] {why}");
+            }
+            text
+        }
+        Some(TermView::Replay(emulator)) => {
+            annulus_term::transcript::transcript(emulator.term_mut())
+        }
+        None => return Err(format!("no terminal tab {tab}: see `annulus tabs`")),
+    };
+    let wanted = lines.unwrap_or(READ_MAX).min(READ_MAX);
+    Ok(Response::Text(last_lines(&text, Some(wanted))))
+}
+
+/// Replaces saved host `host`'s notes, cleaned and 2,000 characters at most (F-HOST-011),
+/// and tells the owner; the host as it is now.
+fn set_notes(app: &mut NativeApp, host: u64, notes: &str) -> Result<Response, String> {
+    let notes = annulus_vault::hosts::clean_notes(notes)?;
+    let vault = app.vault.as_mut().ok_or("the vault is locked")?;
+    let mut saved = vault
+        .hosts()
+        .iter()
+        .find(|known| known.id == host)
+        .cloned()
+        .ok_or_else(|| format!("no saved host {host}: see `annulus hosts`"))?;
+    if saved.notes != notes {
+        saved.notes = notes;
+        let label = saved.label.clone();
+        vault
+            .upsert_host(saved)
+            .map_err(|error| format!("the notes could not be saved: {error}"))?;
+        // The owner hears of every change an agent makes to the vault.
+        app.agent_news
+            .push(format!("An agent updated the notes of {label}"));
+    }
+    let vault = app.vault.as_ref().ok_or("the vault is locked")?;
+    hosts(vault)
+        .into_iter()
+        .find(|info| info.id == host)
+        .map(Response::Host)
+        .ok_or_else(|| format!("no saved host {host}"))
 }
 
 /// `tab` as a client sees it; `active` when it is in front.
