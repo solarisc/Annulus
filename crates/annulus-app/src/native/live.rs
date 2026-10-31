@@ -375,6 +375,18 @@ impl LiveTerminal {
         self.session.is_some()
     }
 
+    /// Whether its program has ended (a shell that exited): typing reaches nothing.
+    #[must_use]
+    pub fn ended(&self) -> bool {
+        self.exited
+    }
+
+    /// Goes up as the program's output comes in ([`Session::output`]); 0 before it starts.
+    #[must_use]
+    pub fn output(&self) -> u64 {
+        self.session.as_ref().map_or(0, Session::output)
+    }
+
     /// Scrolls the view so `row` (counted from the oldest row of the scrollback) is at the top.
     pub fn scroll_to_row(&self, row: usize) {
         if let Some(session) = &self.session {

@@ -8,7 +8,9 @@ use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
 
 use crate::door::DoorFile;
-use crate::protocol::{self, Call, Hello, HostInfo, Outcome, Reply, Request, Status, TabInfo};
+use crate::protocol::{
+    self, Call, Hello, HostInfo, Outcome, Reply, Request, RunOutput, Status, TabInfo,
+};
 
 /// Why a call through the door failed.
 #[derive(Debug)]
@@ -155,7 +157,8 @@ impl Client {
         self.call(Request::Open { host })
     }
 
-    /// Runs `command` in agent tab `tab` and returns its output, waiting `wait` seconds at most.
+    /// Runs `command` in agent tab `tab` and returns its output and how far it got, waiting
+    /// `wait` seconds at most.
     ///
     /// # Errors
     /// As [`Self::call`].
@@ -164,12 +167,20 @@ impl Client {
         tab: u64,
         command: &str,
         wait: Option<u64>,
-    ) -> Result<String, ClientError> {
+    ) -> Result<RunOutput, ClientError> {
         self.call(Request::Run {
             tab,
             command: command.to_owned(),
             wait,
         })
+    }
+
+    /// Waits up to `wait` seconds for the last command in agent tab `tab` to finish.
+    ///
+    /// # Errors
+    /// As [`Self::call`].
+    pub fn wait(&mut self, tab: u64, wait: Option<u64>) -> Result<RunOutput, ClientError> {
+        self.call(Request::Wait { tab, wait })
     }
 
     /// Presses Ctrl+C in agent tab `tab`.

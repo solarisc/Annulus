@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::process::ExitCode;
 
 use annulus_control::client::{Client, ClientError};
-use annulus_control::protocol::{HostInfo, TabInfo};
+use annulus_control::protocol::{HostInfo, RunOutput, TabInfo};
 
 const USAGE: &str = "\
 Drives a running Annulus while its vault is unlocked and Settings > Security > Automation
@@ -30,16 +30,23 @@ Commands:
   open [host]                   open a tab of your own: an SSH session to saved host <host>
                                 (an id from `hosts`), or a local shell
   run <tab> [--wait S] <cmd...> type <cmd> and Enter into your tab <tab> and print what it
-                                printed, once quiet (or after S seconds, 30 by default)
+                                printed once its prompt is back (or its output stops, or
+                                after S seconds, 30 by default)
+  wait <tab> [S]                wait up to S seconds (30 by default) for the last command in
+                                your tab <tab> to finish, and print as run does
   interrupt <tab>               press Ctrl+C in your tab <tab> (a command that hangs stops)
   close <tab>                   close your tab <tab>
   mcp                           serve these as MCP tools over stdin and stdout
 
-You can type only into tabs you opened; the owner's tabs are read-only.
+You can type only into tabs you opened; the owner's tabs are read-only. run and wait exit
+with 3, and say why on stderr, when the command has not finished.
 
 Options:
   --json                        print what Annulus answered as JSON
 ";
+
+/// The exit code of a `run` or `wait` whose command has not finished.
+const UNFINISHED: u8 = 3;
 
 /// What the command line asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +65,10 @@ enum Command {
     Run {
         tab: u64,
         command: String,
+        wait: Option<u64>,
+    },
+    Wait {
+        tab: u64,
         wait: Option<u64>,
     },
     Interrupt {
@@ -127,6 +138,17 @@ fn parse(args: &[String]) -> Result<(Command, bool), String> {
                 wait,
             }
         }
+        ["wait", tab, rest @ ..] if rest.len() <= 1 => Command::Wait {
+            tab: tab_id(tab)?,
+            wait: match rest {
+                [seconds] => Some(
+                    seconds
+                        .parse()
+                        .map_err(|_| format!("`{seconds}` is not a number of seconds"))?,
+                ),
+                _ => None,
+            },
+        },
         ["interrupt", tab] => Command::Interrupt { tab: tab_id(tab)? },
         ["close", tab] => Command::Close { tab: tab_id(tab)? },
         _ => return Err(format!("not a command: {}\n\n{USAGE}", words.join(" "))),
@@ -170,11 +192,44 @@ fn tabs_table(tabs: &[TabInfo]) -> String {
     out
 }
 
-fn run(command: Command, json: bool) -> Result<String, ClientError> {
+/// What a command prints, and for a `run` or `wait` whose command has not finished, why (on
+/// stderr, with exit code 3).
+struct Printed {
+    out: String,
+    unfinished: Option<&'static str>,
+}
+
+impl From<String> for Printed {
+    fn from(out: String) -> Self {
+        Self {
+            out,
+            unfinished: None,
+        }
+    }
+}
+
+/// A command's answer as printed: its output (or all of it as JSON), and why it is
+/// unfinished when it is.
+fn ran(answer: &RunOutput, json: bool) -> Printed {
+    Printed {
+        out: if json {
+            serde_json::to_string_pretty(answer).unwrap_or_default() + "\n"
+        } else {
+            answer.output.clone()
+        },
+        unfinished: answer.state.advice(),
+    }
+}
+
+fn run(command: Command, json: bool) -> Result<Printed, ClientError> {
     let mut client = Client::connect(&annulus_control::data_dir())?;
     let printed =
         |value: serde_json::Value| serde_json::to_string_pretty(&value).unwrap_or_default() + "\n";
-    Ok(match command {
+    let out = match command {
+        Command::Run { tab, command, wait } => {
+            return Ok(ran(&client.run(tab, &command, wait)?, json));
+        }
+        Command::Wait { tab, wait } => return Ok(ran(&client.wait(tab, wait)?, json)),
         Command::Help | Command::Mcp => USAGE.to_owned(),
         Command::Status => {
             let status = client.status()?;
@@ -226,8 +281,8 @@ fn run(command: Command, json: bool) -> Result<String, ClientError> {
             String::new()
         }
         Command::Read { tab, lines } => text(client.read(tab, lines)?, json),
-        Command::Run { tab, command, wait } => text(client.run(tab, &command, wait)?, json),
-    })
+    };
+    Ok(out.into())
 }
 
 /// A terminal's text as printed: as it is, or as a JSON string.
@@ -265,9 +320,15 @@ fn main() -> ExitCode {
         _ => {}
     }
     match run(command, json) {
-        Ok(out) => {
-            print!("{out}");
-            ExitCode::SUCCESS
+        Ok(printed) => {
+            print!("{}", printed.out);
+            match printed.unfinished {
+                None => ExitCode::SUCCESS,
+                Some(why) => {
+                    eprintln!("annulus: {why}");
+                    ExitCode::from(UNFINISHED)
+                }
+            }
         }
         Err(error) => {
             eprintln!("annulus: {error}");
@@ -347,11 +408,47 @@ mod tests {
             Ok((Command::Interrupt { tab: 4 }, false))
         );
         assert_eq!(parse(&args("mcp")), Ok((Command::Mcp, false)));
+        assert_eq!(
+            parse(&args("wait 9 120")),
+            Ok((
+                Command::Wait {
+                    tab: 9,
+                    wait: Some(120)
+                },
+                false
+            ))
+        );
+        assert_eq!(
+            parse(&args("wait 9")),
+            Ok((Command::Wait { tab: 9, wait: None }, false))
+        );
+        assert!(parse(&args("wait 9 soon")).is_err());
         assert!(parse(&args("run 9")).is_err());
         assert!(parse(&args("open web-1")).is_err());
         assert!(parse(&args("read web-1")).is_err());
         assert!(parse(&args("read 7 40 9")).is_err());
         assert!(parse(&args("delete everything")).is_err());
+    }
+
+    #[test]
+    fn a_finished_command_prints_its_output_and_an_unfinished_one_says_why() {
+        use annulus_control::protocol::RunState;
+        let answer = |state| RunOutput {
+            output: "$ make\nbuilding\n".into(),
+            state,
+            millis: 2_000,
+        };
+        let done = ran(&answer(RunState::Done), false);
+        assert_eq!(done.out, "$ make\nbuilding\n");
+        assert_eq!(done.unfinished, None);
+        let going = ran(&answer(RunState::Running), false);
+        assert_eq!(going.out, "$ make\nbuilding\n", "what it printed so far");
+        assert!(
+            going.unfinished.is_some_and(|why| why.contains("wait")),
+            "and what to do next"
+        );
+        let json = ran(&answer(RunState::Waiting), true);
+        assert!(json.out.contains(r#""state": "waiting""#), "{}", json.out);
     }
 
     #[test]

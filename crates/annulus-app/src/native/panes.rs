@@ -496,6 +496,20 @@ impl Panes {
         self.pane(self.focused)?.terminal.transcript()
     }
 
+    /// Whether the focused pane's program has ended (its shell exited).
+    #[must_use]
+    pub fn focused_ended(&self) -> bool {
+        self.pane(self.focused)
+            .is_some_and(|pane| pane.terminal.ended())
+    }
+
+    /// Goes up as output reaches the focused pane: unchanged, it printed nothing new.
+    #[must_use]
+    pub fn focused_output(&self) -> u64 {
+        self.pane(self.focused)
+            .map_or(0, |pane| pane.terminal.output())
+    }
+
     /// Why the focused pane's program could not start or its connection ended, if it did.
     #[must_use]
     pub fn focused_failure(&self) -> Option<String> {

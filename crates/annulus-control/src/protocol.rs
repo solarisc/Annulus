@@ -54,14 +54,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<u64>,
     },
-    /// Types `command` and Enter into agent tab `tab`, then answers with the output once it
-    /// has been quiet a moment, or after `wait` seconds at most.
+    /// Types `command` and Enter into agent tab `tab`, then answers with its output and how
+    /// far it got ([`RunOutput`]): once its prompt is back, once its output stops with no
+    /// prompt back, or after `wait` seconds at most.
     Run {
         /// The agent tab's id.
         tab: u64,
         /// What to type; each line is entered in turn.
         command: String,
         /// The most seconds to wait for output; 30 when `None`, 300 at most.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<u64>,
+    },
+    /// Waits for the last command typed into agent tab `tab` to finish, and answers as `run`
+    /// does ([`RunOutput`]): at once if it already has.
+    Wait {
+        /// The agent tab's id.
+        tab: u64,
+        /// The most seconds to wait; 30 when `None`, 300 at most.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait: Option<u64>,
     },
@@ -106,6 +116,7 @@ impl Outcome {
             Ok(Response::Hosts(hosts)) => Self::ok(&hosts),
             Ok(Response::Tabs(tabs)) => Self::ok(&tabs),
             Ok(Response::Text(text)) => Self::Ok(serde_json::Value::String(text)),
+            Ok(Response::Ran(ran)) => Self::ok(&ran),
             Ok(Response::Tab(tab)) => Self::ok(&tab),
             Ok(Response::Done) => Self::Ok(serde_json::Value::Null),
             Err(error) => Self::Error(error),
@@ -126,8 +137,10 @@ pub enum Response {
     Hosts(Vec<HostInfo>),
     /// For [`Request::Tabs`].
     Tabs(Vec<TabInfo>),
-    /// A terminal's text, for [`Request::Read`] and [`Request::Run`].
+    /// A terminal's text, for [`Request::Read`].
     Text(String),
+    /// What a command printed and how far it got, for [`Request::Run`] and [`Request::Wait`].
+    Ran(RunOutput),
     /// The tab [`Request::Open`] opened.
     Tab(TabInfo),
     /// Done, with nothing to say ([`Request::Close`]).
@@ -162,6 +175,50 @@ pub struct HostInfo {
     pub group: String,
     /// Its OS key (`ubuntu`, `debian`, …), empty while unknown.
     pub os: String,
+}
+
+/// What an agent's command printed, and how far it got.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunOutput {
+    /// The terminal's text from the line the command was typed on (the last 5,000 lines).
+    pub output: String,
+    /// How far it got.
+    pub state: RunState,
+    /// Milliseconds from typing it to its last output (to the answer, while it goes on).
+    pub millis: u64,
+}
+
+/// How far an agent's command got when its answer was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunState {
+    /// Its shell's prompt is back: it finished.
+    Done,
+    /// Its output stopped with no prompt back: it may be asking for input, or still working.
+    Waiting,
+    /// Its wait ran out while it was still printing.
+    Running,
+    /// Ctrl+C was pressed in it.
+    Interrupted,
+    /// Its shell exited or its connection ended.
+    Ended,
+}
+
+impl RunState {
+    /// What an agent or a person should know: nothing once done, else what to do next.
+    #[must_use]
+    pub fn advice(self) -> Option<&'static str> {
+        match self {
+            Self::Done => None,
+            Self::Waiting => Some(
+                "no prompt is back: it may be asking for input (answer with run) or still \
+                 working (wait for it, or interrupt it)",
+            ),
+            Self::Running => Some("still running: wait for it, read the tab, or interrupt it"),
+            Self::Interrupted => Some("interrupted with Ctrl+C"),
+            Self::Ended => Some("the shell or its connection ended: close the tab, open another"),
+        }
+    }
 }
 
 /// An open tab.
@@ -232,6 +289,27 @@ mod tests {
             result: Outcome::Error("no such tab".into()),
         };
         assert_eq!(decode::<Reply>(&encode(&failed)), Ok(failed));
+        let ran = Reply {
+            id: 3,
+            result: Outcome::of(Ok(Response::Ran(RunOutput {
+                output: "$ sleep 1\n$\n".into(),
+                state: RunState::Done,
+                millis: 1004,
+            }))),
+        };
+        let line = encode(&ran);
+        assert_eq!(
+            line,
+            r#"{"id":3,"ok":{"output":"$ sleep 1\n$\n","state":"done","millis":1004}}"#
+        );
+        assert_eq!(decode::<Reply>(&line), Ok(ran));
+        assert_eq!(
+            decode::<Call>(r#"{"id":4,"op":"wait","tab":2}"#),
+            Ok(Call {
+                id: 4,
+                request: Request::Wait { tab: 2, wait: None }
+            })
+        );
         assert!(decode::<Call>(r#"{"id":1,"op":"format_disk"}"#).is_err());
     }
 }

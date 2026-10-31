@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use annulus_config::tokens::space;
 use annulus_control::door::{Door, Pending};
-use annulus_control::protocol::{HostInfo, Request, Response, Status, TabInfo};
+use annulus_control::protocol::{
+    HostInfo, Request, Response, RunOutput, RunState, Status, TabInfo,
+};
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Point, Rect};
 use annulus_ui::icons;
@@ -75,17 +77,22 @@ pub struct AgentCommand {
     pub text: String,
     /// When it was typed (seconds since the Unix epoch).
     pub at: u64,
-    /// The transcript line it was typed on.
+    /// The row it was typed on.
     pub line: usize,
     pub state: Ran,
+    /// What the terminal showed as it was typed, to find its output again.
+    pub typed: Typed,
 }
 
 /// How far a command got.
 pub enum Ran {
     /// Typed at this instant; its output has not settled yet.
     Running(Instant),
-    /// Its output settled after `took`, `lines` long.
+    /// Its prompt came back after `took` (to its last output), `lines` printed.
     Done { took: Duration, lines: usize },
+    /// Its output stopped after `took`, `lines` long, with no prompt back: it may be asking
+    /// for input or still working.
+    Waiting { took: Duration, lines: usize },
     /// Its wait ran out after `took` with output still coming, `lines` long so far: it may
     /// still be running.
     TimedOut { took: Duration, lines: usize },
@@ -93,38 +100,258 @@ pub enum Ran {
     Interrupted { took: Duration },
     /// Stop (or the vault locking) cut the agent off after `took`, before it settled.
     Cut { took: Duration },
+    /// Its shell exited or its connection ended after `took`.
+    Ended { took: Duration },
 }
 
 impl Ran {
-    /// Typed and not known to have ended: running, or out of its wait and maybe still going.
+    /// Typed and not known to have ended: running, waiting with no prompt back, or out of
+    /// its wait and maybe still going.
     #[must_use]
     pub fn going(&self) -> bool {
-        matches!(self, Self::Running(_) | Self::TimedOut { .. })
+        matches!(
+            self,
+            Self::Running(_) | Self::Waiting { .. } | Self::TimedOut { .. }
+        )
+    }
+
+    /// How far it got, as an agent hears it.
+    fn state(&self) -> RunState {
+        match self {
+            Self::Done { .. } => RunState::Done,
+            Self::Waiting { .. } => RunState::Waiting,
+            Self::Running(_) | Self::TimedOut { .. } => RunState::Running,
+            Self::Interrupted { .. } => RunState::Interrupted,
+            Self::Cut { .. } | Self::Ended { .. } => RunState::Ended,
+        }
+    }
+
+    /// How long it ran: so far while it runs.
+    fn took(&self, now: Instant) -> Duration {
+        match self {
+            Self::Running(since) => now.duration_since(*since),
+            Self::Done { took, .. }
+            | Self::Waiting { took, .. }
+            | Self::TimedOut { took, .. }
+            | Self::Interrupted { took }
+            | Self::Cut { took }
+            | Self::Ended { took } => *took,
+        }
     }
 }
 
-/// An agent's command on its way: waiting for its terminal to start, then for its output to
-/// settle.
-pub struct Running {
-    call: Pending,
-    tab: u64,
-    command: String,
-    /// How many lines the terminal held before it was typed; `None` until it is.
-    before: Option<usize>,
-    asked: Instant,
-    /// The longest to wait for output.
-    wait: Duration,
-    /// The length of the text last seen, and when it last changed.
-    seen: (usize, Instant),
-    /// The length of the text when the command was typed: quiet counts only after it grew.
-    typed_at: usize,
-    /// Its place in its tab's [`AgentLog`], once typed.
-    entry: usize,
+/// What a terminal showed just before a command was typed into it: enough to find the
+/// command's line again however much output follows, even once the scrollback runs over and
+/// drops lines from its top.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Typed {
+    /// How many lines the terminal held.
+    lines: usize,
+    /// The line the command went on, as it stood.
+    line: String,
+    /// Up to two lines above it.
+    above: Vec<String>,
+    /// The shell prompt that comes back once it is done: that line, unless the command
+    /// answered a question (a password, a yes or no) of the one before.
+    prompt: String,
 }
 
-/// Output quiet this long counts as finished.
+impl Typed {
+    /// What `text`, a terminal's text just before a command is typed, says of where it goes.
+    fn of(text: &str) -> Self {
+        let lines: Vec<&str> = text.trim_end().lines().collect();
+        let last = lines.len().saturating_sub(1);
+        let line = lines.last().map_or("", |line| line.trim_end()).to_owned();
+        Self {
+            lines: lines.len(),
+            above: lines[last.saturating_sub(2)..last]
+                .iter()
+                .map(|line| (*line).to_owned())
+                .collect(),
+            prompt: line.clone(),
+            line,
+        }
+    }
+
+    /// The index in `lines` of the line the command was typed on: where it was, or higher
+    /// up once lines dropped off the top. `None` once it is gone (cleared, or more output
+    /// than the scrollback holds).
+    fn find(&self, lines: &[&str]) -> Option<usize> {
+        let Some(expected) = self.lines.checked_sub(1) else {
+            return (!lines.is_empty()).then_some(0);
+        };
+        let above_at = |at: usize| {
+            at >= self.above.len() && lines[at - self.above.len()..at] == self.above[..]
+        };
+        let last = lines.len().checked_sub(1)?;
+        (0..=expected.min(last))
+            .rev()
+            .find(|&at| lines[at].starts_with(self.line.as_str()) && above_at(at))
+            // A prompt redrawn as Enter was pressed (a transient prompt) no longer matches:
+            // nothing moved, so the line is where it was.
+            .or_else(|| (expected <= last && above_at(expected)).then_some(expected))
+    }
+}
+
+/// What followed a command's line, worked out once its output paused.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct After {
+    /// How many lines came after the command's own.
+    lines: usize,
+    /// The last of them is a shell prompt like the one it was typed at.
+    prompt: bool,
+}
+
+/// What followed the command `typed` in `text`, the terminal's text now.
+fn after(text: &str, typed: &Typed) -> After {
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    let count = match typed.find(&lines) {
+        Some(at) => lines.len() - at - 1,
+        None => lines.len(),
+    };
+    After {
+        lines: count,
+        prompt: count > 0
+            && lines
+                .last()
+                .is_some_and(|last| prompt_back(last, &typed.prompt)),
+    }
+}
+
+/// Characters a shell prompt ends with: `$` and `#` (sh, bash), `%` (zsh), `>` (fish, cmd,
+/// PowerShell), `❯` and `»` (starship and its kind).
+const PROMPT_ENDS: [char; 6] = ['$', '#', '%', '>', '❯', '»'];
+/// Marks some prompts start with instead (oh-my-zsh's arrow, starship's chevron, lambda).
+const PROMPT_MARKS: [char; 3] = ['➜', '❯', 'λ'];
+
+/// Whether `line`, the terminal's last line, is a shell prompt like `prompt`, the one the
+/// command was typed at: the same, or the same kind of prompt in another folder (`~$`, then
+/// `/tmp$`). A question (`[Y/n]`, `password:`) or another user's shell is not.
+fn prompt_back(line: &str, prompt: &str) -> bool {
+    let line = line.trim_end();
+    if prompt.is_empty() || line.is_empty() {
+        return false;
+    }
+    if line == prompt {
+        return true;
+    }
+    let shared = line
+        .chars()
+        .zip(prompt.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ends_alike = prompt
+        .chars()
+        .last()
+        .is_some_and(|end| PROMPT_ENDS.contains(&end) && line.ends_with(end));
+    let marked = prompt
+        .chars()
+        .next()
+        .is_some_and(|mark| PROMPT_MARKS.contains(&mark) && line.starts_with(mark));
+    (shared >= 2 && ends_alike) || marked
+}
+
+/// How a command settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Settled {
+    /// Its prompt is back.
+    Done,
+    /// Its output stopped with no prompt back.
+    Waiting,
+}
+
+/// Whether a command whose lines after it are `after` has settled, its output quiet for
+/// `quiet`. `fresh`: output came since it was typed or last waited on. A command with
+/// nothing past its own line (a silent `sleep`) never settles by quiet alone.
+fn settled(after: After, quiet: Duration, fresh: bool) -> Option<Settled> {
+    if after.prompt && quiet >= PROMPT_QUIET {
+        Some(Settled::Done)
+    } else if fresh && after.lines > 0 && quiet >= QUIET {
+        Some(Settled::Waiting)
+    } else {
+        None
+    }
+}
+
+/// What a command printed, from the line it was typed on, as found in `text`: the last
+/// [`READ_MAX`] lines. Once its line is gone, everything the terminal holds is newer.
+fn output_of(text: &str, typed: &Typed) -> String {
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    let from = typed
+        .find(&lines)
+        .unwrap_or(0)
+        .max(lines.len().saturating_sub(READ_MAX));
+    let mut out = lines[from..].join("\n");
+    out.push('\n');
+    out
+}
+
+/// How a command was answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    Done,
+    Waiting,
+    TimedOut,
+    Ended,
+}
+
+/// An agent's command on its way: waiting for its turn and its terminal, then for its output
+/// to settle. Answered while the command goes on (waiting, or out of its wait), it is still
+/// watched with no call, so its row turns done once its prompt comes back; `wait` takes it
+/// up again.
+pub struct Running {
+    call: Option<Pending>,
+    tab: u64,
+    command: String,
+    /// The longest to wait for output.
+    wait: Duration,
+    /// When it was asked for; once typed, when it was typed.
+    asked: Instant,
+    /// When to answer at the latest, once typed (or waited on).
+    until: Instant,
+    /// What the terminal showed as it was typed; `None` until it is.
+    typed: Option<Typed>,
+    /// Its place in its tab's [`AgentLog`], once typed.
+    entry: usize,
+    /// The terminal's output count when last looked at, and when it last went up.
+    output: (u64, Instant),
+    /// The output count as it was typed or last waited on.
+    base: u64,
+    /// What followed it when its output last paused, and whether output came since.
+    after: After,
+    stale: bool,
+}
+
+impl Running {
+    fn new(call: Pending, tab: u64, command: String, wait: Duration, now: Instant) -> Self {
+        Self {
+            call: Some(call),
+            tab,
+            command,
+            wait,
+            asked: now,
+            until: now + wait,
+            typed: None,
+            entry: 0,
+            output: (u64::MAX, now),
+            base: 0,
+            after: After::default(),
+            stale: true,
+        }
+    }
+
+    /// Answers its call, if one waits.
+    fn answer(&mut self, answer: Result<Response, String>) {
+        if let Some(call) = self.call.take() {
+            call.answer(answer);
+        }
+    }
+}
+
+/// Output quiet this long with no prompt back answers a command as waiting.
 const QUIET: Duration = Duration::from_millis(1200);
-/// How long the terminal's prompt must sit unchanged before a command is typed at it.
+/// How long a prompt must sit unchanged: before a command is typed at it, and once it is
+/// back after one, before the command counts as done.
 const PROMPT_QUIET: Duration = Duration::from_millis(300);
 /// How long to wait for a prompt from a shell that prints none before typing anyway.
 const SILENT_PROMPT: Duration = Duration::from_secs(10);
@@ -136,8 +363,8 @@ const WAIT_MAX: u64 = 300;
 
 impl NativeApp {
     /// Opens the door when it should be open and closes it when it should not, answers every
-    /// request that came through it, and moves agents' commands along. Returns whether a
-    /// command is still waiting (the window should look again soon).
+    /// request that came through it, and moves agents' commands along. Returns whether to look
+    /// again soon: a command waits for its answer, or one just printed.
     pub(super) fn control(&mut self) -> bool {
         let wanted = self.settings.automation && self.vault.is_some() && self.blocked.is_none();
         if !wanted {
@@ -154,39 +381,66 @@ impl NativeApp {
                 self.door_failed = self.door.is_none();
             }
         }
+        let now = Instant::now();
         let calls = self.door.as_ref().map(Door::take_calls).unwrap_or_default();
         for call in calls {
-            if let Request::Run { tab, command, wait } = &call.request {
-                let (tab, command) = (*tab, command.clone());
-                let wait = Duration::from_secs(wait.unwrap_or(WAIT_DEFAULT).min(WAIT_MAX));
-                match agent_tab(self, tab) {
-                    Ok(_) => self.runs.push(Running {
-                        call,
-                        tab,
-                        command,
-                        before: None,
-                        asked: Instant::now(),
-                        wait,
-                        seen: (0, Instant::now()),
-                        typed_at: 0,
-                        entry: 0,
-                    }),
-                    Err(why) => call.answer(Err(why)),
+            match &call.request {
+                Request::Run { tab, command, wait } => {
+                    let (tab, command, wait) = (*tab, command.clone(), waited(*wait));
+                    match agent_tab(self, tab) {
+                        Ok(_) => self.runs.push(Running::new(call, tab, command, wait, now)),
+                        Err(why) => call.answer(Err(why)),
+                    }
                 }
-            } else {
-                let answer = handle(self, &call.request);
-                call.answer(answer);
+                Request::Wait { tab, wait } => {
+                    let (tab, wait) = (*tab, waited(*wait));
+                    self.wait_for(call, tab, wait, now);
+                }
+                _ => {
+                    let answer = handle(self, &call.request);
+                    call.answer(answer);
+                }
             }
         }
-        self.move_runs(Instant::now());
-        !self.runs.is_empty()
+        self.move_runs(now);
+        self.runs
+            .iter()
+            .any(|run| run.call.is_some() || now.duration_since(run.output.1) < QUIET * 2)
+    }
+
+    /// Takes up a `wait` for the last command in agent tab `uid`: answered once it settles,
+    /// or at once if it has.
+    fn wait_for(&mut self, call: Pending, uid: u64, wait: Duration, now: Instant) {
+        if let Err(why) = agent_tab(self, uid) {
+            call.answer(Err(why));
+            return;
+        }
+        if self
+            .runs
+            .iter()
+            .any(|run| run.tab == uid && run.call.is_some())
+        {
+            call.answer(Err(format!(
+                "tab {uid} already has a command waiting for its answer"
+            )));
+            return;
+        }
+        if let Some(run) = self.runs.iter_mut().find(|run| run.tab == uid) {
+            // Still watched: only output from now on counts as a new pause.
+            run.call = Some(call);
+            run.until = now + wait;
+            run.base = run.output.0;
+            return;
+        }
+        let answer = last_answer(self, uid, now);
+        call.answer(answer);
     }
 
     /// Drops every command on its way, as the door closes: the ones already typed are marked
     /// cut off in their panels, so none shows as running forever.
     pub(super) fn cut_runs(&mut self, now: Instant) {
         for run in std::mem::take(&mut self.runs) {
-            if run.before.is_none() {
+            if run.typed.is_none() {
                 continue;
             }
             if let Some(command) = self
@@ -204,108 +458,224 @@ impl NativeApp {
         }
     }
 
-    /// Types each waiting command once its terminal has started, and answers each typed one
-    /// with its output once that has settled or its wait is up.
+    /// Types each waiting command when its turn comes, and follows each typed one.
     fn move_runs(&mut self, now: Instant) {
-        for mut run in std::mem::take(&mut self.runs) {
-            let Ok(tab) = agent_tab(self, run.tab) else {
-                run.call.answer(Err(format!("tab {} closed", run.tab)));
-                continue;
-            };
-            let Some(TermView::Live(panes)) = &tab.terminal else {
-                run.call
-                    .answer(Err(format!("tab {} holds no terminal", run.tab)));
-                continue;
-            };
-            let Some(before) = run.before else {
-                if let Some(why) = panes.focused_failure() {
-                    run.call
-                        .answer(Err(format!("tab {} could not connect: {why}", run.tab)));
-                    continue;
-                }
-                // Typing before the shell's first prompt has it echo the command early and
-                // print its prompt into the answer, so wait for the prompt to settle.
-                let shown = panes.focused_transcript().unwrap_or_default();
-                if shown.len() != run.seen.0 {
-                    run.seen = (shown.len(), now);
-                }
-                // A command that ran out of its wait may still be printing: the next one waits
-                // for it to go quiet rather than land in the middle of its output.
-                let busy = tab
-                    .agent
-                    .as_ref()
-                    .and_then(|log| log.commands.last())
-                    .is_some_and(|last| matches!(last.state, Ran::TimedOut { .. }));
-                let ready = if shown.trim().is_empty() {
-                    now.duration_since(run.asked) >= SILENT_PROMPT
-                } else {
-                    let quiet = if busy { QUIET } else { PROMPT_QUIET };
-                    now.duration_since(run.seen.1) >= quiet
-                };
-                let row = panes.focused_cursor_row().unwrap_or(0);
-                let mut typed = run.command.replace("\r\n", "\r").replace('\n', "\r");
-                typed.push('\r');
-                if ready && panes.type_focused(typed.as_bytes()) {
-                    let text = panes.focused_transcript().unwrap_or_default();
-                    let before = text.trim_end().lines().count();
-                    run.before = Some(before);
-                    run.seen = (text.len(), now);
-                    run.typed_at = text.len();
-                    run.asked = now;
-                    let at = crate::sync_screen::now_secs();
-                    let log = tab.agent.get_or_insert_with(|| Box::new(AgentLog::new(at)));
-                    run.entry = log.commands.len();
-                    log.commands.push(AgentCommand {
-                        text: run.command.clone(),
-                        at,
-                        line: row,
-                        state: Ran::Running(now),
-                    });
-                    self.runs.push(run);
-                } else if now.duration_since(run.asked) > START_WITHIN {
-                    let why = if busy {
-                        format!(
-                            "tab {} is still busy with the command before, which ran out of \
-                             its wait: read it, or interrupt it",
-                            run.tab
-                        )
-                    } else {
-                        "the terminal never started; read it to see why".to_owned()
-                    };
-                    run.call.answer(Err(why));
-                } else {
-                    self.runs.push(run);
-                }
-                continue;
-            };
-            let text = panes.focused_transcript().unwrap_or_default();
-            if text.len() != run.seen.0 {
-                run.seen = (text.len(), now);
-            }
-            // A slow shell or command may say nothing for a while: silence before any output
-            // is waiting, not done, so only the wait ends it.
-            let settled = text.len() != run.typed_at && now.duration_since(run.seen.1) >= QUIET;
-            if settled || now.duration_since(run.asked) >= run.wait {
-                let out = new_output(&text, before);
-                // Done when its last output came, not when the quiet after it ran out.
-                let took = if settled {
-                    run.seen.1.duration_since(run.asked)
-                } else {
-                    now.duration_since(run.asked)
-                };
-                if let Some(command) = tab
-                    .agent
-                    .as_mut()
-                    .and_then(|log| log.commands.get_mut(run.entry))
-                {
-                    command.state = ran(&out, took, settled);
-                }
-                run.call.answer(Ok(Response::Text(out)));
+        for run in std::mem::take(&mut self.runs) {
+            if run.typed.is_none() {
+                self.start_run(run, now);
             } else {
-                self.runs.push(run);
+                self.watch_run(run, now);
             }
         }
     }
+
+    /// Types `run`'s command once its terminal has started, its prompt has settled and no
+    /// command before it in the tab still waits for its answer; gives it up when that takes
+    /// too long.
+    fn start_run(&mut self, mut run: Running, now: Instant) {
+        // One command at a time per tab: a second one queues behind the first.
+        let queued = self
+            .runs
+            .iter()
+            .any(|other| other.tab == run.tab && other.call.is_some());
+        let Ok(tab) = agent_tab(self, run.tab) else {
+            run.answer(Err(format!("tab {} closed", run.tab)));
+            return;
+        };
+        let Some(TermView::Live(panes)) = &tab.terminal else {
+            run.answer(Err(format!("tab {} holds no terminal", run.tab)));
+            return;
+        };
+        if let Some(why) = panes.focused_failure() {
+            run.answer(Err(format!("tab {} could not connect: {why}", run.tab)));
+            return;
+        }
+        if panes.focused_ended() {
+            run.answer(Err(format!(
+                "the shell in tab {} has ended: close the tab and open another",
+                run.tab
+            )));
+            return;
+        }
+        let count = panes.focused_output();
+        if count != run.output.0 {
+            run.output = (count, now);
+        }
+        // A command answered while it went on may still print, or ask for the answer this
+        // one types: its output must stop first, so this never lands in the middle of it.
+        let busy = tab
+            .agent
+            .as_ref()
+            .and_then(|log| log.commands.last())
+            .is_some_and(|last| last.state.going());
+        // Typing before the shell's first prompt has it echo the command early and print its
+        // prompt into the answer, so wait for the prompt to settle.
+        let ready = !queued
+            && if count == 0 {
+                now.duration_since(run.asked) >= SILENT_PROMPT
+            } else {
+                now.duration_since(run.output.1) >= if busy { QUIET } else { PROMPT_QUIET }
+            };
+        let text = if ready {
+            panes.focused_transcript()
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            // A trailing newline would press Enter twice.
+            let mut keys = run
+                .command
+                .trim_end_matches(['\r', '\n'])
+                .replace("\r\n", "\r")
+                .replace('\n', "\r");
+            keys.push('\r');
+            let row = panes.focused_cursor_row().unwrap_or(0);
+            if panes.type_focused(keys.as_bytes()) {
+                let mut typed = Typed::of(&text);
+                let at = crate::sync_screen::now_secs();
+                let log = tab.agent.get_or_insert_with(|| Box::new(AgentLog::new(at)));
+                // An answer to the command before ends when that one's prompt comes back.
+                if busy && let Some(before) = log.commands.last() {
+                    typed.prompt.clone_from(&before.typed.prompt);
+                }
+                run.entry = log.commands.len();
+                log.commands.push(AgentCommand {
+                    text: run.command.clone(),
+                    at,
+                    line: row,
+                    state: Ran::Running(now),
+                    typed: typed.clone(),
+                });
+                run.typed = Some(typed);
+                run.asked = now;
+                run.until = now + run.wait;
+                run.base = count;
+                run.output = (count, now);
+                run.stale = true;
+                // The command before is done with: no more watching it.
+                let uid = run.tab;
+                self.runs
+                    .retain(|other| other.tab != uid || other.call.is_some());
+                self.runs.push(run);
+                return;
+            }
+        }
+        if now.duration_since(run.asked) > START_WITHIN.max(run.wait) {
+            let why = if queued || busy {
+                format!(
+                    "tab {} is still busy with the command before: wait for it, read it, or \
+                     interrupt it",
+                    run.tab
+                )
+            } else {
+                "the terminal never started; read it to see why".to_owned()
+            };
+            run.answer(Err(why));
+        } else {
+            self.runs.push(run);
+        }
+    }
+
+    /// Follows a typed command: answers its call once its prompt is back, its output stops
+    /// with no prompt back, its shell ends or its wait runs out. Answered while it goes on,
+    /// it is watched on until its prompt comes back, so its row turns done.
+    fn watch_run(&mut self, mut run: Running, now: Instant) {
+        let Ok(tab) = agent_tab(self, run.tab) else {
+            run.answer(Err(format!("tab {} closed", run.tab)));
+            return;
+        };
+        let Some(TermView::Live(panes)) = &tab.terminal else {
+            run.answer(Err(format!("tab {} holds no terminal", run.tab)));
+            return;
+        };
+        let Some(typed) = run.typed.clone() else {
+            return;
+        };
+        let count = panes.focused_output();
+        if count != run.output.0 {
+            run.output = (count, now);
+            run.stale = true;
+        }
+        let quiet = now.duration_since(run.output.1);
+        // Its text is read once its output pauses, not on every frame while it streams.
+        if run.stale && quiet >= PROMPT_QUIET {
+            if let Some(text) = panes.focused_transcript() {
+                run.after = after(&text, &typed);
+            }
+            run.stale = false;
+        }
+        let settles = if run.stale {
+            None
+        } else {
+            settled(run.after, quiet, count != run.base)
+        };
+        let ending = if panes.focused_ended() || panes.focused_failure().is_some() {
+            Some(Ending::Ended)
+        } else {
+            match settles {
+                Some(Settled::Done) => Some(Ending::Done),
+                Some(Settled::Waiting) if run.call.is_some() => Some(Ending::Waiting),
+                _ if run.call.is_some() && now >= run.until => Some(Ending::TimedOut),
+                _ => None,
+            }
+        };
+        let Some(ending) = ending else {
+            self.runs.push(run);
+            return;
+        };
+        // Settled: it ran until its last output, not until the quiet after it ran out.
+        let took = match ending {
+            Ending::Done | Ending::Waiting => run.output.1.duration_since(run.asked),
+            Ending::TimedOut | Ending::Ended => now.duration_since(run.asked),
+        };
+        let out = output_of(&panes.focused_transcript().unwrap_or_default(), &typed);
+        let state = ran(&out, took, ending);
+        let mut heard = state.state();
+        let mut by_hand = false;
+        if let Some(command) = tab
+            .agent
+            .as_mut()
+            .and_then(|log| log.commands.get_mut(run.entry))
+        {
+            // Ctrl+C or Stop already said how it ended.
+            by_hand = matches!(command.state, Ran::Interrupted { .. } | Ran::Cut { .. });
+            if by_hand {
+                heard = RunState::Interrupted;
+            } else {
+                command.state = state;
+            }
+        }
+        run.answer(Ok(Response::Ran(RunOutput {
+            output: out,
+            state: heard,
+            millis: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
+        })));
+        if !by_hand && matches!(ending, Ending::Waiting | Ending::TimedOut) {
+            self.runs.push(run);
+        }
+    }
+}
+
+/// The seconds `run` or `wait` asked to wait at most, as a wait.
+fn waited(wait: Option<u64>) -> Duration {
+    Duration::from_secs(wait.unwrap_or(WAIT_DEFAULT).min(WAIT_MAX))
+}
+
+/// The answer for the last command typed into agent tab `uid`, as it stands now.
+fn last_answer(app: &mut NativeApp, uid: u64, now: Instant) -> Result<Response, String> {
+    let tab = agent_tab(app, uid)?;
+    let Some(TermView::Live(panes)) = &tab.terminal else {
+        return Err(format!("tab {uid} holds no terminal"));
+    };
+    let Some(last) = tab.agent.as_ref().and_then(|log| log.commands.last()) else {
+        return Err(format!("nothing was run in tab {uid} yet"));
+    };
+    let text = panes.focused_transcript().unwrap_or_default();
+    Ok(Response::Ran(RunOutput {
+        output: output_of(&text, &last.typed),
+        state: last.state.state(),
+        millis: u64::try_from(last.state.took(now).as_millis()).unwrap_or(u64::MAX),
+    }))
 }
 
 /// How wide the panel beside an agent's terminal is, open and folded.
@@ -678,8 +1048,9 @@ fn rail(ui: &mut Ui<'_>, rect: Rect, log: &mut AgentLog, allowed: bool) -> Optio
     clicked.then_some(asks)
 }
 
-/// The mark at `center` for how a command ran: a check once done, a clock when its wait ran
-/// out, a cross when it was interrupted or cut off, a turning arc while it runs.
+/// The mark at `center` for how a command ran: a check once done, a keyboard while it waits
+/// with no prompt back (for input, maybe), a clock when its wait ran out, a cross when it was
+/// interrupted, cut off or its shell ended, a turning arc while it runs.
 fn status_mark(ui: &mut Ui<'_>, center: Point, state: &Ran) {
     let t = ui.theme;
     let icon = |icon, color, ui: &mut Ui<'_>| {
@@ -691,9 +1062,10 @@ fn status_mark(ui: &mut Ui<'_>, center: Point, state: &Ran) {
     };
     match state {
         Ran::Done { .. } => icon(icons::CHECK, t.ok, ui),
+        Ran::Waiting { .. } => icon(icons::KEYBOARD, t.warn, ui),
         Ran::TimedOut { .. } => icon(icons::CLOCK, t.warn, ui),
         Ran::Interrupted { .. } => icon(icons::CLOSE, t.warn, ui),
-        Ran::Cut { .. } => icon(icons::CLOSE, t.text3, ui),
+        Ran::Cut { .. } | Ran::Ended { .. } => icon(icons::CLOSE, t.text3, ui),
         Ran::Running(_) => {
             ui.gfx.stroke_circle(center, 6.0, 1.5, t.accent.alpha(0.25));
             #[allow(clippy::cast_possible_truncation)] // An angle for drawing.
@@ -765,6 +1137,18 @@ fn describe_run(command: &AgentCommand, since: u64, now: Instant) -> (String, In
         ),
         Ran::Cut { took: spent } => (
             format!("{at} · cut off by Stop after {}", took(*spent)),
+            Ink::Quiet,
+        ),
+        Ran::Waiting { took: spent, lines } => (
+            format!(
+                "{at} · no prompt after {} · {}",
+                took(*spent),
+                lines_said(*lines)
+            ),
+            Ink::Warn,
+        ),
+        Ran::Ended { took: spent } => (
+            format!("{at} · its shell ended after {}", took(*spent)),
             Ink::Quiet,
         ),
     }
@@ -844,36 +1228,24 @@ fn agent_tab(app: &mut NativeApp, uid: u64) -> Result<&mut Tab, String> {
     Ok(tab)
 }
 
-/// What a terminal printed after a command was typed into it, when it held `before` lines:
-/// from the line the command was typed on. If the terminal was cleared or its scrollback ran
-/// over meanwhile, its last screenful or so.
-fn new_output(text: &str, before: usize) -> String {
-    let lines: Vec<&str> = text.trim_end().lines().collect();
-    let from = if lines.len() >= before {
-        before.saturating_sub(1)
-    } else {
-        lines.len().saturating_sub(60)
-    };
-    let mut out = lines[from..].join("\n");
-    out.push('\n');
-    out
-}
-
-/// How a command that answered with `out` after `took` ran: done when its output `settled`,
-/// timed out otherwise. Its lines leave out the command's own line and, once done, the prompt
-/// that came back after it.
-fn ran(out: &str, took: Duration, settled: bool) -> Ran {
+/// How a command answered with `out` after `took` ran, as it ended. Its lines leave out the
+/// command's own line and, once done, the prompt that came back after it.
+fn ran(out: &str, took: Duration, ending: Ending) -> Ran {
     let shown = out.trim_end().lines().count();
-    if settled {
-        Ran::Done {
+    match ending {
+        Ending::Done => Ran::Done {
             took,
             lines: shown.saturating_sub(2),
-        }
-    } else {
-        Ran::TimedOut {
+        },
+        Ending::Waiting => Ran::Waiting {
             took,
             lines: shown.saturating_sub(1),
-        }
+        },
+        Ending::TimedOut => Ran::TimedOut {
+            took,
+            lines: shown.saturating_sub(1),
+        },
+        Ending::Ended => Ran::Ended { took },
     }
 }
 
@@ -927,6 +1299,8 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             // Typed and answered over the next frames by `NativeApp::control`.
             agent_tab(app, *tab).map(|_| Response::Done)
         }
+        // Taken up by `NativeApp::control` while the command goes on; as it stands otherwise.
+        Request::Wait { tab, .. } => last_answer(app, *tab, Instant::now()),
         Request::Interrupt { tab } => {
             let agent = agent_tab(app, *tab)?;
             let Some(TermView::Live(panes)) = &agent.terminal else {
@@ -1240,29 +1614,127 @@ mod tests {
 
     #[test]
     fn a_commands_output_starts_at_the_line_it_was_typed_on() {
-        let before = "old line\nuser@box:~$";
+        let typed = Typed::of("old line\nuser@box:~$");
         let after = "old line\nuser@box:~$ uptime\n 10:00 up 2 days\nuser@box:~$\n";
         assert_eq!(
-            new_output(after, before.lines().count()),
+            output_of(after, &typed),
             "user@box:~$ uptime\n 10:00 up 2 days\nuser@box:~$\n"
         );
-        // Cleared meanwhile (fewer lines than before): its last lines instead.
-        assert_eq!(new_output("fresh\n", 40), "fresh\n");
+        // Cleared meanwhile: all the terminal shows is newer than the command.
+        let long = Typed::of(&format!("{}user@box:~$", "old\n".repeat(40)));
+        assert_eq!(output_of("fresh\n", &long), "fresh\n");
+    }
+
+    #[test]
+    fn a_commands_output_is_found_by_its_line_once_the_full_scrollback_drops_lines() {
+        // 100 lines and the prompt; the scrollback is full, so as the command prints 6 lines,
+        // 6 drop off the top and the count stays the same.
+        let lines =
+            |from: usize| -> String { (from..100).map(|n| format!("line {n}\n")).collect() };
+        let typed = Typed::of(&format!("{}user@box:~$", lines(0)));
+        let now = format!(
+            "{}user@box:~$ seq 5\n1\n2\n3\n4\n5\nuser@box:~$\n",
+            lines(6)
+        );
+        assert_eq!(now.lines().count(), typed.lines, "as many lines as before");
+        assert_eq!(
+            output_of(&now, &typed),
+            "user@box:~$ seq 5\n1\n2\n3\n4\n5\nuser@box:~$\n"
+        );
+        assert_eq!(
+            after(&now, &typed),
+            After {
+                lines: 6,
+                prompt: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_prompt_is_back_when_the_last_line_is_one_like_it_even_in_another_folder() {
+        assert!(prompt_back("user@box:~$", "user@box:~$"));
+        assert!(prompt_back("user@box:/tmp$", "user@box:~$"), "after cd");
+        assert!(prompt_back(r"PS C:\Windows>", r"PS C:\Users\me>"));
+        assert!(prompt_back("➜  tmp", "➜  ~"), "a prompt led by its mark");
+        assert!(!prompt_back("[sudo] password for me:", "user@box:~$"));
+        assert!(!prompt_back("Continue? [Y/n]", "user@box:~$"));
+        assert!(
+            !prompt_back("root@box:~#", "user@box:~$"),
+            "another user's shell"
+        );
+        assert!(
+            !prompt_back("</html>", r"PS C:\Users\me>"),
+            "output that only ends like one"
+        );
+        assert!(!prompt_back("anything", ""), "no prompt was seen");
+        // A password typed at sudo's question ends at the shell prompt from before.
+        let mut answer = Typed::of("user@box:~$ sudo ls\n[sudo] password for me:");
+        answer.prompt = "user@box:~$".into();
+        let now = "user@box:~$ sudo ls\n[sudo] password for me:\nfile\nuser@box:~$\n";
+        assert_eq!(
+            after(now, &answer),
+            After {
+                lines: 2,
+                prompt: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_command_is_done_once_its_prompt_is_back_and_a_silent_one_never_by_quiet_alone() {
+        let after = |lines, prompt| After { lines, prompt };
+        let long = Duration::from_secs(20);
+        assert_eq!(
+            settled(after(0, false), long, true),
+            None,
+            "nothing past its own line: a silent sleep runs on"
+        );
+        assert_eq!(
+            settled(after(3, true), PROMPT_QUIET, true),
+            Some(Settled::Done)
+        );
+        assert_eq!(
+            settled(after(3, true), PROMPT_QUIET / 3, true),
+            None,
+            "the prompt may still be drawing"
+        );
+        assert_eq!(
+            settled(after(2, false), QUIET, true),
+            Some(Settled::Waiting),
+            "output, then quiet with no prompt: a question, or a silent step"
+        );
+        assert_eq!(settled(after(2, false), QUIET / 2, true), None);
+        assert_eq!(
+            settled(after(2, false), long, false),
+            None,
+            "waited on again, only output since then counts"
+        );
     }
 
     #[test]
     fn a_finished_command_counts_its_output_and_a_timed_out_one_keeps_its_lines_so_far() {
         let out = "user@box:~$ uptime\n 10:00 up 2 days\nuser@box:~$\n";
         let took = Duration::from_millis(400);
-        assert!(matches!(ran(out, took, true), Ran::Done { lines: 1, .. }));
+        assert!(matches!(
+            ran(out, took, Ending::Done),
+            Ran::Done { lines: 1, .. }
+        ));
         let going = "user@box:~$ tail -f log\none\ntwo\n";
         assert!(matches!(
-            ran(going, took, false),
+            ran(going, took, Ending::TimedOut),
             Ran::TimedOut { lines: 2, .. }
         ));
         assert!(matches!(
-            ran("user@box:~$ true\nuser@box:~$\n", took, true),
+            ran("user@box:~$ true\nuser@box:~$\n", took, Ending::Done),
             Ran::Done { lines: 0, .. }
+        ));
+        assert!(matches!(
+            ran(
+                "user@box:~$ sudo ls\n[sudo] password for me:\n",
+                took,
+                Ending::Waiting
+            ),
+            Ran::Waiting { lines: 1, .. }
         ));
     }
 
@@ -1273,6 +1745,7 @@ mod tests {
             at: 1_000 + 84,
             line: 0,
             state,
+            typed: Typed::default(),
         };
         let done = command(Ran::Done {
             took: Duration::from_millis(400),
@@ -1348,6 +1821,7 @@ mod tests {
                 at: 0,
                 line,
                 state: Ran::Running(Instant::now()),
+                typed: Typed::default(),
             });
         }
         assert_eq!(log.marks().lines, vec![3, 9, 20]);

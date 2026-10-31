@@ -167,6 +167,7 @@ fn agent_tab(app: &mut NativeApp) {
         at: now - ago,
         line,
         state,
+        typed: super::control::Typed::default(),
     };
     let done = |millis, lines| Ran::Done {
         took: Duration::from_millis(millis),
@@ -3907,10 +3908,10 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
     let agent = std::thread::spawn(move || {
         let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
         let tab = client.open(None).map_err(|e| e.to_string())?;
-        let out = client
+        let ran = client
             .run(tab.id, "echo agent-was-here", Some(30))
             .map_err(|e| e.to_string())?;
-        Ok::<_, String>((tab.id, out))
+        Ok::<_, String>((tab.id, ran))
     });
     let started = std::time::Instant::now();
     let mut time = 1.0;
@@ -3919,10 +3920,17 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
         time += 0.05;
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
-    let (tab, out) = agent.join().unwrap().unwrap();
+    let (tab, ran) = agent.join().unwrap().unwrap();
     assert!(
-        out.lines().any(|line| line.trim() == "agent-was-here"),
-        "the echo's answer comes back:\n{out}"
+        ran.output
+            .lines()
+            .any(|line| line.trim() == "agent-was-here"),
+        "the echo's answer comes back: {ran:?}"
+    );
+    assert_eq!(
+        ran.state,
+        annulus_control::protocol::RunState::Done,
+        "its prompt came back: {ran:?}"
     );
     let log = app
         .tabs
@@ -4064,9 +4072,11 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
             .map(|command| match command.state {
                 Ran::Running(_) => "running",
                 Ran::Done { .. } => "done",
+                Ran::Waiting { .. } => "waiting",
                 Ran::TimedOut { .. } => "timed out",
                 Ran::Interrupted { .. } => "interrupted",
                 Ran::Cut { .. } => "cut",
+                Ran::Ended { .. } => "ended",
             })
             .map(str::to_owned)
             .collect()
@@ -4103,10 +4113,89 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
     );
     let (out, refused) = agent.join().unwrap().unwrap();
     assert!(
-        out.lines().count() >= 2,
-        "it printed before its wait ran out:\n{out}"
+        out.output.lines().count() >= 2,
+        "it printed before its wait ran out: {out:?}"
+    );
+    assert_eq!(
+        out.state,
+        annulus_control::protocol::RunState::Running,
+        "and is still running"
     );
     assert!(refused, "the cut-off agent hears no answer");
+}
+
+#[test]
+fn an_agents_silent_command_is_not_done_until_its_prompt_is_back_and_wait_follows_it() {
+    use annulus_control::client::Client;
+    use annulus_control::protocol::{RunOutput, RunState};
+    let mut app = NativeApp::new(Some(fixture_vault("agent-silent", false)));
+    app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
+    let dir = app
+        .vault_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_path_buf)
+        .unwrap();
+    app.waker = Some(std::sync::Arc::new(|| {}));
+    app.settings.automation = true;
+    // Three seconds of silence, then one line, in the shell an agent's tab opens.
+    let shell = app
+        .profiles
+        .first()
+        .map(|profile| profile.name.clone())
+        .unwrap_or_default();
+    let command = if !cfg!(windows) {
+        "sleep 3; echo slept-then-said"
+    } else if shell.contains("PowerShell") {
+        "Start-Sleep -Seconds 3; Write-Output slept-then-said"
+    } else {
+        "ping -n 4 127.0.0.1 >nul & echo slept-then-said"
+    };
+    let mut state = UiState::default();
+    // The first frame opens the door.
+    step(&mut app, &mut state, &[], 0.0);
+    let agent = std::thread::spawn(move || {
+        let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
+        let tab = client.open(None).map_err(|e| e.to_string())?;
+        // Its wait runs out in the silence: answered, but not as done.
+        let early = client
+            .run(tab.id, command, Some(1))
+            .map_err(|e| e.to_string())?;
+        let late = client.wait(tab.id, Some(30)).map_err(|e| e.to_string())?;
+        Ok::<_, String>((tab.id, early, late))
+    });
+    let started = std::time::Instant::now();
+    let mut time = 0.05;
+    while !agent.is_finished() && started.elapsed() < std::time::Duration::from_secs(90) {
+        step(&mut app, &mut state, &[], time);
+        time += 0.05;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let (tab, early, late) = agent.join().unwrap().unwrap();
+    // The typed command holds the word too: only a line of its own is the answer.
+    let said = |ran: &RunOutput| {
+        ran.output
+            .lines()
+            .any(|line| line.trim() == "slept-then-said")
+    };
+    assert_eq!(early.state, RunState::Running, "{early:?}");
+    assert!(!said(&early), "{early:?}");
+    assert_eq!(late.state, RunState::Done, "{late:?}");
+    assert!(said(&late), "the line after the silence: {late:?}");
+    assert!(
+        late.millis >= 2_000,
+        "done once its prompt came back, after the silence: {late:?}"
+    );
+    let log = app
+        .tabs
+        .iter()
+        .find(|open| open.uid == tab)
+        .and_then(|open| open.agent.as_ref())
+        .unwrap();
+    assert!(
+        matches!(log.commands[0].state, super::control::Ran::Done { .. }),
+        "its row turned done too"
+    );
 }
 
 #[test]
