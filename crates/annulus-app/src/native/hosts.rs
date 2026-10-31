@@ -113,6 +113,7 @@ pub struct Editor {
     reconnect: bool,
     /// The icon picked by hand (an OS key), or `None` to show what the server says.
     icon: Option<String>,
+    notes: String,
     /// The Advanced section is open.
     pub advanced: bool,
     problem: Option<String>,
@@ -144,6 +145,7 @@ impl Editor {
             term: host.term.clone(),
             reconnect: !host.no_reconnect,
             icon: host.os_by_hand.then(|| host.os.clone()),
+            notes: host.notes.clone(),
             advanced: false,
             problem: None,
             content_h: 0.0,
@@ -195,6 +197,12 @@ impl Editor {
             }
             None => {}
         }
+        host.notes = annulus_vault::hosts::clean_notes(&self.notes).map_err(|_| {
+            format!(
+                "Notes hold {} characters at most: shorten them",
+                annulus_vault::hosts::NOTES_MAX
+            )
+        })?;
         Ok(host)
     }
 
@@ -231,6 +239,7 @@ impl Editor {
             term,
             os,
             os_by_hand,
+            notes,
         } = edited;
         // The icon goes as one: what the server said, or what was picked.
         if (os.as_str(), os_by_hand) != (before.os.as_str(), before.os_by_hand) {
@@ -278,6 +287,10 @@ impl Editor {
         }
         if term != before.term {
             host.term = term;
+        }
+        // Notes an agent changed meanwhile stay, unless they were edited here too.
+        if notes != before.notes {
+            host.notes = notes;
         }
         Ok(host)
     }
@@ -1213,6 +1226,14 @@ impl HostsView {
         if let Some(chosen) = form.select(ui, "editor.icon", "Icon", &icon_items, Some(icon_at)) {
             editor.icon = chosen.checked_sub(1).map(|at| os::ALL[at].key.to_owned());
         }
+        // What to know about the server, for people and agents alike (F-HOST-011).
+        form.area(
+            ui,
+            "editor.notes",
+            "Notes",
+            &mut editor.notes,
+            "What it is for, how it is set up, what to watch out for. Agents read these too.",
+        );
 
         form.gap(space::S);
         form.section(ui, "Credentials");
@@ -1976,6 +1997,32 @@ impl Form {
         self.y += space::L;
     }
 
+    /// A field of several lines (notes) under its label.
+    fn area(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        buffer: &mut String,
+        placeholder: &str,
+    ) {
+        /// Room for about five lines.
+        const AREA_H: f32 = 108.0;
+        self.label(ui, label);
+        let field = Rect::new(self.x, self.y, self.w, AREA_H);
+        ui.text_area(
+            Id::new(id),
+            field,
+            buffer,
+            FieldStyle {
+                placeholder,
+                ..FieldStyle::default()
+            },
+        );
+        ui.set_name(Id::new(id), label);
+        self.y += AREA_H + space::L;
+    }
+
     fn secret(
         &mut self,
         ui: &mut Ui<'_>,
@@ -2555,6 +2602,27 @@ mod tests {
         editor.group = Some("group-2".into());
         let saved = editor.merged(Some(&moved)).unwrap();
         assert_eq!(saved.group.as_deref(), Some("group-2"));
+    }
+
+    #[test]
+    fn notes_save_cleaned_and_an_agents_notes_written_meanwhile_stay_unless_edited_here() {
+        let vault = crate::native::demo::fixture_vault("notes-editor", false);
+        let mut host = vault.draft_host();
+        (host.label, host.address) = ("web".into(), "10.0.0.5".into());
+        let mut editor = Editor::new(host.clone(), false);
+        "deploy".clone_into(&mut editor.username);
+        // An agent wrote notes while the editor was open.
+        let mut noted = host.clone();
+        "nginx front end".clone_into(&mut noted.notes);
+        let saved = editor.merged(Some(&noted)).unwrap();
+        assert_eq!(saved.notes, "nginx front end", "the agent's notes stay");
+        // Notes edited here win, trimmed.
+        "  serves the shop  \n".clone_into(&mut editor.notes);
+        let saved = editor.merged(Some(&noted)).unwrap();
+        assert_eq!(saved.notes, "serves the shop");
+        editor.notes = "x".repeat(annulus_vault::hosts::NOTES_MAX + 1);
+        let refused = editor.merged(Some(&noted)).unwrap_err();
+        assert!(refused.contains("shorten"), "{refused}");
     }
 
     #[test]
