@@ -228,11 +228,7 @@ fn key_rows(vault: &Vault) -> Vec<KeyRow> {
         .ssh_keys()
         .iter()
         .map(|key| {
-            let users = vault
-                .hosts()
-                .iter()
-                .filter(|host| host.key_id == Some(key.id))
-                .count();
+            let users = users_of(vault, key.id).len();
             let algorithm = key.public.split_whitespace().next().unwrap_or_default();
             KeyRow {
                 id: key.id,
@@ -245,6 +241,17 @@ fn key_rows(vault: &Vault) -> Vec<KeyRow> {
                 users,
             }
         })
+        .collect()
+}
+
+/// The hosts that log in with key `key_id`, by id and name: those that name it, and those
+/// that take it from their group, as a connection resolves them.
+fn users_of(vault: &Vault, key_id: u64) -> Vec<(u64, String)> {
+    vault
+        .hosts()
+        .iter()
+        .filter(|host| vault.resolve(host).0.key_id == Some(key_id))
+        .map(|host| (host.id, host.label.clone()))
         .collect()
 }
 
@@ -426,12 +433,7 @@ impl KeychainView {
             self.removal = None;
             return;
         }
-        let users: Vec<(u64, String)> = vault
-            .hosts()
-            .iter()
-            .filter(|host| host.key_id == Some(key.id))
-            .map(|host| (host.id, host.label.clone()))
-            .collect();
+        let users = users_of(vault, key.id);
         let names: Vec<&str> = users.iter().map(|(_, label)| label.as_str()).collect();
         let t = ui.theme;
         let mut card = pages::card(
@@ -2056,6 +2058,40 @@ mod tests {
             annulus_platform::cpu::TextEngine::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_key_a_host_takes_from_its_group_counts_as_one_it_logs_in_with() {
+        let mut vault = crate::native::demo::fixture_vault("key-from-group", false);
+        let pair = keys::generate(KeyKind::Ed25519, "me@test").unwrap();
+        let key = keychain_screen::stored(&vault, "deploy", &pair);
+        let key_id = key.id;
+        vault.upsert_key(key).unwrap();
+        let mut group = vault.draft_group(None).unwrap();
+        group.name = "Production".into();
+        group.defaults.key_id = Some(key_id);
+        let uid = group.uid.clone();
+        vault.upsert_group(group).unwrap();
+        let mut inherits = vault.draft_host();
+        (inherits.label, inherits.address) = ("web".into(), "10.0.0.5".into());
+        inherits.group = Some(uid.clone());
+        vault.upsert_host(inherits.clone()).unwrap();
+        // In the same group, a host with a key of its own does not use the group's.
+        let other = keychain_screen::stored(&vault, "other", &pair);
+        let other_id = other.id;
+        vault.upsert_key(other).unwrap();
+        let mut own = vault.draft_host();
+        (own.label, own.address) = ("db".into(), "10.0.0.6".into());
+        (own.group, own.key_id) = (Some(uid), Some(other_id));
+        vault.upsert_host(own).unwrap();
+        assert_eq!(
+            users_of(&vault, key_id),
+            vec![(inherits.id, "web".to_owned())]
+        );
+        let rows = key_rows(&vault);
+        let row = rows.iter().find(|row| row.id == key_id).unwrap();
+        assert_eq!(row.users, 1);
+        assert!(row.detail.ends_with("used by 1 host(s)"), "{}", row.detail);
     }
 
     #[test]
