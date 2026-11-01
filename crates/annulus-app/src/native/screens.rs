@@ -20,6 +20,7 @@ use annulus_vault::vault::Vault;
 use zeroize::Zeroizing;
 
 use super::ask::{self, Ask};
+use super::forward_wizard::{Finish, Wizard};
 use super::pages::{self, ROW_H};
 use crate::forwards_screen::{Draft, Running, Status, start};
 use crate::job::{Job, Poll};
@@ -1485,6 +1486,8 @@ pub struct ForwardsView {
     auto_started: bool,
     /// The rule whose Delete asks once more.
     confirm: Option<u64>,
+    /// Making a new rule step by step (F-FWD-006); with no rules, the whole screen.
+    wizard: Option<Wizard>,
 }
 
 const KINDS: [(&str, ForwardKind); 3] = [
@@ -1600,7 +1603,8 @@ impl ForwardsView {
             "Reach services behind your hosts, or share local ones.",
         );
         let first_host = vault.hosts().first().map(|host| host.id);
-        if let Some(host) = first_host
+        if self.wizard.is_none()
+            && let Some(host) = first_host
             && pages::action(
                 ui,
                 &mut actions,
@@ -1610,7 +1614,17 @@ impl ForwardsView {
                 Kind::Primary,
             )
         {
-            self.draft = Some(Draft::new(vault.draft_forward(host), true));
+            self.wizard = Some(Wizard::new(vault.draft_forward(host)));
+            self.draft = None;
+        }
+        // With no rules the wizard is the screen, so a first rule explains how tunnels work.
+        if count == 0 && self.wizard.is_none() {
+            self.wizard = Some(Wizard::new(vault.draft_forward(first_host.unwrap_or(0))));
+        }
+        if self.wizard.is_some() {
+            self.wizard_page(ui, area, vault, files, waker);
+            self.ask_card(ui, rect);
+            return;
         }
         if let Some(draft) = &mut self.draft {
             let hosts: Vec<(u64, String)> = vault
@@ -1747,15 +1761,6 @@ impl ForwardsView {
                 self.draft = None;
             }
         }
-        if count == 0 {
-            let line = if first_host.is_some() {
-                "Add a rule to tunnel a port through one of your hosts."
-            } else {
-                "Save a host first: rules run through a host."
-            };
-            pages::empty(ui, area, icons::FORWARD, "No rules yet", line);
-            return;
-        }
         let rules: Vec<PortForward> = vault.forwards().to_vec();
         let host_names: HashMap<u64, String> = vault
             .hosts()
@@ -1886,6 +1891,47 @@ impl ForwardsView {
             self.running.remove(&id);
             let _ = vault.remove_forward(id);
         }
+        self.ask_card(ui, rect);
+    }
+
+    /// The wizard in `area`; the rule it makes is saved and, when asked, started.
+    fn wizard_page(
+        &mut self,
+        ui: &mut Ui<'_>,
+        area: Rect,
+        vault: &mut Vault,
+        files: &SshFiles,
+        waker: Option<&Waker>,
+    ) {
+        let hosts: Vec<(u64, String)> = vault
+            .hosts()
+            .iter()
+            .map(|host| (host.id, host.label.clone()))
+            .collect();
+        let cancellable = !vault.forwards().is_empty();
+        let Some(wizard) = &mut self.wizard else {
+            return;
+        };
+        match wizard.draw(ui, area, &hosts, cancellable) {
+            Some(Finish::Cancel) => self.wizard = None,
+            Some(Finish::Save(rule, start)) => {
+                let id = rule.id;
+                match vault.upsert_forward(rule) {
+                    Ok(()) => {
+                        self.wizard = None;
+                        if start {
+                            self.start_rule(id, vault, files, waker);
+                        }
+                    }
+                    Err(error) => wizard.problem = Some(error.to_string()),
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// A question a running rule's connection asks, over the screen.
+    fn ask_card(&mut self, ui: &mut Ui<'_>, rect: Rect) {
         if let Some((&id, ask)) = self.asks.iter_mut().next()
             && let Some(running) = self.running.get(&id)
             && ask::card(

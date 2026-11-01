@@ -8,6 +8,7 @@ mod ask;
 mod colors;
 pub mod control;
 pub mod demo;
+mod forward_wizard;
 pub mod hosts;
 mod live;
 pub mod lock;
