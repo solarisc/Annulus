@@ -10,9 +10,45 @@ use annulus_term::Palette;
 use annulus_term::alacritty_terminal::vte::ansi::Rgb as TermRgb;
 use annulus_ui::gfx::Color;
 use annulus_ui::kit::Theme;
+use annulus_ui::motion::Motion;
 
 /// The first entry of the window's scheme menu: no scheme, our own theme.
 pub const OWN_COLORS: &str = "Annulus";
+
+/// The window's colors on their way to new ones: a scheme previewed or chosen, or the OS
+/// turning dark, blends in over [`Motion::BASE`] instead of flashing.
+#[derive(Default)]
+pub struct ThemeFade {
+    /// Where the colors come from, where they go, and since when.
+    way: Option<(Theme, Theme, f64)>,
+}
+
+impl ThemeFade {
+    /// The colors to draw with at `now` on the way to `target`, and whether they are still
+    /// moving. With `instant` (reduced motion) a change shows at once.
+    pub fn step(&mut self, target: Theme, now: f64, instant: bool) -> (Theme, bool) {
+        let shown = self.at(now);
+        if self.way.is_none_or(|(_, to, _)| to != target) {
+            let from = match shown {
+                Some((theme, _)) if !instant => theme,
+                _ => target,
+            };
+            self.way = Some((from, target, now));
+        }
+        self.at(now).unwrap_or((target, false))
+    }
+
+    fn at(&self, now: f64) -> Option<(Theme, bool)> {
+        let (from, to, start) = self.way?;
+        let share = (now - start) / (f64::from(Motion::BASE.ms) / 1000.0);
+        if share >= 1.0 || from == to {
+            return Some((to, false));
+        }
+        #[allow(clippy::cast_possible_truncation)] // A share between 0 and 1.
+        let eased = Motion::BASE.curve.at(share.max(0.0) as f32);
+        Some((from.mix(&to, eased), true))
+    }
+}
 
 /// The window's colors: the chosen scheme, else our own theme in `settings.theme`, where
 /// `system` is ours as the OS currently wants it.
@@ -212,6 +248,27 @@ mod tests {
             terminal_swatches()[ayu][0],
             Color::rgba(background.r, background.g, background.b, 255)
         );
+    }
+
+    #[test]
+    fn new_colors_blend_in_and_reduced_motion_shows_them_at_once() {
+        let dark = Theme::new(Appearance::Dark);
+        let light = Theme::new(Appearance::Light);
+        let mut fade = ThemeFade::default();
+        assert_eq!(fade.step(dark, 0.0, false), (dark, false));
+        assert_eq!(
+            fade.step(light, 1.0, false),
+            (dark, true),
+            "it starts where it was"
+        );
+        let (between, moving) = fade.step(light, 1.1, false);
+        assert!(moving && between != dark && between != light);
+        assert_eq!(fade.step(light, 1.3, false), (light, false));
+        // Turned back halfway, it goes back from where it is, not from the far end.
+        fade.step(dark, 2.0, false);
+        let (turned, _) = fade.step(dark, 2.1, false);
+        assert_eq!(fade.step(light, 2.1, false), (turned, true));
+        assert_eq!(fade.step(dark, 3.0, true), (dark, false), "reduced motion");
     }
 
     #[test]

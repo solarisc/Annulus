@@ -379,6 +379,37 @@ impl Theme {
             scrim: black.alpha(if dark { 0.55 } else { 0.3 }),
         }
     }
+
+    /// Every color `t` of the way from this theme's to `other`'s (0.0 to 1.0): a change of
+    /// theme drawn as a blend. Dark or light flips halfway.
+    #[must_use]
+    pub fn mix(&self, other: &Theme, t: f32) -> Self {
+        let mix = |a: Color, b: Color| a.mix(b, t);
+        Self {
+            dark: if t < 0.5 { self.dark } else { other.dark },
+            chrome: mix(self.chrome, other.chrome),
+            bg: mix(self.bg, other.bg),
+            surface: mix(self.surface, other.surface),
+            raised: mix(self.raised, other.raised),
+            field: mix(self.field, other.field),
+            hover: mix(self.hover, other.hover),
+            press: mix(self.press, other.press),
+            selected: mix(self.selected, other.selected),
+            line: mix(self.line, other.line),
+            line_strong: mix(self.line_strong, other.line_strong),
+            text: mix(self.text, other.text),
+            text2: mix(self.text2, other.text2),
+            text3: mix(self.text3, other.text3),
+            accent: mix(self.accent, other.accent),
+            accent_hover: mix(self.accent_hover, other.accent_hover),
+            on_accent: mix(self.on_accent, other.on_accent),
+            warn: mix(self.warn, other.warn),
+            error: mix(self.error, other.error),
+            ok: mix(self.ok, other.ok),
+            shadow: mix(self.shadow, other.shadow),
+            scrim: mix(self.scrim, other.scrim),
+        }
+    }
 }
 
 /// What one zone did this frame.

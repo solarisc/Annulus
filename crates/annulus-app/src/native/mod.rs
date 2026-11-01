@@ -270,6 +270,8 @@ pub struct NativeApp {
     pub settings_view: settings::SettingsView,
     /// The OS was asked for fewer animations; read when the window opens.
     os_reduces_motion: bool,
+    /// The window's colors on their way to new ones.
+    fade: colors::ThemeFade,
     /// The control door, while automation is allowed and the vault unlocked (ADR-0020).
     door: Option<annulus_control::door::Door>,
     /// Opening the door failed; it is not tried again until the switch or the vault changes.
@@ -329,6 +331,7 @@ impl NativeApp {
             tab_grab: None,
             settings_view: settings::SettingsView::default(),
             os_reduces_motion: false,
+            fade: colors::ThemeFade::default(),
             door: None,
             door_failed: false,
             runs: Vec::new(),
@@ -1120,6 +1123,12 @@ impl NativeApp {
     #[allow(clippy::too_many_lines)] // The window top to bottom: title bar, then the tab in front.
     pub fn frame(&mut self, ui: &mut Ui<'_>) -> Option<WindowAction> {
         ui.state.reduce_motion = self.settings.reduce_motion || self.os_reduces_motion;
+        // New colors (a scheme previewed or chosen, the OS turning dark) blend in, never flash.
+        let (theme, fading) = self.fade.step(ui.theme, ui.time(), ui.state.reduce_motion);
+        ui.theme = theme;
+        if fading {
+            ui.request_repaint();
+        }
         // Settings → Appearance sets it again while its scheme menu is open and drawn.
         self.settings_view.previewing = None;
         let t = ui.theme;
