@@ -3217,6 +3217,59 @@ fn the_forwarding_wizard_saves_the_rule_it_describes() {
     assert_eq!(rule.label, format!("db.internal:5432 via {server}"));
 }
 
+#[test]
+fn the_wizards_cards_are_reached_with_tab_and_picked_with_enter() {
+    let mut app = NativeApp::new(Some(fixture_vault("wizard-keys", true)));
+    forwards_empty(&mut app);
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let card = output
+        .zones
+        .iter()
+        .find(|zone| zone.label == "Share a service from this computer")
+        .map(|zone| zone.id)
+        .unwrap();
+    let tab = [Event::Key(Key::Tab, Modifiers::NONE)];
+    let mut time = 1.0;
+    while state.focus() != Some(card) {
+        assert!(time < 60.0, "Tab never reached the card");
+        output = step(&mut app, &mut state, &tab, time);
+        time += 1.0;
+    }
+    let enter = [Event::Key(Key::Enter, Modifiers::NONE)];
+    output = step(&mut app, &mut state, &enter, time);
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Port on the server"),
+        "Enter picked it: the remote rule's ports"
+    );
+}
+
+#[test]
+fn duplicating_a_rule_opens_a_new_one_that_saves_beside_it() {
+    let mut app = NativeApp::new(Some(fixture_vault("duplicate-rule", true)));
+    forwards(&mut app);
+    let before = app.vault.as_ref().unwrap().forwards().len();
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Duplicate rule"),
+        1.0,
+    );
+    let mut events = click_on(&output, "Port, e.g. 8080");
+    events.push(Event::Text("18080".into()));
+    output = step(&mut app, &mut state, &events, 2.0);
+    step(&mut app, &mut state, &click_on(&output, "Save"), 3.0);
+    let rules = app.vault.as_ref().unwrap().forwards();
+    assert_eq!(rules.len(), before + 1, "the copy is saved beside it");
+    let copy = rules.iter().find(|rule| rule.bind_port == 18080).unwrap();
+    assert!(copy.label.ends_with("copy"), "{}", copy.label);
+}
+
 /// End to end on test VM 1: a local rule made in the forwarding wizard and saved with Save
 /// and start carries a connection to the VM's own sshd.
 #[test]
