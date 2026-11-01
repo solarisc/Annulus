@@ -1,7 +1,7 @@
 //! The Hosts screen (UI-SPEC §2): a header, a search box that also quick-connects, groups and
 //! host cards (or a list), an empty state, and the host editor in a side panel.
 
-use annulus_config::tokens::space;
+use annulus_config::tokens::{radius, space};
 use annulus_session::Target;
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Rect, Weight};
@@ -748,19 +748,20 @@ impl HostsView {
         }
         if let Some(tags) = tags {
             let tags_id = Id::new("hosts.tags");
-            let kind = if self.tag_bar {
-                Kind::Secondary
-            } else {
-                Kind::Ghost
-            };
+            // Open, it is lit like the grid/list toggle's chosen half.
+            if self.tag_bar {
+                ui.gfx
+                    .fill_rect(tags, radius::SMALL + 2.0, ui.theme.selected);
+            }
             if ui
-                .button(tags_id, tags, label("Tags"), Some(icons::TAG), kind)
+                .button(tags_id, tags, label("Tags"), Some(icons::TAG), Kind::Ghost)
                 .clicked
             {
                 // Closing the chips stops filtering: a filter is never on out of sight.
                 self.tag_bar = !self.tag_bar;
                 self.tags.clear();
             }
+            ui.set_toggled(tags_id, self.tag_bar);
             if compact {
                 ui.set_name(tags_id, "Tags");
                 ui.tooltip(tags_id, tags, "Tags");
