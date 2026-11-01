@@ -196,6 +196,9 @@ pub struct FieldStyle<'a> {
     pub mono: bool,
     /// Show the field in the error color.
     pub error: bool,
+    /// A [`Ui::text_area`] breaks long lines at its width instead of running past it (prose,
+    /// such as notes; scripts keep their lines whole).
+    pub wrap: bool,
 }
 
 /// What a toast is about, for its color and mark.
@@ -609,8 +612,10 @@ impl Ui<'_> {
         }
     }
 
-    /// A multi-line text field (scripts): Enter starts a new line, Up and Down move between
-    /// lines, Home and End go to the ends of the line, and a paste keeps its line breaks.
+    /// A multi-line text field (scripts, notes): Enter starts a new line, Up and Down move
+    /// between lines, Home and End go to the ends of the line, and a paste keeps its line
+    /// breaks. With [`FieldStyle::wrap`] long lines break at its width, and the keys move
+    /// along the rows shown.
     #[allow(clippy::too_many_lines)] // Input, scrolling and drawing of one area, in order.
     pub fn text_area(
         &mut self,
@@ -642,6 +647,10 @@ impl Ui<'_> {
         }
         let inner = rect.inset(space::M - 2.0, space::S);
         let line_h = self.gfx.measure("Ag", font).height;
+        let secret = buffer.is_secret();
+        // The width rows break at; a secret never wraps, as its dots would break elsewhere
+        // than its text.
+        let wrap = (style.wrap && !secret).then_some(inner.w - 2.0);
         let mut state = self.state.edit(id);
         state.fit(buffer.as_str());
         let mut changed = false;
@@ -672,13 +681,28 @@ impl Ui<'_> {
                     }
                     Typed::Key(key @ (Key::Up | Key::Down), modifiers) => {
                         let up = key == Key::Up;
-                        state.cursor = line_step(buffer.as_str(), state.cursor, up);
+                        let text = buffer.as_str();
+                        state.cursor = match wrap {
+                            Some(width) => {
+                                let rows = visual_rows(&mut self.gfx, text, font, Some(width));
+                                row_step(&mut self.gfx, text, &rows, (state.cursor, up), font)
+                            }
+                            None => line_step(text, state.cursor, up),
+                        };
                         if !modifiers.shift {
                             state.anchor = state.cursor;
                         }
                     }
                     Typed::Key(key @ (Key::Home | Key::End), modifiers) if !modifiers.ctrl => {
-                        let (start, end) = line_bounds(buffer.as_str(), state.cursor);
+                        let text = buffer.as_str();
+                        let (start, end) = match wrap {
+                            Some(width) => {
+                                let rows = visual_rows(&mut self.gfx, text, font, Some(width));
+                                let row = row_of(&rows, state.cursor);
+                                (rows[row].0, soft_end(text, &rows, row))
+                            }
+                            None => line_bounds(text, state.cursor),
+                        };
                         state.cursor = if key == Key::Home { start } else { end };
                         if !modifiers.shift {
                             state.anchor = state.cursor;
@@ -698,12 +722,12 @@ impl Ui<'_> {
             }
             self.state.return_keys(leftover);
         }
-        let secret = buffer.is_secret();
         let text = buffer.as_str();
         state.fit(text);
-        // The caret's line stays in view.
-        let caret_row = text[..state.cursor].matches('\n').count();
-        #[allow(clippy::cast_precision_loss)] // Scripts are short.
+        let rows = self.text_rows(id, text, font, wrap);
+        // The caret's row stays in view.
+        let caret_row = row_of(&rows, state.cursor);
+        #[allow(clippy::cast_precision_loss)] // Scripts and notes are short.
         let caret_y = caret_row as f32 * line_h;
         if caret_y - state.scroll > inner.h - line_h {
             state.scroll = caret_y - inner.h + line_h;
@@ -711,25 +735,18 @@ impl Ui<'_> {
         if caret_y < state.scroll {
             state.scroll = caret_y;
         }
-        #[allow(clippy::cast_precision_loss)] // Scripts are short.
-        let content = (text.matches('\n').count() + 1) as f32 * line_h;
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let content = rows.len() as f32 * line_h;
         state.scroll -= self.take_wheel(inner);
         state.scroll = state.scroll.clamp(0.0, (content - inner.h).max(0.0));
         if (response.pressed || response.clicked)
             && let Some(pointer) = self.pointer()
         {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // On screen.
-            let row = ((pointer.y - inner.y + state.scroll) / line_h).max(0.0) as usize;
-            let mut start = 0;
-            for (index, line) in text.split('\n').enumerate() {
-                if index == row {
-                    break;
-                }
-                start += line.len() + 1;
-            }
-            let start = start.min(text.len());
-            let line_end = text[start..].find('\n').map_or(text.len(), |at| start + at);
-            let line = &text[start..line_end];
+            let row = (((pointer.y - inner.y + state.scroll) / line_h).max(0.0) as usize)
+                .min(rows.len() - 1);
+            let start = rows[row].0;
+            let line = &text[start..soft_end(text, &rows, row)];
             let shown = if secret {
                 "\u{2022}".repeat(line.chars().count())
             } else {
@@ -760,11 +777,12 @@ impl Ui<'_> {
             );
         }
         let (from, to) = state.range();
-        let mut start = 0;
-        for (row, line) in text.split('\n').enumerate() {
-            #[allow(clippy::cast_precision_loss)] // Scripts are short.
+        // A click may have moved the caret to another row.
+        let caret_row = row_of(&rows, state.cursor);
+        for (row, &(start, end)) in rows.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // Scripts and notes are short.
             let y = inner.y + row as f32 * line_h - state.scroll;
-            let end = start + line.len();
+            let line = &text[start..end];
             // A secret is drawn as one dot per character; byte offsets map by count.
             let masked = if secret {
                 "\u{2022}".repeat(line.chars().count())
@@ -796,24 +814,18 @@ impl Ui<'_> {
                 }
                 self.gfx
                     .draw_text(Point::new(inner.x, y), line_shown, font, t.text);
-                if response.focused
-                    && (start..=end).contains(&state.cursor)
-                    && state.cursor >= start
-                {
+                if response.focused && row == caret_row && (start..=end).contains(&state.cursor) {
                     let x = self
                         .gfx
                         .measure(&line_shown[..to_shown(state.cursor - start)], font)
                         .width;
-                    if row == caret_row {
-                        self.gfx.fill_rect(
-                            Rect::new(inner.x + x, y + 1.0, 1.5, line_h - 2.0),
-                            0.0,
-                            t.text,
-                        );
-                    }
+                    self.gfx.fill_rect(
+                        Rect::new(inner.x + x, y + 1.0, 1.5, line_h - 2.0),
+                        0.0,
+                        t.text,
+                    );
                 }
             }
-            start = end + 1;
         }
         self.pop_clip();
         self.state.set_edit(id, state);
@@ -827,6 +839,32 @@ impl Ui<'_> {
             changed,
             submitted: false,
         }
+    }
+
+    /// The rows text area `id` shows `text` in ([`visual_rows`]). Wrapped rows are kept
+    /// until the text or width changes: measuring every word each frame would be slow.
+    fn text_rows(
+        &mut self,
+        id: Id,
+        text: &str,
+        font: Font,
+        wrap: Option<f32>,
+    ) -> Vec<(usize, usize)> {
+        use std::hash::{Hash, Hasher};
+        let Some(width) = wrap else {
+            return visual_rows(&mut self.gfx, text, font, None);
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let key = (hasher.finish(), width.to_bits());
+        if let Some((known, rows)) = self.state.wraps.get(&id)
+            && *known == key
+        {
+            return rows.clone();
+        }
+        let rows = visual_rows(&mut self.gfx, text, font, Some(width));
+        self.state.wraps.insert(id, (key, rows.clone()));
+        rows
     }
 
     /// A check box with `label` to its right; the whole row toggles it.
@@ -1663,6 +1701,111 @@ fn line_step(text: &str, at: usize, up: bool) -> usize {
         .map_or(line_end, |(offset, _)| line_start + offset)
 }
 
+/// The rows a text area shows `text` in, as byte ranges without their line breaks: one per
+/// line, or with `width`, each line broken after the last word that fits.
+fn visual_rows(
+    canvas: &mut dyn Canvas,
+    text: &str,
+    font: Font,
+    width: Option<f32>,
+) -> Vec<(usize, usize)> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        let end = start + line.len();
+        match width {
+            Some(width) => wrap_line(canvas, text, (start, end), (font, width), &mut rows),
+            None => rows.push((start, end)),
+        }
+        start = end + 1;
+    }
+    rows
+}
+
+/// Breaks the line `text[start..end]` into rows no wider than `width`. Spaces at a break
+/// stay at the end of the row before it; a word wider than a whole row breaks between
+/// characters.
+fn wrap_line(
+    canvas: &mut dyn Canvas,
+    text: &str,
+    (start, end): (usize, usize),
+    (font, width): (Font, f32),
+    rows: &mut Vec<(usize, usize)>,
+) {
+    let mut row = start;
+    // The width of `text[row..at]`.
+    let mut x = 0.0;
+    let mut at = start;
+    for word in text[start..end].split_inclusive(char::is_whitespace) {
+        let ink = word.trim_end();
+        let ink_w = canvas.measure(ink, font).width;
+        if at > row && x + ink_w > width {
+            rows.push((row, at));
+            row = at;
+            x = 0.0;
+        }
+        if ink_w > width {
+            for (offset, c) in ink.char_indices() {
+                let next = at + offset + c.len_utf8();
+                if at + offset > row && canvas.measure(&text[row..next], font).width > width {
+                    rows.push((row, at + offset));
+                    row = at + offset;
+                }
+            }
+            at += word.len();
+            x = canvas.measure(&text[row..at], font).width;
+        } else {
+            x += canvas.measure(word, font).width;
+            at += word.len();
+        }
+    }
+    rows.push((row, end));
+}
+
+/// The row of `rows` the caret at `at` shows on: at a soft break, the row it starts.
+fn row_of(rows: &[(usize, usize)], at: usize) -> usize {
+    rows.iter()
+        .rposition(|(start, _)| *start <= at)
+        .unwrap_or(0)
+}
+
+/// The furthest the caret goes on row `row` and still shows on it: before the space a soft
+/// break leaves at its end, else the row's end.
+fn soft_end(text: &str, rows: &[(usize, usize)], row: usize) -> usize {
+    let end = rows[row].1;
+    if rows.get(row + 1).is_some_and(|next| next.0 == end) {
+        prev_char(text, end)
+    } else {
+        end
+    }
+}
+
+/// The offset one row up or down from `at`, at the same distance from the left edge; the
+/// ends of the text past the first and last row.
+fn row_step(
+    canvas: &mut dyn Canvas,
+    text: &str,
+    rows: &[(usize, usize)],
+    (at, up): (usize, bool),
+    font: Font,
+) -> usize {
+    let row = row_of(rows, at);
+    let x = canvas.measure(&text[rows[row].0..at], font).width;
+    let target = if up {
+        let Some(above) = row.checked_sub(1) else {
+            return 0;
+        };
+        above
+    } else {
+        if row + 1 >= rows.len() {
+            return text.len();
+        }
+        row + 1
+    };
+    let start = rows[target].0;
+    start + offset_at(canvas, &text[start..soft_end(text, rows, target)], font, x)
+}
+
 fn prev_char(text: &str, at: usize) -> usize {
     text[..at].char_indices().next_back().map_or(0, |(i, _)| i)
 }
@@ -1923,6 +2066,72 @@ mod tests {
             },
         );
         assert_eq!(script, "echo a\n# echo b\necho c");
+    }
+
+    #[test]
+    fn a_wrapping_text_area_breaks_lines_at_its_width_and_draws_every_character() {
+        let mut state = UiState::default();
+        let mut notes = String::from(
+            "nginx front end, restart it with care after a deploy; certs at \
+             https://example.com/a-long-path-without-any-spaces-in-it\nsecond line",
+        );
+        let area = Rect::new(10.0, 10.0, 200.0, 280.0);
+        let mut canvas = Recorder::default();
+        state.begin_frame(&[], 0.0);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            &mut state,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        let style = FieldStyle {
+            wrap: true,
+            ..FieldStyle::default()
+        };
+        ui.text_area(Id::new("notes"), area, &mut notes, style);
+        // The recorder's characters are 7 wide; spaces at a break may hang past the edge.
+        let inside = area.w - 2.0 * (space::M - 2.0);
+        let rows: Vec<&str> = canvas.texts.iter().map(|(_, row)| row.as_str()).collect();
+        #[allow(clippy::cast_precision_loss)] // Short rows.
+        let widest = rows
+            .iter()
+            .map(|row| row.trim_end().chars().count() as f32 * 7.0)
+            .fold(0.0, f32::max);
+        assert!(widest <= inside, "{rows:?}");
+        assert_eq!(rows.concat(), notes.replace('\n', ""));
+        assert!(rows.len() > 4, "{rows:?}");
+    }
+
+    #[test]
+    fn end_up_and_down_keep_to_wrapped_rows() {
+        let mut state = UiState::default();
+        let id = Id::new("notes");
+        let style = FieldStyle {
+            wrap: true,
+            ..FieldStyle::default()
+        };
+        // Five words of four letters fill a row: "aaaa bbbb cccc dddd eeee " is 25 long.
+        let mut notes = String::from("aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj");
+        frame(&mut state, &[], |ui| {
+            ui.text_area(id, FIELD, &mut notes, style);
+        });
+        state.set_focus(Some(id), true);
+        let mut press = |state: &mut UiState, pressed: Key| {
+            frame(state, &[key(pressed, Modifiers::NONE)], |ui| {
+                ui.text_area(id, FIELD, &mut notes, style);
+            });
+            state.edit(id).cursor
+        };
+        // End stops before the space at the break, so the caret stays on the first row.
+        assert_eq!(press(&mut state, Key::End), 24);
+        assert_eq!(
+            press(&mut state, Key::Down),
+            49,
+            "the same place on the next row"
+        );
+        assert_eq!(press(&mut state, Key::Up), 24);
+        assert_eq!(press(&mut state, Key::Home), 0);
+        assert_eq!(press(&mut state, Key::Up), 0);
     }
 
     #[test]

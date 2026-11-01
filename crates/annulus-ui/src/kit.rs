@@ -466,6 +466,9 @@ pub struct UiState {
     /// The tooltip to draw over this frame: its text and the control it explains.
     pub(crate) tooltip: Option<(String, Rect)>,
     edits: HashMap<Id, EditState>,
+    /// The rows each wrapping text area broke its text into, with the hash of that text and
+    /// the width they fit.
+    pub(crate) wraps: HashMap<Id, ((u64, u32), Vec<(usize, usize)>)>,
     pub(crate) popup: Option<Popup>,
     /// Toasts on screen, oldest first.
     pub(crate) toasts: Vec<crate::widgets::Toast>,
