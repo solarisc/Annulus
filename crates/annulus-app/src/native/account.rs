@@ -343,7 +343,8 @@ impl AccountView {
         }
         let card = Rect::new(column.x, card_top, column.w, inner.y - card_top + space::M);
         ui.gfx.stroke_rect(card, 12.0, 1.0, t.line);
-        let mut after = Rect::new(column.x, card.b() + space::XL, column.w, 10.0);
+        // Room to lay out in; its height becomes what the password card took.
+        let mut after = Rect::new(column.x, card.b() + space::XL, column.w, 1000.0);
         after.h = self.password_card(ui, after, vault, pace);
         after.b() - top
     }
