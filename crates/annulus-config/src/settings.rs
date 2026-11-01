@@ -130,6 +130,13 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Whether an agent's tab closes once its shell has ended. Never while agents may not
+    /// close tabs: an agent could end its shell with `exit` to get round that.
+    #[must_use]
+    pub fn closes_ended_agent_tabs(&self) -> bool {
+        self.close_ended_agent_tabs && !self.stop_agents_closing_tabs
+    }
+
     /// Pins host `host` to the top of the New Tab page, last among the pinned, or unpins it.
     pub fn toggle_pin(&mut self, host: u64) {
         if let Some(at) = self.pinned.iter().position(|pinned| *pinned == host) {
@@ -179,6 +186,22 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ended_agents_tab_closes_only_while_agents_may_close_tabs() {
+        let mut settings = Settings {
+            close_ended_agent_tabs: true,
+            ..Settings::default()
+        };
+        assert!(
+            !settings.closes_ended_agent_tabs(),
+            "the guard keeps it, even after exit"
+        );
+        settings.stop_agents_closing_tabs = false;
+        assert!(settings.closes_ended_agent_tabs());
+        settings.close_ended_agent_tabs = false;
+        assert!(!settings.closes_ended_agent_tabs());
+    }
 
     #[test]
     fn settings_round_trip_and_bad_files_fall_back_to_defaults() {

@@ -703,7 +703,11 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         settings.auto_lock_minutes = LOCK_MINUTES[chosen].0;
         changed = true;
     }
-    let mut automation = self::card(ui, page, "Automation", 6);
+    // Whether a tab closes when its shell ends is asked only once agents may close tabs:
+    // until then nothing closes an agent's tab, not even `exit`.
+    let closing = !settings.stop_agents_closing_tabs;
+    let rows = if closing { 6 } else { 5 };
+    let mut automation = self::card(ui, page, "Automation", rows);
     let control = row(
         ui,
         &mut automation,
@@ -723,7 +727,7 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         )
         .clicked;
     // How agents' tabs behave (F-AUTO-006).
-    let switches = [
+    let mut switches = vec![
         (
             "settings.agent.front",
             "Agents' tabs open in front",
@@ -739,22 +743,24 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         (
             "settings.agent.keep",
             "Stop agents closing their tabs",
-            "Their tabs stay for you to read. Off, an agent may close the tabs it opened.",
+            "Their tabs stay for you to read, even after exit. Off, agents may close them.",
             &mut settings.stop_agents_closing_tabs,
         ),
-        (
-            "settings.agent.close",
-            "Close an agent's tab when its shell ends",
-            "Off, it stays open with Start again.",
-            &mut settings.close_ended_agent_tabs,
-        ),
-        (
-            "settings.agent.folded",
-            "Agent panel starts folded",
-            "New agent tabs show the slim rail, not the list.",
-            &mut settings.agent_panel_folded,
-        ),
     ];
+    if closing {
+        switches.push((
+            "settings.agent.close",
+            "Also close an agent's tab when its shell ends",
+            "After exit or a lost connection. Off, it stays open with Start again.",
+            &mut settings.close_ended_agent_tabs,
+        ));
+    }
+    switches.push((
+        "settings.agent.folded",
+        "Agent panel starts folded",
+        "New agent tabs show the slim rail, not the list.",
+        &mut settings.agent_panel_folded,
+    ));
     for (id, name, about, value) in switches {
         let control = row(ui, &mut automation, false, (name, about), 60.0);
         changed |= ui.switch(Id::new(id), control, value, name).clicked;

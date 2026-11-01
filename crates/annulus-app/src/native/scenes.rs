@@ -4589,6 +4589,12 @@ fn an_agents_tab_opened_behind_starts_unseen_and_closes_once_its_shell_ends() {
     assert_eq!(left.state, RunState::Ended, "{left:?}");
     step(&mut app, &mut state, &[], time);
     assert!(
+        app.tabs.iter().any(|open| open.uid == tab),
+        "kept while agents may not close tabs, though the agent typed exit"
+    );
+    app.settings.stop_agents_closing_tabs = false;
+    step(&mut app, &mut state, &[], time + 0.05);
+    assert!(
         !app.tabs.iter().any(|open| open.uid == tab),
         "closed once its shell ended"
     );

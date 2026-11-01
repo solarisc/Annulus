@@ -473,7 +473,7 @@ impl NativeApp {
             }
         }
         self.move_runs(now);
-        if self.settings.close_ended_agent_tabs {
+        if self.settings.closes_ended_agent_tabs() {
             self.close_ended_agent_tabs();
         }
         self.runs
@@ -482,7 +482,7 @@ impl NativeApp {
     }
 
     /// Closes agents' tabs whose shells have all ended, once no answer waits on them
-    /// (Settings > Security > Automation, F-AUTO-006).
+    /// (Settings > Security > Automation, F-AUTO-006, and only while agents may close tabs).
     fn close_ended_agent_tabs(&mut self) {
         let ended: Vec<usize> = self
             .tabs
