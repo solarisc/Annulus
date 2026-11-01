@@ -1780,9 +1780,9 @@ fn workers() -> usize {
 }
 
 /// The agents' tests time a real shell's prompt (a pause of `control::QUIET` with no prompt
-/// reads as a command waiting for input). Rendering every scene on all cores beside them
-/// starved PowerShell on the Windows runner, so the renders run alone; the agents' tests
-/// share this with each other.
+/// reads as a command waiting for input). Rendering every scene or running the random users
+/// on all cores beside them starved PowerShell on the Windows runner, so those run alone;
+/// the agents' tests share this with each other.
 static TIMED_SHELLS: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Holds off the scene renders while an agent's shell is being timed.
@@ -2142,6 +2142,10 @@ fn random_user(seed: u64, steps: usize, (width, height): (f32, f32)) {
 /// make the nightly run longer and replay a failure.
 #[test]
 fn random_input_finds_no_panic_or_fault() {
+    // Its users run on every core, like the scene renders: never beside a timed shell.
+    let _alone = TIMED_SHELLS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let steps = std::env::var("ANNULUS_MONKEY_STEPS")
         .ok()
         .and_then(|value| value.parse().ok())
