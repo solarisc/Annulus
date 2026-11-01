@@ -1088,6 +1088,8 @@ impl LiveTerminal {
             inner.take_top(space::M);
             let box_rect = inner.take_top(log_h - space::M);
             ui.gfx.fill_rect(box_rect, 10.0, t.field);
+            // Edged too: in the light theme a field is nearly the card's own white.
+            ui.gfx.stroke_rect(box_rect, 10.0, 1.0, t.line);
             let mut lines = box_rect.inset(space::M, space::S);
             for line in self.log.iter().rev().take(6).rev() {
                 ui.gfx.text(
