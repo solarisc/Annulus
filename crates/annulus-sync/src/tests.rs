@@ -665,6 +665,17 @@ fn a_servers_own_certificate_is_trusted_only_once_pinned_and_only_that_one() {
 }
 
 #[test]
+fn the_health_check_answers_anyone_without_a_version_or_a_token() {
+    let base = http_server();
+    // As a container's health check or an uptime monitor asks: a bare GET.
+    let mut response = ureq::get(&format!("{base}{}", annulus_proto::path::HEALTH))
+        .call()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.body_mut().read_to_string().unwrap(), "ok");
+}
+
+#[test]
 fn only_a_signed_in_push_may_be_large_and_strangers_are_refused_first() {
     let base = http_server();
     let agent: ureq::Agent = ureq::Agent::config_builder()
