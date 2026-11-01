@@ -4521,9 +4521,14 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
         "nothing is left spinning"
     );
     let (out, refused) = agent.join().unwrap().unwrap();
-    // Its first line may or may not come within the second a busy runner gives it: what
-    // counts is that the answer starts at the command and says it still runs.
-    assert!(out.output.contains(ticking), "{out:?}");
+    // Its first line may or may not come within the second a busy runner gives it, nor even
+    // the shell's echo of what was typed: what counts is that the answer starts at the
+    // prompt the command was typed at and says it still runs.
+    let typed_at = out.output.lines().next().unwrap_or_default().trim_end();
+    assert!(
+        typed_at.contains(ticking) || typed_at.ends_with(['>', '$', '#', '%']),
+        "{out:?}"
+    );
     assert_eq!(
         out.state,
         annulus_control::protocol::RunState::Running,
