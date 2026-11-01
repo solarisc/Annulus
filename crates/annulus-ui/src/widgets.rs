@@ -131,6 +131,14 @@ impl EditState {
     }
 }
 
+/// The rows a wrapping [`Ui::text_area`] broke its text into, kept while they still fit:
+/// `fit` is the hash of that text and the width's bits.
+#[derive(Debug)]
+pub(crate) struct Wrapped {
+    fit: (u64, u32),
+    rows: Vec<(usize, usize)>,
+}
+
 /// Text a field can edit: a plain `String`, or a `Zeroizing<String>` for secrets.
 pub trait TextBuffer {
     /// The text.
@@ -856,14 +864,20 @@ impl Ui<'_> {
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
-        let key = (hasher.finish(), width.to_bits());
-        if let Some((known, rows)) = self.state.wraps.get(&id)
-            && *known == key
+        let fit = (hasher.finish(), width.to_bits());
+        if let Some(known) = self.state.wraps.get(&id)
+            && known.fit == fit
         {
-            return rows.clone();
+            return known.rows.clone();
         }
         let rows = visual_rows(&mut self.gfx, text, font, Some(width));
-        self.state.wraps.insert(id, (key, rows.clone()));
+        self.state.wraps.insert(
+            id,
+            Wrapped {
+                fit,
+                rows: rows.clone(),
+            },
+        );
         rows
     }
 
