@@ -364,6 +364,8 @@ pub(crate) struct Wizard {
     cards: [Play; 3],
     /// How tall the step drew last frame, for its scroll.
     content_h: f32,
+    /// The name was typed: it no longer follows the server and ports.
+    named: bool,
 }
 
 impl Wizard {
@@ -376,6 +378,7 @@ impl Wizard {
             play: Play::default(),
             cards: [Play::default(); 3],
             content_h: 0.0,
+            named: false,
         }
     }
 
@@ -703,9 +706,11 @@ impl Wizard {
                     Some("Save a host first: a rule runs through one of your hosts.".into());
                 return;
             }
-            // A name comes later; one is given meanwhile, so only these fields are checked.
-            if self.draft.rule.label.trim().is_empty() {
+            // A name comes later; one is given meanwhile, so only these fields are checked. Until
+            // one is typed, it follows the server and ports each time.
+            if !self.named || self.draft.rule.label.trim().is_empty() {
                 self.draft.rule.label = default_label(&self.draft.rule, self.ports(), server);
+                self.named = false;
             }
             match self.draft.finish() {
                 Ok(_) => (self.step, self.play, self.problem) = (2, Play::default(), None),
@@ -726,15 +731,20 @@ impl Wizard {
         self.big_diagram(ui, page, server);
         ui.section_label(page.take_top(18.0), "Name");
         let name = page.take_top(CONTROL);
-        ui.text_field(
-            Id::new("wizard.label"),
-            Rect::new(name.x, name.y, name.w.min(420.0), CONTROL),
-            &mut self.draft.rule.label,
-            FieldStyle {
-                placeholder: "Name",
-                ..FieldStyle::default()
-            },
-        );
+        if ui
+            .text_field(
+                Id::new("wizard.label"),
+                Rect::new(name.x, name.y, name.w.min(420.0), CONTROL),
+                &mut self.draft.rule.label,
+                FieldStyle {
+                    placeholder: "Name",
+                    ..FieldStyle::default()
+                },
+            )
+            .changed
+        {
+            self.named = true;
+        }
         ui.set_name(Id::new("wizard.label"), "Name");
         page.take_top(space::M);
         let mut ticks = page.take_top(CONTROL);
