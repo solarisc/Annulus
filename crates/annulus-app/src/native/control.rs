@@ -273,8 +273,12 @@ impl Typed {
     }
 
     /// Whether `line`, the terminal's last line, is its prompt or one its tab showed before.
+    /// Typed at a line that is no prompt (one the shell printed while it started, such as
+    /// "Loading personal and system profiles took 900ms."), any prompt-shaped line ends it.
     fn prompt_back(&self, line: &str) -> bool {
-        prompt_back(line, &self.prompt) || self.known.iter().any(|known| prompt_back(line, known))
+        prompt_back(line, &self.prompt)
+            || self.known.iter().any(|known| prompt_back(line, known))
+            || (!looks_like_prompt(&self.prompt) && looks_like_prompt(line))
     }
 }
 
@@ -452,30 +456,21 @@ const QUIET: Duration = Duration::from_millis(1200);
 const PROMPT_QUIET: Duration = Duration::from_millis(300);
 /// How long to wait for a prompt from a shell that prints none before typing anyway.
 const SILENT_PROMPT: Duration = Duration::from_secs(10);
-/// How long text that is no prompt must sit unchanged before a command is typed at it: a
-/// prompt of an unusual shape, not a line the shell prints while it starts.
-const ODD_PROMPT_QUIET: Duration = Duration::from_secs(3);
-
 /// Whether a command may be typed into a terminal showing `text` (`None`: not read), its
 /// output quiet for `quiet`, `waited` after it was asked for; `busy` while the command before
-/// still goes on (this one answers its question). Typed at anything but the shell's prompt,
-/// the command is echoed early or lost, and the line it went on is not the prompt that ends
-/// it. So a shell's own lines while it starts ("Loading personal and system profiles took
-/// 900ms.", an update notice) wait for the prompt after them.
+/// still goes on (this one answers its question). Once the shell has shown text and settled,
+/// it is typed even before the prompt: a fresh PowerShell drops keys that arrive as its
+/// prompt appears, but keeps those typed while it starts. A command
+/// typed at a line that is no prompt ends at the first prompt instead
+/// ([`Typed::prompt_back`]).
 fn ready_to_type(text: Option<&str>, quiet: Duration, waited: Duration, busy: bool) -> bool {
     let Some(text) = text else {
         return false;
     };
-    let Some(last) = text.trim_end().lines().last() else {
+    if text.trim().is_empty() {
         return waited >= SILENT_PROMPT;
-    };
-    if busy {
-        quiet >= QUIET
-    } else if looks_like_prompt(last) {
-        quiet >= PROMPT_QUIET
-    } else {
-        quiet >= ODD_PROMPT_QUIET
     }
+    quiet >= if busy { QUIET } else { PROMPT_QUIET }
 }
 /// How long a new terminal may take to start before a command for it is given up.
 const START_WITHIN: Duration = Duration::from_secs(30);
@@ -2066,6 +2061,26 @@ mod tests {
     }
 
     #[test]
+    fn a_command_typed_before_the_prompt_ends_at_the_first_prompt() {
+        let loading = "PowerShell 7.6.9\nLoading personal and system profiles took 912ms.";
+        let mut typed = Typed::of(loading);
+        "echo hi".clone_into(&mut typed.command);
+        // Echoed once the prompt came, then its line and the prompt back.
+        let screen = format!("{loading}\nPS C:\\work> echo hi\nhi\nPS C:\\work>");
+        assert_eq!(
+            after(&screen, &typed),
+            After {
+                lines: 2,
+                prompt: true
+            }
+        );
+        // Typed at a prompt, only a prompt like that one ends it, as before.
+        let at_prompt = Typed::of("user@box:~$");
+        assert!(!at_prompt.prompt_back("50% done >"));
+        assert!(at_prompt.prompt_back("user@box:/tmp$"));
+    }
+
+    #[test]
     fn a_command_wrapped_at_the_terminals_width_is_no_output_of_its_own() {
         let mut typed = Typed::of("PS C:\\work>");
         "Start-Sleep -Seconds 3; Write-Output said".clone_into(&mut typed.command);
@@ -2095,38 +2110,23 @@ mod tests {
     }
 
     #[test]
-    fn a_command_waits_for_the_prompt_not_a_line_the_shell_prints_while_it_starts() {
+    fn a_command_is_typed_once_the_shell_has_shown_text_and_settled() {
         let ms = Duration::from_millis;
-        let prompt = "PS C:\\work> ";
         let loading = "PowerShell 7.6.9\nLoading personal and system profiles took 912ms.";
+        // While a fresh PowerShell starts its keys are kept; as its prompt appears they may
+        // not be, so the command goes in once anything shows and settles.
+        assert!(ready_to_type(Some(loading), PROMPT_QUIET, ms(2_000), false));
         assert!(
-            !ready_to_type(Some(loading), ms(500), ms(2_000), false),
-            "PowerShell is still starting"
-        );
-        assert!(ready_to_type(
-            Some(&format!("{loading}\n{prompt}")),
-            PROMPT_QUIET,
-            ms(2_000),
-            false
-        ));
-        assert!(
-            !ready_to_type(Some(prompt), ms(100), ms(2_000), false),
+            !ready_to_type(Some("PS C:\\work> "), ms(100), ms(2_000), false),
             "not settled yet"
         );
-        // A prompt of an unusual shape is typed at once it has sat still a while.
+        // Answering a question of the command before: its output must have stopped.
         assert!(!ready_to_type(
-            Some("[me@box work]"),
-            QUIET,
-            ms(4_000),
-            false
+            Some("Password:"),
+            PROMPT_QUIET,
+            ms(2_000),
+            true
         ));
-        assert!(ready_to_type(
-            Some("[me@box work]"),
-            ODD_PROMPT_QUIET,
-            ms(4_000),
-            false
-        ));
-        // Answering a question of the command before: no prompt to wait for.
         assert!(ready_to_type(Some("Password:"), QUIET, ms(2_000), true));
         // Nothing shown yet: a shell that prints no prompt gets the command after a while.
         assert!(!ready_to_type(Some(""), ms(5_000), ms(5_000), false));
