@@ -15,6 +15,16 @@ pub const PAD: f32 = 28.0;
 /// Height of a list row.
 pub const ROW_H: f32 = 56.0;
 
+/// `n` of something in words: "no hosts", "1 host", "3 hosts".
+#[must_use]
+pub fn count(n: usize, one: &str, many: &str) -> String {
+    match n {
+        0 => format!("no {many}"),
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    }
+}
+
 /// The page's content area inside `rect`.
 #[must_use]
 pub fn page(rect: Rect) -> Rect {

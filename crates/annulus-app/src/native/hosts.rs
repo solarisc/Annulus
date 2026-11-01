@@ -1564,9 +1564,9 @@ impl HostsView {
             let (hosts, rules) = crate::import_dialog::entities(&chosen);
             self.notice = Some(match vault.adopt(&hosts, &rules, &[], &[], &[]) {
                 Ok(()) => format!(
-                    "Imported {} host(s) and {} forward(s).",
-                    hosts.len(),
-                    rules.len()
+                    "Imported {} and {}.",
+                    super::pages::count(hosts.len(), "host", "hosts"),
+                    super::pages::count(rules.len(), "port forward", "port forwards")
                 ),
                 Err(error) => format!("Nothing was imported: {error}"),
             });

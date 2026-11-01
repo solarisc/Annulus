@@ -506,9 +506,9 @@ impl Wizard {
         );
         // Side by side when there is room, else one under another.
         let stacked = page.w < 680.0;
-        // Stacked, the cards are short, so two fit a small window.
+        // Stacked, each card has its name across the top and its picture beside what it does.
         let gap = if stacked { space::S } else { space::L };
-        let card_h = if stacked { 110.0 } else { SMALL_DIAGRAM + 96.0 };
+        let card_h = if stacked { 136.0 } else { SMALL_DIAGRAM + 96.0 };
         let card_w = if stacked {
             page.w
         } else {
@@ -541,32 +541,30 @@ impl Wizard {
                 ui.set_cursor(Cursor::Pointer);
             }
             let mut inside = card.inset(space::M, space::M);
-            let (picture, mut words) = if stacked {
-                let picture = inside.take_left(inside.w.min(300.0));
-                inside.take_left(space::M);
-                (
-                    picture.centered(picture.w, SMALL_DIAGRAM.min(picture.h)),
-                    inside,
+            let name = if stacked {
+                inside.take_top(20.0)
+            } else {
+                Rect::new(
+                    inside.x,
+                    inside.y + SMALL_DIAGRAM + space::S,
+                    inside.w,
+                    20.0,
                 )
+            };
+            ui.gfx.text(name, title, BODY_STRONG, t.text, Align::Start);
+            let (picture, mut words) = if stacked {
+                inside.take_top(4.0);
+                let picture = inside.take_left((inside.w * 0.55).min(300.0));
+                inside.take_left(space::M);
+                (picture, inside.centered(inside.w, 2.0 * 18.0))
             } else {
                 let picture = inside.take_top(SMALL_DIAGRAM);
-                inside.take_top(space::S);
+                inside.take_top(space::S + 20.0 + 4.0);
                 (picture, inside)
             };
             let packet = self.cards[index].at(ui, response.hovered || response.focused);
             let sample = sample(*kind);
             diagram(ui, picture, *kind, &sample, packet);
-            if stacked {
-                words = words.centered(words.w, 20.0 + 4.0 + 2.0 * 18.0);
-            }
-            ui.gfx.text(
-                words.take_top(20.0),
-                title,
-                BODY_STRONG,
-                t.text,
-                Align::Start,
-            );
-            words.take_top(4.0);
             for line in lines {
                 ui.gfx
                     .text(words.take_top(18.0), line, SMALL, t.text2, Align::Start);

@@ -52,6 +52,12 @@ fn rows(
     #[allow(clippy::cast_precision_loss)] // Lists are short.
     let height = count as f32 * (ROW_H + GAP);
     let offset = ui.scroll_view(Id::new(id), rect, height);
+    // Room for the scroll bar only while there is one, so rows end with the header's buttons.
+    let width = if height > rect.h {
+        rect.w - 10.0
+    } else {
+        rect.w
+    };
     ui.push_clip(rect);
     for index in 0..count {
         #[allow(clippy::cast_precision_loss)] // Lists are short.
@@ -59,7 +65,7 @@ fn rows(
         if y + ROW_H < rect.y || y > rect.b() {
             continue;
         }
-        each(ui, index, Rect::new(rect.x, y, rect.w - 10.0, ROW_H));
+        each(ui, index, Rect::new(rect.x, y, width, ROW_H));
     }
     ui.pop_clip();
 }
@@ -234,8 +240,9 @@ fn key_rows(vault: &Vault) -> Vec<KeyRow> {
                 id: key.id,
                 label: key.label.clone(),
                 detail: format!(
-                    "{algorithm}  {}  \u{b7}  used by {users} host(s)",
-                    key.fingerprint
+                    "{algorithm}  {}  \u{b7}  used by {}",
+                    key.fingerprint,
+                    pages::count(users, "host", "hosts")
                 ),
                 public: key.public.clone(),
                 users,
@@ -2146,7 +2153,9 @@ mod tests {
         let rows = key_rows(&vault);
         let row = rows.iter().find(|row| row.id == key_id).unwrap();
         assert_eq!(row.users, 1);
-        assert!(row.detail.ends_with("used by 1 host(s)"), "{}", row.detail);
+        assert!(row.detail.ends_with("used by 1 host"), "{}", row.detail);
+        assert_eq!(pages::count(0, "host", "hosts"), "no hosts");
+        assert_eq!(pages::count(3, "host", "hosts"), "3 hosts");
     }
 
     #[test]

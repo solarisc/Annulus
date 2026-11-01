@@ -183,6 +183,9 @@ const LOCK_MINUTES: [(u32, &str); 8] = [
 
 /// Width of the sections' navigation.
 const NAV_W: f32 = 212.0;
+/// The place of a switch in a setting row: as wide as the switch, so it ends where the menus
+/// and segmented controls above and below it end.
+const SWITCH_W: f32 = 34.0;
 /// Height of one setting row.
 const ROW: f32 = 60.0;
 /// The widest the section column gets.
@@ -541,7 +544,7 @@ fn appearance(
             "Reduce motion",
             "Changes happen at once, without animating.",
         ),
-        60.0,
+        SWITCH_W,
     );
     changed |= ui
         .switch(
@@ -687,7 +690,7 @@ fn preview(ui: &mut Ui<'_>, page: &mut Rect, theme: &str, font_size: f32) {
 fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
     let mut card = card(ui, page, "Vault", 1);
     let when = format!(
-        "When you have been away from the keyboard. {} locks it now.",
+        "After this long idle. {} locks it now.",
         shortcuts::LOCK.keys()
     );
     let control = row(ui, &mut card, true, ("Lock the vault", &when), 260.0);
@@ -716,7 +719,7 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
             "Allow the command line and AI agents",
             "Only while the vault is unlocked; locking shuts them out.",
         ),
-        60.0,
+        SWITCH_W,
     );
     changed |= ui
         .switch(
@@ -762,7 +765,7 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         &mut settings.agent_panel_folded,
     ));
     for (id, name, about, value) in switches {
-        let control = row(ui, &mut automation, false, (name, about), 60.0);
+        let control = row(ui, &mut automation, false, (name, about), SWITCH_W);
         changed |= ui.switch(Id::new(id), control, value, name).clicked;
     }
     changed
@@ -779,7 +782,7 @@ fn sessions(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
             "Reopen my tabs",
             "Local shells and saved hosts, at the next start.",
         ),
-        60.0,
+        SWITCH_W,
     );
     changed |= ui
         .switch(
@@ -797,7 +800,7 @@ fn sessions(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
             "Save session logs",
             "Output can hold secrets; logs stay encrypted.",
         ),
-        60.0,
+        SWITCH_W,
     );
     changed |= ui
         .switch(
