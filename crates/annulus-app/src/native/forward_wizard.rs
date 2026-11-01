@@ -322,7 +322,8 @@ fn diagram(ui: &mut Ui<'_>, rect: Rect, kind: ForwardKind, ends: &Ends, packet: 
         }
     }
     // Names and addresses under the ends.
-    let mono = Font::mono(11.0);
+    // Addresses are a size smaller in a card's narrow columns, so neighbours never touch.
+    let mono = Font::mono(if column < 100.0 { 10.0 } else { 11.0 });
     let far_bottom = far.last().map_or(y, |end| end.y) + far_size / 2.0;
     // A label may run a little past its column into the gaps beside it (a narrow card).
     let label_w = column * 1.3;

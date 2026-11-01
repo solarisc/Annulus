@@ -457,9 +457,11 @@ impl KeychainView {
                 })
                 .collect::<Vec<_>>()
                 .join("  \u{b7}  ")
+        } else if let [one] = names.as_slice() {
+            format!("It logs in to {one}. Taken off that server, it no longer opens it.")
         } else {
             format!(
-                "It logs in to {}. Taken off there, it no longer opens them.",
+                "It logs in to {}. Taken off those servers, it no longer opens them.",
                 names.join(", ")
             )
         };
