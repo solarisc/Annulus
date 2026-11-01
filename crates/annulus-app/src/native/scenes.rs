@@ -2975,11 +2975,13 @@ fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
 }
 
 /// End to end on test VM 1: the new Keychain installs a fresh key on a real host through
-/// the UI (Install on a host, choose it, trust its key, Install), the host is set to log in
-/// with it, and a second connection does log in with it (and takes the key off again).
+/// the UI (Install on a host, choose it, trust its key, Install), and the host is set to log
+/// in with it. Deleting the key then logs in with it to take it off the host, and the host's
+/// `authorized_keys` no longer holds it.
 #[test]
 #[ignore = "needs the test servers"]
-fn e2e_the_new_keychain_installs_a_key_on_a_real_host() {
+#[allow(clippy::too_many_lines)] // Install, delete, check the server.
+fn e2e_the_new_keychain_installs_a_key_and_deleting_it_takes_it_off_the_host() {
     use crate::keychain_screen::stored;
     use annulus_ssh::keys;
 
@@ -3046,32 +3048,55 @@ fn e2e_the_new_keychain_installs_a_key_on_a_real_host() {
         output = step(&mut app, &mut state, &events, clock());
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    // Log in again, now with the fresh key, and take it off the host.
-    let vault = app.vault.as_ref().unwrap();
-    let host = vault
+    // Delete it from the Keychain: it logs in with the fresh key to take it off the host,
+    // then leaves the vault.
+    output = step(&mut app, &mut state, &[], clock());
+    let delete = click_within(&output, "fresh", "Delete");
+    output = step(&mut app, &mut state, &delete, clock());
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Delete key"),
+        clock(),
+    );
+    let has_fresh = |app: &NativeApp| {
+        app.vault
+            .as_ref()
+            .is_some_and(|vault| vault.ssh_keys().iter().any(|key| key.id == fresh_id))
+    };
+    while has_fresh(&app) {
+        assert!(clock() < 90.0, "the key was not taken off and deleted");
+        step(&mut app, &mut state, &[], clock());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Logged in with the e2e key again, the host no longer lists it.
+    let vault = app.vault.as_mut().unwrap();
+    let mut host = vault
         .hosts()
         .iter()
         .find(|host| host.id == host_id)
+        .cloned()
         .unwrap();
+    assert_eq!(
+        host.key_id, None,
+        "the host no longer names the deleted key"
+    );
+    host.key_id = Some(login_id);
+    vault.upsert_host(host.clone()).unwrap();
     let task = crate::ssh_task::SshTask::exec(
-        crate::connect::host(vault, &app.ssh_files, host),
-        format!("sed -i '/{marker}/d' ~/.ssh/authorized_keys && echo removed"),
+        crate::connect::host(vault, &app.ssh_files, &host),
+        format!("grep -c '{marker}' ~/.ssh/authorized_keys || true"),
         || {},
     );
     let outcome = loop {
-        assert!(clock() < 90.0, "the second login never finished");
+        assert!(clock() < 120.0, "the check never finished");
         if let Some(outcome) = task.outcome() {
             break outcome;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     let exec = outcome.unwrap();
-    assert_eq!(
-        exec.status,
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&exec.output)
-    );
+    assert_eq!(String::from_utf8_lossy(&exec.output).trim(), "0");
 }
 
 /// How many SSH sessions `host`'s user has on the server, counted over one more connection

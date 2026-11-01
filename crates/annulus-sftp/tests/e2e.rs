@@ -514,19 +514,50 @@ async fn generated_keys_of_every_kind_install_once_and_log_in() {
             .await
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&check.output), "1\n600\n");
+        let (vm, key_ref) = ((&env.vm2, &env.user), &key);
+        let log_in = move |answers| async move {
+            connect(
+                &target(vm.0, vm.1),
+                &known_hosts("keychain"),
+                None,
+                std::slice::from_ref(&key_ref.private),
+                answers,
+            )
+            .await
+        };
         let answers = trusting(None);
-        let connection = connect(
-            &target(&env.vm2, &env.user),
-            &known_hosts("keychain"),
-            None,
-            &[key.private],
-            answers.clone(),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("the new {} key logs in: {error}", kind.name()));
+        let connection = log_in(answers.clone())
+            .await
+            .unwrap_or_else(|error| panic!("the new {} key logs in: {error}", kind.name()));
         assert_eq!(*answers.asked_password.lock().unwrap(), 0);
         drop(connection);
-        run(&admin, "sed -i '/annulus-e2e/d' ~/.ssh/authorized_keys").await;
+        // Deleting it from the keychain takes its line off, and only its line.
+        let lines =
+            || admin.exec("wc -l < ~/.ssh/authorized_keys; stat -c %a ~/.ssh/authorized_keys");
+        let before = String::from_utf8_lossy(&lines().await.unwrap().output).into_owned();
+        let remove = annulus_ssh::keys::remove_command(&key.public).unwrap();
+        let removed = admin.exec(&remove).await.unwrap();
+        assert_eq!(
+            (
+                removed.status,
+                String::from_utf8_lossy(&removed.output).as_ref()
+            ),
+            (Some(0), "annulus-removed 1\n")
+        );
+        let count: usize = before.lines().next().unwrap().trim().parse().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&lines().await.unwrap().output),
+            format!("{}\n600\n", count - 1)
+        );
+        assert!(
+            log_in(trusting(None)).await.is_err(),
+            "it no longer logs in"
+        );
+        let again = admin.exec(&remove).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&again.output),
+            "annulus-removed 0\n"
+        );
     }
 }
 
