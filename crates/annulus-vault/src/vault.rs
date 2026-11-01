@@ -565,11 +565,12 @@ impl Vault {
         PortForward::new(id, host_id)
     }
 
-    /// Adds or replaces a rule, then saves. On failure nothing changes.
+    /// Adds or replaces a rule, then saves; returns the id it is saved under, which differs
+    /// from a draft's when a rule synced meanwhile took that id. On failure nothing changes.
     ///
     /// # Errors
     /// Writing the file.
-    pub fn upsert_forward(&mut self, mut rule: PortForward) -> Result<(), VaultError> {
+    pub fn upsert_forward(&mut self, mut rule: PortForward) -> Result<u64, VaultError> {
         rule.id = self.settle_id(kind::FORWARD, rule.id, self.forwards.iter().map(|r| r.id));
         let id = rule.id;
         let mut next = self.forwards.clone();
@@ -588,7 +589,7 @@ impl Vault {
         self.forwards = next;
         self.sync = sync;
         self.generation += 1;
-        Ok(())
+        Ok(id)
     }
 
     /// Deletes a rule, then saves. On failure nothing changes.

@@ -1765,16 +1765,20 @@ impl ForwardsView {
                 .clicked
             {
                 match draft.finish() {
-                    Ok(rule) => {
-                        // A running rule starts again with what was changed.
-                        let id = rule.id;
-                        let was_running = self.running.remove(&id).is_some();
-                        let _ = vault.upsert_forward(rule);
-                        self.draft = None;
-                        if was_running {
-                            self.start_rule(id, vault, files, waker);
+                    // A running rule starts again with what was changed. Not saved, the
+                    // form stays with the reason, so nothing typed is lost.
+                    Ok(rule) => match vault.upsert_forward(rule.clone()) {
+                        Ok(id) => {
+                            let was_running = self.running.remove(&rule.id).is_some();
+                            self.draft = None;
+                            if was_running {
+                                self.start_rule(id, vault, files, waker);
+                            }
                         }
-                    }
+                        Err(error) => {
+                            draft.problem = Some(format!("Could not save the rule: {error}"));
+                        }
+                    },
                     Err(problem) => draft.problem = Some(problem),
                 }
             } else if cancelled {
@@ -1953,18 +1957,17 @@ impl ForwardsView {
         };
         match wizard.draw(ui, area, &hosts, cancellable) {
             Some(Finish::Cancel) => self.wizard = None,
-            Some(Finish::Save(rule, start)) => {
-                let id = rule.id;
-                match vault.upsert_forward(rule) {
-                    Ok(()) => {
-                        self.wizard = None;
-                        if start {
-                            self.start_rule(id, vault, files, waker);
-                        }
+            Some(Finish::Save(rule, start)) => match vault.upsert_forward(rule) {
+                // Started by the id it was saved under: a rule synced meanwhile may hold
+                // the one it was drafted with.
+                Ok(id) => {
+                    self.wizard = None;
+                    if start {
+                        self.start_rule(id, vault, files, waker);
                     }
-                    Err(error) => wizard.problem = Some(error.to_string()),
                 }
-            }
+                Err(error) => wizard.problem = Some(error.to_string()),
+            },
             None => {}
         }
     }
