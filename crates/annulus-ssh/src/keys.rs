@@ -159,6 +159,35 @@ pub fn install_command(public: &str) -> String {
     )
 }
 
+/// What [`remove_command`] prints once the key is gone, before the number of lines that held
+/// it (0 when it was not there).
+pub const REMOVED: &str = "annulus-removed ";
+
+/// The shell command that takes `public` off the remote `~/.ssh/authorized_keys` (deleting a
+/// key, F-KEY-004): every line holding its key data, whatever its options or comment, and
+/// nothing else. The file is rewritten in place, so its mode, owner and any link stay. It
+/// prints [`REMOVED`] and the count once a fresh read finds the key gone; it exits 2 when
+/// the file cannot be read or written and 3 when the key is still there. `None` for a line
+/// without base64 key data.
+#[must_use]
+pub fn remove_command(public: &str) -> Option<String> {
+    let data = public.split_whitespace().nth(1)?;
+    if !data
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        return None;
+    }
+    Some(format!(
+        "f=~/.ssh/authorized_keys; [ -e \"$f\" ] || {{ echo '{REMOVED}0'; exit 0; }}; \
+         n=$(grep -cF -- '{data}' \"$f\"); [ $? -le 1 ] || exit 2; \
+         if [ \"$n\" -gt 0 ]; then t=\"$f.annulus-$$\"; \
+         (umask 077 && grep -vF -- '{data}' \"$f\" > \"$t\"); \
+         [ $? -le 1 ] && cat \"$t\" > \"$f\" || {{ rm -f \"$t\"; exit 2; }}; rm -f \"$t\"; fi; \
+         grep -qF -- '{data}' \"$f\" && exit 3; echo \"{REMOVED}$n\""
+    ))
+}
+
 /// Decodes a stored private key for signing.
 pub(crate) fn decode(private: &str) -> Option<PrivateKey> {
     russh::keys::decode_secret_key(private, None).ok()
@@ -206,6 +235,59 @@ mod tests {
         );
         assert!(command.contains("chmod 600 ~/.ssh/authorized_keys"));
         assert!(command.contains("grep -qxF"), "only added when missing");
+    }
+
+    #[test]
+    fn the_remove_command_matches_the_key_data_and_refuses_anything_else() {
+        let command = remove_command("ssh-ed25519 AAAAC3Nz/a+b= me@laptop").unwrap();
+        assert!(command.contains("grep -vF -- 'AAAAC3Nz/a+b='"), "{command}");
+        assert!(
+            !command.contains("me@laptop"),
+            "matched by its data, not its comment"
+        );
+        assert!(
+            command.contains("cat \"$t\" > \"$f\""),
+            "rewritten in place"
+        );
+        assert_eq!(remove_command("ssh-ed25519"), None);
+        assert_eq!(remove_command("ssh-ed25519 AAAA';rm -rf ~;' x"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_remove_command_takes_off_only_the_key_and_says_so() {
+        let home = std::env::temp_dir().join(format!("annulus-remove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let file = home.join(".ssh/authorized_keys");
+        std::fs::write(
+            &file,
+            "ssh-ed25519 KEEP1 other\nfrom=\"10.0.0.1\" ssh-ed25519 GONE me\nssh-rsa KEEP2 x\nssh-ed25519 GONE again\n",
+        )
+        .unwrap();
+        let run = || {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(remove_command("ssh-ed25519 GONE me@laptop").unwrap())
+                .env("HOME", &home)
+                .output()
+                .unwrap()
+        };
+        let first = run();
+        assert_eq!(first.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&first.stdout),
+            "annulus-removed 2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "ssh-ed25519 KEEP1 other\nssh-rsa KEEP2 x\n"
+        );
+        // Not there any more: nothing to do, and it says so.
+        assert_eq!(
+            String::from_utf8_lossy(&run().stdout),
+            "annulus-removed 0\n"
+        );
     }
 
     #[test]
