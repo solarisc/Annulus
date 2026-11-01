@@ -231,15 +231,18 @@ fn powershell_quoted(text: &str) -> String {
 
 /// A Windows key script: `$f` set to the `authorized_keys` sshd reads for the user (`$shared`
 /// when it is the administrators' file), then `body`; any error is printed after [`FAILED`]
-/// as one plain line (no CLIXML) and exits 2.
+/// as one plain line (no CLIXML) and exits 2. An administrator is told by membership, as
+/// sshd's `Match Group` does, not by an elevated session: a session that is not elevated
+/// lists the group as "deny only" (`whoami` shows it, .NET's group list does not), and gets
+/// an access error on the shared file instead of a key looked for in the wrong one.
 fn windows_script(body: &str) -> String {
     format!(
-        r"$ProgressPreference = 'SilentlyContinue'
+        r#"$ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 try {{
   $f = Join-Path $env:USERPROFILE '.ssh\authorized_keys'
   $config = Join-Path $env:ProgramData 'ssh\sshd_config'
-  $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  $admin = [bool]@(whoami /groups /fo csv /nh | Select-String '"S-1-5-32-544"')
   $shared = $admin -and (Test-Path -LiteralPath $config) -and (Select-String -LiteralPath $config -Pattern '^\s*Match\s+Group\s+administrators\b' -Quiet)
   if ($shared) {{ $f = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys' }}
 {body}
@@ -249,7 +252,7 @@ try {{
   [Console]::Out.WriteLine('{FAILED}' + $e.Message)
   exit 2
 }}
-"
+"#
     )
 }
 
@@ -376,6 +379,10 @@ mod tests {
         let remove = script_of(&remove_commands(public).unwrap().windows);
         for script in [&install, &remove] {
             assert!(script.contains("Match\\s+Group\\s+administrators"));
+            // By membership, as sshd decides, even in a session that is not elevated.
+            assert!(
+                script.contains("whoami /groups /fo csv /nh | Select-String '\"S-1-5-32-544\"'")
+            );
             assert!(script.contains(r"'ssh\administrators_authorized_keys'"));
             assert!(
                 script.contains(FAILED),
