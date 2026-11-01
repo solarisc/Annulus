@@ -654,8 +654,7 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         true,
         (
             "Allow the command line and AI agents",
-            "While the vault is unlocked, the annulus command and AI agents can list your hosts \
-             and read your terminals. Locking shuts them out.",
+            "Only while the vault is unlocked; locking shuts them out.",
         ),
         60.0,
     );
