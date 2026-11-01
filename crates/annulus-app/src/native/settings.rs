@@ -114,9 +114,52 @@ pub struct SettingsView {
     refusals: u32,
     /// The keys pressed this frame while recording, before any shortcut saw them.
     caught: Option<(Key, Modifiers)>,
-    /// The entry of the window's scheme menu under the pointer this frame: the window shows
-    /// it until the menu closes ([`super::colors::previewed_theme`]).
+    /// The entry of the window's scheme menu to show this frame: the window shows it until
+    /// the menu closes ([`super::colors::previewed_theme`]).
     pub previewing: Option<usize>,
+    /// Which entry of that menu the pointer rests on.
+    scheme: SchemePreview,
+}
+
+/// How long the pointer rests on a scheme before the window takes its colors, in seconds.
+const PREVIEW_REST: f64 = 0.18;
+
+/// The entry of the window's scheme menu the pointer (or the keyboard) has rested on: the one
+/// the window previews. Entries passed over on the way change nothing, so sweeping the list
+/// never flashes the window through every scheme it crosses.
+#[derive(Default)]
+struct SchemePreview {
+    /// The entry under the pointer, and since when.
+    hot: Option<(usize, f64)>,
+    /// The entry the window shows.
+    shown: Option<usize>,
+}
+
+impl SchemePreview {
+    /// Follows the menu at `now`: whether it is `open`, and its entry under the pointer.
+    /// Returns the entry to show, and how long until the one under the pointer shows.
+    fn follow(&mut self, open: bool, hot: Option<usize>, now: f64) -> (Option<usize>, Option<f64>) {
+        if !open {
+            *self = Self::default();
+            return (None, None);
+        }
+        let Some(entry) = hot else {
+            // Off the list (in its search): what shows stays.
+            self.hot = None;
+            return (self.shown, None);
+        };
+        let since = match self.hot {
+            Some((known, since)) if known == entry => since,
+            _ => now,
+        };
+        self.hot = Some((entry, since));
+        let left = PREVIEW_REST - (now - since);
+        if left > 0.0 {
+            return (self.shown, Some(left));
+        }
+        self.shown = Some(entry);
+        (self.shown, None)
+    }
 }
 
 /// The scrollback choices (F-TERM-004), each with what a full tab 120 columns wide costs.
@@ -255,7 +298,12 @@ impl SettingsView {
                 }
             }
             Page::Appearance => {
-                changed = appearance(ui, &mut page, settings, &mut self.previewing);
+                changed = appearance(
+                    ui,
+                    &mut page,
+                    settings,
+                    (&mut self.previewing, &mut self.scheme),
+                );
             }
             Page::Terminal => changed = terminal(ui, &mut page, settings),
             Page::Security => changed = security(ui, &mut page, settings),
@@ -424,7 +472,7 @@ fn appearance(
     ui: &mut Ui<'_>,
     page: &mut Rect,
     settings: &mut Settings,
-    previewing: &mut Option<usize>,
+    (previewing, scheme): (&mut Option<usize>, &mut SchemePreview),
 ) -> bool {
     let mut changed = false;
     let mut card = card(ui, page, "Look", 3);
@@ -466,8 +514,13 @@ fn appearance(
         .as_ref()
         .map_or(Some(0), |name| schemes.iter().position(|s| s == name));
     let id = Id::new("settings.scheme");
-    // The window takes the colors under the pointer, so each can be seen before it is chosen.
-    *previewing = ui.menu_hot(id);
+    // The window takes the colors the pointer rests on, so each can be seen before it is
+    // chosen; the window blends into them (`colors::ThemeFade`).
+    let (shown, wait) = scheme.follow(ui.menu_open(id), ui.menu_hot(id), ui.time());
+    *previewing = shown;
+    if let Some(wait) = wait {
+        ui.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+    }
     if let Some(chosen) = ui.select_with_swatches(
         id,
         control,
@@ -1057,4 +1110,36 @@ fn about(ui: &mut Ui<'_>, page: &mut Rect) {
         t.text3,
         Align::Start,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scheme_shows_once_the_pointer_rests_on_it_not_while_it_passes() {
+        let mut preview = SchemePreview::default();
+        assert_eq!(
+            preview.follow(true, Some(3), 0.0),
+            (None, Some(PREVIEW_REST))
+        );
+        assert_eq!(preview.follow(true, Some(3), 0.2), (Some(3), None));
+        // Sweeping past entries keeps what shows.
+        for (step, entry) in (4..12).enumerate() {
+            #[allow(clippy::cast_precision_loss)] // A few steps.
+            let now = 0.3 + step as f64 * 0.03;
+            assert_eq!(preview.follow(true, Some(entry), now).0, Some(3));
+        }
+        // The last entry passed, 11, came at 0.51.
+        assert_eq!(preview.follow(true, Some(11), 0.6).0, Some(3));
+        assert_eq!(
+            preview.follow(true, Some(11), 0.75).0,
+            Some(11),
+            "rested on"
+        );
+        // In the search, what shows stays; closed, the window goes back.
+        assert_eq!(preview.follow(true, None, 0.8), (Some(11), None));
+        assert_eq!(preview.follow(false, None, 0.85), (None, None));
+        assert_eq!(preview.follow(true, Some(5), 0.9).0, None);
+    }
 }

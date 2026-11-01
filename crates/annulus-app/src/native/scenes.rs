@@ -946,7 +946,8 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
-        // The scheme menu searched, its swatches, and the window previewing the one hovered.
+        // The scheme menu searched, its swatches, and the window previewing the one the
+        // pointer rested on (the second hover is a second later).
         name: "scheme-menu-search",
         width: 1100,
         height: 720,
@@ -956,6 +957,7 @@ const SCENES: &[Scene] = &[
         acts: &[
             Act::Click("Solarized Light"),
             Act::Type("gruvbox"),
+            Act::Hover("Gruvbox dark, hard"),
             Act::Hover("Gruvbox dark, hard"),
         ],
     },
