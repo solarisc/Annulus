@@ -3299,6 +3299,30 @@ fn the_wizards_suggested_name_follows_the_ports_until_one_is_typed() {
 }
 
 #[test]
+fn the_connecting_card_sits_near_the_middle_and_its_log_opens_downward() {
+    let mut app = NativeApp::new(Some(fixture_vault("connect-card", false)));
+    connecting(&mut app);
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    let output = step(&mut app, &mut state, &[], 5.0);
+    let toggle = |output: &FrameOutput, label: &str| {
+        output
+            .zones
+            .iter()
+            .find(|zone| zone.label == label)
+            .map(|zone| zone.rect)
+            .unwrap()
+    };
+    let closed = toggle(&output, "Show log");
+    // The window is 800 tall: its head sits in the band a little above the middle.
+    assert!((240.0..400.0).contains(&closed.y), "{closed:?}");
+    step(&mut app, &mut state, &click_on(&output, "Show log"), 6.0);
+    let output = step(&mut app, &mut state, &[], 11.0);
+    let open = toggle(&output, "Hide log");
+    assert!((open.y - closed.y).abs() < 1.0, "the card stays: {open:?}");
+}
+
+#[test]
 fn a_rule_open_to_the_network_says_so_on_its_row() {
     let mut app = NativeApp::new(Some(fixture_vault("open-rule", true)));
     forwards_open(&mut app);

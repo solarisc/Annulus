@@ -956,6 +956,8 @@ impl LiveTerminal {
     #[allow(clippy::too_many_lines)] // The card top to bottom: head, track, log, hint.
     fn connect_card(&mut self, ui: &mut Ui<'_>, rect: Rect, terminal: Id) {
         const STEPS: [&str; 4] = ["Server", "Key", "Login", "Shell"];
+        // Its height with the log closed.
+        const CARD_H: f32 = 196.0;
         let t = ui.theme;
         let id = terminal.with("connect");
         let (mut who, route) = match &self.program {
@@ -973,8 +975,12 @@ impl LiveTerminal {
         let active = active_step(self.stage, self.ask.as_ref());
         let log_h = if self.show_log { 132.0 } else { 0.0 };
         let width = (rect.w - 2.0 * space::XL).clamp(0.0, 520.0);
-        let height = 196.0 + log_h;
-        let top = rect.y + (rect.h * 0.16).max(space::XL);
+        let height = CARD_H + log_h;
+        // A little above the middle, as the eye reads a centered card, placed by its closed
+        // height so opening the log grows it downward; raised only when the log needs room.
+        let top = (rect.y + ((rect.h - CARD_H) * 0.42).max(space::XL))
+            .min(rect.b() - height - space::XL)
+            .max(rect.y + space::XL);
         let card = Rect::new(rect.center().x - width / 2.0, top, width, height);
         let shown = ui.entrance(id.with("enter"), Motion::SLOW);
         ui.push_layer(Layer::appear(shown, card.center(), 0.96, 10.0));
