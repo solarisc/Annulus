@@ -164,6 +164,12 @@ fn settings(app: &mut NativeApp) {
     section(app, super::Section::Settings);
 }
 
+/// Settings with agents allowed to close their tabs, so the Automation card has its sixth row.
+fn settings_agents_may_close(app: &mut NativeApp) {
+    settings(app);
+    app.settings.stop_agents_closing_tabs = false;
+}
+
 fn settings_account(app: &mut NativeApp) {
     settings(app);
     app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
@@ -1134,6 +1140,17 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: settings,
+        acts: &[Act::Click("Security")],
+    },
+    // With agents allowed to close their tabs, the sixth row ("close when its shell ends")
+    // shows.
+    Scene {
+        name: "settings-security-agents-may-close",
+        width: 1100,
+        height: 860,
+        scale: 1.0,
+        populated: true,
+        setup: settings_agents_may_close,
         acts: &[Act::Click("Security")],
     },
     Scene {
@@ -3215,6 +3232,23 @@ fn the_forwarding_wizard_saves_the_rule_it_describes() {
         )
     );
     assert_eq!(rule.label, format!("db.internal:5432 via {server}"));
+}
+
+#[test]
+fn the_tags_button_tells_a_screen_reader_whether_its_chips_are_open() {
+    let mut app = NativeApp::new(Some(fixture_vault("tags-toggle", true)));
+    let mut state = UiState::default();
+    let toggled = |output: &FrameOutput| {
+        output
+            .zones
+            .iter()
+            .find(|zone| zone.label == "Tags")
+            .and_then(|zone| zone.toggled)
+    };
+    let output = step(&mut app, &mut state, &[], 0.0);
+    assert_eq!(toggled(&output), Some(false));
+    let output = step(&mut app, &mut state, &click_on(&output, "Tags"), 1.0);
+    assert_eq!(toggled(&output), Some(true));
 }
 
 #[test]
