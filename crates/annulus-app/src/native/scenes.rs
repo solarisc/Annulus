@@ -518,6 +518,20 @@ const SCENES: &[Scene] = &[
         setup: nothing,
         acts: &[Act::Hover("More ways to add hosts")],
     },
+    // From the search, Tab reaches New host and then its menu half, each with its own ring.
+    Scene {
+        name: "hosts-new-menu-focus",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[
+            Act::Click("Search hosts, or type user@host:port to connect"),
+            Act::Press(Key::Tab, Modifiers::NONE),
+            Act::Press(Key::Tab, Modifiers::NONE),
+        ],
+    },
     // Beside the editor the actions row is too narrow for its labels: icons only.
     Scene {
         name: "hosts-toolbar-compact",
