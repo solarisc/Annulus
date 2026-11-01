@@ -1503,7 +1503,7 @@ mod tests {
                 .forwards()
                 .iter()
                 .find(|r| r.id == id)
-                .map(|r| &*r.label)
+                .map(|r| r.label.as_str())
         };
         assert_eq!((label(id), label(mine.id)), (Some("mine"), Some("theirs")));
     }

@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn a_push_never_holds_more_changes_than_the_server_takes() {
-        let many: Vec<Change> = (0..annulus_proto::MAX_PUSH_CHANGES * 2 + 1)
+        let many: Vec<Change> = (0..=annulus_proto::MAX_PUSH_CHANGES * 2)
             .map(|index| change(&index.to_string(), 1))
             .collect();
         let runs: Vec<usize> = batches(&many, usize::MAX)

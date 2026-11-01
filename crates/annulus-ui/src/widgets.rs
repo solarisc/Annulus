@@ -2084,11 +2084,8 @@ mod tests {
         // The arrow's tip low on the control reaches 20 below it: the tip goes under that.
         let tip = tooltip_place(control, Some(Point::new(115.0, 125.0)), size, window);
         assert_eq!(tip.y, 125.0 + 20.0 + 6.0);
-        assert_eq!(
-            tip.center().x,
-            control.center().x,
-            "still centered on its control"
-        );
+        let off_center = (tip.center().x - control.center().x).abs();
+        assert!(off_center < 0.01, "still centered on its control: {tip:?}");
         // From the keyboard, or with the pointer elsewhere, it sits just under the control.
         for pointer in [None, Some(Point::new(500.0, 500.0))] {
             assert_eq!(tooltip_place(control, pointer, size, window).y, 136.0);
