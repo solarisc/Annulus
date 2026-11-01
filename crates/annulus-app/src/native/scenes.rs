@@ -138,6 +138,17 @@ fn forwards(app: &mut NativeApp) {
     section(app, super::Section::PortForwarding);
 }
 
+/// Port Forwarding with a rule that listens on every interface (an imported `*:1080`).
+fn forwards_open(app: &mut NativeApp) {
+    if let Some(vault) = app.vault.as_mut()
+        && let Some(mut rule) = vault.forwards().first().cloned()
+    {
+        "0.0.0.0".clone_into(&mut rule.bind_address);
+        vault.upsert_forward(rule).unwrap();
+    }
+    section(app, super::Section::PortForwarding);
+}
+
 /// Port Forwarding with hosts but no rules yet: the wizard is the screen.
 fn forwards_empty(app: &mut NativeApp) {
     if let Some(vault) = app.vault.as_mut() {
@@ -912,6 +923,16 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: forwards,
+        acts: &[],
+    },
+    Scene {
+        // A rule open to the network carries the warning on its row.
+        name: "forwards-open-to-network",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards_open,
         acts: &[],
     },
     Scene {
@@ -3232,6 +3253,21 @@ fn the_forwarding_wizard_saves_the_rule_it_describes() {
         )
     );
     assert_eq!(rule.label, format!("db.internal:5432 via {server}"));
+}
+
+#[test]
+fn a_rule_open_to_the_network_says_so_on_its_row() {
+    let mut app = NativeApp::new(Some(fixture_vault("open-rule", true)));
+    forwards_open(&mut app);
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let open: Vec<&str> = output
+        .zones
+        .iter()
+        .filter(|zone| zone.label.ends_with(", open to your network"))
+        .map(|zone| zone.label.as_str())
+        .collect();
+    assert_eq!(open.len(), 1, "only the rule on 0.0.0.0: {open:?}");
 }
 
 #[test]

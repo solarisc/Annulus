@@ -1817,7 +1817,14 @@ impl ForwardsView {
             } else {
                 rule.label.clone()
             };
-            pages::row(ui, zone, row, &title, false);
+            // Listening beyond this computer (an imported `*:1080`) is said, seen and heard.
+            let exposed = rule.is_exposed();
+            let name = if exposed {
+                format!("{title}, open to your network")
+            } else {
+                title.clone()
+            };
+            pages::row(ui, zone, row, &name, false);
             let confirming = confirm == Some(rule.id);
             let mut remainder = row.inset(space::M, 0.0);
             let mut slots = None;
@@ -1863,6 +1870,24 @@ impl ForwardsView {
                 t.text2,
                 Align::Start,
             );
+            if exposed {
+                const OPEN: &str = "Open to your network";
+                let width = ui.gfx.measure(OPEN, SMALL).width + 20.0;
+                remainder.take_right(space::M);
+                let mark = remainder.take_right(width);
+                ui.gfx.icon(
+                    icons::WARNING,
+                    Rect::new(mark.x, mark.center().y - 7.0, 14.0, 14.0),
+                    t.warn,
+                );
+                ui.gfx.text(
+                    Rect::new(mark.x + 20.0, mark.y, mark.w - 20.0, mark.h),
+                    OPEN,
+                    SMALL,
+                    t.warn,
+                    Align::Start,
+                );
+            }
             let inner = pages::row_icon(ui, remainder, icons::FORWARD);
             let kind = KINDS
                 .iter()
