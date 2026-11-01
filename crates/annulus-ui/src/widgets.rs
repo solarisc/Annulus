@@ -1543,20 +1543,11 @@ impl Ui<'_> {
         };
         let t = self.theme;
         let size = self.gfx.measure(&text, SMALL);
-        let (width, height) = (size.width + 2.0 * space::S, size.height + 8.0);
-        let below = anchor.b() + 6.0;
-        let top = if below + height > self.viewport.b() - 4.0 {
-            anchor.y - 6.0 - height
-        } else {
-            below
-        };
-        let left = (anchor.center().x - width / 2.0)
-            .min(self.viewport.r() - width - 4.0)
-            .max(self.viewport.x + 4.0);
-        let tip = Rect::new(left, top, width, height);
+        let size = (size.width + 2.0 * space::S, size.height + 8.0);
+        let tip = tooltip_place(anchor, self.pointer(), size, self.viewport);
         // It fades in, rising a touch toward its control.
         let shown = self.entrance(crate::kit::Id::new(("tooltip", &text)), Motion::FAST);
-        let toward = if top > anchor.y { 3.0 } else { -3.0 };
+        let toward = if tip.y > anchor.y { 3.0 } else { -3.0 };
         self.push_layer(Layer::appear(shown, tip.center(), 0.97, toward));
         self.gfx.shadow(tip, radius::SMALL, 10.0, 3.0, t.shadow);
         self.gfx.fill_rect(tip, radius::SMALL, t.raised);
@@ -1692,6 +1683,33 @@ enum KeyOutcome {
     Submit,
     Copy(String),
     Ignored,
+}
+
+/// Where a tooltip `size` big goes for its control at `anchor`, all in screen space: under
+/// the control, and under the arrow when `pointer` rests on it, so the arrow never covers
+/// the words; above the control where the window's bottom leaves no room. Always inside
+/// `viewport`.
+fn tooltip_place(
+    anchor: Rect,
+    pointer: Option<Point>,
+    (width, height): (f32, f32),
+    viewport: Rect,
+) -> Rect {
+    // How far the arrow cursor reaches below its tip.
+    const ARROW: f32 = 20.0;
+    let clear = pointer
+        .filter(|at| anchor.contains(*at))
+        .map_or(anchor.b(), |at| anchor.b().max(at.y + ARROW));
+    let below = clear + 6.0;
+    let top = if below + height > viewport.b() - 4.0 {
+        anchor.y - 6.0 - height
+    } else {
+        below
+    };
+    let left = (anchor.center().x - width / 2.0)
+        .min(viewport.r() - width - 4.0)
+        .max(viewport.x + 4.0);
+    Rect::new(left, top, width, height)
 }
 
 impl EditState {
@@ -2056,6 +2074,29 @@ mod tests {
             out = ui.text_field(id, FIELD, buffer, FieldStyle::default());
         });
         out
+    }
+
+    #[test]
+    fn a_tooltip_keeps_clear_of_the_arrow_resting_on_its_control() {
+        let window = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let control = Rect::new(100.0, 100.0, 30.0, 30.0);
+        let size = (80.0, 24.0);
+        // The arrow's tip low on the control reaches 20 below it: the tip goes under that.
+        let tip = tooltip_place(control, Some(Point::new(115.0, 125.0)), size, window);
+        assert_eq!(tip.y, 125.0 + 20.0 + 6.0);
+        assert_eq!(
+            tip.center().x,
+            control.center().x,
+            "still centered on its control"
+        );
+        // From the keyboard, or with the pointer elsewhere, it sits just under the control.
+        for pointer in [None, Some(Point::new(500.0, 500.0))] {
+            assert_eq!(tooltip_place(control, pointer, size, window).y, 136.0);
+        }
+        // Near the window's bottom it goes above, clear of the arrow inside the control.
+        let low = Rect::new(100.0, 560.0, 30.0, 30.0);
+        let tip = tooltip_place(low, Some(Point::new(115.0, 575.0)), size, window);
+        assert!(tip.b() <= low.y, "{tip:?}");
     }
 
     #[test]
