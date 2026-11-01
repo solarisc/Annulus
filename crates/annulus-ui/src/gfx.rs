@@ -421,9 +421,12 @@ pub trait Canvas {
     }
 
     /// Draws `text` on one line inside `rect`, vertically centered and aligned by `align`.
-    /// Text wider than `rect` is cut at a character boundary and ends in an ellipsis.
-    /// Returns whether it had to be cut.
+    /// Line breaks (a server's or the OS's message often has them) become spaces, so the text
+    /// never grows out of `rect` over what is above and below. Text wider than `rect` is cut
+    /// at a character boundary and ends in an ellipsis. Returns whether it had to be cut.
     fn text(&mut self, rect: Rect, text: &str, font: Font, color: Color, align: Align) -> bool {
+        let line = one_line(text);
+        let text = line.as_ref();
         let fitted = fit(self, text, font, rect.w);
         let size = self.measure(&fitted, font);
         let x = match align {
@@ -435,6 +438,21 @@ pub trait Canvas {
         self.draw_text(Point::new(x, y), &fitted, font, color);
         fitted.len() != text.len()
     }
+}
+
+/// `text` on one line: each run of line breaks and other control characters, with the
+/// spaces around it, becomes one space (none at either end).
+#[must_use]
+pub fn one_line(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let pieces: Vec<&str> = text
+        .split(char::is_control)
+        .map(str::trim)
+        .filter(|piece| !piece.is_empty())
+        .collect();
+    std::borrow::Cow::Owned(pieces.join(" "))
 }
 
 /// `text`, or as much of it as fits in `width` followed by an ellipsis.
@@ -614,6 +632,26 @@ pub(crate) mod tests {
             a.intersect(&Rect::new(5.0, 5.0, 10.0, 10.0)),
             Rect::new(5.0, 5.0, 5.0, 5.0)
         );
+    }
+
+    #[test]
+    fn text_with_line_breaks_is_drawn_on_one_line_inside_its_rect() {
+        let mut canvas = Recorder::default();
+        let rect = Rect::new(10.0, 100.0, 400.0, 20.0);
+        let message = "'umask' is not recognized,\r\n  operable program.\r\n\r\n'[' too\n";
+        let cut = canvas.text(rect, message, Font::ui(13.0), Color::WHITE, Align::Start);
+        assert!(!cut, "it fits once on one line");
+        let (origin, drawn) = &canvas.texts[0];
+        assert_eq!(
+            drawn,
+            "'umask' is not recognized, operable program. '[' too"
+        );
+        assert!(origin.y >= rect.y, "not above its rect");
+        assert_eq!(one_line("tab\there"), "tab here");
+        assert!(matches!(
+            one_line("plain"),
+            std::borrow::Cow::Borrowed("plain")
+        ));
     }
 
     #[test]
