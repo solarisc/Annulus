@@ -363,7 +363,7 @@ fn main() -> ExitCode {
             match printed.unfinished {
                 None => ExitCode::SUCCESS,
                 Some(why) => {
-                    eprintln!("annulus: {}", printable(&why));
+                    eprintln!("annulus: {}", printable(why));
                     ExitCode::from(UNFINISHED)
                 }
             }
