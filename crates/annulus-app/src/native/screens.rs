@@ -239,10 +239,12 @@ fn key_rows(vault: &Vault) -> Vec<KeyRow> {
             KeyRow {
                 id: key.id,
                 label: key.label.clone(),
+                // Who uses it first: a narrow row (one asking before a delete) cuts the
+                // fingerprint's end, never that.
                 detail: format!(
-                    "{algorithm}  {}  \u{b7}  used by {}",
-                    key.fingerprint,
-                    pages::count(users, "host", "hosts")
+                    "Used by {}  \u{b7}  {algorithm}  {}",
+                    pages::count(users, "host", "hosts"),
+                    key.fingerprint
                 ),
                 public: key.public.clone(),
                 users,
@@ -2178,7 +2180,8 @@ mod tests {
         let rows = key_rows(&vault);
         let row = rows.iter().find(|row| row.id == key_id).unwrap();
         assert_eq!(row.users, 1);
-        assert!(row.detail.ends_with("used by 1 host"), "{}", row.detail);
+        // First, so a row narrowed by Cancel and Delete key still shows it.
+        assert!(row.detail.starts_with("Used by 1 host  "), "{}", row.detail);
         assert_eq!(pages::count(0, "host", "hosts"), "no hosts");
         assert_eq!(pages::count(3, "host", "hosts"), "3 hosts");
     }
