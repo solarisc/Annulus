@@ -222,6 +222,32 @@ struct KeyRow {
     users: usize,
 }
 
+/// The vault's keys as the list shows them, each with how many hosts log in with it.
+fn key_rows(vault: &Vault) -> Vec<KeyRow> {
+    vault
+        .ssh_keys()
+        .iter()
+        .map(|key| {
+            let users = vault
+                .hosts()
+                .iter()
+                .filter(|host| host.key_id == Some(key.id))
+                .count();
+            let algorithm = key.public.split_whitespace().next().unwrap_or_default();
+            KeyRow {
+                id: key.id,
+                label: key.label.clone(),
+                detail: format!(
+                    "{algorithm}  {}  \u{b7}  used by {users} host(s)",
+                    key.fingerprint
+                ),
+                public: key.public.clone(),
+                users,
+            }
+        })
+        .collect()
+}
+
 /// The Keychain screen.
 #[derive(Default)]
 pub struct KeychainView {
@@ -837,28 +863,7 @@ impl KeychainView {
 
     /// The keys, each with Copy, Install and Delete; Delete asks once more.
     fn list(&mut self, ui: &mut Ui<'_>, area: Rect, vault: &mut Vault) {
-        let list: Vec<KeyRow> = vault
-            .ssh_keys()
-            .iter()
-            .map(|key| {
-                let users = vault
-                    .hosts()
-                    .iter()
-                    .filter(|host| host.key_id == Some(key.id))
-                    .count();
-                let algorithm = key.public.split_whitespace().next().unwrap_or_default();
-                KeyRow {
-                    id: key.id,
-                    label: key.label.clone(),
-                    detail: format!(
-                        "{algorithm}  {}  \u{b7}  used by {users} host(s)",
-                        key.fingerprint
-                    ),
-                    public: key.public.clone(),
-                    users,
-                }
-            })
-            .collect();
+        let list = key_rows(vault);
         let confirm = self.confirm_delete;
         let mut confirm_next = confirm;
         let (mut remove, mut install, mut copied, mut unkey) = (None, None, None, None);
