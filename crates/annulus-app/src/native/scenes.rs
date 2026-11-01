@@ -1779,8 +1779,24 @@ fn workers() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get().min(8))
 }
 
+/// The agents' tests time a real shell's prompt (a pause of `control::QUIET` with no prompt
+/// reads as a command waiting for input). Rendering every scene on all cores beside them
+/// starved PowerShell on the Windows runner, so the renders run alone; the agents' tests
+/// share this with each other.
+static TIMED_SHELLS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Holds off the scene renders while an agent's shell is being timed.
+fn timing_a_shell() -> std::sync::RwLockReadGuard<'static, ()> {
+    TIMED_SHELLS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[test]
 fn every_scene_renders_without_layout_faults() {
+    let _alone = TIMED_SHELLS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = out_dir();
     std::fs::create_dir_all(&dir).unwrap();
     // `ANNULUS_SCENES=forwards` renders only the scenes whose names contain it.
@@ -4189,6 +4205,7 @@ fn tabs_past_the_strips_end_wait_in_the_all_tabs_menu_and_come_back_when_picked(
 #[test]
 fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output() {
     use annulus_control::client::Client;
+    let _timed = timing_a_shell();
     let mut app = NativeApp::new(Some(fixture_vault("agent-run", false)));
     app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
     let dir = app
@@ -4281,6 +4298,7 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
 #[test]
 fn an_agent_hears_why_its_tab_could_not_connect_and_its_command_is_refused_at_once() {
     use annulus_control::client::Client;
+    let _timed = timing_a_shell();
     let mut app = NativeApp::new(Some(fixture_vault("agent-failed", false)));
     app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
     let dir = app
@@ -4332,6 +4350,7 @@ fn an_agent_hears_why_its_tab_could_not_connect_and_its_command_is_refused_at_on
 fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_next() {
     use super::control::Ran;
     use annulus_control::client::Client;
+    let _timed = timing_a_shell();
     // A line a second for a while, in every local shell the runners have.
     let ticking = if cfg!(windows) {
         "ping -n 40 127.0.0.1"
@@ -4423,6 +4442,7 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
 fn an_agents_silent_command_is_not_done_until_its_prompt_is_back_and_wait_follows_it() {
     use annulus_control::client::Client;
     use annulus_control::protocol::{RunOutput, RunState};
+    let _timed = timing_a_shell();
     let mut app = NativeApp::new(Some(fixture_vault("agent-silent", false)));
     app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
     let dir = app
@@ -4497,6 +4517,7 @@ fn an_agents_silent_command_is_not_done_until_its_prompt_is_back_and_wait_follow
 fn an_agents_tab_opened_behind_starts_unseen_and_closes_once_its_shell_ends() {
     use annulus_control::client::Client;
     use annulus_control::protocol::RunState;
+    let _timed = timing_a_shell();
     let mut app = NativeApp::new(Some(fixture_vault("agent-behind", false)));
     app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
     let dir = app
