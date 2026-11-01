@@ -508,6 +508,26 @@ const SCENES: &[Scene] = &[
         setup: nothing,
         acts: &[Act::Click("More ways to add hosts")],
     },
+    // New host and its menu are one control: only the half under the pointer lights up.
+    Scene {
+        name: "hosts-new-menu-hover",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Hover("More ways to add hosts")],
+    },
+    // Beside the editor the actions row is too narrow for its labels: icons only.
+    Scene {
+        name: "hosts-toolbar-compact",
+        width: 1040,
+        height: 680,
+        scale: 1.0,
+        populated: true,
+        setup: edit_prod_db,
+        acts: &[],
+    },
     Scene {
         name: "hosts-context-menu",
         width: 1100,
@@ -3644,6 +3664,9 @@ fn tab_crosses_the_hosts_toolbar_left_to_right() {
         at("New host"),
         at("More ways to add hosts"),
         at("Terminal"),
+        at("Tags"),
+        at("Grid view"),
+        at("List view"),
         at("Homelab"),
     ];
     assert!(order.is_sorted(), "{order:?}: {focused:?}");

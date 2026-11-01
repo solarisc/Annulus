@@ -9,8 +9,8 @@ use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, TITLE, Tone,
-    button_width,
+    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, SPLIT_MENU_W, TITLE,
+    Tone, button_width, split_button_width,
 };
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
@@ -33,6 +33,8 @@ const ROW_H: f32 = 44.0;
 const GAP: f32 = 12.0;
 /// Side padding of the screen.
 const PAD: f32 = 28.0;
+/// Width of the grid/list toggle.
+const TOGGLE_W: f32 = 72.0;
 
 /// How hosts are shown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -465,9 +467,13 @@ impl HostsView {
         let (cards, groups) = self.gather(vault);
         let mut main = area.inset(PAD, 0.0);
         main.take_top(space::XL);
-        self.header(ui, main.take_top(36.0), cards.len(), !tags.is_empty());
+        header(ui, main.take_top(36.0), cards.len());
         main.take_top(space::L);
-        if let Some(toolbar) = self.toolbar(ui, main.take_top(CONTROL), vault) {
+        if let Some(found) = self.search(ui, main.take_top(CONTROL), vault) {
+            action = Some(found);
+        }
+        main.take_top(space::M);
+        if let Some(toolbar) = self.toolbar(ui, main.take_top(CONTROL), vault, !tags.is_empty()) {
             action = Some(toolbar);
         }
         main.take_top(space::L);
@@ -632,47 +638,144 @@ impl HostsView {
         (cards, groups)
     }
 
-    /// The title, the host count, the Tags button (when any host has a tag) and the grid/list
-    /// toggle.
-    fn header(&mut self, ui: &mut Ui<'_>, rect: Rect, count: usize, tagged: bool) {
-        let t = ui.theme;
+    /// The search box. It filters as you type; Enter connects to the first card, or to a
+    /// typed `user@host:port` when no card matches.
+    fn search(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &Vault) -> Option<HostsAction> {
+        let field = ui.text_field(
+            Id::new("hosts.search"),
+            rect,
+            &mut self.query,
+            FieldStyle {
+                placeholder: "Search hosts, or type user@host:port to connect",
+                icon: Some(icons::SEARCH),
+                ..FieldStyle::default()
+            },
+        );
+        if !field.submitted {
+            return None;
+        }
+        // Matched against the text as it is now: what was typed this frame counts.
+        let (cards, _) = self.gather(vault);
+        let query = self.query.trim();
+        // Enter with nothing typed connects nowhere: the first card is just the first.
+        if query.is_empty() {
+            return None;
+        }
+        Some(match cards.first() {
+            Some(first) => HostsAction::Connect(first.id),
+            None => HostsAction::QuickConnect(query.to_owned()),
+        })
+    }
+
+    /// The actions under the search: New host with its menu and Terminal on the left, the Tags
+    /// button (when any host has a tag) and the grid/list toggle on the right.
+    fn toolbar(
+        &mut self,
+        ui: &mut Ui<'_>,
+        rect: Rect,
+        vault: &mut Vault,
+        tagged: bool,
+    ) -> Option<HostsAction> {
         let mut row = rect;
-        // Laid out from the right, drawn from the left: Tab follows the drawing order.
-        let toggle = row.take_right(72.0);
+        let mut action = None;
+        let mut new_w = split_button_width(&mut ui.gfx, "New host", icons::PLUS);
+        let mut term_w = button_width(&mut ui.gfx, "Terminal", Some(icons::TERMINAL));
+        let mut tags_w = button_width(&mut ui.gfx, "Tags", Some(icons::TAG));
+        let tags_room = if tagged { tags_w + space::S } else { 0.0 };
+        // Labels go when the row cannot hold them all; the icons and the names stay.
+        let compact = new_w + space::S + term_w + space::L + tags_room + TOGGLE_W > row.w;
+        if compact {
+            (new_w, term_w, tags_w) = (CONTROL + SPLIT_MENU_W, CONTROL, CONTROL);
+        }
+        let label = |text: &'static str| if compact { "" } else { text };
+
+        // Laid out from both ends, drawn from the left: Tab follows the drawing order.
+        let new = row.take_left(new_w);
+        row.take_left(space::S);
+        let terminal = row.take_left(term_w);
+        let toggle = row.take_right(TOGGLE_W);
         let tags = tagged.then(|| {
             row.take_right(space::S);
-            let width = button_width(&mut ui.gfx, "Tags", Some(icons::TAG));
-            row.take_right(width).centered(width, CONTROL)
+            row.take_right(tags_w)
         });
-        let title = ui.gfx.measure("Hosts", TITLE).width;
-        let head = row.take_left(title + 2.0);
-        ui.strict_text(head, "Hosts", TITLE, t.text, Align::Start);
-        row.take_left(space::S + 2.0);
-        if count > 0 {
-            let label = count.to_string();
-            let width = ui.gfx.measure(&label, SMALL).width + 14.0;
-            let badge = Rect::new(row.x, row.center().y - 10.0, width, 20.0);
-            ui.gfx.fill_rect(badge, 10.0, t.hover);
-            ui.gfx.text(badge, &label, SMALL, t.text2, Align::Center);
+
+        let items = [
+            "New group".to_owned(),
+            "Import from ssh_config".to_owned(),
+            "Copy hosts as ssh_config".to_owned(),
+        ];
+        let new_host = ui.split_button(
+            Id::new("hosts.new"),
+            new,
+            "New host",
+            icons::PLUS,
+            "More ways to add hosts",
+            &items,
+        );
+        if new_host.main.clicked || super::shortcuts::NEW_HOST.pressed(ui) {
+            self.new_host(vault);
         }
-        let kind = if self.tag_bar {
-            Kind::Secondary
-        } else {
-            Kind::Ghost
-        };
-        if let Some(tags) = tags
-            && ui
-                .button(Id::new("hosts.tags"), tags, "Tags", Some(icons::TAG), kind)
-                .clicked
+        match new_host.chosen {
+            Some(0) => self.new_group(vault),
+            Some(1) => action = Some(HostsAction::ImportSshConfig),
+            Some(_) => {
+                let resolved: Vec<Host> = vault
+                    .hosts()
+                    .iter()
+                    .map(|host| vault.resolve(host).0)
+                    .collect();
+                ui.copy(annulus_import::ssh_config::export(&resolved));
+                self.notice = Some("Copied the hosts as an OpenSSH config (no passwords).".into());
+            }
+            None => {}
+        }
+        let term_id = Id::new("hosts.terminal");
+        if ui
+            .button(
+                term_id,
+                terminal,
+                label("Terminal"),
+                Some(icons::TERMINAL),
+                Kind::Ghost,
+            )
+            .clicked
         {
-            // Closing the chips stops filtering: a filter is never on out of sight.
-            self.tag_bar = !self.tag_bar;
-            self.tags.clear();
+            action = Some(HostsAction::LocalTerminal);
         }
-        let segment = toggle.centered(72.0, 32.0);
-        ui.gfx.fill_rect(segment, 8.0, t.surface);
-        ui.gfx.stroke_rect(segment, 8.0, 1.0, t.line);
-        let mut halves = segment.inset(2.0, 2.0);
+        if compact {
+            ui.set_name(term_id, "Terminal");
+            ui.tooltip(term_id, terminal, "Terminal");
+        }
+        if let Some(tags) = tags {
+            let tags_id = Id::new("hosts.tags");
+            let kind = if self.tag_bar {
+                Kind::Secondary
+            } else {
+                Kind::Ghost
+            };
+            if ui
+                .button(tags_id, tags, label("Tags"), Some(icons::TAG), kind)
+                .clicked
+            {
+                // Closing the chips stops filtering: a filter is never on out of sight.
+                self.tag_bar = !self.tag_bar;
+                self.tags.clear();
+            }
+            if compact {
+                ui.set_name(tags_id, "Tags");
+                ui.tooltip(tags_id, tags, "Tags");
+            }
+        }
+        self.view_toggle(ui, toggle);
+        action
+    }
+
+    /// The grid/list toggle: two icon buttons in one outlined segment.
+    fn view_toggle(&mut self, ui: &mut Ui<'_>, toggle: Rect) {
+        let t = ui.theme;
+        ui.gfx.fill_rect(toggle, 8.0, t.surface);
+        ui.gfx.stroke_rect(toggle, 8.0, 1.0, t.line);
+        let mut halves = toggle.inset(2.0, 2.0);
         let grid = halves.take_left(34.0);
         let list = halves;
         if ui
@@ -699,112 +802,6 @@ impl HostsView {
         {
             self.mode = Mode::List;
         }
-    }
-
-    fn toolbar(&mut self, ui: &mut Ui<'_>, rect: Rect, vault: &mut Vault) -> Option<HostsAction> {
-        let mut row = rect;
-        let mut action = None;
-        let new_w = button_width(&mut ui.gfx, "New host", Some(icons::PLUS));
-        let term_w = button_width(&mut ui.gfx, "Terminal", Some(icons::TERMINAL));
-        // Labels go when the search box would get too narrow; icons stay.
-        let compact = row.w - (new_w + CONTROL + term_w + 3.0 * space::S) < 240.0;
-        let (new_label, term_label) = if compact {
-            ("", "")
-        } else {
-            ("New host", "Terminal")
-        };
-        let term_w = if compact { CONTROL } else { term_w };
-        let new_w = if compact { CONTROL } else { new_w };
-
-        // Laid out from the right, drawn from the left: Tab follows the drawing order.
-        let terminal = row.take_right(term_w);
-        row.take_right(space::S);
-        let more = row.take_right(CONTROL);
-        row.take_right(2.0);
-        let new = row.take_right(new_w);
-        row.take_right(space::M);
-        let search = row;
-        let field = ui.text_field(
-            Id::new("hosts.search"),
-            search,
-            &mut self.query,
-            FieldStyle {
-                placeholder: "Search hosts, or type user@host:port to connect",
-                icon: Some(icons::SEARCH),
-                ..FieldStyle::default()
-            },
-        );
-        if field.submitted {
-            // Matched against the text as it is now: what was typed this frame counts.
-            let (cards, _) = self.gather(vault);
-            let query = self.query.trim();
-            // Enter with nothing typed connects nowhere: the first card is just the first.
-            if !query.is_empty() {
-                action = Some(match cards.first() {
-                    Some(first) => HostsAction::Connect(first.id),
-                    None => HostsAction::QuickConnect(query.to_owned()),
-                });
-            }
-        }
-        if ui
-            .button(
-                Id::new("hosts.new"),
-                new,
-                new_label,
-                Some(icons::PLUS),
-                Kind::Primary,
-            )
-            .clicked
-            || super::shortcuts::NEW_HOST.pressed(ui)
-        {
-            self.new_host(vault);
-        }
-        let items = vec![
-            "New group".to_owned(),
-            "Import from ssh_config".to_owned(),
-            "Copy hosts as ssh_config".to_owned(),
-        ];
-        let chosen = ui.menu_button(
-            Id::new("hosts.new.more"),
-            more,
-            "",
-            Some(icons::CHEVRON_DOWN),
-            Kind::Primary,
-            &items,
-        );
-        ui.set_name(Id::new("hosts.new.more"), "More ways to add hosts");
-        ui.tooltip(
-            Id::new("hosts.new.more"),
-            more,
-            "New group, import or export",
-        );
-        match chosen {
-            Some(0) => self.new_group(vault),
-            Some(1) => action = Some(HostsAction::ImportSshConfig),
-            Some(_) => {
-                let resolved: Vec<Host> = vault
-                    .hosts()
-                    .iter()
-                    .map(|host| vault.resolve(host).0)
-                    .collect();
-                ui.copy(annulus_import::ssh_config::export(&resolved));
-                self.notice = Some("Copied the hosts as an OpenSSH config (no passwords).".into());
-            }
-            None => {}
-        }
-        if ui
-            .button(
-                Id::new("hosts.terminal"),
-                terminal,
-                term_label,
-                Some(icons::TERMINAL),
-                Kind::Secondary,
-            )
-            .clicked
-        {
-            action = Some(HostsAction::LocalTerminal);
-        }
-        action
     }
 
     /// The tag filter (F-HOST-004): a chip per tag in use, `(name, hosts)`, that chooses or
@@ -2087,6 +2084,23 @@ impl Form {
         ui.section_label(inner, title);
         self.y += 28.0 + space::S;
         response.clicked
+    }
+}
+
+/// The screen's title and the number of hosts listed.
+fn header(ui: &mut Ui<'_>, rect: Rect, count: usize) {
+    let t = ui.theme;
+    let mut row = rect;
+    let title = ui.gfx.measure("Hosts", TITLE).width;
+    let head = row.take_left(title + 2.0);
+    ui.strict_text(head, "Hosts", TITLE, t.text, Align::Start);
+    row.take_left(space::S + 2.0);
+    if count > 0 {
+        let label = count.to_string();
+        let width = ui.gfx.measure(&label, SMALL).width + 14.0;
+        let badge = Rect::new(row.x, row.center().y - 10.0, width, 20.0);
+        ui.gfx.fill_rect(badge, 10.0, t.hover);
+        ui.gfx.text(badge, &label, SMALL, t.text2, Align::Center);
     }
 }
 
