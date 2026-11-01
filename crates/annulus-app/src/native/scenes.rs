@@ -887,13 +887,13 @@ const SCENES: &[Scene] = &[
         ],
     },
     Scene {
-        name: "forwards-wizard-socks-small",
+        name: "forwards-wizard-remote-small",
         width: 640,
         height: 520,
         scale: 1.0,
         populated: true,
         setup: forwards_empty,
-        acts: &[Act::Click("Browse through a server")],
+        acts: &[Act::Click("Share a service from this computer")],
     },
     Scene {
         name: "known-hosts",
@@ -2835,9 +2835,15 @@ fn escape_closes_the_open_card_and_keeps_what_a_delete_would_remove() {
     app.section = super::Section::PortForwarding;
     output = step(&mut app, &mut state, &[], 8.0);
     output = step(&mut app, &mut state, &click_on(&output, "New rule"), 9.0);
-    assert!(output.zones.iter().any(|zone| zone.label == "Save"));
+    let wizard = |output: &FrameOutput| {
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Reach a service behind a server")
+    };
+    assert!(wizard(&output), "New rule opens the wizard");
     output = step(&mut app, &mut state, &escape, 10.0);
-    assert!(!output.zones.iter().any(|zone| zone.label == "Save"));
+    assert!(!wizard(&output));
 }
 
 #[test]
