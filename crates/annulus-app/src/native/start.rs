@@ -456,15 +456,16 @@ fn draw_row(ui: &mut Ui<'_>, base: Id, rect: Rect, row: &Row, highlighted: bool)
         os::tile(ui, tile, &row.title, row.os);
     }
     inner.take_left(space::M);
-    // Right side: when it was used, and Enter on the highlighted row.
+    // Right side: when it was used, and Enter on the highlighted row. Every row keeps Enter's
+    // room, so the times line up in one column.
+    let width = keys_width(&mut ui.gfx, "Enter");
+    let keys = inner.take_right(width);
+    inner.take_right(space::M);
     if highlighted {
-        let width = keys_width(&mut ui.gfx, "Enter");
-        let keys = inner.take_right(width);
         ui.keys(
             Point::new(keys.x, keys.center().y - KEYCAP_H / 2.0),
             "Enter",
         );
-        inner.take_right(space::M);
     }
     if let Some(when) = &row.when {
         let width = ui.gfx.measure(when, SMALL).width;
