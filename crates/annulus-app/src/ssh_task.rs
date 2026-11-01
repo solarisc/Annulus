@@ -1,12 +1,14 @@
 //! A one-off command on a saved host, run in the background: connect (the screen shows the
-//! host-key and password questions the connection asks), run it, and hand back how it ended.
-//! Used for actions the user starts, such as installing a key (F-KEY-004).
+//! host-key and password questions the connection asks), run the command written for the
+//! server's shell (a Windows server's cmd or PowerShell gets its own), and hand back how it
+//! ended. Used for actions the user starts, such as installing a key (F-KEY-004).
 
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
 use annulus_session::{Answers, Hop, Program, SessionEvent};
 use annulus_ssh::Exec;
+use annulus_ssh::remote::Commands;
 
 /// How the command ended: its exit status and output, or why it could not run.
 pub type Outcome = Result<Exec, String>;
@@ -21,11 +23,12 @@ pub struct SshTask {
 }
 
 impl SshTask {
-    /// Connects with `program` (an SSH program from the hosts screen) and runs `command`.
-    /// `wake` is called from the background thread whenever there is news.
+    /// Connects with `program` (an SSH program from the hosts screen) and runs the one of
+    /// `commands` for the server's shell. `wake` is called from the background thread
+    /// whenever there is news.
     pub fn exec(
         program: Program,
-        command: String,
+        commands: Commands,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let (events_tx, events) = channel();
@@ -88,7 +91,7 @@ impl SshTask {
                             annulus_session::connect_chain(&via, &last, &files, &answers, notify)
                                 .await?;
                         connection
-                            .exec(&command)
+                            .exec_in_shell(&commands)
                             .await
                             .map_err(|error| error.to_string())
                     };
@@ -128,6 +131,14 @@ impl SshTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command that changes nothing, in either kind of shell.
+    fn harmless() -> Commands {
+        Commands {
+            unix: "true".into(),
+            windows: "ver".into(),
+        }
+    }
 
     /// Polls `task` until it is done (at most 20 s).
     fn finish(task: &mut SshTask) -> Outcome {
@@ -176,7 +187,7 @@ mod tests {
             startup: None,
             term: String::new(),
         };
-        let task = SshTask::exec(program, "true".into(), || {});
+        let task = SshTask::exec(program, harmless(), || {});
         std::thread::sleep(std::time::Duration::from_millis(300));
         // Cancel (or a lock) drops the task: nothing should stay connected.
         drop(task);
@@ -190,7 +201,7 @@ mod tests {
 
     #[test]
     fn a_host_annulus_cannot_reach_itself_fails_at_once() {
-        let mut task = SshTask::exec(Program::system_ssh("web"), "true".into(), || {});
+        let mut task = SshTask::exec(Program::system_ssh("web"), harmless(), || {});
         assert_eq!(
             finish(&mut task),
             Err("Annulus cannot connect to this host itself.".into())
@@ -223,7 +234,7 @@ mod tests {
             startup: None,
             term: String::new(),
         };
-        let mut task = SshTask::exec(program, "true".into(), || {});
+        let mut task = SshTask::exec(program, harmless(), || {});
         assert!(finish(&mut task).is_err());
     }
 }

@@ -3,54 +3,75 @@
 //! `authorized_keys`, install it on a saved host (F-KEY-004), and delete keys. Hosts pick
 //! a key in the host editor.
 
-use annulus_ssh::keys::KeyPair;
+use annulus_ssh::keys::{self, KeyPair};
+use annulus_ssh::remote::without_clixml;
 use annulus_vault::hosts::Secret;
 use annulus_vault::keychain::SshKey;
 use annulus_vault::vault::Vault;
 
 use crate::ssh_task::Outcome;
 
-/// What an install's outcome means: done, or why not.
+/// What a key command printed, on one line for the message: PowerShell's CLIXML and our
+/// own error prefix left out. `None` when it printed nothing.
+fn said(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            line.strip_prefix(keys::FAILED.trim_end())
+                .map_or(line, str::trim_start)
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    (!lines.is_empty()).then(|| lines.join(" "))
+}
+
+fn status_text(status: Option<u32>) -> String {
+    status.map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+}
+
+/// What an install's outcome means: done, or why not. Done only when the command said so
+/// ([`keys::INSTALLED`]): a shell that ran nothing of ours can still end with status 0.
 pub(crate) fn install_result(outcome: Outcome) -> Result<(), String> {
     let exec = outcome?;
-    if exec.status == Some(0) {
+    let output = without_clixml(&String::from_utf8_lossy(&exec.output));
+    let installed = output.lines().any(|line| line.trim() == keys::INSTALLED);
+    if exec.status == Some(0) && installed {
         return Ok(());
     }
-    let output = String::from_utf8_lossy(&exec.output).trim().to_owned();
-    Err(if output.is_empty() {
-        format!(
+    Err(match said(&output) {
+        Some(reason) => format!("The host could not add the key: {reason}"),
+        None if exec.status == Some(0) => {
+            "The host could not add the key: its shell ran something else.".to_owned()
+        }
+        None => format!(
             "The host could not add the key (exit status {}).",
-            exec.status
-                .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
-        )
-    } else {
-        format!("The host could not add the key: {output}")
+            status_text(exec.status)
+        ),
     })
 }
 
-/// What taking a key off a server came to ([`annulus_ssh::keys::remove_command`]): how many
-/// lines of its `authorized_keys` held the key (0 when none did), or why it is still there.
+/// What taking a key off a server came to ([`keys::remove_commands`]): how many lines of its
+/// `authorized_keys` held the key (0 when none did), or why it is still there.
 pub(crate) fn removal_result(outcome: Outcome) -> Result<usize, String> {
     let exec = outcome?;
-    let output = String::from_utf8_lossy(&exec.output);
+    let output = without_clixml(&String::from_utf8_lossy(&exec.output));
     let count = output.lines().find_map(|line| {
         line.trim()
-            .strip_prefix(annulus_ssh::keys::REMOVED.trim_end())
+            .strip_prefix(keys::REMOVED.trim_end())
             .and_then(|count| count.trim().parse().ok())
     });
+    // A Windows server whose shell is PowerShell turns every failing status into 1, so
+    // the command's own word counts, not only its status.
+    let still_there = output.lines().any(|line| line.trim() == keys::STILL_THERE);
     match (exec.status, count) {
         (Some(0), Some(count)) => Ok(count),
         (Some(3), _) => Err("the key was still there afterwards".into()),
-        _ => Err(output.trim().lines().last().map_or_else(
-            || {
-                format!(
-                    "exit status {}",
-                    exec.status
-                        .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
-                )
-            },
-            str::to_owned,
-        )),
+        _ if still_there => Err("the key was still there afterwards".into()),
+        _ => {
+            Err(said(&output)
+                .unwrap_or_else(|| format!("exit status {}", status_text(exec.status))))
+        }
     }
 }
 
@@ -150,17 +171,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_install_succeeds_only_on_exit_status_zero() {
+    fn an_install_succeeds_only_when_the_command_says_so_with_status_zero() {
         let exec = |status, output: &[u8]| {
             Ok(annulus_ssh::Exec {
                 status,
                 output: output.to_vec(),
             })
         };
-        assert_eq!(install_result(exec(Some(0), b"")), Ok(()));
+        assert_eq!(
+            install_result(exec(Some(0), b"annulus-installed\n")),
+            Ok(())
+        );
+        assert_eq!(
+            install_result(exec(Some(0), b"annulus-installed\r\n")),
+            Ok(()),
+            "from Windows"
+        );
+        // A shell that ran nothing of ours (a menu, another kind of shell) can end with 0.
+        assert_eq!(
+            install_result(exec(Some(0), b"")),
+            Err("The host could not add the key: its shell ran something else.".into())
+        );
         assert_eq!(
             install_result(exec(Some(1), b"touch: Read-only file system\n")),
             Err("The host could not add the key: touch: Read-only file system".into())
+        );
+        // cmd's lines and PowerShell's CLIXML come back as one plain line.
+        assert_eq!(
+            install_result(exec(
+                Some(1),
+                b"'umask' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n"
+            )),
+            Err("The host could not add the key: 'umask' is not recognized as an internal or \
+                 external command, operable program or batch file."
+                .into())
+        );
+        assert_eq!(
+            install_result(exec(
+                Some(1),
+                b"annulus-error: Access to the path is denied.\r\n#< CLIXML\r\n<Objs Version=\"1.1.0.1\"></Objs>\r\n"
+            )),
+            Err("The host could not add the key: Access to the path is denied.".into())
         );
         assert_eq!(
             install_result(exec(None, b"")),
@@ -184,6 +235,15 @@ mod tests {
         assert_eq!(
             removal_result(exec(Some(3), b"")),
             Err("the key was still there afterwards".into())
+        );
+        // A Windows server whose shell is PowerShell ends a failing command with 1.
+        assert_eq!(
+            removal_result(exec(Some(1), b"annulus-still-there\r\n")),
+            Err("the key was still there afterwards".into())
+        );
+        assert_eq!(
+            removal_result(exec(Some(1), b"annulus-error: Access is denied.\r\n")),
+            Err("Access is denied.".into())
         );
         assert_eq!(
             removal_result(exec(Some(2), b"sh: cannot create: Read-only file system\n")),

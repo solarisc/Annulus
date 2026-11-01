@@ -548,7 +548,7 @@ impl KeychainView {
             self.removal = None;
             return;
         }
-        let Some(command) = keys::remove_command(&key.public) else {
+        let Some(commands) = keys::remove_commands(&key.public) else {
             self.message = Some((
                 true,
                 "This key's public half cannot be read, so it cannot be taken off servers. \
@@ -566,7 +566,7 @@ impl KeychainView {
                 label: label.clone(),
                 task: Some(SshTask::exec(
                     connect::host(vault, files, host),
-                    command.clone(),
+                    commands.clone(),
                     move || {
                         if let Some(waker) = &waker {
                             waker();
@@ -864,7 +864,7 @@ impl KeychainView {
         let waker = waker.cloned();
         install.task = Some(SshTask::exec(
             connect::host(vault, files, host),
-            keys::install_command(&key.public),
+            keys::install_commands(&key.public),
             move || {
                 if let Some(waker) = &waker {
                     waker();

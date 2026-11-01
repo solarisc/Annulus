@@ -184,8 +184,8 @@ fn refused(message: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::ConnectionRefused, message.to_owned())
 }
 
-/// Standard base64, for the Basic auth header.
-fn base64(bytes: &[u8]) -> String {
+/// Standard base64, for the Basic auth header (and PowerShell's `-EncodedCommand`).
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

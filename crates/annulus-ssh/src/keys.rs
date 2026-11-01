@@ -6,6 +6,8 @@ use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, EcdsaCurve, HashAlg, PrivateKey};
 use zeroize::Zeroizing;
 
+use crate::remote::{self, Commands};
+
 /// A private key in OpenSSH format, unencrypted (the vault encrypts it), and its public
 /// key line.
 pub struct KeyPair {
@@ -141,36 +143,57 @@ pub fn import(text: &str, passphrase: Option<&str>) -> Result<KeyPair, KeyError>
     })
 }
 
-/// The shell command that adds `public` (an `authorized_keys` line) to the remote
-/// `~/.ssh/authorized_keys` once, with the permissions sshd insists on (F-KEY-004). Running
-/// it again changes nothing.
-#[must_use]
-pub fn install_command(public: &str) -> String {
-    let line = public
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace('\'', r"'\''");
-    let file = "~/.ssh/authorized_keys";
-    format!(
-        "umask 077 && mkdir -p ~/.ssh && touch {file} && chmod 700 ~/.ssh && chmod 600 {file} \
-         && {{ [ ! -s {file} ] || [ -z \"$(tail -c 1 {file})\" ] || echo >> {file}; }} \
-         && {{ grep -qxF '{line}' {file} || printf '%s\\n' '{line}' >> {file}; }}"
-    )
-}
+/// What [`install_commands`] prints once the key is in place. A shell that ran nothing of
+/// ours (a menu, a shell of another kind) may still end with status 0, so success is this
+/// word, not the status alone.
+pub const INSTALLED: &str = "annulus-installed";
 
-/// What [`remove_command`] prints once the key is gone, before the number of lines that held
-/// it (0 when it was not there).
+/// What [`remove_commands`] prints once the key is gone, before the number of lines that
+/// held it (0 when it was not there).
 pub const REMOVED: &str = "annulus-removed ";
 
-/// The shell command that takes `public` off the remote `~/.ssh/authorized_keys` (deleting a
-/// key, F-KEY-004): every line holding its key data, whatever its options or comment, and
-/// nothing else. The file is rewritten in place, so its mode, owner and any link stay. It
-/// prints [`REMOVED`] and the count once a fresh read finds the key gone; it exits 2 when
-/// the file cannot be read or written and 3 when the key is still there. `None` for a line
-/// without base64 key data.
+/// What [`remove_commands`] prints when a fresh read still finds the key.
+pub const STILL_THERE: &str = "annulus-still-there";
+
+/// What the Windows commands print before the reason they failed.
+pub const FAILED: &str = "annulus-error: ";
+
+/// The commands that add `public` (an `authorized_keys` line) to the server's
+/// `authorized_keys` once, with the permissions sshd insists on (F-KEY-004), and print
+/// [`INSTALLED`]. Running them again changes nothing.
+///
+/// On Windows the file is the one sshd reads for the user: `%USERPROFILE%\.ssh` for most, but
+/// for an administrator `%ProgramData%\ssh\administrators_authorized_keys` while the stock
+/// `Match Group administrators` block of `sshd_config` is on. It is written as UTF-8 without
+/// a byte order mark, and only its owner, SYSTEM and the Administrators may change it (only
+/// SYSTEM and the Administrators for the shared file).
 #[must_use]
-pub fn remove_command(public: &str) -> Option<String> {
+pub fn install_commands(public: &str) -> Commands {
+    let line = public.split_whitespace().collect::<Vec<_>>().join(" ");
+    let quoted = line.replace('\'', r"'\''");
+    let file = "~/.ssh/authorized_keys";
+    let unix = format!(
+        "umask 077 && mkdir -p ~/.ssh && touch {file} && chmod 700 ~/.ssh && chmod 600 {file} \
+         && {{ [ ! -s {file} ] || [ -z \"$(tail -c 1 {file})\" ] || echo >> {file}; }} \
+         && {{ grep -qxF '{quoted}' {file} || printf '%s\\n' '{quoted}' >> {file}; }} \
+         && echo {INSTALLED}"
+    );
+    let body = WINDOWS_INSTALL.replace("@LINE@", &powershell_quoted(&line));
+    Commands {
+        unix,
+        windows: remote::powershell(&windows_script(&body)),
+    }
+}
+
+/// The commands that take `public` off the server's `authorized_keys` (deleting a key,
+/// F-KEY-004): every line holding its key data, whatever its options or comment, and nothing
+/// else. The file is rewritten in place, so its mode, owner and any link (on Windows its
+/// permissions) stay. They print [`REMOVED`] and the count once a fresh read finds the key
+/// gone, or [`STILL_THERE`] (exiting 3) when it is not; they exit 2 when the file cannot be
+/// read or written. On Windows the file is the one [`install_commands`] picks. `None` for a
+/// line without base64 key data.
+#[must_use]
+pub fn remove_commands(public: &str) -> Option<Commands> {
     let data = public.split_whitespace().nth(1)?;
     if !data
         .bytes()
@@ -178,15 +201,98 @@ pub fn remove_command(public: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
+    let unix = format!(
         "f=~/.ssh/authorized_keys; [ -e \"$f\" ] || {{ echo '{REMOVED}0'; exit 0; }}; \
          n=$(grep -cF -- '{data}' \"$f\"); [ $? -le 1 ] || exit 2; \
          if [ \"$n\" -gt 0 ]; then t=\"$f.annulus-$$\"; \
          (umask 077 && grep -vF -- '{data}' \"$f\" > \"$t\"); \
          [ $? -le 1 ] && cat \"$t\" > \"$f\" || {{ rm -f \"$t\"; exit 2; }}; rm -f \"$t\"; fi; \
-         grep -qF -- '{data}' \"$f\" && exit 3; echo \"{REMOVED}$n\""
-    ))
+         grep -qF -- '{data}' \"$f\" && {{ echo {STILL_THERE}; exit 3; }}; echo \"{REMOVED}$n\""
+    );
+    let body = WINDOWS_REMOVE.replace("@DATA@", data);
+    Some(Commands {
+        unix,
+        windows: remote::powershell(&windows_script(&body)),
+    })
 }
+
+/// `text` inside a PowerShell single-quoted string: each quote doubled, the typographic ones
+/// too, which PowerShell also takes for quotes.
+fn powershell_quoted(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted
+}
+
+/// A Windows key script: `$f` set to the `authorized_keys` sshd reads for the user (`$shared`
+/// when it is the administrators' file), then `body`; any error is printed after [`FAILED`]
+/// as one plain line (no CLIXML) and exits 2.
+fn windows_script(body: &str) -> String {
+    format!(
+        r"$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+try {{
+  $f = Join-Path $env:USERPROFILE '.ssh\authorized_keys'
+  $config = Join-Path $env:ProgramData 'ssh\sshd_config'
+  $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  $shared = $admin -and (Test-Path -LiteralPath $config) -and (Select-String -LiteralPath $config -Pattern '^\s*Match\s+Group\s+administrators\b' -Quiet)
+  if ($shared) {{ $f = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys' }}
+{body}
+}} catch {{
+  $e = $_.Exception
+  while ($e.InnerException) {{ $e = $e.InnerException }}
+  [Console]::Out.WriteLine('{FAILED}' + $e.Message)
+  exit 2
+}}
+"
+    )
+}
+
+/// Adds `@LINE@` to `$f` once, then lets only its owner, SYSTEM and the Administrators (only
+/// the last two for the shared file) change it, by SID, since group names are translated.
+const WINDOWS_INSTALL: &str = r#"  $line = '@LINE@'
+  New-Item -ItemType Directory -Force -Path (Split-Path $f) | Out-Null
+  $text = ''
+  if (Test-Path -LiteralPath $f) { $text = [IO.File]::ReadAllText($f) }
+  if (@($text -split "`r?`n" | ForEach-Object { $_.Trim() }) -cnotcontains $line) {
+    if ($text -and -not $text.EndsWith("`n")) { $line = "`r`n" + $line }
+    [IO.File]::AppendAllText($f, $line + "`r`n", (New-Object Text.UTF8Encoding $false))
+  }
+  $grant = '*S-1-5-32-544:F', '*S-1-5-18:F'
+  if (-not $shared) { $grant += '*' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value + ':F' }
+  icacls $f /inheritance:r /grant $grant | Out-Null
+  if ($LASTEXITCODE) { throw "could not limit who may change $f" }
+  [Console]::Out.WriteLine('annulus-installed')
+  exit 0"#;
+
+/// Takes every line holding `@DATA@` off `$f`, rewriting it in place (it keeps its
+/// permissions), then reads it again.
+const WINDOWS_REMOVE: &str = r#"  $data = '@DATA@'
+  $n = 0
+  if (Test-Path -LiteralPath $f) {
+    $text = [IO.File]::ReadAllText($f)
+    $nl = "`n"
+    if ($text.Contains("`r`n")) { $nl = "`r`n" }
+    $lines = $text -split "`r?`n"
+    $kept = @($lines | Where-Object { -not $_.Contains($data) })
+    $n = $lines.Count - $kept.Count
+    if ($n) {
+      $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($kept -join $nl)
+      $out = [IO.File]::Open($f, 'Truncate', 'Write')
+      try { $out.Write($bytes, 0, $bytes.Length) } finally { $out.Dispose() }
+    }
+    if ([IO.File]::ReadAllText($f).Contains($data)) {
+      [Console]::Out.WriteLine('annulus-still-there')
+      exit 3
+    }
+  }
+  [Console]::Out.WriteLine("annulus-removed $n")
+  exit 0"#;
 
 /// Decodes a stored private key for signing.
 pub(crate) fn decode(private: &str) -> Option<PrivateKey> {
@@ -226,20 +332,78 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_install_command_quotes_the_key_line() {
-        let command = install_command("ssh-ed25519 AAAA it's me\n");
-        assert!(
-            command.contains(r"'ssh-ed25519 AAAA it'\''s me'"),
-            "{command}"
-        );
-        assert!(command.contains("chmod 600 ~/.ssh/authorized_keys"));
-        assert!(command.contains("grep -qxF"), "only added when missing");
+    /// The PowerShell script a Windows command carries.
+    fn script_of(command: &str) -> String {
+        use base64::Engine as _;
+        let encoded = command.rsplit(' ').next().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let utf16: Vec<u16> = bytes
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16(&utf16).unwrap()
     }
 
     #[test]
-    fn the_remove_command_matches_the_key_data_and_refuses_anything_else() {
-        let command = remove_command("ssh-ed25519 AAAAC3Nz/a+b= me@laptop").unwrap();
+    fn the_install_commands_quote_the_key_line() {
+        let commands = install_commands("ssh-ed25519 AAAA it's me\u{2019}\n");
+        assert!(
+            commands
+                .unix
+                .contains("'ssh-ed25519 AAAA it'\\''s me\u{2019}'"),
+            "{}",
+            commands.unix
+        );
+        assert!(commands.unix.contains("chmod 600 ~/.ssh/authorized_keys"));
+        assert!(
+            commands.unix.contains("grep -qxF"),
+            "only added when missing"
+        );
+        let script = script_of(&commands.windows);
+        assert!(
+            script.contains("'ssh-ed25519 AAAA it''s me\u{2019}\u{2019}'"),
+            "{script}"
+        );
+        assert!(script.contains("-cnotcontains"), "only added when missing");
+    }
+
+    #[test]
+    fn on_windows_an_administrators_key_goes_where_sshd_reads_it() {
+        let public = "ssh-ed25519 AAAAC3Nz me";
+        let install = script_of(&install_commands(public).windows);
+        let remove = script_of(&remove_commands(public).unwrap().windows);
+        for script in [&install, &remove] {
+            assert!(script.contains("Match\\s+Group\\s+administrators"));
+            assert!(script.contains(r"'ssh\administrators_authorized_keys'"));
+            assert!(
+                script.contains(FAILED),
+                "errors come back as one plain line"
+            );
+        }
+        // Only SYSTEM and the Administrators, by SID, may change the shared file.
+        assert!(install.contains("'*S-1-5-32-544:F', '*S-1-5-18:F'"));
+        assert!(install.contains("/inheritance:r"));
+        assert!(install.contains(INSTALLED));
+        assert!(remove.contains(REMOVED.trim_end()) && remove.contains(STILL_THERE));
+    }
+
+    #[test]
+    fn a_windows_command_for_a_long_key_fits_cmds_command_line() {
+        // An RSA 4096 public key: 716 characters of key data.
+        let public = format!(
+            "ssh-rsa AAAAB3{} someone@a-long-computer-name",
+            "x".repeat(710)
+        );
+        assert!(install_commands(&public).windows.len() < remote::CMD_MOST);
+        assert!(remove_commands(&public).unwrap().windows.len() < remote::CMD_MOST);
+    }
+
+    #[test]
+    fn the_remove_commands_match_the_key_data_and_refuse_anything_else() {
+        let commands = remove_commands("ssh-ed25519 AAAAC3Nz/a+b= me@laptop").unwrap();
+        let command = &commands.unix;
         assert!(command.contains("grep -vF -- 'AAAAC3Nz/a+b='"), "{command}");
         assert!(
             !command.contains("me@laptop"),
@@ -249,45 +413,102 @@ mod tests {
             command.contains("cat \"$t\" > \"$f\""),
             "rewritten in place"
         );
-        assert_eq!(remove_command("ssh-ed25519"), None);
-        assert_eq!(remove_command("ssh-ed25519 AAAA';rm -rf ~;' x"), None);
+        assert!(script_of(&commands.windows).contains("'AAAAC3Nz/a+b='"));
+        assert!(!script_of(&commands.windows).contains("me@laptop"));
+        assert_eq!(remove_commands("ssh-ed25519"), None);
+        assert_eq!(remove_commands("ssh-ed25519 AAAA';rm -rf ~;' x"), None);
     }
 
-    #[cfg(unix)]
+    /// Installs a key twice, then takes it off twice, in each shell this OS's servers run
+    /// commands in (sh; cmd and PowerShell on Windows), in a home of its own.
     #[test]
-    fn the_remove_command_takes_off_only_the_key_and_says_so() {
-        let home = std::env::temp_dir().join(format!("annulus-remove-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join(".ssh")).unwrap();
-        let file = home.join(".ssh/authorized_keys");
-        std::fs::write(
-            &file,
-            "ssh-ed25519 KEEP1 other\nfrom=\"10.0.0.1\" ssh-ed25519 GONE me\nssh-rsa KEEP2 x\nssh-ed25519 GONE again\n",
-        )
-        .unwrap();
-        let run = || {
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg(remove_command("ssh-ed25519 GONE me@laptop").unwrap())
-                .env("HOME", &home)
-                .output()
-                .unwrap()
-        };
-        let first = run();
-        assert_eq!(first.status.code(), Some(0));
-        assert_eq!(
-            String::from_utf8_lossy(&first.stdout),
-            "annulus-removed 2\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
-            "ssh-ed25519 KEEP1 other\nssh-rsa KEEP2 x\n"
-        );
-        // Not there any more: nothing to do, and it says so.
-        assert_eq!(
-            String::from_utf8_lossy(&run().stdout),
-            "annulus-removed 0\n"
-        );
+    fn the_key_commands_add_a_key_once_and_take_off_only_it() {
+        use crate::remote::{ShellKind, tests::run_in};
+        #[cfg(windows)]
+        let shells = [
+            ("cmd", ShellKind::Windows),
+            ("powershell", ShellKind::Windows),
+        ];
+        #[cfg(not(windows))]
+        let shells = [("sh", ShellKind::Unix)];
+        let key = "ssh-ed25519 GONE it's me";
+        let (install, remove) = (install_commands(key), remove_commands(key).unwrap());
+        for (shell, kind) in shells {
+            let home = std::env::temp_dir().join(format!(
+                "annulus-key-commands-{}-{shell}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(home.join(".ssh")).unwrap();
+            let file = home.join(".ssh").join("authorized_keys");
+            // An older line of the same key with options, and a last line not ended.
+            std::fs::write(
+                &file,
+                "ssh-ed25519 KEEP1 other\nfrom=\"10.0.0.1\" ssh-ed25519 GONE old\nssh-rsa KEEP2 x",
+            )
+            .unwrap();
+            let run = |command: &str| {
+                let output = run_in(shell, command)
+                    .env("HOME", &home)
+                    .env("USERPROFILE", &home)
+                    // No sshd_config there: the user's own file, administrator or not.
+                    .env("ProgramData", home.join("programdata"))
+                    .output()
+                    .unwrap();
+                let out = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                (output.status.code(), out)
+            };
+            for _ in 0..2 {
+                assert_eq!(
+                    run(install.for_shell(kind)),
+                    (Some(0), INSTALLED.to_owned()),
+                    "{shell}"
+                );
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(!text.starts_with('\u{feff}'), "{shell}: no byte order mark");
+            assert_eq!(
+                text.lines().collect::<Vec<_>>(),
+                [
+                    "ssh-ed25519 KEEP1 other",
+                    "from=\"10.0.0.1\" ssh-ed25519 GONE old",
+                    "ssh-rsa KEEP2 x",
+                    key
+                ],
+                "{shell}: added once, after the unended line"
+            );
+            #[cfg(windows)]
+            {
+                let acl = std::process::Command::new("icacls")
+                    .arg(&file)
+                    .output()
+                    .unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&acl.stdout).contains("(I)"),
+                    "{shell}: no permission inherited from the folder"
+                );
+            }
+            assert_eq!(
+                run(remove.for_shell(kind)),
+                (Some(0), format!("{REMOVED}2")),
+                "{shell}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&file)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                ["ssh-ed25519 KEEP1 other", "ssh-rsa KEEP2 x"],
+                "{shell}"
+            );
+            // Not there any more: nothing to do, and it says so.
+            assert_eq!(
+                run(remove.for_shell(kind)),
+                (Some(0), format!("{REMOVED}0")),
+                "{shell}"
+            );
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 
     #[test]

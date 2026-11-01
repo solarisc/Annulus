@@ -3592,7 +3592,7 @@ fn e2e_the_new_keychain_installs_a_key_and_deleting_it_takes_it_off_the_host() {
     vault.upsert_host(host.clone()).unwrap();
     let task = crate::ssh_task::SshTask::exec(
         crate::connect::host(vault, &app.ssh_files, &host),
-        format!("grep -c '{marker}' ~/.ssh/authorized_keys || true"),
+        on_linux(format!("grep -c '{marker}' ~/.ssh/authorized_keys || true")),
         || {},
     );
     let outcome = loop {
@@ -3604,6 +3604,14 @@ fn e2e_the_new_keychain_installs_a_key_and_deleting_it_takes_it_off_the_host() {
     };
     let exec = outcome.unwrap();
     assert_eq!(String::from_utf8_lossy(&exec.output).trim(), "0");
+}
+
+/// `command` for the test VMs, which run Linux.
+fn on_linux(command: String) -> annulus_ssh::remote::Commands {
+    annulus_ssh::remote::Commands {
+        windows: command.clone(),
+        unix: command,
+    }
 }
 
 /// How many SSH sessions `host`'s user has on the server, counted over one more connection
@@ -3618,7 +3626,7 @@ fn sessions_on(app: &NativeApp, host_id: u64) -> usize {
     let user = host.username.clone();
     let mut task = crate::ssh_task::SshTask::exec(
         crate::connect::host(vault, &app.ssh_files, host),
-        format!("pgrep -fc '^sshd: {user}' || true"),
+        on_linux(format!("pgrep -fc '^sshd: {user}' || true")),
         || {},
     );
     let started = std::time::Instant::now();

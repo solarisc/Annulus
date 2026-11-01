@@ -499,14 +499,12 @@ async fn generated_keys_of_every_kind_install_once_and_log_in() {
         // Installed the way the keychain's "Install on host" does it, twice: one line.
         for _ in 0..2 {
             let exec = admin
-                .exec(&annulus_ssh::keys::install_command(&key.public))
+                .exec_in_shell(&annulus_ssh::keys::install_commands(&key.public))
                 .await
                 .unwrap();
             assert_eq!(
-                exec.status,
-                Some(0),
-                "{}",
-                String::from_utf8_lossy(&exec.output)
+                (exec.status, String::from_utf8_lossy(&exec.output).as_ref()),
+                (Some(0), "annulus-installed\n")
             );
         }
         let check = admin
@@ -535,8 +533,8 @@ async fn generated_keys_of_every_kind_install_once_and_log_in() {
         let lines =
             || admin.exec("wc -l < ~/.ssh/authorized_keys; stat -c %a ~/.ssh/authorized_keys");
         let before = String::from_utf8_lossy(&lines().await.unwrap().output).into_owned();
-        let remove = annulus_ssh::keys::remove_command(&key.public).unwrap();
-        let removed = admin.exec(&remove).await.unwrap();
+        let remove = annulus_ssh::keys::remove_commands(&key.public).unwrap();
+        let removed = admin.exec_in_shell(&remove).await.unwrap();
         assert_eq!(
             (
                 removed.status,
@@ -553,7 +551,7 @@ async fn generated_keys_of_every_kind_install_once_and_log_in() {
             log_in(trusting(None)).await.is_err(),
             "it no longer logs in"
         );
-        let again = admin.exec(&remove).await.unwrap();
+        let again = admin.exec_in_shell(&remove).await.unwrap();
         assert_eq!(
             String::from_utf8_lossy(&again.output),
             "annulus-removed 0\n"

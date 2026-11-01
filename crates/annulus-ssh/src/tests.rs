@@ -256,6 +256,13 @@ impl server::Handler for TestServer {
             });
             return Ok(());
         }
+        if data == remote::PROBE.as_bytes() {
+            // Answers as cmd does: a Windows server.
+            session.data(channel, b"Windows_NT$env:OS\r\n".to_vec())?;
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            return session.close(channel);
+        }
         session.data(channel, [b"ran: ", data].concat())?;
         session.exit_status_request(channel, 3)?;
         session.eof(channel)?;
@@ -602,6 +609,38 @@ async fn exec_returns_the_output_and_the_exit_status() {
     let exec = connection.exec("uptime").await.unwrap();
     assert_eq!(exec.output, b"ran: uptime");
     assert_eq!(exec.status, Some(3));
+}
+
+#[tokio::test]
+async fn a_command_for_the_servers_shell_runs_after_asking_which_shell_it_is() {
+    let (port, requests) = serve_recording(new_key()).await;
+    let script = Script::new(true, &["secret"]);
+    let connection = connect(
+        &target(port, "alice"),
+        &known_hosts("exec-in-shell"),
+        None,
+        &[],
+        script,
+    )
+    .await
+    .unwrap();
+    let commands = remote::Commands {
+        unix: "uname".into(),
+        windows: "ver".into(),
+    };
+    let exec = connection.exec_in_shell(&commands).await.unwrap();
+    assert_eq!(exec.output, b"ran: ver");
+    let execs: Vec<String> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.starts_with("exec "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        execs,
+        [format!("exec {}", remote::PROBE), "exec ver".into()]
+    );
 }
 
 #[tokio::test]

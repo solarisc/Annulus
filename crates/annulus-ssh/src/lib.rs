@@ -11,6 +11,7 @@ pub mod keys;
 pub mod known;
 pub mod os;
 pub mod proxy;
+pub mod remote;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -864,6 +865,18 @@ impl Connection {
                 Some(_) => {}
             }
         }
+    }
+
+    /// Runs the one of `commands` written for the server's shell, after asking the shell what
+    /// it is ([`remote::PROBE`], a second command): Windows OpenSSH runs commands in cmd or
+    /// PowerShell. Only for an action the user asked for, as [`Connection::exec`].
+    ///
+    /// # Errors
+    /// The server refused a channel or a command.
+    pub async fn exec_in_shell(&self, commands: &remote::Commands) -> Result<Exec, SshError> {
+        let probe = self.exec(remote::PROBE).await?;
+        let kind = remote::ShellKind::from_probe(&probe.output);
+        self.exec(commands.for_shell(kind)).await
     }
 
     /// Opens the `sftp` subsystem and returns its byte stream, for `annulus-sftp`.
