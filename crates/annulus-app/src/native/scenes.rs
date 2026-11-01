@@ -76,6 +76,36 @@ fn edit_prod_db(app: &mut NativeApp) {
     }
 }
 
+/// prod-db's editor with notes longer than a line of the box, which wrap inside it.
+fn edit_prod_db_notes(app: &mut NativeApp) {
+    if let Some(vault) = app.vault.as_mut()
+        && let Some(mut host) = vault
+            .hosts()
+            .iter()
+            .find(|host| host.label == "prod-db")
+            .cloned()
+    {
+        host.notes = "Primary Postgres for the shop; replicas on db-2 and db-3. Restart only \
+                      after draining connections: see https://wiki.example.com/runbooks/\
+                      postgres-restart-without-dropping-checkouts\nBackups at 02:00."
+            .into();
+        vault.upsert_host(host).unwrap();
+    }
+    edit_prod_db(app);
+}
+
+/// The Keychain with its key in use by a host: Delete asks about its servers too.
+fn keychain_in_use(app: &mut NativeApp) {
+    if let Some(vault) = app.vault.as_mut()
+        && let Some(key) = vault.ssh_keys().first().map(|key| key.id)
+        && let Some(mut host) = vault.hosts().first().cloned()
+    {
+        host.key_id = Some(key);
+        vault.upsert_host(host).unwrap();
+    }
+    section(app, super::Section::Keychain);
+}
+
 fn with_tabs(app: &mut NativeApp) {
     for (title, status) in [
         ("prod-db", None),
@@ -448,6 +478,16 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
+        // Long notes wrap inside their box, a long link broken where it must be.
+        name: "host-editor-notes",
+        width: 1280,
+        height: 800,
+        scale: 1.0,
+        populated: true,
+        setup: edit_prod_db_notes,
+        acts: &[],
+    },
+    Scene {
         name: "hosts-search",
         width: 1100,
         height: 720,
@@ -787,6 +827,16 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: keychain,
+        acts: &[Act::Click("Delete")],
+    },
+    Scene {
+        // A key a host logs in with: its servers are named, "take it off" ticked.
+        name: "keychain-delete-from-servers",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: keychain_in_use,
         acts: &[Act::Click("Delete")],
     },
     Scene {
