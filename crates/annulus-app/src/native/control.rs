@@ -179,6 +179,9 @@ pub struct Typed {
     /// Other prompts its tab showed before: one of them back ends it too (the local shell's,
     /// after `exit` from an `ssh`).
     known: Vec<String>,
+    /// The command's first line as typed, to tell its own line wrapped at the terminal's
+    /// width from output; empty when unknown.
+    command: String,
 }
 
 impl Typed {
@@ -196,7 +199,31 @@ impl Typed {
             prompt: line.clone(),
             line,
             known: Vec::new(),
+            command: String::new(),
         }
+    }
+
+    /// How many rows after `lines[at]`, the command's line, are that line wrapped at the
+    /// terminal's width: a long command fills more than one row, and those rows are none of
+    /// its output. 0 when the command shows on its line whole, or cannot be found there.
+    fn wrapped_rows(&self, lines: &[&str], at: usize) -> usize {
+        // A wrap can fall on a space: compare without any.
+        let squeeze =
+            |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+        let command = squeeze(&self.command);
+        if command.is_empty() {
+            return 0;
+        }
+        let mut joined = squeeze(lines[at]);
+        let mut rows = 0;
+        while !joined.contains(&command) {
+            let Some(next) = lines.get(at + rows + 1).filter(|_| rows < 8) else {
+                return 0;
+            };
+            rows += 1;
+            joined.push_str(&squeeze(next));
+        }
+        rows
     }
 
     /// The index in `lines` of the line the command was typed on: where it was, or higher
@@ -277,7 +304,7 @@ struct After {
 fn after(text: &str, typed: &Typed) -> After {
     let lines: Vec<&str> = text.trim_end().lines().collect();
     let count = match typed.find(&lines) {
-        Some(at) => lines.len() - at - 1,
+        Some(at) => lines.len() - at - 1 - typed.wrapped_rows(&lines, at),
         None => lines.len(),
     };
     After {
@@ -654,6 +681,12 @@ impl NativeApp {
             let row = panes.focused_cursor_row().unwrap_or(0);
             if panes.type_focused(keys.as_bytes()) {
                 let mut typed = Typed::of(&text);
+                run.command
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .clone_into(&mut typed.command);
                 let at = crate::sync_screen::now_secs();
                 let log = tab.agent.get_or_insert_with(|| Box::new(AgentLog::new(at)));
                 if let Some(before) = log.commands.last() {
@@ -2030,6 +2063,35 @@ mod tests {
                 prompt: true
             }
         );
+    }
+
+    #[test]
+    fn a_command_wrapped_at_the_terminals_width_is_no_output_of_its_own() {
+        let mut typed = Typed::of("PS C:\\work>");
+        "Start-Sleep -Seconds 3; Write-Output said".clone_into(&mut typed.command);
+        // Too long for the row, its line went on to the next one: still silent.
+        let wrapped = "PS C:\\work> Start-Sleep -Seconds 3\n; Write-Output said";
+        assert_eq!(
+            after(wrapped, &typed),
+            After {
+                lines: 0,
+                prompt: false
+            }
+        );
+        // A wrap that falls on a space reads the same.
+        let at_space = "PS C:\\work> Start-Sleep -Seconds\n3; Write-Output said";
+        assert_eq!(after(at_space, &typed).lines, 0);
+        // Then its line and its prompt back.
+        assert_eq!(
+            after(&format!("{wrapped}\nsaid\nPS C:\\work>"), &typed),
+            After {
+                lines: 2,
+                prompt: true
+            }
+        );
+        // A command whose echo is not there counts every line after, as before.
+        typed.command = "something else".into();
+        assert_eq!(after(wrapped, &typed).lines, 1);
     }
 
     #[test]
