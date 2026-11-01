@@ -912,6 +912,46 @@ mod tests {
     }
 
     #[test]
+    fn a_hosts_notes_reach_the_server_sealed_and_arrive_whole() {
+        let mut copy = copy();
+        let notes = "nginx front end; restart it with care";
+        copy.hosts.push(Host {
+            id: 1,
+            label: "web".into(),
+            address: "10.0.0.5".into(),
+            port: None,
+            username: String::new(),
+            tags: Vec::new(),
+            password: None,
+            key_id: None,
+            jump_id: None,
+            proxy: None,
+            no_reconnect: false,
+            group: None,
+            env: Vec::new(),
+            startup: String::new(),
+            term: String::new(),
+            os: String::new(),
+            os_by_hand: false,
+            notes: notes.into(),
+        });
+        copy.state.touch(kind::HOST, 1, false).unwrap();
+        let pending = copy.pending().remove(0);
+        let (kind, body) = pending.content.unwrap();
+        let sealed = copy.seal(&pending.id, kind, pending.hlc, &body).unwrap();
+        // What the server stores never holds the notes in the clear.
+        assert!(
+            !sealed
+                .windows(notes.len())
+                .any(|window| window == notes.as_bytes())
+        );
+        let (kind, hlc, body) = copy.open(&pending.id, &sealed).unwrap();
+        let mut other = self::copy();
+        other.apply(&pending.id, 1, Some((kind, hlc, body)));
+        assert_eq!(other.hosts[0].notes, notes);
+    }
+
+    #[test]
     fn auto_start_stays_on_the_device_that_set_it() {
         let mut copy = copy();
         let mut mine = PortForward::new(1, 0);
