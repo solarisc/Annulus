@@ -499,8 +499,9 @@ impl Wizard {
         );
         // Side by side when there is room, else one under another.
         let stacked = page.w < 680.0;
-        let gap = space::L;
-        let card_h = if stacked { 136.0 } else { SMALL_DIAGRAM + 96.0 };
+        // Stacked, the cards are short, so two fit a small window.
+        let gap = if stacked { space::S } else { space::L };
+        let card_h = if stacked { 110.0 } else { SMALL_DIAGRAM + 96.0 };
         let card_w = if stacked {
             page.w
         } else {

@@ -1608,6 +1608,10 @@ impl ForwardsView {
             "Reach services behind your hosts, or share local ones.",
         );
         let first_host = vault.hosts().first().map(|host| host.id);
+        // With no rules the wizard is the screen, so a first rule explains how tunnels work.
+        if count == 0 && self.wizard.is_none() {
+            self.wizard = Some(Wizard::new(vault.draft_forward(first_host.unwrap_or(0))));
+        }
         if self.wizard.is_none()
             && let Some(host) = first_host
             && pages::action(
@@ -1621,10 +1625,6 @@ impl ForwardsView {
         {
             self.wizard = Some(Wizard::new(vault.draft_forward(host)));
             self.draft = None;
-        }
-        // With no rules the wizard is the screen, so a first rule explains how tunnels work.
-        if count == 0 && self.wizard.is_none() {
-            self.wizard = Some(Wizard::new(vault.draft_forward(first_host.unwrap_or(0))));
         }
         if self.wizard.is_some() {
             self.wizard_page(ui, area, vault, files, waker);
