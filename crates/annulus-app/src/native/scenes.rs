@@ -3222,7 +3222,7 @@ fn the_wizards_cards_are_reached_with_tab_and_picked_with_enter() {
     let mut app = NativeApp::new(Some(fixture_vault("wizard-keys", true)));
     forwards_empty(&mut app);
     let mut state = UiState::default();
-    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let output = step(&mut app, &mut state, &[], 0.0);
     let card = output
         .zones
         .iter()
@@ -3233,11 +3233,11 @@ fn the_wizards_cards_are_reached_with_tab_and_picked_with_enter() {
     let mut time = 1.0;
     while state.focus() != Some(card) {
         assert!(time < 60.0, "Tab never reached the card");
-        output = step(&mut app, &mut state, &tab, time);
+        step(&mut app, &mut state, &tab, time);
         time += 1.0;
     }
     let enter = [Event::Key(Key::Enter, Modifiers::NONE)];
-    output = step(&mut app, &mut state, &enter, time);
+    let output = step(&mut app, &mut state, &enter, time);
     assert!(
         output
             .zones
