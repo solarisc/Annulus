@@ -101,6 +101,14 @@ pub fn button_width(canvas: &mut dyn Canvas, label: &str, icon: Option<IconId>) 
     (label_width + icon_width + 2.0 * space::M).ceil()
 }
 
+/// Width of the menu half of a [`Ui::split_button`].
+pub const SPLIT_MENU_W: f32 = 30.0;
+
+/// The width a [`Ui::split_button`] needs to show `label` in full.
+pub fn split_button_width(canvas: &mut dyn Canvas, label: &str, icon: IconId) -> f32 {
+    button_width(canvas, label, Some(icon)) + SPLIT_MENU_W
+}
+
 /// The persistent state of one text field's editor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EditState {
@@ -189,6 +197,15 @@ pub struct FieldResponse {
     pub changed: bool,
     /// Enter was pressed in the field.
     pub submitted: bool,
+}
+
+/// What a split button did this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SplitResponse {
+    /// The main action's half.
+    pub main: Response,
+    /// The menu item chosen this frame.
+    pub chosen: Option<usize>,
 }
 
 /// Options for [`Ui::text_field`].
@@ -1037,6 +1054,92 @@ impl Ui<'_> {
             .map(|item| self.gfx.measure(item, BODY).width + 2.0 * space::L + 24.0)
             .fold(rect.w.max(180.0), f32::max);
         self.popup_toggle(id, &response, rect, items, None, width)
+    }
+
+    /// The screen's main action and a menu of related ones, joined into one accent-filled
+    /// control: `label` on the left does the action, a chevron on the right named
+    /// `menu_name` opens `items` under the whole control. Narrower than
+    /// [`split_button_width`], the left half shows only its icon and keeps its name for
+    /// screen readers and a tooltip.
+    pub fn split_button(
+        &mut self,
+        id: Id,
+        rect: Rect,
+        label: &str,
+        icon: IconId,
+        menu_name: &str,
+        items: &[String],
+    ) -> SplitResponse {
+        let t = self.theme;
+        let more_id = id.with("menu");
+        let mut main = rect;
+        let more = main.take_right(SPLIT_MENU_W);
+        // Two zones, drawn left to right: Tab reaches the action, then its menu.
+        let response = self.zone(id, main, Role::Button, label);
+        let toggle = self.zone(more_id, more, Role::Button, menu_name);
+        let open = self.menu_open(more_id);
+        let corner = radius::SMALL + 2.0;
+        let held = response.pressed || toggle.pressed;
+        let press = self.ease(id.with("press"), if held { 1.0 } else { 0.0 });
+        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.035 * press));
+        // One shape; each half lights up on its own, clipped so only the outer corners round.
+        self.gfx.fill_rect(rect, corner, t.accent);
+        for (half, half_id, zone, lit) in [
+            (main, id, response, response.hovered),
+            (more, more_id, toggle, toggle.hovered || open),
+        ] {
+            let hover = self.ease(half_id.with("hover"), if lit { 1.0 } else { 0.0 });
+            if hover > 0.0 || zone.pressed {
+                let fill = t.accent.mix(t.accent_hover, hover);
+                let fill = if zone.pressed {
+                    fill.mix(t.press, 0.4)
+                } else {
+                    fill
+                };
+                self.push_clip(half);
+                self.gfx.fill_rect(rect, corner, fill);
+                self.pop_clip();
+            }
+        }
+        let divider = Rect::new(more.x, rect.y + 8.0, 1.0, rect.h - 16.0);
+        self.gfx.fill_rect(divider, 0.0, t.on_accent.alpha(0.25));
+        let needed = button_width(&mut self.gfx, label, Some(icon));
+        let full = main.w >= needed;
+        if full {
+            let mut inner = main.centered(needed - 2.0 * space::M, main.h);
+            let slot = inner.take_left(16.0);
+            self.gfx.icon(icon, slot.centered(16.0, 16.0), t.on_accent);
+            inner.take_left(6.0);
+            self.strict_text(inner, label, BODY_MEDIUM, t.on_accent, Align::Start);
+        } else {
+            self.gfx.icon(icon, main.centered(16.0, 16.0), t.on_accent);
+        }
+        self.gfx
+            .icon(icons::CHEVRON_DOWN, more.centered(16.0, 16.0), t.on_accent);
+        if response.focus_ring {
+            self.focus_ring(main, corner);
+        }
+        if toggle.focus_ring {
+            self.focus_ring(more, corner);
+        }
+        self.pop_layer();
+        if response.hovered || toggle.hovered {
+            self.set_cursor(Cursor::Pointer);
+        }
+        if !full {
+            self.tooltip(id, main, label);
+        }
+        self.tooltip(more_id, more, menu_name);
+        let width = items
+            .iter()
+            // As in a menu button: the item's text, its row's insets and the check mark's column.
+            .map(|item| self.gfx.measure(item, BODY).width + 2.0 * space::L + 24.0)
+            .fold(rect.w.max(180.0), f32::max);
+        let chosen = self.popup_toggle(more_id, &toggle, rect, items, None, width);
+        SplitResponse {
+            main: response,
+            chosen,
+        }
     }
 
     /// The context menu of zone `owner` (a card, a row) whose `response` this frame is: it opens
@@ -2213,6 +2316,69 @@ mod tests {
             ui.text_area(id, FIELD, &mut area, FieldStyle::default());
         });
         assert!(area.contains('y'));
+    }
+
+    #[test]
+    fn a_split_buttons_halves_act_apart_and_its_menu_opens_under_all_of_it() {
+        let mut state = UiState::default();
+        let id = Id::new("new");
+        let items = vec!["New group".to_owned(), "Import".to_owned()];
+        let rect = Rect::new(20.0, 40.0, 140.0, 32.0);
+        // Time moves, so the menu has finished opening when an item is clicked.
+        let mut time = 0.0;
+        let mut split = |state: &mut UiState, events: &[Event]| {
+            time += 0.5;
+            let mut canvas = Recorder::default();
+            state.begin_frame(events, time);
+            let mut ui = Ui::new(
+                &mut canvas,
+                Theme::new(Appearance::Dark),
+                state,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+            );
+            let out = ui.split_button(id, rect, "New host", icons::PLUS, "More", &items);
+            ui.overlays();
+            state.end_frame();
+            out
+        };
+        let click = |at: Point| {
+            [
+                Event::PointerMoved(at),
+                Event::PointerDown(crate::kit::Button::Primary),
+                Event::PointerUp(crate::kit::Button::Primary),
+            ]
+        };
+        let menu = |state: &UiState| -> Vec<Zone> {
+            state
+                .zones()
+                .iter()
+                .filter(|zone| zone.role == Role::MenuItem)
+                .cloned()
+                .collect()
+        };
+        split(&mut state, &[]);
+        let action = split(
+            &mut state,
+            &click(Point::new(rect.x + 20.0, rect.center().y)),
+        );
+        split(&mut state, &[]);
+        assert!(action.main.clicked && action.chosen.is_none());
+        assert!(menu(&state).is_empty(), "the action opens no menu");
+
+        let chevron = Point::new(rect.r() - SPLIT_MENU_W / 2.0, rect.center().y);
+        assert!(!split(&mut state, &click(chevron)).main.clicked);
+        split(&mut state, &[]);
+        let items_shown = menu(&state);
+        assert_eq!(items_shown.len(), 2);
+        assert!(
+            items_shown
+                .iter()
+                .all(|zone| zone.rect.x < rect.r() - SPLIT_MENU_W && zone.rect.y > rect.center().y),
+            "under the whole control, from its left edge: {items_shown:?}"
+        );
+        let chosen = split(&mut state, &click(items_shown[1].rect.center()));
+        assert_eq!(chosen.chosen, Some(1));
+        assert!(!chosen.main.clicked);
     }
 
     #[test]
