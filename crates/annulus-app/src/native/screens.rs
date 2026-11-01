@@ -193,12 +193,32 @@ struct Install {
     ask: Option<Ask>,
 }
 
+/// Deleting a key that hosts log in with (F-KEY-004): it comes off those servers'
+/// `authorized_keys` first, while it can still log in, then out of the vault.
+struct Removal {
+    key_id: u64,
+    /// Take it off the servers too; on unless unticked.
+    from_servers: bool,
+    /// Each server's run, once Delete was clicked.
+    runs: Vec<ServerRun>,
+}
+
+/// Taking a key off one server.
+struct ServerRun {
+    label: String,
+    task: Option<SshTask>,
+    ask: Option<Ask>,
+    ended: Option<Result<usize, String>>,
+}
+
 /// One key as the list shows it.
 struct KeyRow {
     id: u64,
     label: String,
     detail: String,
     public: String,
+    /// How many hosts log in with it.
+    users: usize,
 }
 
 /// The Keychain screen.
@@ -209,6 +229,7 @@ pub struct KeychainView {
     message: Option<(bool, String)>,
     confirm_delete: Option<u64>,
     install: Option<Install>,
+    removal: Option<Removal>,
 }
 
 impl KeychainView {
@@ -275,6 +296,7 @@ impl KeychainView {
         }
         self.form_card(ui, &mut area, vault, waker);
         self.install_card(ui, &mut area, vault, files, waker);
+        self.removal_card(ui, &mut area, vault, files, waker);
         if let Some((problem, message)) = &self.message {
             let t = ui.theme;
             let color = if *problem { t.error } else { t.text2 };
@@ -300,6 +322,222 @@ impl KeychainView {
         {
             install.ask = None;
         }
+        // One at a time, a question a server the key comes off asks.
+        if let Some(removal) = &mut self.removal
+            && let Some((index, run)) = removal
+                .runs
+                .iter_mut()
+                .enumerate()
+                .find(|(_, run)| run.ask.is_some())
+            && let (Some(task), Some(ask_now)) = (&run.task, &mut run.ask)
+            && ask::card(
+                ui,
+                Id::new(("removal.ask", index)),
+                rect,
+                ask_now,
+                task.answers(),
+            )
+        {
+            run.ask = None;
+        }
+    }
+
+    /// Deleting a key that hosts log in with: the hosts it comes off, ticked, then each
+    /// server's progress. Once every server has answered, the key leaves the vault, unless a
+    /// server still has it: then it stays, so no way in is left behind unseen.
+    #[allow(clippy::too_many_lines)] // The card, then what its runs came to.
+    fn removal_card(
+        &mut self,
+        ui: &mut Ui<'_>,
+        area: &mut Rect,
+        vault: &mut Vault,
+        files: &SshFiles,
+        waker: Option<&Waker>,
+    ) {
+        let Some(removal) = &mut self.removal else {
+            return;
+        };
+        let Some(key) = vault
+            .ssh_keys()
+            .iter()
+            .find(|key| key.id == removal.key_id)
+            .cloned()
+        else {
+            self.removal = None;
+            return;
+        };
+        for run in &mut removal.runs {
+            if let Some(task) = &mut run.task {
+                while let Some(event) = task.question() {
+                    if let Some(question) = Ask::from_event(event) {
+                        run.ask = Some(question);
+                    }
+                }
+                if let Some(outcome) = task.outcome() {
+                    run.ended = Some(keychain_screen::removal_result(outcome));
+                    (run.task, run.ask) = (None, None);
+                }
+            }
+        }
+        let busy = !removal.runs.is_empty();
+        if busy && removal.runs.iter().all(|run| run.ended.is_some()) {
+            let servers: Vec<(String, Result<usize, String>)> = removal
+                .runs
+                .iter()
+                .filter_map(|run| run.ended.clone().map(|ended| (run.label.clone(), ended)))
+                .collect();
+            let (mut problem, mut message) =
+                keychain_screen::removal_summary(&key.label, &servers, &[]);
+            if !problem && let Err(error) = vault.remove_key(key.id) {
+                problem = true;
+                message = format!(
+                    "Took {} off its servers, but could not delete it here: {error}",
+                    key.label
+                );
+            }
+            self.message = Some((problem, message));
+            self.removal = None;
+            return;
+        }
+        let users: Vec<(u64, String)> = vault
+            .hosts()
+            .iter()
+            .filter(|host| host.key_id == Some(key.id))
+            .map(|host| (host.id, host.label.clone()))
+            .collect();
+        let names: Vec<&str> = users.iter().map(|(_, label)| label.as_str()).collect();
+        let t = ui.theme;
+        let mut card = pages::card(
+            ui,
+            area,
+            &format!("Delete {}", key.label),
+            2.0 * CONTROL + 20.0 + 5.0 * space::S,
+        );
+        card.take_top(space::S);
+        let about = if busy {
+            removal
+                .runs
+                .iter()
+                .map(|run| {
+                    let state = match &run.ended {
+                        None if run.ask.is_some() => "waiting for you",
+                        None => "taking it off\u{2026}",
+                        Some(Ok(0)) => "not found",
+                        Some(Ok(_)) => "taken off",
+                        Some(Err(_)) => "could not",
+                    };
+                    format!("{}: {state}", run.label)
+                })
+                .collect::<Vec<_>>()
+                .join("  \u{b7}  ")
+        } else {
+            format!(
+                "It logs in to {}. Taken off there, it no longer opens them.",
+                names.join(", ")
+            )
+        };
+        ui.gfx
+            .text(card.take_top(20.0), &about, SMALL, t.text2, Align::Start);
+        card.take_top(space::S);
+        let tick = card.take_top(CONTROL);
+        if !busy {
+            let servers = if names.len() == 1 {
+                names[0].to_owned()
+            } else {
+                format!("these {} servers", names.len())
+            };
+            ui.checkbox(
+                Id::new("removal.servers"),
+                tick,
+                &mut removal.from_servers,
+                &format!("Also take it off {servers} (their ~/.ssh/authorized_keys)"),
+            );
+        }
+        card.take_top(space::S);
+        let mut line = card.take_top(CONTROL);
+        let go_label = if busy {
+            "Removing\u{2026}"
+        } else {
+            "Delete key"
+        };
+        let go = line.take_right(button_width(&mut ui.gfx, "Removing\u{2026}", None));
+        line.take_right(space::S);
+        let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
+        let cancelled = ui
+            .button(
+                Id::new("removal.cancel"),
+                cancel,
+                "Cancel",
+                None,
+                Kind::Ghost,
+            )
+            .clicked
+            || ui.key(Key::Escape, Modifiers::NONE);
+        let start = ui
+            .button(Id::new("removal.go"), go, go_label, None, Kind::Danger)
+            .clicked
+            && !busy;
+        if cancelled {
+            // Dropping the runs stops them; a server may have taken the key off already.
+            if busy {
+                self.message = Some((
+                    true,
+                    format!(
+                        "Stopped. {} is kept; some servers may no longer have it.",
+                        key.label
+                    ),
+                ));
+            }
+            self.removal = None;
+            return;
+        }
+        if !start {
+            return;
+        }
+        if !removal.from_servers || users.is_empty() {
+            let kept: Vec<String> = if users.is_empty() {
+                Vec::new()
+            } else {
+                users.iter().map(|(_, label)| label.clone()).collect()
+            };
+            let (_, message) = keychain_screen::removal_summary(&key.label, &[], &kept);
+            self.message = Some(match vault.remove_key(key.id) {
+                Ok(()) => (false, message),
+                Err(error) => (true, error.to_string()),
+            });
+            self.removal = None;
+            return;
+        }
+        let Some(command) = keys::remove_command(&key.public) else {
+            self.message = Some((
+                true,
+                "This key's public half cannot be read, so it cannot be taken off servers. \
+                 Untick them to delete it here only."
+                    .into(),
+            ));
+            return;
+        };
+        for (host_id, label) in &users {
+            let Some(host) = vault.hosts().iter().find(|host| host.id == *host_id) else {
+                continue;
+            };
+            let waker = waker.cloned();
+            removal.runs.push(ServerRun {
+                label: label.clone(),
+                task: Some(SshTask::exec(
+                    connect::host(vault, files, host),
+                    command.clone(),
+                    move || {
+                        if let Some(waker) = &waker {
+                            waker();
+                        }
+                    },
+                )),
+                ask: None,
+                ended: None,
+            });
+        }
+        self.message = None;
     }
 
     /// The Generate or Import card, while one is open.
@@ -616,12 +854,13 @@ impl KeychainView {
                         key.fingerprint
                     ),
                     public: key.public.clone(),
+                    users,
                 }
             })
             .collect();
         let confirm = self.confirm_delete;
         let mut confirm_next = confirm;
-        let (mut remove, mut install, mut copied) = (None, None, None);
+        let (mut remove, mut install, mut copied, mut unkey) = (None, None, None, None);
         rows(ui, "keys.list", area, list.len(), |ui, index, row| {
             let key = &list[index];
             let zone = Id::new(("key", key.id));
@@ -651,6 +890,8 @@ impl KeychainView {
                         copied = Some(key.label.clone());
                     }
                     Some(1) => install = Some(key.id),
+                    // A key hosts log in with is asked about in a card: their servers too?
+                    Some(0) if key.users > 0 => unkey = Some(key.id),
                     Some(0) => confirm_next = Some(key.id),
                     _ => {}
                 }
@@ -660,6 +901,19 @@ impl KeychainView {
             pages::two_lines(ui, inner, &key.label, &key.detail, true);
         });
         self.confirm_delete = confirm_next;
+        if let Some(key_id) = unkey
+            && self
+                .removal
+                .as_ref()
+                .is_none_or(|removal| removal.runs.is_empty())
+        {
+            self.removal = Some(Removal {
+                key_id,
+                from_servers: true,
+                runs: Vec::new(),
+            });
+            (self.install, self.message) = (None, None);
+        }
         if let Some(label) = copied {
             self.message = Some((false, format!("Copied the public key of {label}.")));
         }

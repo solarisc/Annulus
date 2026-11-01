@@ -28,6 +28,78 @@ pub(crate) fn install_result(outcome: Outcome) -> Result<(), String> {
     })
 }
 
+/// What taking a key off a server came to ([`annulus_ssh::keys::remove_command`]): how many
+/// lines of its `authorized_keys` held the key (0 when none did), or why it is still there.
+pub(crate) fn removal_result(outcome: Outcome) -> Result<usize, String> {
+    let exec = outcome?;
+    let output = String::from_utf8_lossy(&exec.output);
+    let count = output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(annulus_ssh::keys::REMOVED.trim_end())
+            .and_then(|count| count.trim().parse().ok())
+    });
+    match (exec.status, count) {
+        (Some(0), Some(count)) => Ok(count),
+        (Some(3), _) => Err("the key was still there afterwards".into()),
+        _ => Err(output.trim().lines().last().map_or_else(
+            || {
+                format!(
+                    "exit status {}",
+                    exec.status
+                        .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+                )
+            },
+            str::to_owned,
+        )),
+    }
+}
+
+/// What deleting key `key` came to, as `(problem, message)`: each server it was to come off
+/// (`servers`, by name, with how that went), and those left alone (`kept`). Any server that
+/// still has it keeps the key in the vault too, so the way in it gives is never lost track of.
+pub(crate) fn removal_summary(
+    key: &str,
+    servers: &[(String, Result<usize, String>)],
+    kept: &[String],
+) -> (bool, String) {
+    let failed: Vec<String> = servers
+        .iter()
+        .filter_map(|(name, result)| result.as_ref().err().map(|why| format!("{name} ({why})")))
+        .collect();
+    if !failed.is_empty() {
+        return (
+            true,
+            format!(
+                "Kept {key}: could not take it off {}. Delete again to retry, or untick the \
+                 servers to delete it here only.",
+                failed.join(", ")
+            ),
+        );
+    }
+    let names = |found: bool| -> Vec<&str> {
+        servers
+            .iter()
+            .filter(|(_, result)| matches!(result, Ok(count) if (*count > 0) == found))
+            .map(|(name, _)| name.as_str())
+            .collect()
+    };
+    let mut message = vec![format!("Deleted {key}.")];
+    let (taken, absent) = (names(true), names(false));
+    if !taken.is_empty() {
+        message.push(format!("Taken off {}.", taken.join(", ")));
+    }
+    if !absent.is_empty() {
+        message.push(format!("Not found on {}.", absent.join(", ")));
+    }
+    if !kept.is_empty() {
+        message.push(format!(
+            "Still in the authorized_keys of {}.",
+            kept.join(", ")
+        ));
+    }
+    (false, message.join(" "))
+}
+
 /// The key as stored, from a generated or imported pair.
 pub(crate) fn stored(vault: &Vault, label: &str, pair: &KeyPair) -> SshKey {
     SshKey {
@@ -95,6 +167,52 @@ mod tests {
             Err("The host could not add the key (exit status unknown).".into())
         );
         assert_eq!(install_result(Err("refused".into())), Err("refused".into()));
+    }
+
+    #[test]
+    fn a_removal_counts_only_on_its_own_word_and_a_server_that_kept_it_keeps_the_key() {
+        let exec = |status, output: &[u8]| {
+            Ok(annulus_ssh::Exec {
+                status,
+                output: output.to_vec(),
+            })
+        };
+        assert_eq!(removal_result(exec(Some(0), b"annulus-removed 1\n")), Ok(1));
+        assert_eq!(removal_result(exec(Some(0), b"annulus-removed 0\n")), Ok(0));
+        // A shell that printed nothing of ours did not run the command (Windows, a menu).
+        assert!(removal_result(exec(Some(0), b"Microsoft Windows\n")).is_err());
+        assert_eq!(
+            removal_result(exec(Some(3), b"")),
+            Err("the key was still there afterwards".into())
+        );
+        assert_eq!(
+            removal_result(exec(Some(2), b"sh: cannot create: Read-only file system\n")),
+            Err("sh: cannot create: Read-only file system".into())
+        );
+        assert_eq!(removal_result(Err("refused".into())), Err("refused".into()));
+
+        let done = |name: &str, result| (name.to_owned(), result);
+        assert_eq!(
+            removal_summary("work", &[done("web", Ok(1)), done("db", Ok(0))], &[]),
+            (
+                false,
+                "Deleted work. Taken off web. Not found on db.".to_owned()
+            )
+        );
+        let (problem, message) = removal_summary(
+            "work",
+            &[done("web", Ok(1)), done("db", Err("refused".into()))],
+            &[],
+        );
+        assert!(problem);
+        assert!(message.starts_with("Kept work: could not take it off db (refused)."));
+        assert_eq!(
+            removal_summary("work", &[], &["web".to_owned()]),
+            (
+                false,
+                "Deleted work. Still in the authorized_keys of web.".to_owned()
+            )
+        );
     }
 
     fn vault(name: &str) -> Vault {
