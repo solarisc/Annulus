@@ -127,12 +127,15 @@ const SCROLLBACK: [(usize, &str); 4] = [
     (100_000, "100,000 lines (about 300 MB)"),
 ];
 
-const LOCK_MINUTES: [(u32, &str); 5] = [
+const LOCK_MINUTES: [(u32, &str); 8] = [
     (0, "Never"),
     (5, "After 5 minutes"),
     (15, "After 15 minutes"),
     (30, "After 30 minutes"),
     (60, "After 1 hour"),
+    (120, "After 2 hours"),
+    (240, "After 4 hours"),
+    (480, "After 8 hours"),
 ];
 
 /// Width of the sections' navigation.
