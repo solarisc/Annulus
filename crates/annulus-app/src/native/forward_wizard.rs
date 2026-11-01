@@ -113,12 +113,12 @@ pub(crate) fn ends(rule: &PortForward, ports: (&str, &str), server: &str) -> End
         ForwardKind::Remote => [
             ("This computer".into(), destination),
             (server, format!("port {}", or(ports.0, "?"))),
-            ("Its users".into(), "anyone who reaches it".into()),
+            ("Its users".into(), "any client".into()),
         ],
         ForwardKind::Dynamic => [
-            ("This computer".into(), format!("SOCKS {listen}")),
+            ("This computer".into(), listen),
             (server, "SSH".into()),
-            ("Any site".into(), "seen from the server".into()),
+            ("Any site".into(), "via the server".into()),
         ],
     }
 }
@@ -147,7 +147,7 @@ pub(crate) fn sentence(rule: &PortForward, ports: (&str, &str), server: &str) ->
             "Whoever opens {server_end} on {server_name} reaches {here_end} on this computer."
         ),
         ForwardKind::Dynamic => {
-            format!("Apps set to use {here_end} as their proxy reach the web from {server_name}.")
+            format!("Apps set to use the SOCKS proxy {here_end} reach the web from {server_name}.")
         }
     }
 }
@@ -324,18 +324,21 @@ fn diagram(ui: &mut Ui<'_>, rect: Rect, kind: ForwardKind, ends: &Ends, packet: 
     // Names and addresses under the ends.
     let mono = Font::mono(11.0);
     let far_bottom = far.last().map_or(y, |end| end.y) + far_size / 2.0;
+    // A label may run a little past its column into the gaps beside it (a narrow card).
+    let label_w = column * 1.3;
     for (index, (name, address)) in ends.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)] // Three columns.
-        let x = rect.x + index as f32 * column;
+        let center = rect.x + (index as f32 + 0.5) * column;
+        let x = (center - label_w / 2.0).clamp(rect.x - 8.0, rect.r() + 8.0 - label_w);
         let top = 6.0
             + if index == 2 {
                 far_bottom
             } else {
                 y + size / 2.0
             };
-        let name_rect = Rect::new(x + 3.0, top, column - 6.0, 18.0);
+        let name_rect = Rect::new(x, top, label_w, 18.0);
         ui.gfx.text(name_rect, name, SMALL, t.text, Align::Center);
-        let address_rect = Rect::new(x + 3.0, top + 17.0, column - 6.0, 16.0);
+        let address_rect = Rect::new(x, top + 17.0, label_w, 16.0);
         ui.gfx
             .text(address_rect, address, mono, t.text2, Align::Center);
     }
@@ -724,7 +727,7 @@ impl Wizard {
         let name = page.take_top(CONTROL);
         ui.text_field(
             Id::new("wizard.label"),
-            name.centered(name.w.min(420.0), CONTROL),
+            Rect::new(name.x, name.y, name.w.min(420.0), CONTROL),
             &mut self.draft.rule.label,
             FieldStyle {
                 placeholder: "Name",
@@ -841,7 +844,7 @@ mod tests {
         rule.kind = ForwardKind::Dynamic;
         assert_eq!(
             sentence(&rule, ("1080", ""), "web-1"),
-            "Apps set to use SOCKS localhost:1080 as their proxy reach the web from web-1."
+            "Apps set to use the SOCKS proxy localhost:1080 reach the web from web-1."
         );
     }
 
