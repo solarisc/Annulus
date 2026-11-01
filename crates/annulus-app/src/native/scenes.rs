@@ -108,6 +108,16 @@ fn forwards(app: &mut NativeApp) {
     section(app, super::Section::PortForwarding);
 }
 
+/// Port Forwarding with hosts but no rules yet: the wizard is the screen.
+fn forwards_empty(app: &mut NativeApp) {
+    if let Some(vault) = app.vault.as_mut() {
+        for rule in vault.forwards().to_vec() {
+            vault.remove_forward(rule.id).unwrap();
+        }
+    }
+    section(app, super::Section::PortForwarding);
+}
+
 fn known_hosts(app: &mut NativeApp) {
     section(app, super::Section::KnownHosts);
 }
@@ -831,6 +841,59 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: forwards,
         acts: &[Act::Click("New rule")],
+    },
+    Scene {
+        // No rules yet: the wizard's first step, a diagram per kind, is the screen. The
+        // photo is taken a second in, with the packets on their way.
+        name: "forwards-wizard",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards_empty,
+        acts: &[],
+    },
+    Scene {
+        name: "forwards-wizard-ports",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards_empty,
+        acts: &[
+            Act::Click("Reach a service behind a server"),
+            Act::Click("Port on this computer"),
+            Act::Type("15432"),
+            Act::Click("Destination, as the server sees it: host"),
+            Act::Type("db.internal"),
+            Act::Click("Destination, as the server sees it: port"),
+            Act::Type("5432"),
+        ],
+    },
+    Scene {
+        name: "forwards-wizard-review",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards_empty,
+        acts: &[
+            Act::Click("Share a service from this computer"),
+            Act::Click("Port on the server"),
+            Act::Type("9000"),
+            Act::Click("Service on this computer: port"),
+            Act::Type("3000"),
+            Act::Click("Next"),
+        ],
+    },
+    Scene {
+        name: "forwards-wizard-socks-small",
+        width: 640,
+        height: 520,
+        scale: 1.0,
+        populated: true,
+        setup: forwards_empty,
+        acts: &[Act::Click("Browse through a server")],
     },
     Scene {
         name: "known-hosts",
@@ -2972,6 +3035,146 @@ fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
         (saved.label.as_str(), saved.public.as_str()),
         ("deploy", pair.public.as_str())
     );
+}
+
+/// Walks the forwarding wizard the way a user does: a kind, the ports, Next, then Save or
+/// Save and start. Returns the frame after the last click.
+fn through_the_wizard(
+    app: &mut NativeApp,
+    state: &mut UiState,
+    clock: &dyn Fn() -> f64,
+    (listen, host, port): (&str, &str, &str),
+    last: &str,
+) -> FrameOutput {
+    let mut output = step(app, state, &[], clock());
+    output = step(
+        app,
+        state,
+        &click_on(&output, "Reach a service behind a server"),
+        clock(),
+    );
+    for (field, text) in [
+        ("Port on this computer", listen),
+        ("Destination, as the server sees it: host", host),
+        ("Destination, as the server sees it: port", port),
+    ] {
+        let mut events = click_on(&output, field);
+        events.push(Event::Text(text.to_owned()));
+        output = step(app, state, &events, clock());
+    }
+    output = step(app, state, &click_on(&output, "Next"), clock());
+    step(app, state, &click_on(&output, last), clock())
+}
+
+#[test]
+fn the_forwarding_wizard_saves_the_rule_it_describes() {
+    let mut app = NativeApp::new(Some(fixture_vault("wizard-rule", true)));
+    forwards_empty(&mut app);
+    let mut state = UiState::default();
+    let time = std::cell::Cell::new(0.0);
+    let clock = || {
+        time.set(time.get() + 1.0);
+        time.get()
+    };
+    through_the_wizard(
+        &mut app,
+        &mut state,
+        &clock,
+        ("15432", "db.internal", "5432"),
+        "Save",
+    );
+    let vault = app.vault.as_ref().unwrap();
+    let [rule] = vault.forwards() else {
+        panic!("one rule, not {:?}", vault.forwards());
+    };
+    let server = &vault.hosts()[0].label;
+    assert_eq!(
+        (
+            rule.kind,
+            rule.bind_port,
+            rule.destination_host.as_str(),
+            rule.destination_port,
+            rule.host_id,
+        ),
+        (
+            annulus_vault::forwards::ForwardKind::Local,
+            15432,
+            "db.internal",
+            5432,
+            vault.hosts()[0].id,
+        )
+    );
+    assert_eq!(rule.label, format!("db.internal:5432 via {server}"));
+}
+
+/// End to end on test VM 1: a local rule made in the forwarding wizard and saved with Save
+/// and start carries a connection to the VM's own sshd.
+#[test]
+#[ignore = "needs the test servers"]
+fn e2e_a_rule_made_in_the_wizard_carries_traffic_through_a_real_host() {
+    use std::io::Read as _;
+    let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+    let mut vault = fixture_vault("e2e-wizard", false);
+    let login = annulus_ssh::keys::import(
+        &std::fs::read_to_string(var("ANNULUS_E2E_KEY")).unwrap(),
+        None,
+    )
+    .unwrap();
+    let login = crate::keychain_screen::stored(&vault, "e2e", &login);
+    let key_id = login.id;
+    vault.upsert_key(login).unwrap();
+    let mut host = vault.draft_host();
+    host.label = "test-1".into();
+    host.address = var("ANNULUS_E2E_VM1");
+    host.username = var("ANNULUS_E2E_USER");
+    host.key_id = Some(key_id);
+    vault.upsert_host(host).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut app = NativeApp::new(Some(vault));
+    app.section = super::Section::PortForwarding;
+    let dir = std::env::temp_dir().join(format!("annulus-e2e-wizard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.ssh_files.known_hosts = dir.join("known_hosts");
+    app.ssh_files.key_dir = None;
+    let mut state = UiState::default();
+    let started = std::time::Instant::now();
+    let clock = || started.elapsed().as_secs_f64();
+    let mut output = through_the_wizard(
+        &mut app,
+        &mut state,
+        &clock,
+        (&port.to_string(), "127.0.0.1", "22"),
+        "Save and start",
+    );
+    let banner = loop {
+        assert!(clock() < 60.0, "the forward never answered");
+        let trust = output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Trust and connect");
+        let events = if trust {
+            click_on(&output, "Trust and connect")
+        } else {
+            Vec::new()
+        };
+        output = step(&mut app, &mut state, &events, clock());
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = [0_u8; 8];
+            if stream.read_exact(&mut bytes).is_ok() {
+                break String::from_utf8_lossy(&bytes).into_owned();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    assert!(banner.starts_with("SSH-2.0"), "{banner:?}");
 }
 
 /// End to end on test VM 1: the new Keychain installs a fresh key on a real host through
