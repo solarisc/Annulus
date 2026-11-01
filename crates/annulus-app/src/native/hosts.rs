@@ -394,26 +394,30 @@ impl HostsView {
             self.start_import(vault);
         }
         if let Some(panel) = panel {
-            // The panel slides in from the right edge and fades up as it opens.
+            // The panel slides in from the right edge and fades up as it opens, never past the
+            // content card's edges.
             let shown = ui.entrance(Id::new("editor.open"), Motion::BASE);
+            ui.push_clip(rect.outset(1.0));
             ui.push_layer(Layer::fade(shown).shifted(32.0 * (1.0 - shown), 0.0));
+            panel_backing(ui, rect, panel);
             if self.group_editor.is_some() {
                 self.group_panel(ui, panel, vault);
             } else {
                 self.editor_panel(ui, panel, vault);
             }
             ui.pop_layer();
+            ui.pop_clip();
             self.last_panel = Some(panel);
         }
         // Closed, the panel's surface slides back out the way it came (its form is gone).
         let present = ui.presence(Id::new("editor.presence"), open, Motion::BASE);
         if !open && present > 0.0 {
             if let Some(panel) = self.last_panel {
-                let t = ui.theme;
+                ui.push_clip(rect.outset(1.0));
                 ui.push_layer(Layer::fade(present).shifted(40.0 * (1.0 - present), 0.0));
-                ui.gfx.shadow(panel, 0.0, 18.0, 0.0, t.shadow);
-                ui.gfx.fill_rect(panel, 0.0, t.raised);
+                panel_backing(ui, rect, panel);
                 ui.pop_layer();
+                ui.pop_clip();
             }
         } else if !open {
             self.last_panel = None;
@@ -1080,11 +1084,6 @@ impl HostsView {
         let Some(editor) = self.editor.as_mut() else {
             return;
         };
-        ui.gfx.shadow(rect, 0.0, 18.0, 0.0, t.shadow);
-        let shape = Rect::new(rect.x, rect.y, rect.w + 24.0, rect.h + 24.0);
-        ui.gfx.fill_rect(shape, 0.0, t.raised);
-        ui.gfx
-            .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
         // Everything inside the panel takes the pointer: nothing below it is clicked.
         ui.zone(Id::new("editor.backdrop"), rect, Role::Backdrop, "");
 
@@ -1670,11 +1669,6 @@ impl HostsView {
         let Some(editor) = self.group_editor.as_mut() else {
             return;
         };
-        ui.gfx.shadow(rect, 0.0, 18.0, 0.0, t.shadow);
-        let shape = Rect::new(rect.x, rect.y, rect.w + 24.0, rect.h + 24.0);
-        ui.gfx.fill_rect(shape, 0.0, t.raised);
-        ui.gfx
-            .fill_rect(Rect::new(rect.x, rect.y, 1.0, rect.h), 0.0, t.line);
         ui.zone(Id::new("group.backdrop"), rect, Role::Backdrop, "");
         let mut area = rect;
         let mut head = area.take_top(64.0).inset(space::XL, 0.0);
@@ -2553,9 +2547,99 @@ fn no_results(ui: &mut Ui<'_>, rect: Rect, query: &str, can_save: bool) -> bool 
     .clicked
 }
 
+/// The surface of an editor panel inside the content card `content`: the card's own rounded
+/// corners and outline where they meet, square and shadowed where it lies over the list.
+fn panel_backing(ui: &mut Ui<'_>, content: Rect, panel: Rect) {
+    let t = ui.theme;
+    let radius = super::PANEL_RADIUS;
+    // Beside the list, or over all of it in a narrow window.
+    let beside = panel.x > content.x + 0.5;
+    if beside {
+        // The shadow falls on the list only, never past the card's edges.
+        ui.push_clip(Rect::new(panel.x - 40.0, panel.y, 40.0, panel.h));
+        ui.gfx.shadow(panel, 0.0, 18.0, 0.0, t.shadow);
+        ui.pop_clip();
+    }
+    ui.gfx.fill_rect(panel, radius, t.raised);
+    if beside {
+        ui.gfx.fill_rect(
+            Rect::new(panel.x, panel.y, 2.0 * radius, panel.h),
+            0.0,
+            t.raised,
+        );
+        // The card's outline on the right, which the surface covers.
+        ui.push_clip(Rect::new(
+            panel.x + radius,
+            panel.y - 1.0,
+            panel.w - radius + 1.0,
+            panel.h + 2.0,
+        ));
+        ui.gfx.stroke_rect(panel, radius, 1.0, t.line);
+        ui.pop_clip();
+        ui.gfx
+            .fill_rect(Rect::new(panel.x, panel.y, 1.0, panel.h), 0.0, t.line);
+    } else {
+        ui.gfx.stroke_rect(panel, radius, 1.0, t.line);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_editor_panel_stays_inside_the_rounded_content_card() {
+        let mut vault = crate::native::demo::fixture_vault("editor-corner", false);
+        let mut host = vault.draft_host();
+        (host.label, host.address) = ("web".into(), "10.0.0.5".into());
+        let id = host.id;
+        vault.upsert_host(host).unwrap();
+        let mut view = HostsView::default();
+        view.edit_host(&vault, id);
+        let content = Rect::new(100.0, 40.0, 1000.0, 640.0);
+        let mut canvas = annulus_platform::cpu::CpuCanvas::new(
+            1120,
+            700,
+            1.0,
+            annulus_platform::cpu::TextEngine::new(),
+        )
+        .unwrap();
+        let theme = annulus_ui::kit::Theme::new(annulus_config::tokens::Appearance::Dark);
+        let mut state = annulus_ui::kit::UiState::default();
+        // The second frame is long after the panel slid in.
+        for time in [0.0, 2.0] {
+            canvas.clear(annulus_ui::gfx::Color::rgba(255, 0, 255, 255));
+            state.begin_frame(&[], time);
+            let mut ui = Ui::new(
+                &mut canvas,
+                theme,
+                &mut state,
+                Rect::new(0.0, 0.0, 1120.0, 700.0),
+            );
+            view.draw(&mut ui, content, Some(&mut vault));
+            state.end_frame();
+        }
+        let pixel = |x: f32, y: f32| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // On the canvas.
+            let at = ((y as usize) * 1120 + x as usize) * 4;
+            canvas.pixels()[at..at + 4].to_vec()
+        };
+        let untouched = vec![255, 0, 255, 255];
+        // Past the card's edges, and outside its rounded corners.
+        for (x, y) in [
+            (content.r() + 4.0, content.b() - 40.0),
+            (content.r() - 40.0, content.b() + 4.0),
+            (content.r() - 2.0, content.b() - 2.0),
+            (content.r() - 2.0, content.y + 1.0),
+        ] {
+            assert_eq!(pixel(x, y), untouched, "drawn at ({x}, {y})");
+        }
+        assert_ne!(
+            pixel(content.r() - 40.0, content.b() - 40.0),
+            untouched,
+            "the panel is there"
+        );
+    }
 
     #[test]
     fn an_empty_field_shows_what_the_host_takes_from_its_group() {
