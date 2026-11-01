@@ -359,20 +359,30 @@ fn main() -> ExitCode {
     }
     match run(command, json) {
         Ok(printed) => {
-            print!("{}", printed.out);
+            print!("{}", printable(&printed.out));
             match printed.unfinished {
                 None => ExitCode::SUCCESS,
                 Some(why) => {
-                    eprintln!("annulus: {why}");
+                    eprintln!("annulus: {}", printable(&why));
                     ExitCode::from(UNFINISHED)
                 }
             }
         }
         Err(error) => {
-            eprintln!("annulus: {error}");
+            eprintln!("annulus: {}", printable(&error.to_string()));
             ExitCode::FAILURE
         }
     }
+}
+
+/// `text` without the control characters a terminal acts on (escape sequences, C1 codes,
+/// bells), line breaks and tabs kept. What is printed comes from servers and the programs
+/// in the tabs, and must not drive the terminal it is read in: set its title, write to the
+/// clipboard, or hide lines.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
+        .collect()
 }
 
 #[cfg(test)]
@@ -381,6 +391,15 @@ mod tests {
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn what_is_printed_cannot_drive_the_terminal() {
+        // A server's text that would set the clipboard (OSC 52) and recolor through C1 CSI.
+        assert_eq!(
+            printable("ok\u{1b}]52;c;ZXZpbA==\u{7}\u{9b}31m\nnext\tcolumn\r"),
+            "ok]52;c;ZXZpbA==31m\nnext\tcolumn"
+        );
     }
 
     #[test]

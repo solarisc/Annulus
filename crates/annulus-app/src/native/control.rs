@@ -216,14 +216,23 @@ impl Typed {
         }
         let mut joined = squeeze(lines[at]);
         let mut rows = 0;
-        while !joined.contains(&command) {
+        let start = loop {
+            if let Some(start) = joined.find(&command) {
+                break start;
+            }
             let Some(next) = lines.get(at + rows + 1).filter(|_| rows < 8) else {
                 return 0;
             };
             rows += 1;
             joined.push_str(&squeeze(next));
+        };
+        // Its echo follows a prompt; found after anything else, those were its output's words
+        // (its echo lost), and every row after its line is output.
+        if rows == 0 || looks_like_prompt(&joined[..start]) {
+            rows
+        } else {
+            0
         }
-        rows
     }
 
     /// The index in `lines` of the line the command was typed on: where it was, or higher
@@ -273,12 +282,23 @@ impl Typed {
     }
 
     /// Whether `line`, the terminal's last line, is its prompt or one its tab showed before.
-    /// Typed at a line that is no prompt (one the shell printed while it started, such as
-    /// "Loading personal and system profiles took 900ms."), any prompt-shaped line ends it.
     fn prompt_back(&self, line: &str) -> bool {
-        prompt_back(line, &self.prompt)
-            || self.known.iter().any(|known| prompt_back(line, known))
-            || (!looks_like_prompt(&self.prompt) && looks_like_prompt(line))
+        prompt_back(line, &self.prompt) || self.known.iter().any(|known| prompt_back(line, known))
+    }
+
+    /// The prompt in front of the command's echo in `rows` (its line and those it wrapped
+    /// onto), when it was typed at a line that is no prompt (one the shell printed while it
+    /// started, such as "Loading personal and system profiles took 900ms."): the prompt that
+    /// ends it is the one it was echoed at, not that line.
+    fn echo_prompt(&self, rows: &[&str]) -> Option<String> {
+        if looks_like_prompt(&self.prompt) {
+            return None;
+        }
+        let head = self.command.split_whitespace().next()?;
+        rows.iter().find_map(|row| {
+            let prompt = row[..row.find(head)?].trim_end();
+            looks_like_prompt(prompt).then(|| prompt.to_owned())
+        })
     }
 }
 
@@ -307,13 +327,25 @@ struct After {
 /// What followed the command `typed` in `text`, the terminal's text now.
 fn after(text: &str, typed: &Typed) -> After {
     let lines: Vec<&str> = text.trim_end().lines().collect();
-    let count = match typed.find(&lines) {
-        Some(at) => lines.len() - at - 1 - typed.wrapped_rows(&lines, at),
-        None => lines.len(),
+    let (count, echoed) = match typed.find(&lines) {
+        Some(at) => {
+            let rows = typed.wrapped_rows(&lines, at);
+            (
+                lines.len() - at - 1 - rows,
+                typed.echo_prompt(&lines[at..=at + rows]),
+            )
+        }
+        None => (lines.len(), None),
+    };
+    let back = |last: &str| {
+        typed.prompt_back(last)
+            || echoed
+                .as_deref()
+                .is_some_and(|echoed| prompt_back(last, echoed))
     };
     After {
         lines: count,
-        prompt: count > 0 && lines.last().is_some_and(|last| typed.prompt_back(last)),
+        prompt: count > 0 && lines.last().is_some_and(|last| back(last)),
     }
 }
 
@@ -1102,7 +1134,8 @@ fn list_commands(ui: &mut Ui<'_>, list: Rect, log: &mut AgentLog) -> Option<Pane
                 )
                 .clicked
             {
-                ui.copy(command.text.clone());
+                // A command may hold a password: kept out of clipboard history, and cleared.
+                ui.copy_secret(command.text.clone());
                 ui.toast("Command copied", Tone::Info);
                 continue;
             }
@@ -2061,7 +2094,7 @@ mod tests {
     }
 
     #[test]
-    fn a_command_typed_before_the_prompt_ends_at_the_first_prompt() {
+    fn a_command_typed_before_the_prompt_ends_at_the_prompt_it_was_echoed_at() {
         let loading = "PowerShell 7.6.9\nLoading personal and system profiles took 912ms.";
         let mut typed = Typed::of(loading);
         "echo hi".clone_into(&mut typed.command);
@@ -2074,10 +2107,27 @@ mod tests {
                 prompt: true
             }
         );
+        // A line of its own that merely ends like a prompt does not end it.
+        let going = format!("{loading}\nPS C:\\work> echo hi\nProgress 45%");
+        assert!(!after(&going, &typed).prompt);
         // Typed at a prompt, only a prompt like that one ends it, as before.
         let at_prompt = Typed::of("user@box:~$");
         assert!(!at_prompt.prompt_back("50% done >"));
         assert!(at_prompt.prompt_back("user@box:/tmp$"));
+    }
+
+    #[test]
+    fn a_commands_words_in_its_output_are_no_echo_when_the_echo_is_lost() {
+        let mut typed = Typed::of("PS C:\\work>");
+        "ls".clone_into(&mut typed.command);
+        // The echo never came; "tools" holds "ls" but is output, after no prompt.
+        assert_eq!(
+            after("PS C:\\work>\ntools\nPS C:\\work>", &typed),
+            After {
+                lines: 2,
+                prompt: true
+            }
+        );
     }
 
     #[test]
