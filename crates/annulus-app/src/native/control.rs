@@ -425,6 +425,31 @@ const QUIET: Duration = Duration::from_millis(1200);
 const PROMPT_QUIET: Duration = Duration::from_millis(300);
 /// How long to wait for a prompt from a shell that prints none before typing anyway.
 const SILENT_PROMPT: Duration = Duration::from_secs(10);
+/// How long text that is no prompt must sit unchanged before a command is typed at it: a
+/// prompt of an unusual shape, not a line the shell prints while it starts.
+const ODD_PROMPT_QUIET: Duration = Duration::from_secs(3);
+
+/// Whether a command may be typed into a terminal showing `text` (`None`: not read), its
+/// output quiet for `quiet`, `waited` after it was asked for; `busy` while the command before
+/// still goes on (this one answers its question). Typed at anything but the shell's prompt,
+/// the command is echoed early or lost, and the line it went on is not the prompt that ends
+/// it. So a shell's own lines while it starts ("Loading personal and system profiles took
+/// 900ms.", an update notice) wait for the prompt after them.
+fn ready_to_type(text: Option<&str>, quiet: Duration, waited: Duration, busy: bool) -> bool {
+    let Some(text) = text else {
+        return false;
+    };
+    let Some(last) = text.trim_end().lines().last() else {
+        return waited >= SILENT_PROMPT;
+    };
+    if busy {
+        quiet >= QUIET
+    } else if looks_like_prompt(last) {
+        quiet >= PROMPT_QUIET
+    } else {
+        quiet >= ODD_PROMPT_QUIET
+    }
+}
 /// How long a new terminal may take to start before a command for it is given up.
 const START_WITHIN: Duration = Duration::from_secs(30);
 /// What `run` waits at most when the agent names nothing, and the most it may name.
@@ -603,21 +628,21 @@ impl NativeApp {
             .as_ref()
             .and_then(|log| log.commands.last())
             .is_some_and(|last| last.state.going());
-        // Typing before the shell's first prompt has it echo the command early, or lose it,
-        // so wait for the prompt to show and settle. Output alone is not enough: a Windows
-        // console clears the screen and places the cursor before the shell says anything.
+        // Typing before the shell's prompt has it echo the command early, or lose it, so wait
+        // for the prompt to show and settle (`ready_to_type`). Output alone is not enough: a
+        // Windows console clears the screen and places the cursor before the shell says
+        // anything, and PowerShell may print a line of its own before its prompt.
         let text = if queued {
             None
         } else {
             panes.focused_transcript()
         };
-        let shown = text.as_deref().is_some_and(|text| !text.trim().is_empty());
-        let ready = !queued
-            && if shown {
-                now.duration_since(run.output.1) >= if busy { QUIET } else { PROMPT_QUIET }
-            } else {
-                now.duration_since(run.asked) >= SILENT_PROMPT
-            };
+        let ready = ready_to_type(
+            text.as_deref(),
+            now.duration_since(run.output.1),
+            now.duration_since(run.asked),
+            busy,
+        );
         if let Some(text) = text.filter(|_| ready) {
             // A trailing newline would press Enter twice.
             let mut keys = run
@@ -2004,6 +2029,49 @@ mod tests {
                 lines: 2,
                 prompt: true
             }
+        );
+    }
+
+    #[test]
+    fn a_command_waits_for_the_prompt_not_a_line_the_shell_prints_while_it_starts() {
+        let ms = Duration::from_millis;
+        let prompt = "PS C:\\work> ";
+        let loading = "PowerShell 7.6.9\nLoading personal and system profiles took 912ms.";
+        assert!(
+            !ready_to_type(Some(loading), ms(500), ms(2_000), false),
+            "PowerShell is still starting"
+        );
+        assert!(ready_to_type(
+            Some(&format!("{loading}\n{prompt}")),
+            PROMPT_QUIET,
+            ms(2_000),
+            false
+        ));
+        assert!(
+            !ready_to_type(Some(prompt), ms(100), ms(2_000), false),
+            "not settled yet"
+        );
+        // A prompt of an unusual shape is typed at once it has sat still a while.
+        assert!(!ready_to_type(
+            Some("[me@box work]"),
+            QUIET,
+            ms(4_000),
+            false
+        ));
+        assert!(ready_to_type(
+            Some("[me@box work]"),
+            ODD_PROMPT_QUIET,
+            ms(4_000),
+            false
+        ));
+        // Answering a question of the command before: no prompt to wait for.
+        assert!(ready_to_type(Some("Password:"), QUIET, ms(2_000), true));
+        // Nothing shown yet: a shell that prints no prompt gets the command after a while.
+        assert!(!ready_to_type(Some(""), ms(5_000), ms(5_000), false));
+        assert!(ready_to_type(Some("\n \n"), ms(0), SILENT_PROMPT, false));
+        assert!(
+            !ready_to_type(None, ms(5_000), SILENT_PROMPT, false),
+            "queued behind another"
         );
     }
 
