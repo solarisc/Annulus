@@ -1486,6 +1486,29 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_rule_whose_id_was_taken_meanwhile_is_saved_under_the_id_it_answers() {
+        let (mut vault, _) = Vault::create(temp("forward-id"), "pw", KdfParams::TEST).unwrap();
+        vault.upsert_host(host(&vault, "bastion")).unwrap();
+        let mut mine = vault.draft_forward(vault.hosts()[0].id);
+        mine.label = "mine".into();
+        // While it is open, a rule synced from another device arrives with the same id.
+        let mut theirs = mine.clone();
+        theirs.label = "theirs".into();
+        vault.forwards.push(theirs);
+
+        let id = vault.upsert_forward(mine.clone()).unwrap();
+        assert_ne!(id, mine.id);
+        let label = |id: u64| {
+            vault
+                .forwards()
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| &*r.label)
+        };
+        assert_eq!((label(id), label(mine.id)), (Some("mine"), Some("theirs")));
+    }
+
+    #[test]
     fn forwarding_rules_survive_lock_and_unlock_beside_the_hosts() {
         let path = temp("forwards");
         let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();

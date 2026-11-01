@@ -3256,6 +3256,49 @@ fn the_forwarding_wizard_saves_the_rule_it_describes() {
 }
 
 #[test]
+fn the_wizards_suggested_name_follows_the_ports_until_one_is_typed() {
+    let mut app = NativeApp::new(Some(fixture_vault("wizard-name", true)));
+    forwards_empty(&mut app);
+    let mut state = UiState::default();
+    let time = std::cell::Cell::new(0.0);
+    let clock = || {
+        time.set(time.get() + 1.0);
+        time.get()
+    };
+    let server = app.vault.as_ref().unwrap().hosts()[0].label.clone();
+    let mut output = through_the_wizard(
+        &mut app,
+        &mut state,
+        &clock,
+        ("15432", "db.internal", "5432"),
+        "Back",
+    );
+    // Back at the ports, the destination becomes 54321: the suggestion follows it.
+    let mut events = click_on(&output, "Destination, as the server sees it: port");
+    events.extend([
+        Event::Key(Key::End, Modifiers::NONE),
+        Event::Text("1".into()),
+    ]);
+    output = step(&mut app, &mut state, &events, clock());
+    output = step(&mut app, &mut state, &click_on(&output, "Next"), clock());
+    // Typed in, the name stays through another Back and Next.
+    let mut events = click_on(&output, "Name");
+    events.extend([
+        Event::Key(Key::End, Modifiers::NONE),
+        Event::Text(" x".into()),
+    ]);
+    output = step(&mut app, &mut state, &events, clock());
+    output = step(&mut app, &mut state, &click_on(&output, "Back"), clock());
+    output = step(&mut app, &mut state, &click_on(&output, "Next"), clock());
+    step(&mut app, &mut state, &click_on(&output, "Save"), clock());
+    let vault = app.vault.as_ref().unwrap();
+    let [rule] = vault.forwards() else {
+        panic!("one rule, not {:?}", vault.forwards());
+    };
+    assert_eq!(rule.label, format!("db.internal:54321 via {server} x"));
+}
+
+#[test]
 fn a_rule_open_to_the_network_says_so_on_its_row() {
     let mut app = NativeApp::new(Some(fixture_vault("open-rule", true)));
     forwards_open(&mut app);
