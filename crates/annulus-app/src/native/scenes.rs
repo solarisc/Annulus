@@ -4357,6 +4357,73 @@ fn a_reset_that_would_share_keys_is_refused_and_reset_all_puts_everything_back()
     );
 }
 
+/// Lays out like [`Measure`] and keeps each text as drawn: fitted to its place, so with
+/// its ellipsis where it was cut.
+struct Words(TextEngine, Vec<String>);
+
+impl Canvas for Words {
+    fn scale(&self) -> f32 {
+        1.0
+    }
+    fn fill_rect(&mut self, _: Rect, _: f32, _: annulus_ui::gfx::Color) {}
+    fn stroke_rect(&mut self, _: Rect, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn shadow(&mut self, _: Rect, _: f32, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn fill_circle(&mut self, _: Point, _: f32, _: annulus_ui::gfx::Color) {}
+    fn polyline(&mut self, _: &[Point], _: bool, _: f32, _: annulus_ui::gfx::Color) {}
+    fn stroke_circle(&mut self, _: Point, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn measure(&mut self, text: &str, font: annulus_ui::gfx::Font) -> annulus_ui::gfx::TextSize {
+        self.0.measure(text, font)
+    }
+    fn draw_text(
+        &mut self,
+        _: Point,
+        text: &str,
+        _: annulus_ui::gfx::Font,
+        _: annulus_ui::gfx::Color,
+    ) {
+        self.1.push(text.to_owned());
+    }
+    fn push_clip(&mut self, _: Rect) {}
+    fn pop_clip(&mut self) {}
+}
+
+#[test]
+fn squeezed_tabs_keep_a_readable_part_of_their_names() {
+    let mut app = NativeApp::new(Some(fixture_vault("squeezed-tabs", false)));
+    for index in 0..6 {
+        replay(&mut app, &format!("session number {index}"));
+    }
+    let mut state = UiState::default();
+    let mut words = Words(TextEngine::new(), Vec::new());
+    // The second frame, once the new tabs have grown into place.
+    for time in [0.0, 5.0] {
+        words.1.clear();
+        state.begin_frame(&[], time);
+        let viewport = Rect::new(0.0, 0.0, 1100.0, 800.0);
+        let mut ui = Ui::new(
+            &mut words,
+            Theme::new(Appearance::Dark),
+            &mut state,
+            viewport,
+        );
+        app.frame(&mut ui);
+        state.end_frame();
+    }
+    // The tabs' titles, whole or cut with an ellipsis.
+    let titles: Vec<&str> = words
+        .1
+        .iter()
+        .map(String::as_str)
+        .filter(|text| text.starts_with('s'))
+        .collect();
+    // Five tabs behind the one in front show no close button, so "sessio…" at least.
+    let readable = titles
+        .iter()
+        .filter(|title| title.starts_with("sessio"))
+        .count();
+    assert!(readable >= 5, "{titles:?}");
+}
+
 #[test]
 fn many_tabs_share_the_strip_and_none_shrinks_to_nothing() {
     let mut app = NativeApp::new(Some(fixture_vault("many-tabs", false)));

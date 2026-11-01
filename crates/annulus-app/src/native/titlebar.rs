@@ -554,7 +554,10 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     if response.focus_ring {
         ui.focus_ring(rect, 9.0);
     }
-    let mut inner = rect.inset(space::M, 0.0);
+    // Squeezed narrower than it wants, a tab trims its padding and keeps room for its close
+    // button only while that shows (in front or hovered), so its name keeps a few letters.
+    let squeezed = slot.w + 0.5 < tab_width(ui, tab);
+    let mut inner = rect.inset(if squeezed { space::S } else { space::M }, 0.0);
     let ink = t.text2.mix(t.text, hover.max(lit));
     let icon = inner.take_left(16.0).centered(16.0, 16.0);
     match tab_icon(app, tab) {
@@ -594,9 +597,13 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
         }
     }
     if !tab.fixed() {
-        let close = inner.take_right(18.0).centered(18.0, 18.0);
         let shown = lit.max(hover);
-        if shown > 0.0 {
+        let close = (shown > 0.0 || !squeezed).then(|| {
+            let close = inner.take_right(18.0).centered(18.0, 18.0);
+            inner.take_right(6.0);
+            close
+        });
+        if let Some(close) = close.filter(|_| shown > 0.0) {
             let close_id = id.with("close");
             // In the slot, where it stays while the tab glides.
             let target = Rect::new(close.x - x + slot.x, close.y, close.w, close.h);
@@ -624,7 +631,6 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
         if let Some(choice) = ui.context_menu(id, &response, &menu) {
             event = TabEvent::Menu(choice);
         }
-        inner.take_right(6.0);
     }
     ui.gfx
         .text(inner, &tab.title, BODY_MEDIUM, ink, Align::Start);
