@@ -112,7 +112,23 @@ fn router(server: Arc<Server>) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             annulus_proto::MAX_SMALL_BODY,
         ))
+        .layer(axum::middleware::from_fn(within_deadline))
         .with_state(server)
+}
+
+/// How long one request may take, its body included. A long poll ([`WAIT_FOR`]) answers well
+/// within it, and a device's push batch is 1 MiB at most; a client that trickles a body loses
+/// its connection instead of holding it, and a file handle, for good.
+const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn within_deadline(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    match tokio::time::timeout(REQUEST_DEADLINE, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    }
 }
 
 /// Refuses a request without a valid device token before its body is read, so a stranger

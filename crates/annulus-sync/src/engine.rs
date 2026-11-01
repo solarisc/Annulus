@@ -324,14 +324,16 @@ fn push(
     Ok(clean)
 }
 
-/// `changes` cut into runs of at most `budget` ciphertext bytes; each run holds at least
-/// one change, so a single large record still goes.
+/// `changes` cut into runs of at most `budget` ciphertext bytes and
+/// [`annulus_proto::MAX_PUSH_CHANGES`] changes, as the server takes them; each run holds at
+/// least one change, so a single large record still goes.
 fn batches(changes: &[Change], budget: usize) -> Vec<&[Change]> {
     let mut runs = Vec::new();
     let (mut start, mut size) = (0, 0);
     for (index, change) in changes.iter().enumerate() {
         let bytes = change.ciphertext.len() + change.id.len();
-        if index > start && size + bytes > budget {
+        let full = index - start >= annulus_proto::MAX_PUSH_CHANGES;
+        if index > start && (size + bytes > budget || full) {
             runs.push(&changes[start..index]);
             (start, size) = (index, 0);
         }
@@ -408,5 +410,24 @@ mod tests {
             .collect();
         assert_eq!(sizes, [vec!["a", "b"], vec!["c"], vec!["d"]]);
         assert_eq!(batches(&[], 100), Vec::<&[Change]>::new());
+    }
+
+    #[test]
+    fn a_push_never_holds_more_changes_than_the_server_takes() {
+        let many: Vec<Change> = (0..annulus_proto::MAX_PUSH_CHANGES * 2 + 1)
+            .map(|index| change(&index.to_string(), 1))
+            .collect();
+        let runs: Vec<usize> = batches(&many, usize::MAX)
+            .iter()
+            .map(|run| run.len())
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                annulus_proto::MAX_PUSH_CHANGES,
+                annulus_proto::MAX_PUSH_CHANGES,
+                1
+            ]
+        );
     }
 }

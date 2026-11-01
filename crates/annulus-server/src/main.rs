@@ -203,10 +203,16 @@ fn serve(options: Serve) -> Result<(), String> {
             let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
                 .await
                 .map_err(|e| format!("cannot load the certificate: {e}"))?;
-            axum_server::bind_rustls(options.listen, config)
-                .serve(app)
-                .await
-                .map_err(|e| e.to_string())
+            let mut server = axum_server::bind_rustls(options.listen, config);
+            // A client gets 10 s to send its request's headers. hyper only enforces that with
+            // a timer; without one, connections that trickle bytes would hold file handles
+            // until the server ran out.
+            server
+                .http_builder()
+                .http1()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(std::time::Duration::from_secs(10));
+            server.serve(app).await.map_err(|e| e.to_string())
         } else {
             let listener = tokio::net::TcpListener::bind(options.listen)
                 .await

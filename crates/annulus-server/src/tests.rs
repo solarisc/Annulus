@@ -369,6 +369,15 @@ fn the_admin_sees_sizes_deletes_accounts_and_takes_backups() {
         std::env::temp_dir().join(format!("annulus-server-backup-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&backup);
     server.backup(&backup).unwrap();
+    // Only the server's user may read it, whatever the umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // A copy is never written over another.
+    assert!(server.backup(&backup).is_err());
     let restored = Server::open(&backup, Signups::Closed).unwrap();
     assert_eq!(restored.accounts().unwrap().len(), 2);
     // The copy keeps the OPAQUE keys, so existing accounts can still sign in.
@@ -377,6 +386,26 @@ fn the_admin_sees_sizes_deletes_accounts_and_takes_backups() {
     assert!(server.delete_account("bob").unwrap());
     assert!(!server.delete_account("bob").unwrap());
     assert!(login(&server, "bob", "pw").is_err());
+}
+
+#[test]
+fn a_push_of_too_many_changes_is_refused_whole() {
+    let server = server(Signups::Open);
+    let me = caller(&server, &register(&server, "ana", "pw").unwrap().token);
+    let many: Vec<Change> = (0..=annulus_proto::MAX_PUSH_CHANGES)
+        .map(|index| change(&index.to_string(), 0, b"x"))
+        .collect();
+    assert!(matches!(
+        server.push(me, &many),
+        Err(ServerError::BadRequest(_))
+    ));
+    // Nothing of it was applied; a push within the cap goes through.
+    assert_eq!(server.pull(me, 0).unwrap().records.len(), 0);
+    let within = &many[..annulus_proto::MAX_PUSH_CHANGES];
+    assert_eq!(
+        server.push(me, within).unwrap().accepted.len(),
+        annulus_proto::MAX_PUSH_CHANGES
+    );
 }
 
 #[test]

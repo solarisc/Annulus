@@ -72,6 +72,11 @@ pub struct DecodeError(String);
 /// sealed, fits.
 pub const MAX_BODY: usize = 8 * 1024 * 1024;
 
+/// The most changes one push may hold. A push is one database transaction that every
+/// account's requests wait behind, so its length is capped as well as its size: tiny
+/// changes would otherwise fit a million in [`MAX_BODY`]. Clients cut their pushes to it.
+pub const MAX_PUSH_CHANGES: usize = 2_000;
+
 /// The largest body of every other request, sign-up and login included: their messages
 /// are a few KiB, and a stranger must not make the server buffer more.
 pub const MAX_SMALL_BODY: usize = 64 * 1024;

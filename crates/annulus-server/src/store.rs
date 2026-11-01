@@ -93,6 +93,35 @@ impl From<rusqlite::Error> for ServerError {
     }
 }
 
+impl From<std::io::Error> for ServerError {
+    fn from(error: std::io::Error) -> Self {
+        ServerError::Storage(error.to_string())
+    }
+}
+
+/// Makes `path` readable by the server's user alone, creating it empty if it is not there
+/// (`new`: it must not be). The database holds every account's OPAQUE record, so a manual
+/// install with a loose umask must not leave it, or a backup of it, readable to others;
+/// SQLite gives its `-wal` and `-shm` files the database's mode.
+fn owner_only(path: &Path, new: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(!new)
+            .create_new(new)
+            .mode(0o600)
+            .open(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    if new && path.exists() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    Ok(())
+}
+
 fn bad(what: &str) -> impl Fn(opaque_ke::errors::ProtocolError) -> ServerError + '_ {
     move |_| ServerError::BadRequest(what.to_owned())
 }
@@ -303,6 +332,9 @@ impl Server {
     /// # Errors
     /// The file cannot be opened or its stored OPAQUE keys are damaged.
     pub fn open(path: &Path, signups: Signups) -> Result<Self, ServerError> {
+        if path != Path::new(":memory:") {
+            owner_only(path, false)?;
+        }
         let db = Connection::open(path)?;
         db.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -754,8 +786,17 @@ impl Server {
     /// the current version comes back as a conflict.
     ///
     /// # Errors
-    /// The database failed; nothing was applied.
+    /// More than [`annulus_proto::MAX_PUSH_CHANGES`] changes, or the database failed; nothing
+    /// was applied.
     pub fn push(&self, caller: Caller, changes: &[Change]) -> Result<PushResult, ServerError> {
+        // One long push would hold every account's requests behind its transaction.
+        if changes.len() > annulus_proto::MAX_PUSH_CHANGES {
+            return Err(ServerError::BadRequest(format!(
+                "{} changes in one push; at most {}",
+                changes.len(),
+                annulus_proto::MAX_PUSH_CHANGES
+            )));
+        }
         let mut db = self.db()?;
         let tx = db.transaction()?;
         let mut last: i64 = tx.query_row(
@@ -1063,6 +1104,8 @@ impl Server {
         let target = path
             .to_str()
             .ok_or_else(|| ServerError::BadRequest("backup path".into()))?;
+        // Owner-only before any data goes in (VACUUM INTO fills an empty file).
+        owner_only(path, true)?;
         self.db()?.execute("VACUUM INTO ?1", [target])?;
         Ok(())
     }
