@@ -1505,6 +1505,17 @@ const KINDS: [(&str, ForwardKind); 3] = [
     ("SOCKS", ForwardKind::Dynamic),
 ];
 
+/// `rule` as a new rule with id `id`: named as its copy, and with no port to listen on yet,
+/// so the two never fight over one.
+fn duplicate(rule: &PortForward, id: u64) -> PortForward {
+    PortForward {
+        id,
+        label: format!("{} copy", rule.label.trim()).trim().to_owned(),
+        bind_port: 0,
+        ..rule.clone()
+    }
+}
+
 fn describe(rule: &PortForward, host: &str) -> String {
     let bind = format!("{}:{}", rule.bind_address, rule.bind_port);
     match rule.kind {
@@ -1778,7 +1789,7 @@ impl ForwardsView {
             .collect();
         let mut toggles = Vec::new();
         let mut remove = None;
-        let mut edit = None;
+        let (mut edit, mut copied) = (None, None);
         let confirm = self.confirm;
         let mut confirm_next = confirm;
         let statuses: HashMap<u64, Status> = self
@@ -1810,11 +1821,13 @@ impl ForwardsView {
             } else {
                 let delete = remainder.take_right(30.0).centered(30.0, 30.0);
                 remainder.take_right(4.0);
+                let copy = remainder.take_right(30.0).centered(30.0, 30.0);
+                remainder.take_right(4.0);
                 let change = remainder.take_right(30.0).centered(30.0, 30.0);
                 remainder.take_right(space::S);
                 let switch = remainder.take_right(40.0);
                 remainder.take_right(space::S);
-                slots = Some((switch, change, delete));
+                slots = Some((switch, change, copy, delete));
             }
             let status = statuses.get(&rule.id);
             let t = ui.theme;
@@ -1855,7 +1868,7 @@ impl ForwardsView {
                 },
                 false,
             );
-            let Some((switch, change, delete)) = slots else {
+            let Some((switch, change, copy, delete)) = slots else {
                 return;
             };
             let mut on = status.is_some();
@@ -1873,6 +1886,18 @@ impl ForwardsView {
             }
             if ui
                 .icon_button(
+                    zone.with("copy"),
+                    copy,
+                    icons::COPY,
+                    "Duplicate rule",
+                    false,
+                )
+                .clicked
+            {
+                copied = Some(rule.clone());
+            }
+            if ui
+                .icon_button(
                     zone.with("delete"),
                     delete,
                     icons::TRASH,
@@ -1887,6 +1912,11 @@ impl ForwardsView {
         self.confirm = confirm_next;
         if let Some(rule) = edit {
             self.draft = Some(Draft::new(rule, false));
+        }
+        // A copy opens as a new rule for its own port (F-FWD-005).
+        if let Some(rule) = copied {
+            let copy = duplicate(&rule, vault.draft_forward(rule.host_id).id);
+            self.draft = Some(Draft::new(copy, true));
         }
         for (id, on) in toggles {
             if on {
@@ -2058,6 +2088,28 @@ mod tests {
             annulus_platform::cpu::TextEngine::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_duplicate_is_a_new_rule_named_as_a_copy_that_listens_nowhere_yet() {
+        let mut rule = PortForward::new(3, 7);
+        (rule.label, rule.bind_port) = ("db".into(), 15432);
+        (rule.destination_host, rule.destination_port) = ("db.internal".into(), 5432);
+        rule.auto_start = true;
+        let copy = duplicate(&rule, 9);
+        assert_eq!(
+            (copy.id, copy.label.as_str(), copy.bind_port),
+            (9, "db copy", 0)
+        );
+        assert_eq!(
+            (
+                copy.host_id,
+                copy.destination_host.as_str(),
+                copy.destination_port,
+                copy.auto_start
+            ),
+            (7, "db.internal", 5432, true)
+        );
     }
 
     #[test]
