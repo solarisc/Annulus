@@ -1991,7 +1991,7 @@ impl Form {
         self.y += space::L;
     }
 
-    /// A field of several lines (notes) under its label.
+    /// A field of several lines (notes) under its label, its lines wrapped at its width.
     fn area(
         &mut self,
         ui: &mut Ui<'_>,
@@ -2010,6 +2010,7 @@ impl Form {
             buffer,
             FieldStyle {
                 placeholder,
+                wrap: true,
                 ..FieldStyle::default()
             },
         );
