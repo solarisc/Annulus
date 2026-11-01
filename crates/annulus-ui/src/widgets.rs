@@ -1084,9 +1084,15 @@ impl Ui<'_> {
         self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.035 * press));
         // One shape; each half lights up on its own, clipped so only the outer corners round.
         self.gfx.fill_rect(rect, corner, t.accent);
+        // The half with the keyboard is lit as under the pointer: it is where Enter goes.
         for (half, half_id, zone, lit) in [
-            (main, id, response, response.hovered),
-            (more, more_id, toggle, toggle.hovered || open),
+            (main, id, response, response.hovered || response.focus_ring),
+            (
+                more,
+                more_id,
+                toggle,
+                toggle.hovered || toggle.focus_ring || open,
+            ),
         ] {
             let hover = self.ease(half_id.with("hover"), if lit { 1.0 } else { 0.0 });
             if hover > 0.0 || zone.pressed {
@@ -1116,11 +1122,9 @@ impl Ui<'_> {
         }
         self.gfx
             .icon(icons::CHEVRON_DOWN, more.centered(16.0, 16.0), t.on_accent);
-        if response.focus_ring {
-            self.focus_ring(main, corner);
-        }
-        if toggle.focus_ring {
-            self.focus_ring(more, corner);
+        // One ring round the whole control: a ring round one half would cut across the other.
+        if response.focus_ring || toggle.focus_ring {
+            self.focus_ring(rect, corner);
         }
         self.pop_layer();
         if response.hovered || toggle.hovered {
