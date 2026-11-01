@@ -67,6 +67,9 @@ pub struct Settings {
     pub close_ended_agent_tabs: bool,
     /// The panel beside a new agent tab starts folded to its rail.
     pub agent_panel_folded: bool,
+    /// Agents may not close tabs, not even the ones they opened, so what they did stays on
+    /// screen for the user; off, an agent may close its own tabs. On by default.
+    pub stop_agents_closing_tabs: bool,
 }
 
 /// A shortcut with keys of the user's choosing.
@@ -121,6 +124,7 @@ impl Default for Settings {
             agents_read_my_tabs: true,
             close_ended_agent_tabs: false,
             agent_panel_folded: false,
+            stop_agents_closing_tabs: true,
         }
     }
 }
@@ -209,6 +213,7 @@ mod tests {
             agents_read_my_tabs: false,
             close_ended_agent_tabs: true,
             agent_panel_folded: true,
+            stop_agents_closing_tabs: false,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -217,16 +222,18 @@ mod tests {
         std::fs::write(&path, br#"{"font_size": 12.0, "future": true}"#).unwrap();
         let loaded = Settings::load(&path);
         assert_eq!((loaded.font_size, loaded.auto_lock_minutes), (12.0, 15));
-        // A file from before the scrollback and agent settings keeps today's behavior.
+        // A file from before the scrollback and agent settings keeps today's behavior, and
+        // one from before the close guard gets it switched on.
         assert_eq!(
             (
                 loaded.scrollback,
                 loaded.agent_tabs_in_front,
                 loaded.agents_read_my_tabs,
                 loaded.close_ended_agent_tabs,
-                loaded.agent_panel_folded
+                loaded.agent_panel_folded,
+                loaded.stop_agents_closing_tabs
             ),
-            (DEFAULT_SCROLLBACK, true, true, false, false)
+            (DEFAULT_SCROLLBACK, true, true, false, false, true)
         );
         // A file from before color schemes keeps its theme and draws our own colors.
         std::fs::write(&path, br#"{"theme": "light", "terminal_theme": "Nord"}"#).unwrap();

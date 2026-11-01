@@ -241,7 +241,7 @@ fn tools() -> Value {
         },
         {
             "name": "annulus_close",
-            "description": "Closes one of your tabs.",
+            "description": "Closes one of your tabs. By default the owner keeps agents from closing tabs, so they can read what you did: then it is refused and the tab stays, which is fine.",
             "inputSchema": { "type": "object", "properties": { "tab": tab }, "required": ["tab"] },
         },
     ])

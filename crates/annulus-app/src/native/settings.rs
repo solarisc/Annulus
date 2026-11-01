@@ -703,7 +703,7 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         settings.auto_lock_minutes = LOCK_MINUTES[chosen].0;
         changed = true;
     }
-    let mut automation = self::card(ui, page, "Automation", 5);
+    let mut automation = self::card(ui, page, "Automation", 6);
     let control = row(
         ui,
         &mut automation,
@@ -735,6 +735,12 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
             "Agents may read my tabs",
             "Off, agents read only the tabs they opened.",
             &mut settings.agents_read_my_tabs,
+        ),
+        (
+            "settings.agent.keep",
+            "Stop agents closing their tabs",
+            "Their tabs stay for you to read. Off, an agent may close the tabs it opened.",
+            &mut settings.stop_agents_closing_tabs,
         ),
         (
             "settings.agent.close",

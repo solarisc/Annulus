@@ -1436,6 +1436,12 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
         }
         Request::Close { tab } => {
             agent_tab(app, *tab)?;
+            if app.settings.stop_agents_closing_tabs {
+                return Err(format!(
+                    "tab {tab} stays open: agents may not close tabs (Settings > Security > \
+                     Automation), so the owner can read what was done there"
+                ));
+            }
             if let Some(index) = app.tabs.iter().position(|open| open.uid == *tab) {
                 app.close_tab(index);
             }
@@ -1782,6 +1788,32 @@ mod tests {
             app.tabs.iter().any(|tab| tab.uid == mine),
             "the owner's tab stays"
         );
+        // Once the owner lets agents close tabs.
+        app.settings.stop_agents_closing_tabs = false;
+        assert_eq!(
+            handle(&mut app, &Request::Close { tab: opened.id }),
+            Ok(Response::Done)
+        );
+        assert!(!app.tabs.iter().any(|tab| tab.uid == opened.id));
+    }
+
+    #[test]
+    fn an_agents_tab_stays_open_until_the_owner_lets_agents_close_tabs() {
+        let mut app = NativeApp::new(Some(fixture_vault("control-keep", true)));
+        let Ok(Response::Tab(opened)) = handle(&mut app, &Request::Open { host: None }) else {
+            panic!("a local tab opens");
+        };
+        assert!(app.settings.stop_agents_closing_tabs, "on by default");
+        let refused = handle(&mut app, &Request::Close { tab: opened.id }).unwrap_err();
+        assert!(
+            refused.contains("Settings > Security > Automation"),
+            "{refused}"
+        );
+        assert!(
+            app.tabs.iter().any(|tab| tab.uid == opened.id),
+            "the tab stays for the owner"
+        );
+        app.settings.stop_agents_closing_tabs = false;
         assert_eq!(
             handle(&mut app, &Request::Close { tab: opened.id }),
             Ok(Response::Done)

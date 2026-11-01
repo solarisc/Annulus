@@ -37,7 +37,8 @@ Commands:
   wait <tab> [S]                wait up to S seconds (30 by default) for the last command in
                                 your tab <tab> to finish, and print as run does
   interrupt <tab>               press Ctrl+C in your tab <tab> (a command that hangs stops)
-  close <tab>                   close your tab <tab>
+  close <tab>                   close your tab <tab>, once the owner lets agents close tabs
+                                (Settings > Security > Automation; not by default)
   mcp                           serve these as MCP tools over stdin and stdout
 
 You can type only into tabs you opened; the owner's tabs are read-only. run and wait exit
