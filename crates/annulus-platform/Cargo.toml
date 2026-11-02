@@ -27,6 +27,10 @@ zeroize.workspace = true
 name = "macos_frame"
 harness = false
 
+[[test]]
+name = "macos_menu"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 accesskit_windows.workspace = true
 windows-numerics.workspace = true

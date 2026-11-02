@@ -31,6 +31,23 @@ pub enum WindowRequest {
     Close,
 }
 
+/// An item the window adds to the app's menu in the system menu bar (macOS; elsewhere the app's
+/// own screens offer them): the app hears of a choice through [`WindowApp::menu`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuItem {
+    /// About the app.
+    About,
+    /// The app's settings.
+    Settings,
+    /// Lock the vault.
+    Lock,
+}
+
+impl MenuItem {
+    /// Every item, in the menu's order.
+    pub const ALL: [MenuItem; 3] = [MenuItem::About, MenuItem::Settings, MenuItem::Lock];
+}
+
 /// The OS draws the window buttons itself (macOS's traffic lights, at the title bar's left
 /// end); elsewhere the app's title bar draws its own.
 pub const OS_WINDOW_BUTTONS: bool = cfg!(target_os = "macos");
@@ -77,6 +94,19 @@ pub trait WindowApp {
 
     /// The colors to draw with.
     fn theme(&self) -> Theme;
+
+    /// The user chose `item` in the menu bar (macOS); a frame follows at once.
+    fn menu(&mut self, item: MenuItem) {
+        let _ = item;
+    }
+
+    /// The keys the menu bar shows beside `item` and answers to before any frame sees them;
+    /// `None` shows none and leaves every key to the frame (while Settings records new keys,
+    /// say). Asked after each frame.
+    fn menu_keys(&self, item: MenuItem) -> Option<(Key, Modifiers)> {
+        let _ = item;
+        None
+    }
 }
 
 /// Why the window could not run.
@@ -265,6 +295,7 @@ mod portable {
     use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WinitKey, NamedKey};
+    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement as _;
     use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
     use std::sync::Arc;
@@ -301,6 +332,7 @@ mod portable {
             text: Some(TextEngine::new()),
             events: Vec::new(),
             modifiers: Modifiers::NONE,
+            buttons: Buttons::default(),
             pointer: None,
             started: Instant::now(),
             wake_at: None,
@@ -327,10 +359,48 @@ mod portable {
         text: Option<TextEngine>,
         events: Vec<Event>,
         modifiers: Modifiers,
+        buttons: Buttons,
         pointer: Option<Point>,
         started: Instant,
         /// When the app asked for its next frame without input.
         wake_at: Option<Instant>,
+    }
+
+    /// Which button a mouse button's press or release is. On a Mac a click held with Ctrl is a
+    /// right click (UI-SPEC §7), from its press to its release even when Ctrl is let go in
+    /// between.
+    #[derive(Debug, Default)]
+    struct Buttons {
+        /// The left button went down with Ctrl held, on a Mac.
+        ctrl_click: bool,
+    }
+
+    impl Buttons {
+        fn button(
+            &mut self,
+            button: MouseButton,
+            state: ElementState,
+            modifiers: Modifiers,
+        ) -> Option<Button> {
+            match button {
+                MouseButton::Left => {}
+                MouseButton::Right => return Some(Button::Secondary),
+                MouseButton::Middle => return Some(Button::Middle),
+                _ => return None,
+            }
+            if state == ElementState::Pressed {
+                self.ctrl_click = cfg!(target_os = "macos") && modifiers.ctrl;
+            }
+            let secondary = self.ctrl_click;
+            if state == ElementState::Released {
+                self.ctrl_click = false;
+            }
+            Some(if secondary {
+                Button::Secondary
+            } else {
+                Button::Primary
+            })
+        }
     }
 
     /// The band along the window's edges that resizes it, in DIPs.
@@ -393,6 +463,10 @@ mod portable {
                 width.get() as f32 / scale,
                 height.get() as f32 / scale,
             );
+            #[cfg(target_os = "macos")]
+            for item in crate::menu_bar::take_chosen() {
+                self.app.menu(item);
+            }
             let theme = self.app.theme();
             let maximized = shown.window.is_maximized();
             let request = {
@@ -401,6 +475,8 @@ mod portable {
             };
             let mut output = self.state.end_frame();
             publish_clipboard(&mut self.state, &mut output);
+            #[cfg(target_os = "macos")]
+            crate::menu_bar::set_menu_keys(|item| self.app.menu_keys(item));
             // The window buttons sit centered in the title bar, which is the drag zone.
             #[cfg(target_os = "macos")]
             if let Some(bar) = output
@@ -526,6 +602,11 @@ mod portable {
             };
             let waker = window.clone();
             self.app.set_waker(Arc::new(move || waker.request_redraw()));
+            #[cfg(target_os = "macos")]
+            {
+                let waker = window.clone();
+                crate::menu_bar::add_menu_items(&self.title, move || waker.request_redraw());
+            }
             window.request_redraw();
             self.window = Some(Shown {
                 window,
@@ -577,11 +658,8 @@ mod portable {
                     self.events.push(Event::FilesDropped(vec![path]));
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
-                    let button = match button {
-                        MouseButton::Left => Button::Primary,
-                        MouseButton::Right => Button::Secondary,
-                        MouseButton::Middle => Button::Middle,
-                        _ => return,
+                    let Some(button) = self.buttons.button(button, state, self.modifiers) else {
+                        return;
                     };
                     if state == ElementState::Pressed && button == Button::Primary {
                         if let Some(direction) =
@@ -627,7 +705,8 @@ mod portable {
                     if event.state == ElementState::Pressed =>
                 {
                     let insert = event.logical_key == WinitKey::Named(NamedKey::Insert);
-                    let mapped = key(&event.logical_key);
+                    let bare = event.key_without_modifiers();
+                    let mapped = pressed_key(&event.logical_key, &bare, self.modifiers);
                     let paste_key = mapped.unwrap_or(kit::Key::Space);
                     if is_paste(self.state.focused_role(), paste_key, self.modifiers, insert) {
                         if let Some(paste) = paste_event() {
@@ -650,6 +729,17 @@ mod portable {
                 _ => return,
             }
             window.request_redraw();
+        }
+    }
+
+    /// The key a press names, from its `logical` key and its `bare` one (without modifiers).
+    /// With Ctrl or Cmd held, a character key is named by the key itself, not by the
+    /// character Shift or Option would make of it: Cmd+Shift+] is "]", not "}". The shortcut
+    /// table writes chords that way, and Windows names keys so (`win32::map_key`).
+    fn pressed_key(logical: &WinitKey, bare: &WinitKey, modifiers: Modifiers) -> Option<kit::Key> {
+        match bare {
+            WinitKey::Character(_) if modifiers.ctrl || modifiers.logo => key(bare),
+            _ => key(logical),
         }
     }
 
@@ -687,6 +777,76 @@ mod portable {
             WinitKey::Character(text) => kit::Key::Char(text.chars().next()?.to_ascii_lowercase()),
             _ => return None,
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_chord_names_the_key_pressed_not_the_character_shift_makes() {
+            let character = |text: &str| WinitKey::Character(text.into());
+            let cmd_shift = Modifiers {
+                logo: true,
+                shift: true,
+                ..Modifiers::NONE
+            };
+            // Cmd+Shift+] on a Mac, Ctrl+Shift+. on Linux.
+            let close = (character("}"), character("]"));
+            assert_eq!(
+                pressed_key(&close.0, &close.1, cmd_shift),
+                Some(kit::Key::Char(']'))
+            );
+            let period = (character(">"), character("."));
+            assert_eq!(
+                pressed_key(&period.0, &period.1, Modifiers::CTRL_SHIFT),
+                Some(kit::Key::Char('.'))
+            );
+            // Without Ctrl or Cmd the character stays what was typed.
+            assert_eq!(
+                pressed_key(&close.0, &close.1, Modifiers::SHIFT),
+                Some(kit::Key::Char('}'))
+            );
+            let enter = WinitKey::Named(NamedKey::Enter);
+            assert_eq!(
+                pressed_key(&enter, &enter, cmd_shift),
+                Some(kit::Key::Enter)
+            );
+        }
+
+        #[test]
+        fn on_a_mac_a_ctrl_click_is_a_right_click_from_press_to_release() {
+            let mut buttons = Buttons::default();
+            let ctrl_click = if cfg!(target_os = "macos") {
+                Button::Secondary
+            } else {
+                Button::Primary
+            };
+            let left = |buttons: &mut Buttons, state, modifiers| {
+                buttons.button(MouseButton::Left, state, modifiers)
+            };
+            assert_eq!(
+                left(&mut buttons, ElementState::Pressed, Modifiers::CTRL),
+                Some(ctrl_click)
+            );
+            // Ctrl let go before the release: still the same click.
+            assert_eq!(
+                left(&mut buttons, ElementState::Released, Modifiers::NONE),
+                Some(ctrl_click)
+            );
+            assert_eq!(
+                left(&mut buttons, ElementState::Pressed, Modifiers::NONE),
+                Some(Button::Primary)
+            );
+            assert_eq!(
+                left(&mut buttons, ElementState::Released, Modifiers::CTRL),
+                Some(Button::Primary)
+            );
+            assert_eq!(
+                buttons.button(MouseButton::Right, ElementState::Pressed, Modifiers::NONE),
+                Some(Button::Secondary)
+            );
+        }
     }
 }
 

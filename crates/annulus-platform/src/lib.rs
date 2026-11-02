@@ -9,6 +9,8 @@ pub mod cpu;
 pub mod d2d;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "macos")]
+pub mod menu_bar;
 pub mod process;
 #[cfg(windows)]
 mod win32;

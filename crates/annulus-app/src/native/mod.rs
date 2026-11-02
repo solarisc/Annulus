@@ -28,7 +28,7 @@ mod titlebar;
 
 use annulus_config::settings::{OpenTab, Settings};
 use annulus_config::tokens::{Appearance, space};
-use annulus_platform::window::{Waker, WindowApp, WindowError, WindowRequest, run};
+use annulus_platform::window::{MenuItem, Waker, WindowApp, WindowError, WindowRequest, run};
 use annulus_session::profiles::{self, Profile};
 use annulus_session::{Program, SshFiles};
 use annulus_term::Emulator;
@@ -644,13 +644,9 @@ impl NativeApp {
         if shortcuts::PREVIOUS_TAB.pressed(ui) && count > 0 {
             self.active = (self.active + count - 1) % count;
         }
-        // Alt+1 to Alt+9: the tab at that place (shortcuts::GO_TO_TAB).
-        let alt = Modifiers {
-            alt: true,
-            ..Modifiers::NONE
-        };
+        // Alt+1 to Alt+9 (Cmd on a Mac): the tab at that place.
         for (place, digit) in ('1'..='9').enumerate() {
-            if ui.key(Key::Char(digit), alt) && place < count {
+            if shortcuts::GO_TO_TAB.pressed_with(ui, Key::Char(digit)) && place < count {
                 self.active = place;
             }
         }
@@ -670,8 +666,7 @@ impl NativeApp {
             self.move_tab(self.active, self.active + 1);
         }
         if shortcuts::SETTINGS.pressed(ui) {
-            self.active = 0;
-            self.section = Section::Settings;
+            self.show_settings();
         }
         if shortcuts::LOCK.pressed(ui) {
             self.lock_vault();
@@ -736,10 +731,6 @@ impl NativeApp {
         if shortcuts::FOCUS_MODE.pressed(ui) {
             panes.toggle_focus_mode();
         }
-        let alt = Modifiers {
-            alt: true,
-            ..Modifiers::NONE
-        };
         if panes.len() > 1 {
             for (key, dx, dy) in [
                 (Key::Left, -1.0, 0.0),
@@ -747,7 +738,7 @@ impl NativeApp {
                 (Key::Up, 0.0, -1.0),
                 (Key::Down, 0.0, 1.0),
             ] {
-                if ui.key(key, alt) {
+                if shortcuts::PANE_FOCUS.pressed_with(ui, key) {
                     panes.move_focus(dx, dy);
                     ui.state
                         .set_focus(Some(Id::new(("terminal", uid, panes.focused))), false);
@@ -835,10 +826,43 @@ impl NativeApp {
             }
             Action::NewLocal => self.open_local(),
             Action::Lock => self.lock_vault(),
-            Action::Settings => {
-                self.section = Section::Settings;
-                self.active = 0;
+            Action::Settings => self.show_settings(),
+        }
+    }
+
+    /// Settings, in the vault tab.
+    fn show_settings(&mut self) {
+        self.active = 0;
+        self.section = Section::Settings;
+    }
+
+    /// An item chosen in the menu bar (macOS): it does what its shortcut does, and like the
+    /// shortcuts nothing while the vault is locked.
+    pub fn menu(&mut self, item: MenuItem) {
+        if self.vault.is_none() {
+            return;
+        }
+        match item {
+            MenuItem::About => {
+                self.show_settings();
+                self.settings_view.page = settings::Page::About;
             }
+            MenuItem::Settings => self.show_settings(),
+            MenuItem::Lock => self.lock_vault(),
+        }
+    }
+
+    /// The keys the menu bar shows beside `item`: its shortcut's, none for About, and none
+    /// while Settings records keys, which must reach the recording rather than the menu.
+    #[must_use]
+    pub fn menu_keys(&self, item: MenuItem) -> Option<(Key, Modifiers)> {
+        if self.settings_view.recording() {
+            return None;
+        }
+        match item {
+            MenuItem::About => None,
+            MenuItem::Settings => shortcuts::SETTINGS.current(),
+            MenuItem::Lock => shortcuts::LOCK.current(),
         }
     }
 
@@ -1628,6 +1652,14 @@ impl WindowApp for Preview {
             self.app.settings_view.previewing,
             self.theme,
         )
+    }
+
+    fn menu(&mut self, item: MenuItem) {
+        self.app.menu(item);
+    }
+
+    fn menu_keys(&self, item: MenuItem) -> Option<(Key, Modifiers)> {
+        self.app.menu_keys(item)
     }
 }
 

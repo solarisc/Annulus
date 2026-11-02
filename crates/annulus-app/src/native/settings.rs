@@ -215,6 +215,12 @@ impl SettingsView {
         }
     }
 
+    /// Whether a shortcut's new keys are being recorded: every key goes to the recording then.
+    #[must_use]
+    pub fn recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
     fn stop_recording(&mut self) {
         self.recording = None;
         self.refused = None;
@@ -242,7 +248,7 @@ impl SettingsView {
         };
         settings.keys.retain(|binding| binding.action != id);
         // Its own keys again need no entry.
-        if shortcut.chord != Some((key, modifiers)) {
+        if shortcut.own() != Some((key, modifiers)) {
             settings.keys.push(KeyBinding {
                 action: id.to_owned(),
                 keys: shortcuts::chord_text(key, modifiers),
@@ -953,7 +959,7 @@ impl SettingsView {
         let mut head = Rect::new(line.x, line.y, line.w, KEY_ROW);
         let keys = shortcut.keys();
         let caps_w = keys_width(&mut ui.gfx, &keys) + 12.0;
-        if shortcut.chord.is_none() {
+        if shortcut.own().is_none() {
             // One a widget or the window handles: listed, not changed here.
             let caps = head.take_right(caps_w);
             head.take_right(space::M);
@@ -1052,7 +1058,7 @@ fn reset_keys(
 ) -> bool {
     let t = ui.theme;
     let own = shortcut
-        .chord
+        .own()
         .map(|(key, modifiers)| shortcuts::chord_text(key, modifiers))
         .unwrap_or_default();
     let w = ui.gfx.measure("Reset", SMALL).width + 14.0;
@@ -1082,7 +1088,7 @@ fn reset_keys(
         return false;
     }
     // Another shortcut may have taken its own keys meanwhile.
-    if let Some((key, modifiers)) = shortcut.chord
+    if let Some((key, modifiers)) = shortcut.own()
         && let Err(why) = shortcuts::check(shortcut.id, key, modifiers)
     {
         ui.toast(

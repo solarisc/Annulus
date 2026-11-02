@@ -23,6 +23,7 @@ use annulus_vault::hosts::Host;
 
 use super::demo::fixture_vault;
 use super::hosts::{HostsAction, Mode};
+use super::shortcuts::{self, Shortcut};
 use super::{NativeApp, TermView, WindowButtons};
 use crate::sync_screen::Attempt;
 use crate::terminal_view::TabStatus;
@@ -38,6 +39,8 @@ enum Act {
     Type(&'static str),
     /// Press a key.
     Press(Key, Modifiers),
+    /// Press a shortcut's own chord on this computer's keyboard.
+    Shortcut(Shortcut),
     /// Press the primary button on the zone with this name and keep it down (a drag starts;
     /// a later `Hover` moves it).
     Hold(&'static str),
@@ -53,6 +56,18 @@ struct Scene {
     populated: bool,
     setup: fn(&mut NativeApp),
     acts: &'static [Act],
+}
+
+/// The key press of `shortcut`'s own chord on this computer's keyboard.
+fn chord(shortcut: Shortcut) -> Event {
+    let (key, modifiers) = shortcut.own().expect("a chord");
+    Event::Key(key, modifiers)
+}
+
+/// `shortcut`'s own chord as this computer's keyboard writes it.
+fn own_keys(shortcut: Shortcut) -> String {
+    let (key, modifiers) = shortcut.own().expect("a chord");
+    shortcuts::chord_text(key, modifiers)
 }
 
 fn nothing(_: &mut NativeApp) {}
@@ -1212,7 +1227,7 @@ const SCENES: &[Scene] = &[
         acts: &[
             Act::Click("Shortcuts"),
             Act::Click("Change the keys of New tab"),
-            Act::Press(Key::Char('k'), Modifiers::CTRL_SHIFT),
+            Act::Shortcut(shortcuts::PALETTE),
         ],
     },
     Scene {
@@ -1278,10 +1293,7 @@ const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: with_tabs,
-        acts: &[
-            Act::Press(Key::Char('k'), Modifiers::CTRL_SHIFT),
-            Act::Type("db"),
-        ],
+        acts: &[Act::Shortcut(shortcuts::PALETTE), Act::Type("db")],
     },
     Scene {
         name: "lock",
@@ -1654,6 +1666,7 @@ fn render(
             }
             Some(Act::Type(text)) => events.push(Event::Text((*text).to_owned())),
             Some(Act::Press(key, modifiers)) => events.push(Event::Key(*key, *modifiers)),
+            Some(Act::Shortcut(shortcut)) => events.push(chord(*shortcut)),
             Some(Act::Hold(name)) => {
                 events.push(Event::PointerMoved(zone_center(&output.zones, name)));
                 events.push(Event::PointerDown(Button::Primary));
@@ -1705,6 +1718,7 @@ fn events_for(act: &Act, zones: &[Zone]) -> Vec<Event> {
         ],
         Act::Type(text) => vec![Event::Text((*text).to_owned())],
         Act::Press(key, modifiers) => vec![Event::Key(*key, *modifiers)],
+        Act::Shortcut(shortcut) => vec![chord(*shortcut)],
         Act::Hold(name) => vec![
             Event::PointerMoved(zone_center(zones, name)),
             Event::PointerDown(Button::Primary),
@@ -2057,7 +2071,6 @@ fn random_action(rng: &mut Rng, zones: &[Zone]) -> (Vec<Event>, String) {
         }
         events
     };
-    let ctrl_shift = |c| Event::Key(Key::Char(c), Modifiers::CTRL_SHIFT);
     match rng.below(24) {
         0..=9 if !targets.is_empty() => {
             let zone = targets[rng.below(targets.len())];
@@ -2121,8 +2134,18 @@ fn random_action(rng: &mut Rng, zones: &[Zone]) -> (Vec<Event>, String) {
             )
         }
         _ => {
-            let c = ['k', 't', 'w', 'f', 'm', 'b', 'd', 'e', '.'][rng.below(9)];
-            (vec![ctrl_shift(c)], format!("Ctrl+Shift+{c}"))
+            let shortcut = [
+                shortcuts::PALETTE,
+                shortcuts::NEW_TAB,
+                shortcuts::CLOSE,
+                shortcuts::FIND,
+                shortcuts::FOCUS_MODE,
+                shortcuts::BROADCAST,
+                shortcuts::SPLIT_RIGHT,
+                shortcuts::SPLIT_DOWN,
+                shortcuts::SNIPPETS,
+            ][rng.below(9)];
+            (vec![chord(shortcut)], shortcut.keys())
         }
     }
 }
@@ -2951,7 +2974,7 @@ fn escape_with_the_palette_open_closes_only_the_palette() {
     let output = step(&mut app, &mut state, &[], 0.0);
     step(&mut app, &mut state, &click_on(&output, "New host"), 1.0);
     assert!(app.hosts.editor.is_some());
-    let palette = [Event::Key(Key::Char('k'), Modifiers::CTRL_SHIFT)];
+    let palette = [chord(shortcuts::PALETTE)];
     step(&mut app, &mut state, &palette, 2.0);
     assert!(app.palette.is_some());
     let escape = [Event::Key(Key::Escape, Modifiers::NONE)];
@@ -3107,9 +3130,9 @@ fn a_locked_vault_hides_every_open_tab_and_the_palette() {
         "no new tab while locked"
     );
     for keys in [
-        vec![Event::Key(Key::Tab, Modifiers::CTRL)],
-        vec![Event::Key(Key::Char('k'), Modifiers::CTRL_SHIFT)],
-        vec![Event::Key(Key::Char('t'), Modifiers::CTRL_SHIFT)],
+        vec![chord(shortcuts::NEXT_TAB)],
+        vec![chord(shortcuts::PALETTE)],
+        vec![chord(shortcuts::NEW_TAB)],
     ] {
         output = step(&mut app, &mut state, &keys, 2.0);
         assert_eq!(app.active, 0, "the lock screen stays in front");
@@ -3175,12 +3198,7 @@ fn the_palette_cannot_lock_while_the_recovery_key_is_shown() {
     app.lock = super::lock::LockView::new(super::lock::Mode::Setup);
     let mut state = UiState::default();
     step(&mut app, &mut state, &[], 0.0);
-    step(
-        &mut app,
-        &mut state,
-        &[Event::Key(Key::Char('k'), Modifiers::CTRL_SHIFT)],
-        1.0,
-    );
+    step(&mut app, &mut state, &[chord(shortcuts::PALETTE)], 1.0);
     assert!(app.palette.is_none(), "no palette before a vault is open");
 }
 
@@ -3754,7 +3772,7 @@ fn e2e_closing_terminals_sftp_and_forwards_leaves_nothing_on_the_server() {
     for _ in 0..3 {
         drive(&mut app, &mut state, &[], clock());
     }
-    let split = [Event::Key(Key::Char('d'), Modifiers::CTRL_SHIFT)];
+    let split = [chord(shortcuts::SPLIT_RIGHT)];
     drive(&mut app, &mut state, &split, clock());
     app.act(super::hosts::HostsAction::Sftp(host_id));
     for _ in 0..3 {
@@ -4325,12 +4343,7 @@ fn a_shortcut_takes_new_keys_in_settings_and_its_own_again_on_reset() {
         4.0,
     );
     // Keys another shortcut has are refused, and reach that one no more than any other.
-    step(
-        &mut app,
-        &mut state,
-        &press(Key::Char('k'), Modifiers::CTRL_SHIFT),
-        5.0,
-    );
+    step(&mut app, &mut state, &[chord(shortcuts::PALETTE)], 5.0);
     assert!(app.palette.is_none(), "the palette's keys opened nothing");
     assert_eq!(app.settings.keys, []);
     let tabs = app.tabs.len();
@@ -4340,33 +4353,86 @@ fn a_shortcut_takes_new_keys_in_settings_and_its_own_again_on_reset() {
         app.settings.keys,
         vec![KeyBinding {
             action: "NEW_TAB".into(),
-            keys: "Ctrl+Alt+N".into(),
+            keys: shortcuts::chord_text(Key::Char('n'), ctrl_alt),
         }]
     );
-    let reset = "Reset New tab to Ctrl+Shift+T";
+    let new_tab = chord(shortcuts::NEW_TAB);
+    let reset = format!("Reset New tab to {}", own_keys(shortcuts::NEW_TAB));
     assert!(output.zones.iter().any(|zone| zone.label == reset));
     // The old keys open nothing now; the new ones open a tab.
-    step(
-        &mut app,
-        &mut state,
-        &press(Key::Char('t'), Modifiers::CTRL_SHIFT),
-        7.0,
-    );
+    step(&mut app, &mut state, std::slice::from_ref(&new_tab), 7.0);
     assert_eq!(app.tabs.len(), tabs);
     step(&mut app, &mut state, &press(Key::Char('n'), ctrl_alt), 8.0);
     assert_eq!(app.tabs.len(), tabs + 1);
     // Back in Settings, Reset gives it its own keys again.
     app.active = 0;
     let output = step(&mut app, &mut state, &[], 9.0);
-    step(&mut app, &mut state, &click_on(&output, reset), 10.0);
+    step(&mut app, &mut state, &click_on(&output, &reset), 10.0);
     assert_eq!(app.settings.keys, []);
+    step(&mut app, &mut state, &[new_tab], 11.0);
+    assert_eq!(app.tabs.len(), tabs + 2);
+}
+
+#[test]
+fn the_menu_bars_items_do_what_their_shortcuts_do_and_nothing_while_locked() {
+    use super::Section;
+    use super::settings::Page;
+    use annulus_platform::window::MenuItem;
+    let mut app = NativeApp::new(Some(fixture_vault("menu-bar", false)));
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    app.active = 1;
+    app.menu(MenuItem::About);
+    assert_eq!(
+        (app.active, app.section, app.settings_view.page),
+        (0, Section::Settings, Page::About)
+    );
+    app.section = Section::Hosts;
+    app.menu(MenuItem::Settings);
+    assert_eq!(app.section, Section::Settings);
+    app.menu(MenuItem::Lock);
+    assert!(app.vault.is_none(), "locked");
+    app.section = Section::Hosts;
+    app.menu(MenuItem::Settings);
+    assert_eq!(app.section, Section::Hosts, "Settings waits for an unlock");
+}
+
+#[test]
+fn the_menu_bar_shows_the_shortcuts_keys_but_none_while_settings_records_keys() {
+    use annulus_platform::window::MenuItem;
+    let mut app = NativeApp::new(Some(fixture_vault("menu-keys", false)));
+    app.section = super::Section::Settings;
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    assert_eq!(app.menu_keys(MenuItem::About), None);
+    assert_eq!(app.menu_keys(MenuItem::Settings), shortcuts::SETTINGS.own());
+    assert_eq!(app.menu_keys(MenuItem::Lock), shortcuts::LOCK.own());
+    // Keys chosen in Settings show in the menu bar too.
+    let ctrl_alt_k = (
+        Key::Char('k'),
+        Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        },
+    );
+    app.settings.keys.push(KeyBinding {
+        action: "LOCK".into(),
+        keys: shortcuts::chord_text(ctrl_alt_k.0, ctrl_alt_k.1),
+    });
+    let output = step(&mut app, &mut state, &click_on(&output, "Shortcuts"), 1.0);
+    assert_eq!(app.menu_keys(MenuItem::Lock), Some(ctrl_alt_k));
+    // While keys are recorded, the menu bar takes none of them.
     step(
         &mut app,
         &mut state,
-        &press(Key::Char('t'), Modifiers::CTRL_SHIFT),
-        11.0,
+        &click_on(&output, "Change the keys of New tab"),
+        2.0,
     );
-    assert_eq!(app.tabs.len(), tabs + 2);
+    assert_eq!(app.menu_keys(MenuItem::Settings), None);
+    assert_eq!(app.menu_keys(MenuItem::Lock), None);
+    app.settings.keys.clear();
+    step(&mut app, &mut state, &[], 3.0);
 }
 
 #[test]
@@ -4389,7 +4455,7 @@ fn a_reset_that_would_share_keys_is_refused_and_reset_all_puts_everything_back()
         ("Change the keys of New tab", (Key::Char('n'), ctrl_alt)),
         (
             "Change the keys of Local terminal",
-            (Key::Char('t'), Modifiers::CTRL_SHIFT),
+            shortcuts::NEW_TAB.own().unwrap(),
         ),
     ] {
         let output = step(&mut app, &mut state, &[], time);
@@ -4399,10 +4465,13 @@ fn a_reset_that_would_share_keys_is_refused_and_reset_all_puts_everything_back()
     }
     assert_eq!(app.settings.keys.len(), 2);
     let output = step(&mut app, &mut state, &[], time);
-    let reset = "Reset New tab to Ctrl+Shift+T";
-    step(&mut app, &mut state, &click_on(&output, reset), time + 1.0);
+    let reset = format!("Reset New tab to {}", own_keys(shortcuts::NEW_TAB));
+    step(&mut app, &mut state, &click_on(&output, &reset), time + 1.0);
     assert_eq!(app.settings.keys.len(), 2, "no reset into a clash");
-    assert_eq!(super::shortcuts::NEW_TAB.keys(), "Ctrl+Alt+N");
+    assert_eq!(
+        shortcuts::NEW_TAB.keys(),
+        shortcuts::chord_text(Key::Char('n'), ctrl_alt)
+    );
     let output = step(&mut app, &mut state, &[], time + 2.0);
     step(
         &mut app,
@@ -4412,11 +4481,8 @@ fn a_reset_that_would_share_keys_is_refused_and_reset_all_puts_everything_back()
     );
     assert_eq!(app.settings.keys, []);
     assert_eq!(
-        (
-            super::shortcuts::NEW_TAB.keys(),
-            super::shortcuts::LOCAL.keys()
-        ),
-        ("Ctrl+Shift+T".to_owned(), "Ctrl+Shift+L".to_owned())
+        (shortcuts::NEW_TAB.keys(), shortcuts::LOCAL.keys()),
+        (own_keys(shortcuts::NEW_TAB), own_keys(shortcuts::LOCAL))
     );
 }
 
@@ -5093,12 +5159,7 @@ fn a_tab_moves_among_the_sessions_and_the_one_in_front_stays_in_front() {
     let mut state = UiState::default();
     app.vault = Some(fixture_vault("move-tab", false));
     step(&mut app, &mut state, &[], 0.0);
-    step(
-        &mut app,
-        &mut state,
-        &[Event::Key(Key::PageUp, Modifiers::CTRL_SHIFT)],
-        1.0,
-    );
+    step(&mut app, &mut state, &[chord(shortcuts::MOVE_LEFT)], 1.0);
     assert_eq!(titles(&app), ["Vault", "SFTP", "b", "a", "c"]);
     assert_eq!(app.tabs[app.active].title, "a");
 }
@@ -5217,12 +5278,7 @@ fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
     assert_eq!(shown, 1, "only the large pane is drawn");
     assert_eq!(layout_faults(&output.zones, viewport), Vec::<String>::new());
     // Ctrl+Shift+M goes back to the split.
-    output = step(
-        &mut app,
-        &mut state,
-        &[Event::Key(Key::Char('m'), Modifiers::CTRL_SHIFT)],
-        3.0,
-    );
+    output = step(&mut app, &mut state, &[chord(shortcuts::FOCUS_MODE)], 3.0);
     assert!(!front_panes(&app).in_focus_mode());
     // Broadcast types into the other three, until one is left out with its own toggle.
     output = step(&mut app, &mut state, &click_on(&output, "Broadcast"), 4.0);
@@ -5249,10 +5305,6 @@ fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
     assert_eq!(layout_faults(&output.zones, viewport), Vec::<String>::new());
     // Ctrl+Alt+Shift+B leaves the focused pane (bastion) out by keyboard; another pane typed
     // in then does not reach it, and the same keys take it back.
-    let leave_out = Modifiers {
-        alt: true,
-        ..Modifiers::CTRL_SHIFT
-    };
     let into = |output: &FrameOutput, pane: u64| {
         let zone = output
             .zones
@@ -5265,21 +5317,11 @@ fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
             Event::PointerUp(Button::Primary),
         ]
     };
-    output = step(
-        &mut app,
-        &mut state,
-        &[Event::Key(Key::Char('b'), leave_out)],
-        5.5,
-    );
+    output = step(&mut app, &mut state, &[chord(shortcuts::LEAVE_OUT)], 5.5);
     output = step(&mut app, &mut state, &into(&output, 1), 5.6);
     assert_eq!(front_panes(&app).receivers(), [3], "bastion is left out");
     step(&mut app, &mut state, &into(&output, 4), 5.7);
-    output = step(
-        &mut app,
-        &mut state,
-        &[Event::Key(Key::Char('b'), leave_out)],
-        5.8,
-    );
+    output = step(&mut app, &mut state, &[chord(shortcuts::LEAVE_OUT)], 5.8);
     step(&mut app, &mut state, &into(&output, 1), 5.9);
     assert_eq!(front_panes(&app).receivers(), [3, 4], "back in");
     assert!(
@@ -5287,12 +5329,7 @@ fn focus_mode_and_broadcast_are_a_click_or_a_shortcut_away() {
         "broadcast itself stays on"
     );
     // Ctrl+Shift+B stops it.
-    step(
-        &mut app,
-        &mut state,
-        &[Event::Key(Key::Char('b'), Modifiers::CTRL_SHIFT)],
-        6.0,
-    );
+    step(&mut app, &mut state, &[chord(shortcuts::BROADCAST)], 6.0);
     assert!(!front_panes(&app).broadcasting());
 }
 

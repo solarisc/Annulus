@@ -528,7 +528,8 @@ impl LiveTerminal {
         }
     }
 
-    /// Drag selects, a double click selects a word, Ctrl+click opens a link.
+    /// Drag selects, a double click selects a word, Ctrl+click (Cmd+click on a Mac) opens a
+    /// link ([`super::shortcuts::OPEN_LINK`]).
     fn mouse(
         &mut self,
         ui: &mut Ui<'_>,
@@ -539,8 +540,8 @@ impl LiveTerminal {
     ) {
         let Some(pointer) = ui.pointer() else { return };
         let (row, column) = cell_at(pointer);
-        let ctrl = ui.modifiers().ctrl;
-        let link = (ctrl && response.hovered)
+        let held = super::shortcuts::OPEN_LINK.held_by(ui.modifiers());
+        let link = (held && response.hovered)
             .then(|| session.link_at(row, column))
             .flatten();
         if let Some(link) = link {
@@ -551,7 +552,7 @@ impl LiveTerminal {
         } else if response.hovered {
             ui.set_cursor(annulus_ui::kit::Cursor::Text);
         }
-        if response.clicked && ctrl {
+        if response.clicked && held {
             if let Some(link) = session.link_at(row, column)
                 && annulus_term::links::allowed(&link.url)
             {
@@ -1322,6 +1323,9 @@ fn encode(typed: &Typed, mode: TermMode) -> Option<Vec<u8>> {
         Typed::Text(text) => Some(text.as_bytes().to_vec()),
         // Wrapped when the program asked for it, and never able to end the bracket early.
         Typed::Paste(text) => Some(paste_bytes(text, mode)),
+        // Cmd (the Windows key on a PC) belongs to the app and the OS, never to the program:
+        // Cmd+Left is no Left, as in Terminal.app.
+        Typed::Key(_, modifiers) if modifiers.logo => None,
         Typed::Key(key, modifiers) => {
             let held = Mods {
                 shift: modifiers.shift,
@@ -1369,7 +1373,7 @@ fn link_hint(url: &str) -> String {
         url.to_owned()
     };
     if annulus_term::links::allowed(url) {
-        format!("Ctrl+click opens {shown}")
+        format!("{} opens {shown}", super::shortcuts::OPEN_LINK.keys())
     } else {
         format!("Not opened: {shown}")
     }
@@ -1472,9 +1476,10 @@ mod tests {
 
     #[test]
     fn a_link_names_its_real_target_and_whether_a_click_opens_it() {
+        let keys = super::super::shortcuts::OPEN_LINK.keys();
         assert_eq!(
             link_hint("https://example.org/x"),
-            "Ctrl+click opens https://example.org/x"
+            format!("{keys} opens https://example.org/x")
         );
         assert_eq!(
             link_hint("file:///etc/passwd"),
@@ -1482,7 +1487,7 @@ mod tests {
         );
         let long = format!("https://example.org/{}", "a".repeat(200));
         let hint = link_hint(&long);
-        assert!(hint.starts_with("Ctrl+click opens https://example.org/aaa"));
+        assert!(hint.starts_with(&format!("{keys} opens https://example.org/aaa")));
         assert!(
             hint.ends_with('\u{2026}') && hint.chars().count() < 100,
             "{hint}"
@@ -1824,6 +1829,14 @@ mod tests {
             encode(&Typed::Key(Key::Char('a'), Modifiers::NONE), plain),
             None
         );
+        // Cmd with any key is the app's or the OS's, and sends nothing.
+        let cmd = Modifiers {
+            logo: true,
+            ..Modifiers::NONE
+        };
+        for key in [Key::Left, Key::Enter, Key::Backspace, Key::Char('q')] {
+            assert_eq!(encode(&Typed::Key(key, cmd), plain), None, "{key:?}");
+        }
         let alt = Modifiers {
             alt: true,
             ..Modifiers::NONE
