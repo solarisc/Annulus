@@ -62,6 +62,21 @@ pub const TRAFFIC_LIGHTS_W: f32 = 88.0;
 /// Asks the window for a new frame; callable from any thread (a session with new output).
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
+/// A [`Waker`] that sends `event()` to `proxy`'s event loop, which then asks for a frame. It
+/// never waits for the main thread: a terminal's reader thread wakes the window while it holds
+/// the terminal's lock, and winit's `request_redraw` from another thread waits for the main
+/// thread on macOS, which may be waiting for that lock to draw.
+#[cfg(not(windows))]
+#[must_use]
+pub fn event_loop_waker<T: Send + 'static>(
+    proxy: winit::event_loop::EventLoopProxy<T>,
+    event: impl Fn() -> T + Send + Sync + 'static,
+) -> Waker {
+    Arc::new(move || {
+        let _ = proxy.send_event(event());
+    })
+}
+
 /// Whether the user asked the OS for fewer animations. Read on Windows; elsewhere not yet,
 /// so it says no.
 #[must_use]
@@ -304,12 +319,17 @@ mod portable {
 
     use super::{WindowApp, WindowError, WindowRequest, is_paste, paste_event, publish_clipboard};
 
-    /// A screen reader's news, sent through the event loop by AccessKit's adapter.
-    pub(super) struct Access(accesskit_winit::Event);
+    /// What other threads send the event loop.
+    pub(super) enum UserEvent {
+        /// A screen reader's news, sent by AccessKit's adapter.
+        Access(accesskit_winit::Event),
+        /// The app has something new to draw (a session's output).
+        Wake,
+    }
 
-    impl From<accesskit_winit::Event> for Access {
+    impl From<accesskit_winit::Event> for UserEvent {
         fn from(event: accesskit_winit::Event) -> Self {
-            Self(event)
+            Self::Access(event)
         }
     }
 
@@ -319,7 +339,7 @@ mod portable {
         size: (f32, f32),
         app: Box<dyn WindowApp>,
     ) -> Result<(), WindowError> {
-        let event_loop = EventLoop::<Access>::with_user_event()
+        let event_loop = EventLoop::<UserEvent>::with_user_event()
             .build()
             .map_err(|e| WindowError::Platform(e.to_string()))?;
         let mut host = Host {
@@ -350,7 +370,7 @@ mod portable {
     }
 
     struct Host {
-        proxy: EventLoopProxy<Access>,
+        proxy: EventLoopProxy<UserEvent>,
         title: String,
         size: (f32, f32),
         app: Box<dyn WindowApp>,
@@ -535,10 +555,14 @@ mod portable {
         }
     }
 
-    impl ApplicationHandler<Access> for Host {
-        fn user_event(&mut self, _: &ActiveEventLoop, event: Access) {
+    impl ApplicationHandler<UserEvent> for Host {
+        fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
             let Some(shown) = &self.window else { return };
-            match event.0.window_event {
+            let UserEvent::Access(event) = event else {
+                shown.window.request_redraw();
+                return;
+            };
+            match event.window_event {
                 accesskit_winit::WindowEvent::ActionRequested(request) => {
                     if let Some(request) = Request::from_action(&request) {
                         self.state.request(request);
@@ -600,8 +624,10 @@ mod portable {
                 event_loop.exit();
                 return;
             };
-            let waker = window.clone();
-            self.app.set_waker(Arc::new(move || waker.request_redraw()));
+            self.app
+                .set_waker(super::event_loop_waker(self.proxy.clone(), || {
+                    UserEvent::Wake
+                }));
             #[cfg(target_os = "macos")]
             {
                 let waker = window.clone();

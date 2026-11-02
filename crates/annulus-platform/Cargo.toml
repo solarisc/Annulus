@@ -31,6 +31,10 @@ harness = false
 name = "macos_menu"
 harness = false
 
+[[test]]
+name = "macos_wake"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 accesskit_windows.workspace = true
 windows-numerics.workspace = true
