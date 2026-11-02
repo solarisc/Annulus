@@ -2597,7 +2597,7 @@ fn a_typed_target_can_be_saved_as_a_host() {
     for (at, typed) in [(4.0, "just words"), (5.0, "zzz")] {
         let mut events = click_on(&output, search);
         events.extend([
-            Event::Key(Key::Char('a'), Modifiers::CTRL),
+            Event::Key(Key::Char('a'), Modifiers::COMMAND),
             Event::Key(Key::Backspace, Modifiers::NONE),
             Event::Text(typed.into()),
         ]);
@@ -3796,7 +3796,7 @@ fn e2e_the_new_settings_create_a_sync_account_and_sync() {
     let mut output = drive(&mut app, &mut state, &[], clock());
     let name = format!("e2e-{}", std::process::id());
     let clear_device = vec![
-        Event::Key(Key::Char('a'), Modifiers::CTRL),
+        Event::Key(Key::Char('a'), Modifiers::COMMAND),
         Event::Key(Key::Backspace, Modifiers::NONE),
     ];
     for (field, text) in [
@@ -4024,7 +4024,7 @@ fn first_run_creates_the_vault_and_opens_it_only_after_the_recovery_key_is_confi
         )),
         Event::PointerDown(Button::Primary),
         Event::PointerUp(Button::Primary),
-        Event::Key(Key::Char('a'), Modifiers::CTRL),
+        Event::Key(Key::Char('a'), Modifiers::COMMAND),
         Event::Key(Key::Backspace, Modifiers::NONE),
     ];
     events.push(Event::Text(first));

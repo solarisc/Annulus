@@ -193,13 +193,22 @@ fn set_secret(clipboard: &mut arboard::Clipboard, text: &str) -> Result<(), arbo
     set.text(text)
 }
 
-/// Whether a key press pastes: Ctrl+Shift+V and Shift+Insert anywhere, Ctrl+V only in a text
-/// field (in a terminal it belongs to the program).
-pub(crate) fn is_paste(state: &UiState, key: Key, modifiers: Modifiers, insert: bool) -> bool {
+/// Whether a key press pastes: Ctrl+Shift+V and Shift+Insert anywhere, and the command key
+/// with V ([`Modifiers::COMMAND`]): on macOS anywhere, since Cmd is free there; elsewhere
+/// only in a text field (Ctrl+V in a terminal belongs to the program).
+pub(crate) fn is_paste(
+    focused: Option<Role>,
+    key: Key,
+    modifiers: Modifiers,
+    insert: bool,
+) -> bool {
     let v = key == Key::Char('v');
+    let command_v = v
+        && modifiers == Modifiers::COMMAND
+        && (cfg!(target_os = "macos") || focused == Some(Role::TextInput));
     (insert && modifiers == Modifiers::SHIFT)
         || (v && modifiers == Modifiers::CTRL_SHIFT)
-        || (v && modifiers == Modifiers::CTRL && state.focused_role() == Some(Role::TextInput))
+        || command_v
 }
 
 /// The paste event for the clipboard's text.
@@ -592,7 +601,7 @@ mod portable {
                     let insert = event.logical_key == WinitKey::Named(NamedKey::Insert);
                     let mapped = key(&event.logical_key);
                     let paste_key = mapped.unwrap_or(kit::Key::Space);
-                    if is_paste(&self.state, paste_key, self.modifiers, insert) {
+                    if is_paste(self.state.focused_role(), paste_key, self.modifiers, insert) {
                         if let Some(paste) = paste_event() {
                             self.events.push(paste);
                         }
@@ -669,5 +678,24 @@ mod tests {
             "what the user copied since stays"
         );
         assert!(!held.clears(None, later));
+    }
+
+    #[test]
+    fn the_command_key_and_v_paste_in_a_text_field_and_on_macos_anywhere() {
+        let v = Key::Char('v');
+        let field = Some(Role::TextInput);
+        assert!(is_paste(field, v, Modifiers::COMMAND, false));
+        assert_eq!(
+            is_paste(Some(Role::Terminal), v, Modifiers::COMMAND, false),
+            cfg!(target_os = "macos"),
+            "outside a text field, Ctrl+V belongs to the terminal's program; Cmd+V is free"
+        );
+        assert!(is_paste(
+            Some(Role::Terminal),
+            v,
+            Modifiers::CTRL_SHIFT,
+            false
+        ));
+        assert!(!is_paste(field, Key::Char('c'), Modifiers::COMMAND, false));
     }
 }

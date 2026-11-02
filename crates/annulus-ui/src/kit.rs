@@ -199,6 +199,16 @@ impl Modifiers {
         shift: true,
         ..Modifiers::NONE
     };
+    /// The platform's command key alone: Command on macOS, Control elsewhere. Text fields
+    /// select all, copy, cut and paste with it.
+    pub const COMMAND: Modifiers = if cfg!(target_os = "macos") {
+        Modifiers {
+            logo: true,
+            ..Modifiers::NONE
+        }
+    } else {
+        Modifiers::CTRL
+    };
 }
 
 /// One input event, in DIPs.

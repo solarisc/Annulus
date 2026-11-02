@@ -570,7 +570,12 @@ impl Host {
                     let key = map_key(code);
                     let modifiers = Self::modifiers();
                     let paste_key = key.unwrap_or(kit::Key::Space);
-                    if is_paste(&self.state, paste_key, modifiers, code == VK_INSERT) {
+                    if is_paste(
+                        self.state.focused_role(),
+                        paste_key,
+                        modifiers,
+                        code == VK_INSERT,
+                    ) {
                         if let Some(paste) = paste_event() {
                             self.push(paste);
                         }

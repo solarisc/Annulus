@@ -1788,12 +1788,12 @@ fn edit_key(
             state.anchor = from;
             KeyOutcome::Changed
         }
-        Key::Char('a') if modifiers == Modifiers::CTRL => {
+        Key::Char('a') if modifiers == Modifiers::COMMAND => {
             state.anchor = 0;
             state.cursor = text.len();
             KeyOutcome::Moved
         }
-        Key::Char(c @ ('c' | 'x')) if modifiers == Modifiers::CTRL => {
+        Key::Char(c @ ('c' | 'x')) if modifiers == Modifiers::COMMAND => {
             let (from, to) = state.range();
             if buffer.is_secret() || from == to {
                 return KeyOutcome::Moved;
@@ -2148,8 +2148,8 @@ mod tests {
         });
         state.set_focus(Some(id), true);
         let copy = [
-            key(Key::Char('a'), Modifiers::CTRL),
-            key(Key::Char('c'), Modifiers::CTRL),
+            key(Key::Char('a'), Modifiers::COMMAND),
+            key(Key::Char('c'), Modifiers::COMMAND),
         ];
         frame(&mut state, &copy, |ui| {
             ui.text_field(id, FIELD, &mut plain, FieldStyle::default());
