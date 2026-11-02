@@ -205,6 +205,15 @@ pub enum SyncBadge {
     Failed,
 }
 
+/// Who draws the window buttons (minimize, maximize, close).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowButtons {
+    /// The title bar, at its right end (Windows, Linux).
+    Ours,
+    /// The OS, at the title bar's left end, which the bar keeps free (macOS).
+    Os,
+}
+
 /// The whole window's state.
 pub struct NativeApp {
     /// Open tabs; the first is always the vault.
@@ -219,6 +228,8 @@ pub struct NativeApp {
     pub hosts: hosts::HostsView,
     /// The window is maximized (the maximize button shows "restore").
     pub maximized: bool,
+    /// Who draws the window buttons.
+    pub window_buttons: WindowButtons,
     /// The lock screen, shown while there is no unlocked vault.
     pub lock: lock::LockView,
     /// Where the vault file lives; `None` for the preview's throwaway vault.
@@ -300,6 +311,11 @@ impl NativeApp {
             vault,
             hosts: hosts::HostsView::default(),
             maximized: false,
+            window_buttons: if annulus_platform::window::OS_WINDOW_BUTTONS {
+                WindowButtons::Os
+            } else {
+                WindowButtons::Ours
+            },
             lock: lock::LockView::new(lock::Mode::Unlock),
             vault_path: None,
             ssh_files: SshFiles {

@@ -1,6 +1,7 @@
 //! The title bar is the tab strip (UI-SPEC §1): our mark, the tabs, new-tab buttons, the sync
 //! badge and the window buttons. Empty space drags the window; the window host finds it, and
-//! the buttons, by their zone ids ([`DRAG`], [`MINIMIZE`], [`MAXIMIZE`], [`CLOSE`]).
+//! the buttons, by their zone ids ([`DRAG`], [`MINIMIZE`], [`MAXIMIZE`], [`CLOSE`]). On macOS
+//! the OS draws the window buttons at the left end instead, and the bar keeps that room free.
 
 use annulus_config::settings::OpenTab;
 use annulus_config::tokens::space;
@@ -11,7 +12,7 @@ use annulus_ui::kit::{Cursor, Id, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM};
 
-use super::{FIXED_TABS, NativeApp, SyncBadge, TabKind, WindowAction};
+use super::{FIXED_TABS, NativeApp, SyncBadge, TabKind, WindowAction, WindowButtons};
 use crate::terminal_view::TabStatus;
 
 /// The zone of the title bar's empty space: dragging it moves the window.
@@ -35,38 +36,14 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     let mut action = drag.double_clicked.then_some(WindowAction::ToggleMaximize);
     let mut row = bar;
 
-    let close = row.take_right(CAPTION_W);
-    let maximize = row.take_right(CAPTION_W);
-    let minimize = row.take_right(CAPTION_W);
-    for (id, rect, glyph, name, act) in [
-        (
-            MINIMIZE,
-            minimize,
-            Glyph::Minimize,
-            "Minimize",
-            WindowAction::Minimize,
-        ),
-        (
-            MAXIMIZE,
-            maximize,
-            if app.maximized {
-                Glyph::Restore
-            } else {
-                Glyph::Maximize
-            },
-            if app.maximized { "Restore" } else { "Maximize" },
-            WindowAction::ToggleMaximize,
-        ),
-        (CLOSE, close, Glyph::Close, "Close", WindowAction::Close),
-    ] {
-        if caption_button(ui, Id::new(id), rect, glyph, name) {
-            action = Some(act);
-        }
+    if app.window_buttons == WindowButtons::Os {
+        row.take_left(annulus_platform::window::TRAFFIC_LIGHTS_W);
+        row.take_right(space::S);
+    } else {
+        action = caption_buttons(app, ui, &mut row).or(action);
+        row.take_right(space::S);
+        row.take_left(space::M + 2.0);
     }
-
-    row.take_right(space::S);
-
-    row.take_left(space::M + 2.0);
     let mark = row.take_left(20.0).centered(20.0, 20.0);
     paint_mark(ui, mark);
     row.take_left(space::M);
@@ -161,6 +138,40 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
     }
     if let Some(index) = close_tab {
         app.close_tab(index);
+    }
+    action
+}
+
+/// Our window buttons at the right end of `row`, taken from it; returns the one clicked.
+fn caption_buttons(app: &NativeApp, ui: &mut Ui<'_>, row: &mut Rect) -> Option<WindowAction> {
+    let close = row.take_right(CAPTION_W);
+    let maximize = row.take_right(CAPTION_W);
+    let minimize = row.take_right(CAPTION_W);
+    let mut action = None;
+    for (id, rect, glyph, name, act) in [
+        (
+            MINIMIZE,
+            minimize,
+            Glyph::Minimize,
+            "Minimize",
+            WindowAction::Minimize,
+        ),
+        (
+            MAXIMIZE,
+            maximize,
+            if app.maximized {
+                Glyph::Restore
+            } else {
+                Glyph::Maximize
+            },
+            if app.maximized { "Restore" } else { "Maximize" },
+            WindowAction::ToggleMaximize,
+        ),
+        (CLOSE, close, Glyph::Close, "Close", WindowAction::Close),
+    ] {
+        if caption_button(ui, Id::new(id), rect, glyph, name) {
+            action = Some(act);
+        }
     }
     action
 }

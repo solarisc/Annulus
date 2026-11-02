@@ -2,10 +2,12 @@
 //! drawn by Direct2D (`crate::win32`), elsewhere `winit` + `softbuffer` drawn by the CPU
 //! renderer (below).
 //!
-//! The window has no OS title bar: the app draws its own and names the zones that drag the
-//! window and maximize it. Frames are drawn only when input arrives or the app asks for one
-//! (P-06). Screen readers get the tree of each frame's zones (`annulus_ui::access`) through
-//! AccessKit: UI Automation on Windows, AT-SPI on Linux, `NSAccessibility` on macOS.
+//! The app draws its own title bar and names the zones that drag the window and maximize it.
+//! The OS draws none, except on macOS, whose title bar is transparent over ours and shows only
+//! the window buttons, at the bar's left end ([`OS_WINDOW_BUTTONS`], `crate::macos`). Frames
+//! are drawn only when input arrives or the app asks for one (P-06). Screen readers get the
+//! tree of each frame's zones (`annulus_ui::access`) through AccessKit: UI Automation on
+//! Windows, AT-SPI on Linux, `NSAccessibility` on macOS.
 //!
 //! [ADR-0017]: ../../../docs/adr/0017-native-ui.md
 
@@ -28,6 +30,17 @@ pub enum WindowRequest {
     /// Close the window and end the app.
     Close,
 }
+
+/// The OS draws the window buttons itself (macOS's traffic lights, at the title bar's left
+/// end); elsewhere the app's title bar draws its own.
+pub const OS_WINDOW_BUTTONS: bool = cfg!(target_os = "macos");
+
+/// How far macOS's first window button sits from the window's left edge, in DIPs: as far as
+/// it sits from the top in our title bar, where it is centered.
+pub const TRAFFIC_LIGHTS_LEFT: f32 = 16.0;
+
+/// The room macOS's window buttons take at the title bar's left end, with a gap after them.
+pub const TRAFFIC_LIGHTS_W: f32 = 88.0;
 
 /// Asks the window for a new frame; callable from any thread (a session with new output).
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
@@ -326,9 +339,10 @@ mod portable {
     /// The time between two frames of an animation: 60 per second.
     const ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
 
-    /// The resize direction of the window edge under `point`, if any.
+    /// The resize direction of the window edge under `point`, if any. None on macOS, which
+    /// resizes a titled window from its edges itself.
     fn edge_at(window: &Window, point: Point) -> Option<ResizeDirection> {
-        if window.is_maximized() {
+        if cfg!(target_os = "macos") || window.is_maximized() {
             return None;
         }
         #[allow(clippy::cast_possible_truncation)] // Window sizes fit in f32.
@@ -387,6 +401,15 @@ mod portable {
             };
             let mut output = self.state.end_frame();
             publish_clipboard(&mut self.state, &mut output);
+            // The window buttons sit centered in the title bar, which is the drag zone.
+            #[cfg(target_os = "macos")]
+            if let Some(bar) = output
+                .zones
+                .iter()
+                .find(|zone| zone.id == self.app.drag_zone())
+            {
+                crate::macos::place_buttons(&shown.window, f64::from(bar.rect.b()));
+            }
             let focus = self.state.focus();
             let title = &self.title;
             shown
@@ -474,9 +497,12 @@ mod portable {
                 .with_title(self.title.clone())
                 .with_inner_size(LogicalSize::new(self.size.0, self.size.1))
                 .with_min_inner_size(LogicalSize::new(640.0, 400.0))
-                .with_decorations(false)
                 // AccessKit's adapter must exist before the window first shows.
                 .with_visible(false);
+            #[cfg(target_os = "macos")]
+            let attributes = crate::macos::frame(attributes);
+            #[cfg(not(target_os = "macos"))]
+            let attributes = attributes.with_decorations(false);
             let Ok(window) = event_loop.create_window(attributes) else {
                 event_loop.exit();
                 return;
@@ -486,6 +512,8 @@ mod portable {
                 &window,
                 self.proxy.clone(),
             );
+            #[cfg(target_os = "macos")]
+            crate::macos::keep_title_bar_clicks(&window);
             window.set_visible(true);
             let window = Arc::new(window);
             let Ok(context) = Context::new(window.clone()) else {

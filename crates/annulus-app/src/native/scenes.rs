@@ -23,7 +23,7 @@ use annulus_vault::hosts::Host;
 
 use super::demo::fixture_vault;
 use super::hosts::{HostsAction, Mode};
-use super::{NativeApp, TermView};
+use super::{NativeApp, TermView, WindowButtons};
 use crate::sync_screen::Attempt;
 use crate::terminal_view::TabStatus;
 
@@ -198,6 +198,12 @@ fn settings_account_certificate(app: &mut NativeApp) {
 
 fn locked(app: &mut NativeApp) {
     app.vault = None;
+}
+
+/// The title bar as on macOS: the OS draws the window buttons at its left end.
+fn macos_title_bar(app: &mut NativeApp) {
+    with_tabs(app);
+    app.window_buttons = WindowButtons::Os;
 }
 
 fn first_run(app: &mut NativeApp) {
@@ -1287,6 +1293,15 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
+        name: "macos-title-bar",
+        width: 1100,
+        height: 720,
+        scale: 2.0,
+        populated: true,
+        setup: macos_title_bar,
+        acts: &[],
+    },
+    Scene {
         name: "lock-setup-error",
         width: 1100,
         height: 720,
@@ -1581,6 +1596,8 @@ fn render(
         scene.populated,
     );
     let mut app = NativeApp::new(Some(vault));
+    // Scenes draw the same frame on every OS; the macOS ones ask for macOS's title bar.
+    app.window_buttons = WindowButtons::Ours;
     (scene.setup)(&mut app);
     // A scene that picks a color scheme draws in it, like the window would, and so does one
     // whose scheme menu has the pointer on an entry.
@@ -2814,6 +2831,40 @@ fn trusting_a_servers_certificate_pins_it_until_the_address_changes() {
     events.push(Event::Text("1".into()));
     step(&mut app, &mut state, &events, 3.0);
     assert_eq!(app.sync.pin, None);
+}
+
+#[test]
+fn on_macos_the_title_bar_leaves_the_window_buttons_to_the_os() {
+    let mut app = NativeApp::new(Some(fixture_vault("os-window-buttons", true)));
+    with_tabs(&mut app);
+    let mut state = UiState::default();
+    let drag = annulus_ui::kit::Id::new(super::titlebar::DRAG);
+    for buttons in [WindowButtons::Ours, WindowButtons::Os] {
+        app.window_buttons = buttons;
+        let output = step(&mut app, &mut state, &[], 0.0);
+        let drawn = output
+            .zones
+            .iter()
+            .filter(|zone| zone.role == Role::WindowButton)
+            .count();
+        let os = buttons == WindowButtons::Os;
+        assert_eq!(drawn, if os { 0 } else { 3 }, "{buttons:?}");
+        if os {
+            // Nothing in the bar sits where macOS draws its buttons.
+            let room = annulus_platform::window::TRAFFIC_LIGHTS_W;
+            let crowding: Vec<&str> = output
+                .zones
+                .iter()
+                .filter(|zone| zone.id != drag && zone.rect.b() <= super::TITLE_H)
+                .filter(|zone| zone.rect.x < room)
+                .map(|zone| zone.label.as_str())
+                .collect();
+            assert!(
+                crowding.is_empty(),
+                "under the window buttons: {crowding:?}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -23,12 +23,19 @@ webbrowser.workspace = true
 winit.workspace = true
 zeroize.workspace = true
 
+[[test]]
+name = "macos_frame"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 accesskit_windows.workspace = true
 windows-numerics.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
 accesskit_winit.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

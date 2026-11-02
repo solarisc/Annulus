@@ -29,6 +29,8 @@ getrandom = "0.4.3"
 hkdf = "0.13.0"
 # setrlimit and prctl, to keep the open vault out of core dumps.
 libc = "0.2.191"
+# AppKit calls for the macOS window's frame: its traffic lights over our title bar.
+objc2 = "0.6.5"
 sha2 = "0.11.1"
 # Only to turn on prebuilt NASM objects on Windows, so builds need no NASM (ADR-0004).
 aws-lc-rs = { version = "1.16.2", features = ["prebuilt-nasm"] }

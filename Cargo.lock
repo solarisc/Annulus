@@ -5473,6 +5473,7 @@ dependencies = [
  "accesskit_winit",
  "arboard",
  "libc",
+ "objc2 0.6.5",
  "parley",
  "softbuffer",
  "swash",
