@@ -151,6 +151,8 @@ pub(crate) fn link_key(vault: &mut Vault, host_id: Option<u64>, key: &SshKey) ->
         return format!("Installed {}.", key.label);
     };
     host.key_id = Some(key.id);
+    // The key went to this device's user there: other devices must log in as them too.
+    crate::connect::pin_user(vault, &mut host, &annulus_session::local_user());
     let label = host.label.clone();
     match vault.upsert_host(host) {
         Ok(()) => format!(

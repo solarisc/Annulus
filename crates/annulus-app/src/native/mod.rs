@@ -1015,8 +1015,9 @@ impl NativeApp {
         }
     }
 
-    /// Saves on each host what its server said it runs, for the host's icon (F-HOST-009), once
-    /// it differs from what the host shows and was not picked by hand.
+    /// Saves on each logged-in host what its server said it runs, for the host's icon
+    /// (F-HOST-009), once it differs from what the host shows and was not picked by hand; and
+    /// the user it logged in as when it names none, so other devices log in as them too.
     fn learn_server_os(&mut self) {
         let Some(vault) = self.vault.as_mut() else {
             return;
@@ -1033,10 +1034,13 @@ impl NativeApp {
             let Some(host) = vault.hosts().iter().find(|host| host.id == *id) else {
                 continue;
             };
+            let mut learned = host.clone();
             if let Some(os) = os::learned(host, server) {
-                let mut host = host.clone();
-                os.clone_into(&mut host.os);
-                let _ = vault.upsert_host(host);
+                os.clone_into(&mut learned.os);
+            }
+            crate::connect::pin_user(vault, &mut learned, &annulus_session::local_user());
+            if learned != *host {
+                let _ = vault.upsert_host(learned);
             }
         }
     }

@@ -1164,7 +1164,12 @@ impl HostsView {
             address_error,
         );
         let (inherited, from) = inherited(vault, &editor.host, editor.group.clone());
-        let user_hint = hint(&inherited.username, from.username.as_ref(), "root");
+        // Saved empty, it takes this device's user (connect::pin_user).
+        let user_hint = hint(
+            &inherited.username,
+            from.username.as_ref(),
+            &annulus_session::local_user(),
+        );
         let port = inherited
             .port
             .map(|port| port.to_string())
@@ -1386,7 +1391,11 @@ impl HostsView {
             || super::shortcuts::SAVE.pressed(ui)
         {
             let current = vault.hosts().iter().find(|host| host.id == editor.host.id);
-            match editor.merged(current) {
+            let edited = editor.merged(current).map(|mut host| {
+                crate::connect::pin_user(vault, &mut host, &annulus_session::local_user());
+                host
+            });
+            match edited {
                 Ok(host) => match vault.upsert_host(host.clone()) {
                     Ok(()) => {
                         self.selected = Some(host.id);

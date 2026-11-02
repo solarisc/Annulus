@@ -41,6 +41,14 @@ pub fn saved<'a>(vault: &'a Vault, text: &str) -> Option<&'a Host> {
         .find(|host| host.label.eq_ignore_ascii_case(text))
 }
 
+/// Saves `user` (this device's login) in a host that names no user, neither itself nor
+/// through its groups. Left empty, each synced device would log in as its own user.
+pub fn pin_user(vault: &Vault, host: &mut Host, user: &str) {
+    if vault.resolve(host).0.username.trim().is_empty() {
+        user.trim().clone_into(&mut host.username);
+    }
+}
+
 /// How to log in to a saved host: its target, saved password and keychain key, with what it
 /// inherits from its groups.
 fn hop(vault: &Vault, host: &Host) -> Option<Hop> {
@@ -210,6 +218,28 @@ mod tests {
         );
         let hops: Vec<&str> = via.iter().map(|hop| hop.target.host.as_str()).collect();
         assert_eq!(hops, ["jump.example.com"], "through the group's jump host");
+    }
+
+    #[test]
+    fn a_host_without_a_user_keeps_this_devices_but_never_hides_its_groups() {
+        let mut vault = vault("pin-user");
+        let mut bare = add(&mut vault, "pc", "10.1.1.182");
+        pin_user(&vault, &mut bare, "admin");
+        assert_eq!(bare.username, "admin", "the user it logged in as here");
+
+        let mut named = add(&mut vault, "named", "10.0.0.2");
+        named.username = "deploy".into();
+        pin_user(&vault, &mut named, "admin");
+        assert_eq!(named.username, "deploy");
+
+        let mut group = vault.draft_group(None).unwrap();
+        group.name = "ops".into();
+        group.defaults.username = "ops".into();
+        vault.upsert_group(group.clone()).unwrap();
+        let mut grouped = add(&mut vault, "grouped", "10.0.0.3");
+        grouped.group = Some(group.uid);
+        pin_user(&vault, &mut grouped, "admin");
+        assert_eq!(grouped.username, "", "still takes its group's user");
     }
 
     #[test]
