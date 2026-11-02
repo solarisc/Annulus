@@ -829,6 +829,9 @@ impl LiveTerminal {
                             (1, format!("{host}'s key is trusted"))
                         }
                         annulus_session::Step::LoggedIn => (2, format!("Logged in to {host}")),
+                        annulus_session::Step::KeysRefused => {
+                            (1, format!("{host} refused the keys offered"))
+                        }
                     };
                     self.stage = self.stage.max(stage);
                     self.log.push(line);
@@ -1632,6 +1635,7 @@ mod tests {
         live.ask = Ask::from_event(SessionEvent::Password {
             user: "me".into(),
             host: "web".into(),
+            keys_refused: false,
         });
         assert_eq!(live.status(), Some(TabStatus::Input));
         live.reconnect.at = Some(1.0);
@@ -1708,6 +1712,7 @@ mod tests {
         let password = Ask::from_event(SessionEvent::Password {
             user: "deploy".into(),
             host: "web-1".into(),
+            keys_refused: false,
         })
         .unwrap();
         // Reaching the server, then past Server and Key, then past Login, then all done.

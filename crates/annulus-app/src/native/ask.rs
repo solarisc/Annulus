@@ -23,6 +23,8 @@ pub enum Ask {
         host: String,
         /// What is typed, wiped when dropped.
         secret: Zeroizing<String>,
+        /// The server turned down the keys offered first.
+        keys_refused: bool,
     },
 }
 
@@ -32,10 +34,15 @@ impl Ask {
     pub fn from_event(event: SessionEvent) -> Option<Self> {
         match event {
             SessionEvent::HostKey(question) => Some(Ask::HostKey(question)),
-            SessionEvent::Password { user, host } => Some(Ask::Password {
+            SessionEvent::Password {
+                user,
+                host,
+                keys_refused,
+            } => Some(Ask::Password {
                 user,
                 host,
                 secret: Zeroizing::new(String::new()),
+                keys_refused,
             }),
             _ => None,
         }
@@ -48,7 +55,18 @@ impl Ask {
 #[allow(clippy::too_many_lines)] // Both questions' cards, each top to bottom.
 pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answers) -> bool {
     let t = ui.theme;
-    let card = rect.centered(rect.w.min(460.0), 236.0);
+    let refused_line = if matches!(
+        ask,
+        Ask::Password {
+            keys_refused: true,
+            ..
+        }
+    ) {
+        20.0
+    } else {
+        0.0
+    };
+    let card = rect.centered(rect.w.min(460.0), 236.0 + refused_line);
     ui.zone(id.with("ask.backdrop"), rect, Role::Backdrop, "");
     super::pages::card_in(ui, id.with("ask"), rect, card);
     ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
@@ -135,7 +153,12 @@ pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answer
                 answered = true;
             }
         }
-        Ask::Password { user, host, secret } => {
+        Ask::Password {
+            user,
+            host,
+            secret,
+            keys_refused,
+        } => {
             ui.strict_text(
                 column.take_top(24.0),
                 &format!("Password for {user}@{host}"),
@@ -151,6 +174,16 @@ pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answer
                 t.text2,
                 Align::Start,
             );
+            // A refused key is most often the wrong login name: say so before a password.
+            if *keys_refused {
+                ui.gfx.text(
+                    column.take_top(20.0),
+                    &format!("The server refused the key for {user}. Check the username."),
+                    SMALL,
+                    t.warn,
+                    Align::Start,
+                );
+            }
             column.take_top(space::L);
             let field = ui.text_field(
                 id.with("ask.password"),

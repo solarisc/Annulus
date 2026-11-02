@@ -811,6 +811,72 @@ async fn a_keychain_key_logs_in_without_asking_for_a_password() {
     assert!(connection.is_ok());
 }
 
+/// Writes down each step and password question, in order.
+#[derive(Default)]
+struct Journal(Mutex<Vec<String>>);
+
+impl Prompt for Journal {
+    fn trust_new_host_key(&self, _: HostKeyQuestion) -> oneshot::Receiver<Trust> {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(Trust::Once);
+        rx
+    }
+
+    fn password(&self, user: String, _: String) -> oneshot::Receiver<Option<Zeroizing<String>>> {
+        self.0.lock().unwrap().push(format!("password for {user}"));
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(Some(Zeroizing::new("secret".to_owned())));
+        rx
+    }
+
+    fn progress(&self, _: &str, step: Step) {
+        self.0.lock().unwrap().push(format!("{step:?}"));
+    }
+}
+
+#[tokio::test]
+async fn a_refused_key_is_reported_before_the_password_is_asked_for() {
+    let key = keys::generate(keys::KeyKind::Ed25519, "alice@test").unwrap();
+    // alice logs in with a password only, so her key is turned down.
+    let journal = Arc::new(Journal::default());
+    let port = serve(new_key()).await;
+    connect(
+        &target(port, "alice"),
+        &known_hosts("refused-key"),
+        None,
+        &[key.private],
+        journal.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *journal.0.lock().unwrap(),
+        [
+            "KeyChecked",
+            "KeysRefused",
+            "password for alice",
+            "LoggedIn"
+        ]
+    );
+
+    // With no key to offer, nothing was refused.
+    let journal = Arc::new(Journal::default());
+    let port = serve(new_key()).await;
+    connect(
+        &target(port, "alice"),
+        &known_hosts("no-key"),
+        None,
+        &[],
+        journal.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *journal.0.lock().unwrap(),
+        ["KeyChecked", "password for alice", "LoggedIn"]
+    );
+}
+
 /// A server that forwards `direct-tcpip` channels to real TCP ports on this machine, like
 /// a bastion, and otherwise behaves like [`TestServer`].
 #[derive(Clone, Default)]

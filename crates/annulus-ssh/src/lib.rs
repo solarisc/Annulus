@@ -135,6 +135,8 @@ pub enum Step {
     KeyChecked,
     /// The server accepted the login.
     LoggedIn,
+    /// The server turned down every key offered; a password is asked for next.
+    KeysRefused,
 }
 
 /// Why a connection failed, in terms the app turns into a message with a next step.
@@ -740,6 +742,9 @@ async fn log_in(
                 remaining_methods, ..
             } => offered = format!("{remaining_methods:?}"),
         }
+    }
+    if !tried.is_empty() {
+        prompt.progress(&target.host, Step::KeysRefused);
     }
     for _ in 0..3 {
         let Some(password) = prompt

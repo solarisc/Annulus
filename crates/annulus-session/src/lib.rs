@@ -9,7 +9,7 @@ pub mod profiles;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -60,6 +60,8 @@ pub enum SessionEvent {
         user: String,
         /// Host.
         host: String,
+        /// The server turned down the keys offered first (a wrong login name, often).
+        keys_refused: bool,
     },
     /// The session could not start or connect; the message says why.
     Failed(String),
@@ -436,6 +438,7 @@ impl Answers {
 pub struct AskUi {
     answers: Answers,
     saved: Mutex<Option<Zeroizing<String>>>,
+    keys_refused: AtomicBool,
     notify: Box<dyn Fn(SessionEvent) + Send + Sync>,
 }
 
@@ -449,6 +452,7 @@ impl AskUi {
         Self {
             answers,
             saved: Mutex::new(saved_password),
+            keys_refused: AtomicBool::new(false),
             notify: Box::new(notify),
         }
     }
@@ -480,11 +484,18 @@ impl Prompt for AskUi {
         if let Ok(mut pending) = self.answers.0.lock() {
             pending.password = Some(tx);
         }
-        (self.notify)(SessionEvent::Password { user, host });
+        (self.notify)(SessionEvent::Password {
+            user,
+            host,
+            keys_refused: self.keys_refused.load(Ordering::Relaxed),
+        });
         rx
     }
 
     fn progress(&self, host: &str, step: Step) {
+        if step == Step::KeysRefused {
+            self.keys_refused.store(true, Ordering::Relaxed);
+        }
         (self.notify)(SessionEvent::Progress {
             host: host.to_owned(),
             step,
@@ -960,6 +971,21 @@ mod tests {
             }
         });
         (port, closing)
+    }
+
+    #[test]
+    fn the_password_question_says_whether_the_keys_were_refused() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        let ask = AskUi::new(Answers::default(), None, move |event| {
+            if let SessionEvent::Password { keys_refused, .. } = event {
+                seen.lock().unwrap().push(keys_refused);
+            }
+        });
+        let _first = ask.password("jack".into(), "pc".into());
+        ask.progress("pc", Step::KeysRefused);
+        let _second = ask.password("jack".into(), "pc".into());
+        assert_eq!(*events.lock().unwrap(), [false, true]);
     }
 
     #[test]
