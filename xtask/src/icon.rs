@@ -1,12 +1,15 @@
 //! `cargo xtask icon`: draws our mark (the teal tile with a prompt the title bar shows,
-//! `titlebar::paint_mark`, ADR-0010) at every Windows icon size and writes:
+//! `titlebar::paint_mark`, ADR-0010) at every Windows and macOS icon size and writes:
 //!
 //! - `crates/annulus-app/assets/annulus.ico`, the icon file;
 //! - `crates/annulus-app/assets/annulus.res`, the same images as a compiled Windows resource
 //!   (icon group 1), which `build.rs` hands to the MSVC linker so the exe carries it. Writing
-//!   the `.res` here keeps the build free of a resource compiler.
+//!   the `.res` here keeps the build free of a resource compiler;
+//! - `crates/annulus-app/assets/annulus.icns`, the macOS icon `cargo xtask mac-app` puts in
+//!   `Annulus.app`. Its tile sits on macOS's icon grid, a margin around it as around every
+//!   other app's in the Dock.
 //!
-//! Both are committed; rerun after changing the mark.
+//! All three are committed; rerun after changing the mark.
 
 use anyhow::{Context, Result};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
@@ -20,25 +23,54 @@ const TILE: [u8; 3] = [0x2B, 0xB3, 0xA3];
 /// The prompt: our dark theme's window color, as the title bar draws it on the accent.
 const INK: [u8; 3] = [0x12, 0x14, 0x16];
 
+/// The images of a macOS icon: each one's type in the `.icns` file and its size in pixels
+/// (the `@2x` ones are the types from `ic11` on), as `iconutil` writes them.
+const MAC_ICONS: [(&[u8; 4], u32); 10] = [
+    (b"icp4", 16),
+    (b"icp5", 32),
+    (b"ic07", 128),
+    (b"ic08", 256),
+    (b"ic09", 512),
+    (b"ic10", 1024),
+    (b"ic11", 32),
+    (b"ic12", 64),
+    (b"ic13", 256),
+    (b"ic14", 512),
+];
+/// The share of a macOS icon its tile takes: 824 of 1024 pixels on Apple's grid.
+const MAC_TILE: f32 = 824.0 / 1024.0;
+
 pub fn run() -> Result<bool> {
     let images = SIZES
         .iter()
-        .map(|&size| Ok((size, mark(size)?)))
+        .map(|&size| Ok((size, mark(size, 1.0)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let mac = MAC_ICONS
+        .iter()
+        .map(|&(kind, size)| Ok((*kind, mark(size, MAC_TILE)?)))
         .collect::<Result<Vec<_>>>()?;
     let assets = repo::root()?.join("crates/annulus-app/assets");
     std::fs::create_dir_all(&assets)?;
     std::fs::write(assets.join("annulus.ico"), ico(&images))?;
     std::fs::write(assets.join("annulus.res"), res(&images))?;
-    println!("wrote annulus.ico and annulus.res ({} sizes)", images.len());
+    std::fs::write(assets.join("annulus.icns"), icns(&mac))?;
+    println!(
+        "wrote annulus.ico and annulus.res ({} sizes) and annulus.icns ({} images)",
+        images.len(),
+        mac.len()
+    );
     Ok(true)
 }
 
-/// The mark at `size` pixels square, as a PNG. Its geometry is the title bar's, on a 20-unit
-/// tile.
-fn mark(size: u32) -> Result<Vec<u8>> {
+/// The mark at `size` pixels square, as a PNG, its tile `share` of that wide and centered.
+/// Its geometry is the title bar's, on a 20-unit tile.
+fn mark(size: u32, share: f32) -> Result<Vec<u8>> {
     let mut pixmap = Pixmap::new(size, size).context("icon size")?;
-    #[allow(clippy::cast_precision_loss)] // 16 to 256.
-    let scale = size as f32 / 20.0;
+    #[allow(clippy::cast_precision_loss)] // 16 to 1024.
+    let canvas = size as f32;
+    let scale = canvas * share / 20.0;
+    let margin = (canvas - 20.0 * scale) / 2.0;
+    let place = Transform::from_translate(margin, margin);
     let paint = |[r, g, b]: [u8; 3]| {
         let mut paint = Paint::default();
         paint.set_color_rgba8(r, g, b, 255);
@@ -46,13 +78,7 @@ fn mark(size: u32) -> Result<Vec<u8>> {
         paint
     };
     let tile = rounded_square(20.0 * scale, 6.0 * scale).context("tile path")?;
-    pixmap.fill_path(
-        &tile,
-        &paint(TILE),
-        FillRule::Winding,
-        Transform::identity(),
-        None,
-    );
+    pixmap.fill_path(&tile, &paint(TILE), FillRule::Winding, place, None);
     let stroke = Stroke {
         width: 1.8 * scale,
         line_cap: LineCap::Round,
@@ -73,7 +99,7 @@ fn mark(size: u32) -> Result<Vec<u8>> {
             }
         }
         let path = path.finish().context("prompt path")?;
-        pixmap.stroke_path(&path, &paint(INK), &stroke, Transform::identity(), None);
+        pixmap.stroke_path(&path, &paint(INK), &stroke, place, None);
     }
     pixmap.encode_png().context("encoding PNG")
 }
@@ -125,6 +151,22 @@ fn ico(images: &[(u32, Vec<u8>)]) -> Vec<u8> {
     for (_, png) in images {
         out.extend(png);
     }
+    out
+}
+
+/// A macOS `.icns` file: the magic and the whole length, then each image as its type, its
+/// length (with this 8-byte header) and its PNG. Lengths are big-endian.
+fn icns(images: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (kind, png) in images {
+        body.extend(kind);
+        body.extend((len32(png) + 8).to_be_bytes());
+        body.extend(png);
+    }
+    let mut out = Vec::with_capacity(body.len() + 8);
+    out.extend(b"icns");
+    out.extend((len32(&body) + 8).to_be_bytes());
+    out.extend(body);
     out
 }
 
@@ -191,7 +233,7 @@ mod tests {
 
     #[test]
     fn the_mark_is_a_teal_tile_with_a_dark_prompt_and_clear_corners() {
-        let png = mark(64).unwrap();
+        let png = mark(64, 1.0).unwrap();
         let pixmap = Pixmap::decode_png(&png).unwrap();
         let at = |x: u32, y: u32| {
             let p = pixmap.pixel(x, y).unwrap();
@@ -201,6 +243,34 @@ mod tests {
         assert_eq!(at(56, 32), [TILE[0], TILE[1], TILE[2], 255], "tile");
         // The underline of the prompt runs at y = 14 units, x 10.5 to 14.5.
         assert_eq!(at(40, 45), [INK[0], INK[1], INK[2], 255], "prompt");
+    }
+
+    #[test]
+    fn on_macos_the_tile_sits_centered_with_a_clear_margin_around_it() {
+        let png = mark(1024, MAC_TILE).unwrap();
+        let pixmap = Pixmap::decode_png(&png).unwrap();
+        let alpha = |x: u32, y: u32| pixmap.pixel(x, y).unwrap().alpha();
+        // 100 pixels of margin on each side of an 824-pixel tile.
+        for (x, y) in [(512, 99), (99, 512), (512, 925), (925, 512)] {
+            assert_eq!(alpha(x, y), 0, "margin at ({x}, {y})");
+        }
+        for (x, y) in [(512, 101), (101, 512), (512, 922), (922, 512)] {
+            assert_eq!(alpha(x, y), 255, "tile at ({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn the_macos_icon_file_holds_each_image_under_its_type() {
+        let images = vec![(*b"icp4", vec![1, 2, 3]), (*b"ic10", vec![4, 5])];
+        let file = icns(&images);
+        let be =
+            |at: usize| u32::from_be_bytes([file[at], file[at + 1], file[at + 2], file[at + 3]]);
+        assert_eq!(&file[..4], b"icns");
+        assert_eq!(be(4) as usize, file.len());
+        assert_eq!((&file[8..12], be(12)), (&b"icp4"[..], 11));
+        assert_eq!(&file[16..19], &[1, 2, 3]);
+        assert_eq!((&file[19..23], be(23)), (&b"ic10"[..], 10));
+        assert_eq!(&file[27..], &[4, 5]);
     }
 
     #[test]

@@ -54,8 +54,8 @@ pub struct Package {
     pub crate_roots: Vec<PathBuf>,
 }
 
-/// The workspace members, keyed by package name.
-pub fn workspace_packages(root: &Path) -> anyhow::Result<BTreeMap<String, Package>> {
+/// The workspace's `cargo metadata`, without its dependencies.
+fn metadata(root: &Path) -> anyhow::Result<serde_json::Value> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = Command::new(cargo)
         .args(["metadata", "--format-version", "1", "--no-deps", "--locked"])
@@ -68,8 +68,20 @@ pub fn workspace_packages(root: &Path) -> anyhow::Result<BTreeMap<String, Packag
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("`cargo metadata` printed invalid JSON")?;
+    serde_json::from_slice(&output.stdout).context("`cargo metadata` printed invalid JSON")
+}
+
+/// Where cargo builds the workspace: `target` under the root unless configured otherwise.
+pub fn target_dir(root: &Path) -> anyhow::Result<PathBuf> {
+    metadata(root)?["target_directory"]
+        .as_str()
+        .map(PathBuf::from)
+        .context("metadata has no target directory")
+}
+
+/// The workspace members, keyed by package name.
+pub fn workspace_packages(root: &Path) -> anyhow::Result<BTreeMap<String, Package>> {
+    let metadata = metadata(root)?;
     let packages = metadata["packages"]
         .as_array()
         .context("metadata has no packages")?;

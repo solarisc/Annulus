@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Developer automation for the Annulus workspace: ci, docs-check, the theme import and the app icon."
+description = "Developer automation for the Annulus workspace: ci, docs-check, the theme import, the app icon and the macOS app bundle."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

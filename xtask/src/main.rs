@@ -8,6 +8,7 @@
 mod ci;
 mod docs_check;
 mod icon;
+mod mac_app;
 mod repo;
 mod themes;
 
@@ -21,7 +22,9 @@ commands:
   docs-check    links and anchors, ADR index, FEATURES test names, to-do markers,
                 Last verified lines, crate dependency rules
   themes <dir>  regenerate the color scheme catalog from a tinted-theming/schemes checkout
-  icon          redraw the app icon (annulus.ico and the exe's annulus.res) from our mark";
+  icon          redraw the app icon (annulus.ico, the exe's annulus.res, annulus.icns) from
+                our mark
+  mac-app       build the release binary into target/release/Annulus.app (macOS only)";
 
 fn main() -> ExitCode {
     let command = std::env::args().nth(1);
@@ -29,6 +32,7 @@ fn main() -> ExitCode {
         Some("ci") => ci::run(),
         Some("docs-check") => docs_check::run(),
         Some("icon") => icon::run(),
+        Some("mac-app") => mac_app::run(),
         Some("themes") => themes::run(std::env::args().nth(2).as_deref()),
         _ => {
             eprintln!("{USAGE}");
