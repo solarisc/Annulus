@@ -179,10 +179,13 @@ pub fn tile_colors(hue: Rgb, surface: Rgb, dark: bool) -> (Rgb, Rgb) {
     };
     let white = Rgb::new(0xFF, 0xFF, 0xFF);
     let black = Rgb::new(0, 0, 0);
+    // Softened toward grey first: a row of warm hues should not read as a row of alarms.
+    let grey = Rgb::new(0x78, 0x78, 0x78);
+    let soft = mix(hue, grey, 0.35);
     if dark {
-        (mix(surface, hue, 0.26), mix(hue, white, 0.62))
+        (mix(surface, soft, 0.24), mix(soft, white, 0.62))
     } else {
-        (mix(surface, hue, 0.13), mix(hue, black, 0.34))
+        (mix(surface, soft, 0.13), mix(soft, black, 0.42))
     }
 }
 

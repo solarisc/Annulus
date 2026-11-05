@@ -1,16 +1,16 @@
 //! The Hosts screen (UI-SPEC §2): a header, a search box that also quick-connects, groups and
 //! host cards (or a list), an empty state, and the host editor in a side panel.
 
-use annulus_config::tokens::{metrics, radius, space};
+use annulus_config::tokens::{metrics, motion, radius, space};
 use annulus_session::Target;
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Rect, Weight};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
-use annulus_ui::motion::{Feel, Layer, Motion};
+use annulus_ui::motion::{Curve, Feel, Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, CONTROL, FieldStyle, HEADING, Kind, SEARCH, SMALL, SPLIT_MENU_W, Tone,
-    button_width, split_button_width,
+    BODY, BODY_MEDIUM, CONTROL, FieldStyle, HEADING, Kind, MENU_BREAK, SEARCH, SMALL, SPLIT_MENU_W,
+    Tone, button_width, split_button_width,
 };
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
@@ -101,12 +101,20 @@ pub struct HostsView {
     places: std::collections::HashMap<Id, Rect>,
     /// Whether an editor was open last frame.
     was_open: bool,
+    /// How many columns the grid had last frame.
+    was_columns: usize,
+    /// How many times the grid has changed its columns: each time its cards fill in anew.
+    refills: u32,
+    /// Where the cards were before the grid changed its columns, and when, while those fade.
+    refilled: Option<(std::collections::HashMap<Id, Rect>, f64)>,
     /// Until when the grid's cards glide to new places, on the window's clock.
     reflow_until: f64,
     /// Where the editor panel's left edge is this frame, or the sheet's right edge.
     list_edge: f32,
     /// The card that was just connected to, on screen: the host flies from there to its tab.
     pub launched: Option<Rect>,
+    /// How long cards wait to fill in when the screen appears, in milliseconds.
+    pub enter_after: u32,
 }
 
 /// The host editor's draft.
@@ -492,16 +500,24 @@ impl HostsView {
         now < self.reflow_until
     }
 
-    /// Starts the grid's cards gliding from where they were to where they now belong, when
-    /// the room they have or how many there are changed by something done here. A window
-    /// being resized moves them at once, with the pointer.
-    fn reflow(&mut self, ui: &mut Ui<'_>, listed: usize) {
+    /// Starts the grid's cards moving to where they now belong, when the room they have or how
+    /// many there are changed by something done here. In the same columns they glide. Into
+    /// other columns their paths would cross, so the old grid fades out and the new one fills
+    /// in. A window being resized moves them at once, with the pointer.
+    fn reflow(&mut self, ui: &mut Ui<'_>, listed: usize, columns: usize) {
         /// Longer than any card takes to arrive.
         const GLIDES: f64 = 0.7;
         let open = self.editor.is_some() || self.group_editor.is_some();
         let changed = open != self.was_open || listed != self.places.len();
+        let new_columns = columns != self.was_columns;
         self.was_open = open;
-        if changed && !self.places.is_empty() && !ui.state.reduce_motion {
+        self.was_columns = columns;
+        let moved = changed && !self.places.is_empty() && !ui.state.reduce_motion;
+        if moved && new_columns {
+            self.refills = self.refills.wrapping_add(1);
+            self.refilled = Some((std::mem::take(&mut self.places), ui.time()));
+            self.reflow_until = 0.0;
+        } else if moved {
             self.reflow_until = ui.time() + GLIDES;
             for (id, from) in &self.places {
                 ui.spring_set(id.with("x"), from.x);
@@ -510,6 +526,40 @@ impl HostsView {
             }
         }
         self.places.clear();
+    }
+
+    /// The old grid's fade, 1.0 to 0.0, while it fades out; ends it once it has.
+    fn old_grid(&mut self, ui: &mut Ui<'_>) -> Option<f32> {
+        let (_, since) = self.refilled.as_ref()?;
+        #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+        let gone = ((ui.time() - since) * 1000.0 / f64::from(motion::EXIT)) as f32;
+        if gone >= 1.0 {
+            self.refilled = None;
+            return None;
+        }
+        ui.request_repaint();
+        Some(1.0 - Curve::Out.at(gone))
+    }
+
+    /// Draws `draw` once more where the old grid had `id`, at `fade`, taking nothing.
+    fn in_old_grid(
+        &self,
+        ui: &mut Ui<'_>,
+        (id, fade, top): (Id, f32, f32),
+        draw: impl FnOnce(&mut Ui<'_>, Rect),
+    ) {
+        let Some(from) = self
+            .refilled
+            .as_ref()
+            .and_then(|(places, _)| places.get(&id))
+        else {
+            return;
+        };
+        ui.push_inert();
+        ui.push_layer(Layer::fade(fade));
+        draw(ui, Rect::new(from.x, from.y + top, from.w, from.h));
+        ui.pop_layer();
+        ui.pop_inert();
     }
 
     /// Whether a search or the tag filter narrows the listing to matching hosts.
@@ -558,10 +608,18 @@ impl HostsView {
         let extra = self.list_edge - area.r();
         let mut top = main.take_top(36.0);
         super::pages::title(ui, &mut top, "Hosts", Some(cards.len()));
-        let room = top.w;
+        // Labels go by the narrower of the room it has now and will have: it changes once, and
+        // never crowds the title on the way.
+        let room = top.w + extra.min(0.0);
         let mut actions = top.centered(top.w, CONTROL);
         actions.w = (actions.w + extra).max(0.0);
-        if let Some(toolbar) = self.toolbar(ui, actions, room, vault, !tags.is_empty()) {
+        let empty = vault.hosts().is_empty() && vault.groups().is_empty();
+        if empty {
+            // The page's own buttons say how to start.
+            if super::shortcuts::NEW_HOST.pressed(ui) {
+                self.new_host(vault);
+            }
+        } else if let Some(toolbar) = self.toolbar(ui, actions, room, vault, !tags.is_empty()) {
             action = Some(toolbar);
         }
         main.take_top(space::L);
@@ -1075,6 +1133,7 @@ impl HostsView {
         action
     }
 
+    #[allow(clippy::too_many_lines)] // The list top to bottom: groups, heading, hosts.
     fn listing(
         &mut self,
         ui: &mut Ui<'_>,
@@ -1109,17 +1168,40 @@ impl HostsView {
         // Cards still gliding into a narrower list are not cut off short of the panel.
         let reach = (self.list_edge - rect.r()).max(0.0);
         ui.push_clip(Rect::new(rect.x, rect.y, rect.w + reach, rect.h));
+        // Room for the scroll bar only while there is one, so the cards end with the search.
+        let width = if content_h > rect.h {
+            rect.w - 10.0
+        } else {
+            rect.w
+        };
         let top = rect.y - offset;
         let mut y = top;
         let mut action = None;
-        self.reflow(ui, cards.len() + groups.len());
+        self.reflow(ui, cards.len() + groups.len(), columns);
+        let old = self.old_grid(ui);
+        let refill = self.refills;
+        // The new grid waits for the old one to have mostly gone when it has just replaced it.
+        let wait = if old.is_some() {
+            motion::EXIT / 2
+        } else {
+            self.enter_after
+        };
         if !groups.is_empty() {
             ui.section_label(Rect::new(rect.x, y, rect.w, 20.0), "Groups");
             y += 28.0;
             for (index, group) in groups.iter().enumerate() {
-                let cell = grid_cell(rect.x, y, rect.w - 8.0, columns, index, GROUP_H);
-                let place = self.place(ui, Id::new(("group", group.uid.as_str())), cell, top);
-                ui.push_layer(Layer::fade(in_flight(place, cell)));
+                let cell = grid_cell(rect.x, y, width, columns, index, GROUP_H);
+                let id = Id::new(("group", group.uid.as_str()));
+                let place = self.place(ui, id, cell, top);
+                if let Some(fade) = old {
+                    self.in_old_grid(ui, (id, fade, top), |ui, rect| {
+                        group_card(ui, rect, group);
+                    });
+                }
+                let shown = ui.entrance(id.with(("enter", refill)), Motion::BASE.delayed(wait));
+                ui.push_layer(
+                    Layer::fade(shown * in_flight(place, cell)).shifted(0.0, 6.0 * (1.0 - shown)),
+                );
                 if group_card(ui, place, group) {
                     self.group = Some(group.uid.clone());
                 }
@@ -1141,16 +1223,26 @@ impl HostsView {
             Mode::Grid => {
                 for (index, card) in cards.iter().enumerate() {
                     let id = Id::new(("host", card.id));
-                    let home = grid_cell(rect.x, y, rect.w - 8.0, columns, index, CARD_H);
+                    let home = grid_cell(rect.x, y, width, columns, index, CARD_H);
                     let cell = self.place(ui, id, home, top);
+                    let selected = self.selected == Some(card.id);
+                    if let Some(fade) = old {
+                        self.in_old_grid(ui, (id, fade, top), |ui, rect| {
+                            host_card(ui, rect, card, selected, menu);
+                        });
+                    }
                     // Cards fill in one after another as the screen appears.
-                    let shown = ui.entrance(id.with("enter"), Motion::SLOW.staggered(index));
+                    let shown = ui.entrance(
+                        id.with(("enter", refill)),
+                        Motion::SLOW.delayed(wait).staggered(index),
+                    );
                     ui.push_layer(
                         Layer::fade(shown * in_flight(cell, home))
                             .scaled(cell.center(), 0.985 + 0.015 * shown)
-                            .shifted(0.0, 14.0 * (1.0 - shown)),
+                            .shifted(0.0, 12.0 * (1.0 - shown)),
                     );
-                    let event = host_card(ui, cell, card, self.selected == Some(card.id), menu);
+                    let gliding = ui.time() < self.reflow_until;
+                    let event = host_card(ui, cell, card, selected && !gliding, menu);
                     if matches!(event, CardEvent::Connect | CardEvent::More(MENU_CONNECT)) {
                         self.launched = Some(ui.gfx.to_screen(cell));
                     }
@@ -1161,10 +1253,10 @@ impl HostsView {
                 }
             }
             Mode::List => {
-                list_header(ui, Rect::new(rect.x, y, rect.w - 8.0, ROW_H - 12.0));
+                list_header(ui, Rect::new(rect.x, y, width, ROW_H - 12.0));
                 y += ROW_H - 12.0;
                 for card in cards {
-                    let row = Rect::new(rect.x, y, rect.w - 8.0, ROW_H);
+                    let row = Rect::new(rect.x, y, width, ROW_H);
                     let event = host_row(ui, row, card, self.selected == Some(card.id), menu);
                     if matches!(event, CardEvent::Connect | CardEvent::More(MENU_CONNECT)) {
                         self.launched = Some(ui.gfx.to_screen(row));
@@ -2276,10 +2368,10 @@ fn host_menu(moves: &[(String, String)]) -> Vec<String> {
     let mut items = vec![
         "Connect".to_owned(),
         "Open SFTP".to_owned(),
-        "Edit".to_owned(),
+        format!("{MENU_BREAK}Edit"),
         "Copy ssh command".to_owned(),
         "Duplicate".to_owned(),
-        "Move to the top level".to_owned(),
+        format!("{MENU_BREAK}Move to the top level"),
     ];
     items.extend(moves.iter().map(|(_, path)| format!("Move to {path}")));
     items

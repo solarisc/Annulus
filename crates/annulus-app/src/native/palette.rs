@@ -14,6 +14,8 @@ use crate::command_palette::{Action, Item, rank, typed_target};
 /// How many results show at once.
 const SHOWN: usize = 8;
 const ROW: f32 = 40.0;
+/// Height of the line at the palette's foot that says what the keys do.
+const HINTS_H: f32 = 28.0;
 
 /// What the palette ended with.
 pub enum Outcome {
@@ -63,7 +65,7 @@ impl PaletteView {
         }
         // As many rows as fit under the field in this window, up to eight.
         let top = if window.h < 560.0 { space::XL } else { 72.0 };
-        let room = window.h - top - space::L - CONTROL - 2.0 * space::M - space::S;
+        let room = window.h - top - space::L - CONTROL - 2.0 * space::M - space::S - HINTS_H;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // A few rows.
         let fits = (room / ROW).floor().max(1.0) as usize;
         results.extend(rank(&self.query, items).into_iter().take(SHOWN).cloned());
@@ -77,11 +79,20 @@ impl PaletteView {
             window.center().x - width / 2.0,
             window.y + top,
             width,
-            CONTROL + 2.0 * space::M + list_h + space::S,
+            CONTROL + 2.0 * space::M + list_h + space::S + HINTS_H,
         );
         ui.raised_surface(card, 14.0);
         ui.zone(Id::new("palette.card"), card, Role::Backdrop, "");
         let mut inner = card.inset(space::M, space::M);
+        // What the keys do, at its foot.
+        let hints = Rect::new(inner.x + space::M, inner.b() - HINTS_H + 8.0, inner.w, 20.0);
+        ui.gfx.text(
+            hints,
+            "Up and Down to move  \u{b7}  Enter to open  \u{b7}  Esc to close",
+            SMALL,
+            t.text3,
+            Align::Start,
+        );
         let field_id = Id::new("palette.query");
         if !self.opened {
             ui.state.set_focus(Some(field_id), false);

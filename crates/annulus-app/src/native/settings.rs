@@ -295,7 +295,13 @@ impl SettingsView {
         section_header(ui, &mut body, self.page);
         let offset = ui.scroll_view(Id::new("settings.scroll"), body, self.content_h);
         ui.push_clip(body);
-        let mut page = Rect::new(body.x, body.y - offset, body.w - 12.0, f32::MAX / 4.0);
+        // Room for the scroll bar only while there is one, so cards end with the header.
+        let page_w = if self.content_h > body.h {
+            body.w - 12.0
+        } else {
+            body.w
+        };
+        let mut page = Rect::new(body.x, body.y - offset, page_w, f32::MAX / 4.0);
         let top = page.y;
         let mut changed = false;
         let mut drawn_h = account_h;

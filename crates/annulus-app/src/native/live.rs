@@ -1010,8 +1010,10 @@ impl LiveTerminal {
             .max(rect.y + space::XL);
         let card = Rect::new(rect.center().x - width / 2.0, top, width, height);
         let shown = ui.entrance(id.with("enter"), Motion::SLOW);
+        // It sits on the window's own sheet until there is a terminal to show: the terminal's
+        // colors need not suit the window's, and nothing has been drawn on it yet.
+        ui.gfx.fill_rect(rect, super::PANEL_RADIUS, t.bg);
         ui.push_layer(Layer::appear(shown, card.center(), 0.98, 10.0));
-        // No box of its own: it sits on the terminal's quiet sheet.
         let mut inner = card.inset(space::XL, space::XL);
         // The host, and Show log.
         let mut head = inner.take_top(44.0);

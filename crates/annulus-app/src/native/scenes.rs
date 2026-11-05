@@ -1888,6 +1888,18 @@ fn filmstrip(film: &Scene, renderer: &mut dyn Renderer) -> Vec<Vec<u8>> {
     frames
 }
 
+/// What film strips are photographed with: what the shipped app draws with on this OS.
+fn film_renderer() -> Box<dyn Renderer> {
+    #[cfg(windows)]
+    {
+        Box::new(Direct2D(annulus_platform::d2d::D2d::new().unwrap()))
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(Cpu(None))
+    }
+}
+
 /// Draws frames of `app` for `film`, one for each of `times`, keeping each as a photograph;
 /// returns what each frame output.
 fn photographed(
@@ -1898,7 +1910,7 @@ fn photographed(
 ) -> Vec<FrameOutput> {
     let dir = out_dir();
     std::fs::create_dir_all(&dir).unwrap();
-    let mut renderer = Cpu(None);
+    let mut renderer = film_renderer();
     let mut state = UiState::default();
     let viewport = Rect::new(0.0, 0.0, 1100.0, 720.0);
     let theme = Theme::new(Appearance::Dark);
@@ -1926,7 +1938,12 @@ fn the_vault_opens_as_the_lock_leaves_and_the_leaving_lock_takes_nothing() {
     let _ = photographed(&mut app, "motion-unlock-before", &[0.0, 0.5, 1.0], &[]);
     app.vault = Some(vault);
     app.lock_left = Some(2.0);
-    let outputs = photographed(&mut app, "motion-unlock", &[2.04, 2.1, 2.18, 2.3, 3.0], &[]);
+    let outputs = photographed(
+        &mut app,
+        "motion-unlock",
+        &[2.04, 2.1, 2.18, 2.26, 2.34, 2.5, 3.0],
+        &[],
+    );
     // The vault works from the first frame, and nothing of the lock can be reached.
     for output in &outputs {
         assert!(output.zones.iter().any(|zone| zone.label == "New host"));
@@ -1957,6 +1974,21 @@ fn a_refused_password_shakes_the_field_and_says_why() {
             .unwrap()
     };
     let places: Vec<f32> = outputs.iter().map(field).collect();
+    let tops: Vec<f32> = outputs
+        .iter()
+        .map(|output| {
+            output
+                .zones
+                .iter()
+                .find(|zone| zone.label == "Master password")
+                .map(|zone| zone.rect.y)
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        tops.windows(2).all(|two| (two[0] - two[1]).abs() < 0.01),
+        "nothing moves up or down for it: {tops:?}"
+    );
     assert!(
         places[1..4].iter().any(|x| (x - places[4]).abs() > 2.0),
         "the field left its place: {places:?}"
@@ -1970,42 +2002,88 @@ fn a_host_flies_from_its_card_to_its_tab_and_lands() {
     let mut app = NativeApp::new(Some(vault));
     with_tabs(&mut app);
     let uid = app.tabs.last().unwrap().uid;
-    let _ = photographed(&mut app, "motion-flight-before", &[0.0], &[]);
+    let mut renderer = film_renderer();
+    let mut state = UiState::default();
+    let viewport = Rect::new(0.0, 0.0, 1100.0, 720.0);
+    let theme = Theme::new(Appearance::Dark);
+    let dir = out_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut shoot = |app: &mut NativeApp, time: f64, name: Option<String>| {
+        let mut output = FrameOutput::default();
+        let png = renderer.frame((1100, 720, 1.0), name.is_some(), &mut |canvas| {
+            state.begin_frame(&[], time);
+            let mut ui = Ui::new(canvas, theme, &mut state, viewport);
+            app.frame(&mut ui);
+            output = state.end_frame();
+        });
+        if let (Some(name), Some(png)) = (name, png) {
+            std::fs::write(dir.join(name), png).unwrap();
+        }
+        output
+    };
+    // The page at rest, as it is when a card is double-clicked.
+    shoot(&mut app, 0.0, None);
+    shoot(&mut app, 2.0, None);
+    assert!(
+        (app.tab_landing(uid, 2.0) - 1.0).abs() < f32::EPSILON,
+        "nothing flying"
+    );
     app.flyer = Some(Flyer {
         uid,
         from: Rect::new(244.0, 312.0, 266.0, 64.0),
         title: "bastion".into(),
         os: None,
-        since: 1.0,
+        since: 3.0,
     });
-    let outputs = photographed(&mut app, "motion-flight", &[1.04, 1.12, 1.24, 1.4], &[]);
-    assert!(outputs.iter().all(|output| output.repaint));
+    for (index, at) in [3.04, 3.12, 3.24, 3.4].into_iter().enumerate() {
+        let output = shoot(&mut app, at, Some(format!("motion-flight-{index}.png")));
+        assert!(output.repaint, "it asks for frames while it flies");
+    }
     assert!(app.flyer.is_some(), "still in the air");
-    let _ = photographed(&mut app, "motion-flight-after", &[1.5], &[]);
+    assert!(app.tab_landing(uid, 3.1) < 0.01, "the tab's own name waits");
+    assert!(app.tab_landing(uid, 3.4) > 0.5, "and comes up as it lands");
+    shoot(&mut app, 3.5, None);
     assert!(app.flyer.is_none(), "landed");
 }
 
+/// One frame of `app` in a window `width` wide, drawing nothing.
+fn frame_wide(state: &mut UiState, app: &mut NativeApp, width: f32, time: f64) -> FrameOutput {
+    let mut canvas = Measure(TextEngine::new());
+    state.begin_frame(&[], time);
+    let mut ui = Ui::new(
+        &mut canvas,
+        Theme::new(Appearance::Dark),
+        state,
+        Rect::new(0.0, 0.0, width, 720.0),
+    );
+    app.frame(&mut ui);
+    state.end_frame()
+}
+
+/// Where the zone named `label` is.
+fn place_of(output: &FrameOutput, label: &str) -> Rect {
+    output
+        .zones
+        .iter()
+        .find(|zone| zone.label == label)
+        .map(|zone| zone.rect)
+        .unwrap()
+}
+
 #[test]
-fn the_grid_glides_when_the_editor_opens_but_follows_a_window_being_resized_at_once() {
+fn in_the_same_columns_the_grid_glides_when_the_editor_opens() {
     let vault = fixture_vault("motion-reflow", true);
     let mut app = NativeApp::new(Some(vault));
     let mut state = UiState::default();
-    let _ = drive(&mut app, &mut state, &[], 0.0);
-    let output = drive(&mut app, &mut state, &[], 1.0);
-    let place = |output: &FrameOutput, label: &str| {
-        output
-            .zones
-            .iter()
-            .find(|zone| zone.label == label)
-            .map(|zone| zone.rect)
-            .unwrap()
-    };
-    let before = place(&output, "web-1");
+    // Wide enough for four columns with the editor open or not.
+    let width = 1800.0;
+    let _ = frame_wide(&mut state, &mut app, width, 0.0);
+    let before = place_of(&frame_wide(&mut state, &mut app, width, 1.0), "web-1");
     let id = app.vault.as_ref().unwrap().hosts()[0].id;
     app.hosts.edit_host(app.vault.as_ref().unwrap(), id);
-    let first = place(&drive(&mut app, &mut state, &[], 1.016), "web-1");
-    let later = place(&drive(&mut app, &mut state, &[], 1.1), "web-1");
-    let settled = place(&drive(&mut app, &mut state, &[], 3.0), "web-1");
+    let first = place_of(&frame_wide(&mut state, &mut app, width, 1.016), "web-1");
+    let later = place_of(&frame_wide(&mut state, &mut app, width, 1.1), "web-1");
+    let settled = place_of(&frame_wide(&mut state, &mut app, width, 3.0), "web-1");
     assert_ne!(before, settled, "the editor took room");
     assert!(
         (first.x - before.x).abs() < (settled.x - before.x).abs() / 2.0,
@@ -2015,32 +2093,48 @@ fn the_grid_glides_when_the_editor_opens_but_follows_a_window_being_resized_at_o
         (later.x - settled.x).abs() < (first.x - settled.x).abs(),
         "on its way: {first:?} {later:?} {settled:?}"
     );
-    // With nothing changed but the window's size, cards are where they belong at once.
-    let resized = |state: &mut UiState, app: &mut NativeApp, width: f32, time: f64| {
-        let mut canvas = Measure(TextEngine::new());
-        state.begin_frame(&[], time);
-        let mut ui = Ui::new(
-            &mut canvas,
-            Theme::new(Appearance::Dark),
-            state,
-            Rect::new(0.0, 0.0, width, 720.0),
-        );
-        app.frame(&mut ui);
-        state.end_frame()
-    };
-    let wide = place(&resized(&mut state, &mut app, 1500.0, 5.0), "web-1");
-    let wide_settled = place(&resized(&mut state, &mut app, 1500.0, 7.0), "web-1");
-    assert_eq!(wide, wide_settled);
+}
+
+#[test]
+fn into_other_columns_the_grid_fades_through_instead_of_crossing_paths() {
+    let vault = fixture_vault("motion-refill", true);
+    let mut app = NativeApp::new(Some(vault));
+    let mut state = UiState::default();
+    let width = 1100.0;
+    let _ = frame_wide(&mut state, &mut app, width, 0.0);
+    let _ = frame_wide(&mut state, &mut app, width, 1.0);
+    let id = app.vault.as_ref().unwrap().hosts()[0].id;
+    app.hosts.edit_host(app.vault.as_ref().unwrap(), id);
+    // No card travels: each is in its new place from the first frame.
+    let first = place_of(&frame_wide(&mut state, &mut app, width, 1.016), "web-1");
+    let settled = place_of(&frame_wide(&mut state, &mut app, width, 3.0), "web-1");
+    assert!(
+        (first.center().x - settled.center().x).abs() < 0.5,
+        "{first:?} {settled:?}"
+    );
+    assert!(!app.hosts.reflowing(1.016));
+}
+
+#[test]
+fn a_window_being_resized_moves_the_grid_at_once() {
+    let vault = fixture_vault("motion-resize", true);
+    let mut app = NativeApp::new(Some(vault));
+    let mut state = UiState::default();
+    let _ = frame_wide(&mut state, &mut app, 1100.0, 0.0);
+    let _ = frame_wide(&mut state, &mut app, 1100.0, 1.0);
+    let wide = place_of(&frame_wide(&mut state, &mut app, 1500.0, 1.016), "web-1");
+    let settled = place_of(&frame_wide(&mut state, &mut app, 1500.0, 3.0), "web-1");
+    assert_eq!(wide, settled);
 }
 
 #[test]
 fn transitions_move_through_frames_and_are_photographed_mid_flight() {
     let dir = out_dir();
     std::fs::create_dir_all(&dir).unwrap();
-    let mut renderer = Cpu(None);
+    let mut renderer = film_renderer();
     let mut still = Vec::new();
     for film in FILMS {
-        let frames = filmstrip(film, &mut renderer);
+        let frames = filmstrip(film, &mut *renderer);
         for (index, png) in frames.iter().enumerate() {
             std::fs::write(dir.join(format!("{}-{index}.png", film.name)), png).unwrap();
         }
@@ -3042,7 +3136,7 @@ fn trusting_a_servers_certificate_pins_it_until_the_address_changes() {
     assert!(!message.contains("Sign in"), "{message}");
     // Another address: the certificate trusted for the old one goes.
     let output = step(&mut app, &mut state, &[], 2.0);
-    let mut events = click_on(&output, "Server, e.g. https://sync.example.com");
+    let mut events = click_on(&output, "Server");
     events.push(Event::Text("1".into()));
     step(&mut app, &mut state, &events, 3.0);
     assert_eq!(app.sync.pin, None);
@@ -4061,7 +4155,7 @@ fn e2e_the_new_settings_create_a_sync_account_and_sync() {
         Event::Key(Key::Backspace, Modifiers::NONE),
     ];
     for (field, text) in [
-        ("Server, e.g. https://sync.example.com", url.as_str()),
+        ("Server", url.as_str()),
         ("Account name", name.as_str()),
         ("This device's name", "e2e device"),
         ("This vault's master password", strong),

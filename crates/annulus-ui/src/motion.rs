@@ -125,7 +125,7 @@ impl Motion {
     #[must_use]
     pub fn staggered(self, index: usize) -> Self {
         let index = u32::try_from(index.min(10)).unwrap_or(10);
-        self.delayed(index * motion::STAGGER)
+        self.delayed(self.delay + index * motion::STAGGER)
     }
 }
 

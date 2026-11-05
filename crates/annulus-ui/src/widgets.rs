@@ -36,6 +36,8 @@ pub const SEARCH: f32 = metrics::SEARCH_HEIGHT;
 const MENU_SHADOW: f32 = 44.0;
 /// Height of one menu entry.
 const MENU_ITEM: f32 = 32.0;
+/// An item of a menu starting with this has a hairline above it: the menu falls into groups.
+pub const MENU_BREAK: char = '\u{1}';
 
 /// How a button looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,6 +343,13 @@ fn swatch(canvas: &mut dyn Canvas, rect: Rect, colors: &[Color], line: Color) {
     }
 }
 
+/// The words on a [`Kind::Danger`] button: the error color moved toward the text color, as
+/// the plain one is too close to its own tint to read.
+#[must_use]
+pub fn danger_ink(t: &crate::kit::Theme) -> Color {
+    t.error.mix(t.text, 0.34)
+}
+
 /// Where the accent's top edge catches the light, for a control in `rect` with corners
 /// `round`.
 fn top_light(rect: Rect, round: f32) -> Rect {
@@ -478,7 +487,7 @@ impl Ui<'_> {
             Kind::Danger => {
                 let fill = t.error.alpha(0.15 + 0.1 * hover + 0.08 * press);
                 self.gfx.fill_rect(rect, round, fill);
-                t.error
+                danger_ink(&t)
             }
             Kind::Quiet => {
                 let fill = t.error.alpha(0.13 * hover + 0.08 * press);
@@ -1477,8 +1486,19 @@ impl Ui<'_> {
     /// when it is the current choice.
     fn menu_row(&mut self, popup: &Popup, index: usize, row: Rect) -> Response {
         let t = self.theme;
-        let item = &popup.items[index];
+        let item = popup.items[index].as_str();
+        let (item, grouped) = match item.strip_prefix(MENU_BREAK) {
+            Some(rest) => (rest, true),
+            None => (item, false),
+        };
         let response = self.zone(popup.owner.with(("item", index)), row, Role::MenuItem, item);
+        if grouped {
+            self.gfx.fill_rect(
+                Rect::new(row.x + 8.0, row.y - 0.5, row.w - 16.0, 1.0),
+                0.0,
+                t.line,
+            );
+        }
         let mut inner = row.inset(space::S + 2.0, 0.0);
         let check = inner.take_right(16.0);
         if popup.selected == Some(index) {
@@ -2203,6 +2223,23 @@ fn from_shown(content: &str, secret: bool, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_danger_button_keeps_its_words_readable_on_its_tint_in_both_themes() {
+        use annulus_config::tokens::{Appearance, Rgb};
+        for look in [Appearance::Dark, Appearance::Light] {
+            let t = crate::kit::Theme::new(look);
+            let rgb = |c: Color| Rgb::new(c.r, c.g, c.b);
+            for under in [t.surface, t.raised, t.bg] {
+                // At rest and with the pointer on it.
+                for strength in [0.15, 0.25] {
+                    let fill = t.error.alpha(strength).over(under);
+                    let ratio = rgb(danger_ink(&t)).contrast(rgb(fill));
+                    assert!(ratio >= 4.5, "{look:?}: {ratio:.2} on {fill:?}");
+                }
+            }
+        }
+    }
     use crate::gfx::tests::Recorder;
     use crate::kit::{Event, Theme, UiState, Zone};
     use annulus_config::tokens::Appearance;

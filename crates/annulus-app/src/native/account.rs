@@ -10,6 +10,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Ui};
+use annulus_ui::motion::Layer;
 use annulus_ui::widgets::{BODY, BODY_STRONG, CONTROL, FieldStyle, Kind, SMALL, button_width};
 use annulus_vault::vault::{Vault, VaultError};
 use zeroize::Zeroizing;
@@ -30,6 +31,10 @@ pub struct AccountView {
     changing: bool,
     change: Option<Job<Result<Vec<u8>, String>>>,
     change_message: Option<(bool, String)>,
+    /// How tall the account card was last frame.
+    card_h: f32,
+    /// How tall the master password card was last frame.
+    password_h: f32,
 }
 
 /// A small primary-or-secondary button at the left of `row`, which shrinks.
@@ -44,8 +49,20 @@ fn push_button(
     let width = button_width(&mut ui.gfx, label, None);
     let rect = row.take_left(width);
     row.take_left(space::S);
-    let kind = if enabled { kind } else { Kind::Ghost };
-    ui.button(Id::new(id), rect, label, None, kind).clicked && enabled
+    // Not ready yet, it keeps its kind and rests dim: what it will do stays clear.
+    ui.push_layer(Layer::fade(if enabled { 1.0 } else { 0.45 }));
+    let clicked = ui.button(Id::new(id), rect, label, None, kind).clicked && enabled;
+    ui.pop_layer();
+    clicked
+}
+
+/// A label over the field below it, taken from the top of `column`; `column` is left where the
+/// field goes.
+fn labelled(ui: &mut Ui<'_>, column: &mut Rect, label: &str) -> Rect {
+    let t = ui.theme;
+    ui.strict_text(column.take_top(16.0), label, SMALL, t.text2, Align::Start);
+    column.take_top(5.0);
+    column.take_top(CONTROL)
 }
 
 impl AccountView {
@@ -59,10 +76,14 @@ impl AccountView {
     ) -> f32 {
         let t = ui.theme;
         let top = rect.y;
-        let mut column = rect;
-        ui.section_label(column.take_top(18.0), "Account & sync");
-        column.take_top(space::S);
+        let column = rect;
         let card_top = column.y;
+        // Its height is known once its content is drawn: last frame's serves.
+        ui.gfx.fill_rect(
+            Rect::new(column.x, card_top, column.w, self.card_h),
+            12.0,
+            t.surface,
+        );
         let mut inner = Rect::new(
             column.x + space::L,
             column.y + space::M,
@@ -85,74 +106,70 @@ impl AccountView {
                 ui.gfx.text(inner.take_top(18.0), "The server stores only ciphertext; your master password never leaves this device.", SMALL, t.text2, Align::Start);
                 inner.take_top(space::M);
                 let half = (inner.w - space::M) / 2.0;
-                let mut row = inner.take_top(CONTROL);
-                let left = row.take_left(half);
+                let mut row = inner.take_top(16.0 + 5.0 + CONTROL);
+                let mut left = row.take_left(half);
                 row.take_left(space::M);
+                let field = labelled(ui, &mut left, "Server");
                 let server = ui.text_field(
                     Id::new("account.server"),
-                    left,
+                    field,
                     &mut sync.server,
                     FieldStyle {
-                        placeholder: "Server, e.g. https://sync.example.com",
+                        placeholder: "https://sync.example.com",
                         ..FieldStyle::default()
                     },
                 );
+                ui.set_name(Id::new("account.server"), "Server");
                 // A trusted certificate belongs to the address it was trusted for.
                 if server.changed {
                     sync.pin = None;
                     sync.untrusted = None;
                 }
+                let field = labelled(ui, &mut row, "Account name");
                 ui.text_field(
                     Id::new("account.name"),
-                    row,
+                    field,
                     &mut sync.account,
-                    FieldStyle {
-                        placeholder: "Account name",
-                        ..FieldStyle::default()
-                    },
+                    FieldStyle::default(),
                 );
-                inner.take_top(space::S);
-                let mut row = inner.take_top(CONTROL);
-                let left = row.take_left(half);
+                ui.set_name(Id::new("account.name"), "Account name");
+                inner.take_top(space::M);
+                let mut row = inner.take_top(16.0 + 5.0 + CONTROL);
+                let mut left = row.take_left(half);
                 row.take_left(space::M);
+                let field = labelled(ui, &mut left, "This device's name");
                 ui.text_field(
                     Id::new("account.device"),
-                    left,
+                    field,
                     &mut sync.device,
-                    FieldStyle {
-                        placeholder: "This device's name",
-                        ..FieldStyle::default()
-                    },
+                    FieldStyle::default(),
                 );
+                ui.set_name(Id::new("account.device"), "This device's name");
+                let field = labelled(ui, &mut row, "This vault's master password");
                 ui.text_field(
                     Id::new("account.password"),
-                    row,
+                    field,
                     &mut self.password,
                     FieldStyle {
-                        placeholder: "This vault's master password",
                         icon: Some(icons::KEY),
                         ..FieldStyle::default()
                     },
                 );
-                inner.take_top(space::S);
-                let mut row = inner.take_top(CONTROL);
+                ui.set_name(Id::new("account.password"), "This vault's master password");
+                inner.take_top(space::M);
+                let mut row = inner.take_top(16.0 + 5.0 + CONTROL);
+                let mut left = row.take_left(half);
+                let field = labelled(ui, &mut left, "Invite code, to create an account");
                 ui.text_field(
                     Id::new("account.invite"),
-                    row.take_left(half),
+                    field,
                     &mut self.invite,
                     FieldStyle {
-                        placeholder: "Invite code (to create an account)",
+                        placeholder: "Only where sign-ups are closed",
                         ..FieldStyle::default()
                     },
                 );
-                row.take_left(space::M);
-                ui.gfx.text(
-                    row,
-                    "Only where sign-ups are closed.",
-                    SMALL,
-                    t.text2,
-                    Align::Start,
-                );
+                ui.set_name(Id::new("account.invite"), "Invite code");
                 if let Some((certificate, attempt)) = sync.untrusted.clone() {
                     inner.take_top(space::M);
                     certificate_box(ui, &mut inner, sync, &certificate, attempt);
@@ -342,7 +359,7 @@ impl AccountView {
             ui.gfx.text(line, &text, BODY, t.text, Align::Start);
         }
         let card = Rect::new(column.x, card_top, column.w, inner.y - card_top + space::M);
-        ui.gfx.stroke_rect(card, 12.0, 1.0, t.line);
+        self.card_h = card.h;
         // Room to lay out in; its height becomes what the password card took.
         let mut after = Rect::new(column.x, card.b() + space::XL, column.w, 1000.0);
         after.h = self.password_card(ui, after, vault, pace);
@@ -384,6 +401,11 @@ impl AccountView {
         ui.section_label(column.take_top(18.0), "Master password");
         column.take_top(space::S);
         let card_top = column.y;
+        ui.gfx.fill_rect(
+            Rect::new(column.x, card_top, column.w, self.password_h),
+            12.0,
+            t.surface,
+        );
         let mut inner = Rect::new(
             column.x + space::L,
             column.y + space::M,
@@ -505,7 +527,7 @@ impl AccountView {
             );
         }
         let card = Rect::new(column.x, card_top, column.w, inner.y - card_top + space::M);
-        ui.gfx.stroke_rect(card, 12.0, 1.0, t.line);
+        self.password_h = card.h;
         card.b() - rect.y
     }
 }

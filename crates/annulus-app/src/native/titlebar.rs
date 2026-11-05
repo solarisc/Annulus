@@ -447,7 +447,7 @@ fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str)
 }
 
 /// Our mark: a prompt in the accent. Ours alone (ADR-0010).
-fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
+pub(super) fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
     let t = ui.theme;
     let ink = t.accent;
     let (x, y) = (rect.x, rect.y);
@@ -486,7 +486,7 @@ fn label_width(ui: &mut Ui<'_>, title: &str, kind: TabKind) -> f32 {
     match kind {
         TabKind::Vault | TabKind::Files => (text + 16.0 + 8.0 + 2.0 * space::M).ceil(),
         TabKind::Terminal | TabKind::Sftp | TabKind::NewTab => {
-            (text + 16.0 + 8.0 + 18.0 + 6.0 + 2.0 * space::M).clamp(132.0, 220.0)
+            (text + 16.0 + 8.0 + 18.0 + 6.0 + 2.0 * space::M).clamp(MIN_TAB, 220.0)
         }
     }
 }
@@ -518,7 +518,7 @@ fn tab_icon(app: &NativeApp, tab: &super::Tab) -> Result<&'static super::os::Os,
         TabKind::Vault => icons::GRID_VIEW,
         TabKind::Files | TabKind::Sftp => icons::FOLDER,
         TabKind::Terminal => icons::TERMINAL,
-        TabKind::NewTab => icons::PLUS,
+        TabKind::NewTab => icons::SEARCH,
     })
 }
 
@@ -566,6 +566,8 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     // Squeezed narrower than it wants, a tab trims its padding and keeps room for its close
     // button only while that shows (in front or hovered), so its name keeps a few letters.
     let squeezed = slot.w + 0.5 < tab_width(ui, tab);
+    // A host flying here lands by melting into the tab's own icon and name.
+    ui.push_layer(Layer::fade(app.tab_landing(tab.uid, ui.time())));
     let mut inner = rect.inset(if squeezed { space::S } else { space::M }, 0.0);
     let ink = t.text2.mix(t.text, hover.max(lit));
     let icon = inner.take_left(16.0).centered(16.0, 16.0);
@@ -647,6 +649,7 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     }
     ui.gfx
         .text(inner, &tab.title, BODY_MEDIUM, ink, Align::Start);
+    ui.pop_layer();
     ui.pop_layer();
     if response.hovered {
         ui.set_cursor(Cursor::Pointer);

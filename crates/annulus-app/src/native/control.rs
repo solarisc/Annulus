@@ -1394,10 +1394,22 @@ fn wrap_command(text: &str, per_line: usize, most: usize) -> Vec<String> {
         .join("  ");
     let chars: Vec<char> = flat.chars().collect();
     let per_line = per_line.max(1);
-    let mut lines: Vec<String> = chars
-        .chunks(per_line)
-        .map(|chunk| chunk.iter().collect())
-        .collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut rest: &[char] = &chars;
+    while rest.len() > per_line {
+        // At the last space that fits, so a word stays whole; a word too long for a line is
+        // broken where the line ends.
+        let cut = rest[..=per_line]
+            .iter()
+            .rposition(|c| *c == ' ')
+            .filter(|at| *at > 0)
+            .map_or(per_line, |at| at + 1);
+        lines.push(rest[..cut].iter().collect::<String>().trim_end().to_owned());
+        rest = &rest[cut..];
+    }
+    if !rest.is_empty() {
+        lines.push(rest.iter().collect());
+    }
     if lines.len() > most {
         lines.truncate(most);
         if let Some(last) = lines.last_mut() {
@@ -2357,6 +2369,11 @@ mod tests {
     #[test]
     fn a_long_command_wraps_to_three_lines_and_the_rest_is_cut_short() {
         assert_eq!(wrap_command("ls -la", 10, 3), vec!["ls -la"]);
+        // At a space where there is one, so words stay whole.
+        assert_eq!(
+            wrap_command("docker ps --format x", 10, 3),
+            vec!["docker ps", "--format x"]
+        );
         assert_eq!(wrap_command("abcdefghij", 4, 3), vec!["abcd", "efgh", "ij"]);
         assert_eq!(
             wrap_command("abcdefghijklmnop", 4, 3),

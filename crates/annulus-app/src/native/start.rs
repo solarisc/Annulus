@@ -340,7 +340,13 @@ impl StartView {
                 layout.push((Rect::new(column.x, y, column.w, LABEL_H), *title, rows));
                 y += LABEL_H;
                 for _ in rows {
-                    places.push(Rect::new(column.x, y, column.w - 8.0, ROW_H - 4.0));
+                    // Room for the scroll bar only while there is one.
+                    let width = if content > column.h {
+                        column.w - 8.0
+                    } else {
+                        column.w
+                    };
+                    places.push(Rect::new(column.x, y, width, ROW_H - 4.0));
                     y += ROW_H;
                 }
                 y += space::M;

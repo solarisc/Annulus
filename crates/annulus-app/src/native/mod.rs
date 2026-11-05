@@ -1525,7 +1525,7 @@ impl NativeApp {
     /// The lock screen on its way out, over the vault coming in.
     fn lock_leaving(&mut self, ui: &mut Ui<'_>, content: Rect) {
         /// How long the lock takes to open and leave, in seconds.
-        const LEAVES: f64 = 0.36;
+        const LEAVES: f64 = 0.28;
         let Some(since) = self.lock_left else { return };
         #[allow(clippy::cast_possible_truncation)] // A share for drawing.
         let share = ((ui.time() - since) / LEAVES) as f32;
@@ -1539,8 +1539,6 @@ impl NativeApp {
 
     /// The host just connected to, on its way from its card to its tab.
     fn flight(&mut self, ui: &mut Ui<'_>) {
-        /// How long the flight takes, in seconds.
-        const TAKES: f64 = 0.44;
         let Some(flyer) = &self.flyer else { return };
         let to = self
             .tab_places
@@ -1548,7 +1546,7 @@ impl NativeApp {
             .find(|(uid, _)| *uid == flyer.uid)
             .map(|(_, place)| *place);
         #[allow(clippy::cast_possible_truncation)] // A share for drawing.
-        let share = ((ui.time() - flyer.since) / TAKES) as f32;
+        let share = ((ui.time() - flyer.since) / FLIGHT) as f32;
         let (Some(to), false, true) = (to, ui.state.reduce_motion, share < 1.0) else {
             self.flyer = None;
             return;
@@ -1564,7 +1562,7 @@ impl NativeApp {
             along(from.h, to.h),
         );
         // It lands by melting into the tab.
-        let shown = 1.0 - Curve::Exit.at(((share - 0.55) / 0.45).clamp(0.0, 1.0));
+        let shown = 1.0 - Curve::Exit.at(((share - LANDS_AT) / (1.0 - LANDS_AT)).clamp(0.0, 1.0));
         ui.push_layer(Layer::fade(shown).grouped(rect.outset(40.0)));
         ui.raised_surface(rect, 10.0);
         ui.gfx.stroke_rect(rect, 10.0, 1.0, t.accent.alpha(0.5));
@@ -1581,6 +1579,17 @@ impl NativeApp {
         ui.request_repaint();
     }
 
+    /// How much of tab `uid`'s own icon and name shows, 0.0 to 1.0: none while a host is flying
+    /// to it, coming up as the host melts away.
+    pub(crate) fn tab_landing(&self, uid: u64, now: f64) -> f32 {
+        let Some(flyer) = self.flyer.as_ref().filter(|flyer| flyer.uid == uid) else {
+            return 1.0;
+        };
+        #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+        let share = ((now - flyer.since) / FLIGHT) as f32;
+        ((share - LANDS_AT) / (1.0 - LANDS_AT)).clamp(0.0, 1.0)
+    }
+
     /// Whether tab `index` holds a session still connecting.
     pub(crate) fn tab_connecting(&self, index: usize) -> bool {
         matches!(
@@ -1595,11 +1604,17 @@ impl NativeApp {
             self.section_left = Some((self.section_drawn, ui.time()));
             self.section_drawn = self.section;
         }
-        // Each section fades and rises a little into place when chosen, just after the last one
-        // has mostly gone, so their words are never read over each other.
+        // Each section fades and rises a little into place when chosen, just after what was
+        // there has mostly gone, so their words are never read over each other.
+        let wait = if self.lock_left.is_some() {
+            AFTER_THE_LOCK
+        } else {
+            motion::EXIT / 2
+        };
+        self.hosts.enter_after = wait;
         let shown = ui.entrance(
             Id::new(("section", self.section.title())),
-            Motion::BASE.delayed(motion::EXIT / 2),
+            Motion::BASE.delayed(wait),
         );
         ui.push_clip(content);
         ui.push_layer(Layer::fade(shown).shifted(0.0, 10.0 * (1.0 - shown)));
@@ -1823,10 +1838,16 @@ fn panel_shape(rect: Rect) -> Rect {
     )
 }
 
+/// How long a host takes to fly from its card to its tab, in seconds.
+const FLIGHT: f64 = 0.44;
+/// How far through its flight, 0.0 to 1.0, a host starts to melt into its tab.
+const LANDS_AT: f32 = 0.62;
+/// How long the vault waits to come in while the lock leaves, in milliseconds.
+const AFTER_THE_LOCK: u32 = 190;
 /// The space between the content panel and the window's right and bottom edges.
 const PANEL_GAP: f32 = 8.0;
 /// The content panel's corner radius.
-const PANEL_RADIUS: f32 = radius::SHEET;
+pub(crate) const PANEL_RADIUS: f32 = radius::SHEET;
 
 impl Drop for NativeApp {
     /// The window closed: sessions still open keep their logs too, as when their tab closes

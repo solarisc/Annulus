@@ -7,7 +7,9 @@ use annulus_ui::gfx::{Align, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
 use annulus_ui::motion::{Curve, Layer, Motion};
-use annulus_ui::widgets::{BODY, CONTROL, FieldStyle, Kind, SEARCH, SMALL, TITLE, shake_offset};
+use annulus_ui::widgets::{
+    BODY, BODY_MEDIUM, CONTROL, FieldStyle, Kind, SEARCH, SMALL, TITLE, shake_offset,
+};
 use annulus_vault::strength::{self, Strength};
 use zeroize::Zeroizing;
 
@@ -114,14 +116,14 @@ impl LockView {
     }
 
     /// Draws the screen on its way out, `t` (0.0 to 1.0) of the way: the shackle lifts, then
-    /// everything fades up and away over the vault coming in. It takes no input.
+    /// everything fades up and away before the vault comes in. It takes no input.
     pub fn draw_leaving(&mut self, ui: &mut Ui<'_>, rect: Rect, t: f32) {
-        self.opened = Curve::Overshoot.at((t / 0.55).min(1.0));
-        let fade = 1.0 - Curve::Exit.at(((t - 0.3) / 0.7).clamp(0.0, 1.0));
+        self.opened = Curve::Overshoot.at((t / 0.5).min(1.0));
+        let fade = 1.0 - Curve::Out.at(((t - 0.4) / 0.45).clamp(0.0, 1.0));
         ui.push_inert();
         ui.push_layer(
             Layer::fade(fade)
-                .scaled(rect.center(), 1.0 + 0.03 * t)
+                .scaled(rect.center(), 1.0 + 0.02 * t)
                 .grouped(rect),
         );
         let _ = self.draw(ui, rect);
@@ -286,13 +288,12 @@ impl LockView {
         };
         let fields = if setup { 2.0 } else { 1.0 };
         let meter_h = if setup { space::S + METER_H } else { 0.0 };
-        // The line under the field opens and closes; the whole screen stays centered.
+        // A problem takes the place of the line under the title, so nothing moves for it.
         let says = ui.animate(
             Id::new("lock.says"),
             if self.error.is_some() { 1.0 } else { 0.0 },
             Motion::BASE,
         );
-        let error_h = 28.0 * says;
         let height = 44.0
             + space::M
             + 36.0
@@ -301,11 +302,11 @@ impl LockView {
             + space::XL
             + fields * SEARCH
             + (fields - 1.0) * space::M
-            + error_h
             + meter_h
             + space::M
             + SEARCH
             + if setup { 0.0 } else { space::M + CONTROL };
+        masthead(ui, rect);
         let mut column = rect.centered(rect.w.min(380.0), height);
 
         let mark = column.take_top(44.0).centered(40.0, 40.0);
@@ -318,7 +319,22 @@ impl LockView {
         column.take_top(space::M);
         ui.strict_text(column.take_top(36.0), title, TITLE, t.text, Align::Center);
         column.take_top(2.0);
-        ui.strict_text(column.take_top(20.0), detail, BODY, t.text2, Align::Center);
+        let saying = column.take_top(20.0);
+        if says < 1.0 {
+            ui.push_layer(Layer::fade(1.0 - says));
+            ui.strict_text(saying, detail, BODY, t.text2, Align::Center);
+            ui.pop_layer();
+        }
+        if let Some(error) = &self.error {
+            ui.push_layer(Layer::fade(says));
+            let width = (ui.gfx.measure(error, BODY).width + 20.0).min(saying.w);
+            let mut at = saying.centered(width, saying.h);
+            let icon = at.take_left(14.0).centered(14.0, 14.0);
+            ui.gfx.icon(icons::WARNING, icon, t.error);
+            at.take_left(6.0);
+            ui.gfx.text(at, error, BODY, t.error, Align::Start);
+            ui.pop_layer();
+        }
         column.take_top(space::XL);
 
         let placeholder = match (setup, self.recovery) {
@@ -378,16 +394,6 @@ impl LockView {
             }
         }
         ui.pop_layer();
-        let room = column.take_top(error_h);
-        if let Some(error) = &self.error {
-            let mut line = Rect::new(room.x, room.y + 6.0, room.w, 20.0);
-            ui.push_layer(Layer::fade(says));
-            let icon = line.take_left(16.0).centered(14.0, 14.0);
-            ui.gfx.icon(icons::WARNING, icon, t.error);
-            line.take_left(space::S);
-            ui.gfx.text(line, error, SMALL, t.error, Align::Start);
-            ui.pop_layer();
-        }
         column.take_top(space::M);
         let go = column.take_top(SEARCH);
         let busy = self.working.is_some() || self.opened > 0.0;
@@ -450,6 +456,19 @@ impl LockView {
         }
         action
     }
+}
+
+/// Whose window this is, at the top of the screen.
+fn masthead(ui: &mut Ui<'_>, rect: Rect) {
+    let t = ui.theme;
+    let name_w = ui.gfx.measure("Annulus", BODY_MEDIUM).width + 2.0;
+    let mut row =
+        Rect::new(rect.x, rect.y + space::L, rect.w, 24.0).centered(20.0 + 8.0 + name_w, 24.0);
+    let mark = row.take_left(20.0).centered(20.0, 20.0);
+    super::titlebar::paint_mark(ui, mark);
+    row.take_left(8.0);
+    ui.gfx
+        .text(row, "Annulus", BODY_MEDIUM, t.text2, Align::Start);
 }
 
 /// A link-like button: quiet text that wakes under the pointer. Returns whether it was

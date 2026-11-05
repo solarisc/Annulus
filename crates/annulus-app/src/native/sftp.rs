@@ -628,7 +628,8 @@ impl SftpView {
             self.tab.local.dir = parent.to_path_buf();
             self.local_selected = None;
         }
-        inner.take_top(space::S);
+        // Empty where the host's pane has its filter, so the two lists line up.
+        inner.take_top(space::S + CONTROL + space::S);
         let list = Self::header_row(ui, inner, None);
         let entries = read_dir(&self.tab.local.dir, self.tab.show_hidden).unwrap_or_default();
         #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.

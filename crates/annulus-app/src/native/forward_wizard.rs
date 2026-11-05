@@ -323,7 +323,7 @@ fn diagram(ui: &mut Ui<'_>, rect: Rect, kind: ForwardKind, ends: &Ends, packet: 
     }
     // Names and addresses under the ends.
     // Addresses are a size smaller in a card's narrow columns, so neighbours never touch.
-    let mono = Font::mono(if column < 100.0 { 10.0 } else { 11.0 });
+    let mono = Font::mono(if column < 100.0 { 10.5 } else { 11.5 });
     let far_bottom = far.last().map_or(y, |end| end.y) + far_size / 2.0;
     // A label may run a little past its column into the gaps beside it (a narrow card).
     let label_w = column * 1.3;
@@ -423,7 +423,13 @@ impl Wizard {
         area.take_top(space::L);
         let offset = ui.scroll_view(Id::new("wizard.scroll"), area, self.content_h);
         ui.push_clip(area);
-        let mut page = Rect::new(area.x, area.y - offset, area.w - 12.0, f32::MAX / 4.0);
+        // Room for the scroll bar only while there is one, so the page ends with the header.
+        let page_w = if self.content_h > area.h {
+            area.w - 12.0
+        } else {
+            area.w
+        };
+        let mut page = Rect::new(area.x, area.y - offset, page_w, f32::MAX / 4.0);
         let start = page.y;
         let server = hosts
             .iter()
@@ -533,7 +539,7 @@ impl Wizard {
             ui.gfx
                 .fill_rect(card, 12.0, t.hover.alpha(hover).over(t.surface));
             ui.gfx
-                .stroke_rect(card, 12.0, 1.0, t.line.mix(t.accent, 0.6 * hover));
+                .stroke_rect(card, 12.0, 1.0, t.accent.alpha(0.5 * hover));
             if response.focus_ring {
                 ui.focus_ring(card, 12.0);
             }

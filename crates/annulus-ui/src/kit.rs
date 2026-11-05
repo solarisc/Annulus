@@ -341,7 +341,7 @@ impl Theme {
         let card = if dark {
             surface.mix(p.bg_raised.into(), 0.65)
         } else {
-            surface.mix(p.bg_app.into(), 0.6)
+            p.bg_app.into()
         };
         let rgb = |c: Color| Rgb::new(c.r, c.g, c.b);
         // Veils of the text color: thinner on a scheme whose text is close to its panels, where
@@ -1905,6 +1905,16 @@ mod tests {
         let fading = run(&mut state, 0.0, at + 0.1);
         assert!(fading > 0.02, "still fading after 100 ms: {fading}");
         assert!(run(&mut state, 0.0, at + 0.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_sweep_asks_for_frames_while_it_is_drawn_but_never_under_reduced_motion() {
+        let mut state = UiState::default();
+        let moving = frame(&mut state, &[], 0.0, |ui| ui.sweep(A));
+        assert!(moving.repaint);
+        state.reduce_motion = true;
+        let still = frame(&mut state, &[], 1.0, |ui| ui.sweep(A));
+        assert!(!still.repaint);
     }
 
     #[test]
