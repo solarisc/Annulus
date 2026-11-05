@@ -11,7 +11,8 @@ mod text;
 pub use text::TextEngine;
 
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
+    FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path,
+    PathBuilder, Pattern, Pixmap, Shader, SpreadMode, Stroke, Transform,
 };
 use annulus_ui::gfx::{Canvas, Color, Font, Point, Rect, TextSize};
 
@@ -38,6 +39,16 @@ pub struct CpuCanvas {
     /// Clip rectangles in device pixels with their masks; the last is active.
     clips: Vec<(Rect, Mask)>,
     text: TextEngine,
+    /// The groups open, innermost last: the frame under each, and where and how it lands.
+    groups: Vec<Group>,
+}
+
+/// A group being drawn: `frame` holds it meanwhile, and this holds what is under it.
+struct Group {
+    under: Pixmap,
+    /// Where it lands, in device pixels.
+    bounds: Rect,
+    alpha: f32,
 }
 
 impl CpuCanvas {
@@ -58,6 +69,7 @@ impl CpuCanvas {
             scale,
             clips: Vec::new(),
             text,
+            groups: Vec::new(),
         })
     }
 
@@ -250,6 +262,92 @@ impl Canvas for CpuCanvas {
     fn pop_clip(&mut self) {
         self.clips.pop();
     }
+
+    fn fill_gradient(&mut self, rect: Rect, radius: f32, from: Color, to: Color, across: bool) {
+        let Some(path) = rounded_rect(rect, radius) else {
+            return;
+        };
+        let stop = |at: f32, c: Color| {
+            GradientStop::new(at, tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a))
+        };
+        let start = tiny_skia::Point::from_xy(rect.x, rect.y);
+        let end = if across {
+            tiny_skia::Point::from_xy(rect.r(), rect.y)
+        } else {
+            tiny_skia::Point::from_xy(rect.x, rect.b())
+        };
+        let Some(shader) = LinearGradient::new(
+            start,
+            end,
+            vec![stop(0.0, from), stop(1.0, to)],
+            SpreadMode::Pad,
+            Transform::identity(),
+        ) else {
+            // Too small a span for a gradient to be seen.
+            self.fill_rect(rect, radius, from.mix(to, 0.5));
+            return;
+        };
+        let paint = Paint {
+            shader,
+            anti_alias: true,
+            ..Paint::default()
+        };
+        let transform = self.transform();
+        let mask = self.clips.last().map(|(_, mask)| mask);
+        self.frame
+            .fill_path(&path, &paint, FillRule::Winding, transform, mask);
+    }
+
+    fn has_groups(&self) -> bool {
+        true
+    }
+
+    fn push_group(&mut self, bounds: Rect, alpha: f32) {
+        // Same size as the frame, so clips and coordinates need no second thought. The memory
+        // comes zeroed and lazily from the OS, and only the group's bounds are ever copied.
+        let (width, height) = (self.frame.width(), self.frame.height());
+        let fresh = Pixmap::new(width, height).unwrap_or_else(|| self.frame.clone());
+        let under = std::mem::replace(&mut self.frame, fresh);
+        let scale = self.scale;
+        self.groups.push(Group {
+            under,
+            bounds: Rect::new(
+                bounds.x * scale,
+                bounds.y * scale,
+                bounds.w * scale,
+                bounds.h * scale,
+            ),
+            alpha,
+        });
+    }
+
+    fn pop_group(&mut self) {
+        let Some(group) = self.groups.pop() else {
+            return;
+        };
+        let drawn = std::mem::replace(&mut self.frame, group.under);
+        let Some(bounds) = tiny_skia::Rect::from_xywh(
+            group.bounds.x,
+            group.bounds.y,
+            group.bounds.w,
+            group.bounds.h,
+        ) else {
+            return;
+        };
+        let paint = Paint {
+            shader: Shader::from(Pattern::new(
+                drawn.as_ref(),
+                SpreadMode::Pad,
+                FilterQuality::Nearest,
+                group.alpha,
+                Transform::identity(),
+            )),
+            ..Paint::default()
+        };
+        let mask = self.clips.last().map(|(_, mask)| mask);
+        self.frame
+            .fill_rect(bounds, &paint, Transform::identity(), mask);
+    }
 }
 
 fn paint(color: Color) -> Paint<'static> {
@@ -320,6 +418,57 @@ mod tests {
             let outside = (25.0 * scale) as u32;
             assert_eq!(pixel(&canvas, inside, inside), [255, 255, 255, 255]);
             assert_eq!(pixel(&canvas, outside, outside), [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn a_group_lands_faded_as_one_where_overlaps_do_not_show_through() {
+        let mut canvas = canvas(1.0);
+        canvas.clear(Color::BLACK);
+        let square = Rect::new(10.0, 10.0, 10.0, 10.0);
+        canvas.push_group(Rect::new(0.0, 0.0, 40.0, 40.0), 0.5);
+        // Red, then white over all of it: as one, only the white shows, at half.
+        canvas.fill_rect(square, 0.0, Color::rgba(255, 0, 0, 255));
+        canvas.fill_rect(square, 0.0, Color::WHITE);
+        canvas.pop_group();
+        let [r, g, b, a] = pixel(&canvas, 15, 15);
+        assert_eq!(a, 255);
+        assert!(r == g && g == b, "no red shows through: {r} {g} {b}");
+        assert!((120..=135).contains(&r), "{r}");
+        assert_eq!(
+            pixel(&canvas, 25, 25),
+            [0, 0, 0, 255],
+            "the rest is untouched"
+        );
+    }
+
+    #[test]
+    fn a_group_lands_only_inside_its_bounds_and_the_active_clip() {
+        let mut canvas = canvas(1.0);
+        canvas.clear(Color::BLACK);
+        canvas.push_clip(Rect::new(0.0, 0.0, 12.0, 40.0));
+        canvas.push_group(Rect::new(5.0, 5.0, 10.0, 10.0), 1.0);
+        canvas.fill_rect(Rect::new(0.0, 0.0, 40.0, 40.0), 0.0, Color::WHITE);
+        canvas.pop_group();
+        canvas.pop_clip();
+        assert_eq!(pixel(&canvas, 8, 8), [255, 255, 255, 255]);
+        assert_eq!(pixel(&canvas, 2, 2), [0, 0, 0, 255], "outside the bounds");
+        assert_eq!(pixel(&canvas, 13, 8), [0, 0, 0, 255], "outside the clip");
+    }
+
+    #[test]
+    fn a_gradient_runs_from_one_color_to_the_other_in_either_direction() {
+        for across in [false, true] {
+            let mut canvas = canvas(1.0);
+            let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+            canvas.fill_gradient(rect, 0.0, Color::BLACK, Color::WHITE, across);
+            let (near, far) = if across {
+                (pixel(&canvas, 2, 20), pixel(&canvas, 37, 20))
+            } else {
+                (pixel(&canvas, 20, 2), pixel(&canvas, 20, 37))
+            };
+            assert!(near[0] < 40, "{near:?}");
+            assert!(far[0] > 215, "{far:?}");
         }
     }
 

@@ -159,7 +159,7 @@ impl TextEngine {
             .ranged_builder(&mut self.fonts, text, 1.0, true);
         builder.push_default(StyleProperty::FontSize(size));
         let family = match font.family {
-            Family::Ui => UI_FAMILY,
+            Family::Ui | Family::Display => UI_FAMILY,
             Family::Mono => MONO_FAMILY,
         };
         builder.push_default(StyleProperty::FontFamily(FontFamily::from(family)));

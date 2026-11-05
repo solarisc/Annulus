@@ -10,7 +10,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use annulus_config::tokens::{Appearance, Palette, Rgb};
 
 use crate::gfx::{Canvas, Color, Point, Rect};
-use crate::motion::{FRAME, Layer, Layers, Motion, Spring, Tween};
+use crate::motion::{FRAME, Feel, Layer, Layers, Motion, Spring, Tween};
 use crate::widgets::{EditState, Popup};
 
 /// Identifies a zone across frames.
@@ -519,6 +519,8 @@ pub struct UiState {
     requests: Vec<crate::access::Request>,
     /// No animations (UI-SPEC §8, "reduce motion").
     pub reduce_motion: bool,
+    /// How many [`Ui::push_inert`] are open: what is drawn meanwhile takes no input.
+    inert: u32,
 }
 
 /// Two clicks on the same zone closer than this are a double click, in seconds.
@@ -866,6 +868,12 @@ impl<'a> Ui<'a> {
     /// Registers an interactive zone and reports what input did to it. A zone clipped out of
     /// sight takes no input.
     pub fn zone(&mut self, id: Id, rect: Rect, role: Role, label: &str) -> Response {
+        if self.state.inert > 0 {
+            return Response {
+                rect,
+                ..Response::default()
+            };
+        }
         let screen = self.gfx.to_screen(rect);
         let visible = self
             .clips
@@ -897,6 +905,24 @@ impl<'a> Ui<'a> {
         }
     }
 
+    /// Until the matching [`Self::pop_inert`], what is drawn only shows: it takes no pointer,
+    /// no keys and no focus, and assistive technology does not see it. For something on its
+    /// way out, drawn one last time while what replaced it already works.
+    pub fn push_inert(&mut self) {
+        self.state.inert += 1;
+    }
+
+    /// Ends the innermost [`Self::push_inert`].
+    pub fn pop_inert(&mut self) {
+        self.state.inert = self.state.inert.saturating_sub(1);
+    }
+
+    /// Whether what is drawn now only shows.
+    #[must_use]
+    pub fn inert(&self) -> bool {
+        self.state.inert > 0
+    }
+
     /// Zone `id` of this frame, to tell assistive technology more about it.
     fn drawn(&mut self, id: Id) -> Option<&mut Zone> {
         self.state
@@ -911,6 +937,9 @@ impl<'a> Ui<'a> {
     /// does). Drawn over everything by [`Ui::overlays`].
     pub fn tooltip(&mut self, id: Id, rect: Rect, text: &str) {
         const DELAY: f64 = 0.6;
+        if self.inert() {
+            return;
+        }
         let keyboard = self.state.focus == Some(id) && self.state.focus_ring;
         let pointer = self.state.hovered == Some(id) && self.state.pressed.is_none();
         if !keyboard && !pointer {
@@ -971,6 +1000,9 @@ impl<'a> Ui<'a> {
 
     /// Consumes a key press with exactly `modifiers`, if one arrived this frame.
     pub fn key(&mut self, key: Key, modifiers: Modifiers) -> bool {
+        if self.inert() {
+            return false;
+        }
         let at = self
             .state
             .typed
@@ -982,6 +1014,9 @@ impl<'a> Ui<'a> {
     /// Takes every key press and text of this frame that is still unconsumed, in the order
     /// they arrived.
     pub fn take_typed(&mut self) -> Vec<Typed> {
+        if self.inert() {
+            return Vec::new();
+        }
         std::mem::take(&mut self.state.typed)
     }
 
@@ -994,6 +1029,9 @@ impl<'a> Ui<'a> {
 
     /// Takes the vertical wheel movement of this frame if the pointer is over `rect`.
     pub fn take_wheel(&mut self, rect: Rect) -> f32 {
+        if self.inert() {
+            return 0.0;
+        }
         let rect = self.gfx.to_screen(rect);
         if self.state.pointer.is_some_and(|point| rect.contains(point)) {
             std::mem::take(&mut self.state.wheel.1)
@@ -1058,6 +1096,9 @@ impl<'a> Ui<'a> {
     /// the pointer is on one of its buttons, which are zones of their own.
     #[must_use]
     pub fn hover_within(&self, rect: Rect) -> bool {
+        if self.inert() {
+            return false;
+        }
         let rect = self.gfx.to_screen(rect);
         self.state
             .hovered
@@ -1091,6 +1132,9 @@ impl<'a> Ui<'a> {
 
     /// Asks for the cursor shown this frame.
     pub fn set_cursor(&mut self, cursor: Cursor) {
+        if self.inert() {
+            return;
+        }
         self.state.cursor = cursor;
     }
 
@@ -1139,10 +1183,21 @@ impl<'a> Ui<'a> {
         self.state.scroll.insert(id, offset);
     }
 
-    /// A value easing toward `target` in the quick feedback motion (hover and press fades):
-    /// [`Self::animate`] with [`Motion::FAST`].
+    /// A value following the pointer (hover and press fades): it answers at once and lets go
+    /// slowly, so a sweep of the pointer leaves a soft trail. [`Self::animate`] with
+    /// [`Motion::ANSWER`] going up and [`Motion::LET_GO`] going down.
     pub fn ease(&mut self, id: Id, target: f32) -> f32 {
-        self.animate(id, target, Motion::FAST)
+        let rising = self
+            .state
+            .tweens
+            .get(&id)
+            .is_none_or(|tween| target > tween.to);
+        let motion = if rising {
+            Motion::ANSWER
+        } else {
+            Motion::LET_GO
+        };
+        self.animate(id, target, motion)
     }
 
     /// A value moving toward `target` along `motion`. When the target changes, the move starts
@@ -1234,6 +1289,27 @@ impl<'a> Ui<'a> {
         spring.value
     }
 
+    /// Like [`Self::spring`], following with `feel`.
+    pub fn spring_with(&mut self, id: Id, target: f32, feel: Feel) -> f32 {
+        let now = self.state.time;
+        let spring = self
+            .state
+            .springs
+            .entry(id)
+            .or_insert_with(|| Spring::at(target, now).feeling(feel));
+        if self.state.reduce_motion {
+            *spring = Spring::at(target, now).feeling(feel);
+            return target;
+        }
+        if spring.seen + 1e-9 < self.state.prev_time {
+            *spring = Spring::at(target, now).feeling(feel);
+        }
+        if spring.advance(target, now) {
+            self.state.repaint = true;
+        }
+        spring.value
+    }
+
     /// Puts the spring `id` at `value`, at rest: the next [`Self::spring`] glides from there (a
     /// tab let go where it was dragged to).
     pub fn spring_set(&mut self, id: Id, value: f32) {
@@ -1263,6 +1339,9 @@ impl<'a> Ui<'a> {
         let accent = self.theme.accent;
         self.gfx
             .stroke_rect(rect.outset(3.0), radius + 3.0, 2.0, accent);
+        // A soft halo around it, so it reads as light and not as a hard outline.
+        self.gfx
+            .stroke_rect(rect.outset(5.0), radius + 5.0, 2.0, accent.alpha(0.18));
     }
 }
 

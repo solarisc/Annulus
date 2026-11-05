@@ -226,14 +226,22 @@ pub mod metrics {
 /// Animation durations in milliseconds (UI-SPEC §8 Motion). Nothing animates under reduced
 /// motion.
 pub mod motion {
-    /// Hover, press and focus feedback, small fades.
+    /// A hover or press arriving: as good as at once.
+    pub const ANSWER: u32 = 70;
+    /// A hover or press going: slower than it came, so the pointer leaves a soft trail.
+    pub const LET_GO: u32 = 220;
+    /// Small fades and focus feedback.
     pub const FAST: u32 = 120;
-    /// Panels, menus, page and tab changes.
-    pub const BASE: u32 = 200;
-    /// Large surfaces: dialogs, the New Tab page, a list filling in.
-    pub const SLOW: u32 = 280;
+    /// Menus and page and tab changes arriving.
+    pub const BASE: u32 = 220;
+    /// Large surfaces: dialogs, side panels, the New Tab page, a list filling in.
+    pub const SLOW: u32 = 320;
+    /// Whatever leaves: never holds up what comes next.
+    pub const EXIT: u32 = 90;
+    /// A side panel leaving: it has further to go.
+    pub const EXIT_SLOW: u32 = 200;
     /// Each further row of a list that fills in starts this much later.
-    pub const STAGGER: u32 = 24;
+    pub const STAGGER: u32 = 28;
 }
 
 #[cfg(test)]

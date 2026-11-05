@@ -21,6 +21,30 @@ pub enum Curve {
     InOut,
     /// Like [`Curve::Out`], passing the target a little and coming back: things that pop in.
     Overshoot,
+    /// Quick to start, then a long soft landing: surfaces and pages arriving.
+    Emphasized,
+    /// Slow to start, then gone: things leaving, which should never hold up what comes next.
+    Exit,
+}
+
+/// The y of a cubic Bezier easing from (0, 0) to (1, 1) through (`x1`, `y1`) and (`x2`, `y2`)
+/// at x = `t`.
+fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+    let along = |a: f32, b: f32, s: f32| {
+        let r = 1.0 - s;
+        3.0 * r * r * s * a + 3.0 * r * s * s * b + s * s * s
+    };
+    // x grows with s here, so halving finds it to well under a pixel of any move on screen.
+    let (mut low, mut high) = (0.0_f32, 1.0_f32);
+    for _ in 0..14 {
+        let middle = f32::midpoint(low, high);
+        if along(x1, x2, middle) < t {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    along(y1, y2, f32::midpoint(low, high))
 }
 
 impl Curve {
@@ -44,6 +68,12 @@ impl Curve {
                 const C3: f32 = C1 + 1.0;
                 1.0 + C3 * (t - 1.0).powi(3) + C1 * (t - 1.0).powi(2)
             }
+            Curve::Emphasized if t >= 1.0 => 1.0,
+            Curve::Emphasized if t <= 0.0 => 0.0,
+            Curve::Emphasized => bezier(0.2, 0.0, 0.0, 1.0, t),
+            Curve::Exit if t >= 1.0 => 1.0,
+            Curve::Exit if t <= 0.0 => 0.0,
+            Curve::Exit => bezier(0.4, 0.0, 1.0, 1.0, t),
         }
     }
 }
@@ -60,14 +90,22 @@ pub struct Motion {
 }
 
 impl Motion {
-    /// Hover, press and focus feedback.
+    /// Small fades and focus feedback.
     pub const FAST: Motion = Motion::new(motion::FAST, Curve::Out);
+    /// Something answering the pointer: the moment it arrives.
+    pub const ANSWER: Motion = Motion::new(motion::ANSWER, Curve::Out);
+    /// Something letting the pointer go: slower than it answered.
+    pub const LET_GO: Motion = Motion::new(motion::LET_GO, Curve::Out);
     /// Panels, menus, page and tab changes.
-    pub const BASE: Motion = Motion::new(motion::BASE, Curve::Out);
+    pub const BASE: Motion = Motion::new(motion::BASE, Curve::Emphasized);
     /// Large surfaces.
-    pub const SLOW: Motion = Motion::new(motion::SLOW, Curve::Out);
+    pub const SLOW: Motion = Motion::new(motion::SLOW, Curve::Emphasized);
     /// Menus, cards and dialogs growing into place.
-    pub const POP: Motion = Motion::new(motion::BASE, Curve::Overshoot);
+    pub const POP: Motion = Motion::new(motion::SLOW, Curve::Overshoot);
+    /// Whatever leaves: gone quickly so what comes next is not held up.
+    pub const EXIT: Motion = Motion::new(motion::EXIT, Curve::Exit);
+    /// A side panel or the like leaving: it has further to go.
+    pub const EXIT_SLOW: Motion = Motion::new(motion::EXIT_SLOW, Curve::Exit);
 
     /// `ms` long along `curve`, at once.
     #[must_use]
@@ -136,15 +174,30 @@ impl Tween {
 
 /// How quickly a spring closes the gap: settles in about 0.2 s.
 const STIFFNESS: f32 = 26.0;
+/// A soft spring's natural frequency, per second: settles in about 0.4 s.
+const SOFT_FREQUENCY: f32 = 19.0;
+/// A soft spring's damping ratio: past its target by about 1 %, then back.
+const SOFT_DAMPING: f32 = 0.82;
 
-/// A critically damped spring: positions that follow their target without overshooting, and
-/// keep their speed when the target moves again mid-way.
+/// How a position follows its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feel {
+    /// Critically damped: quick and exact, never passing the target (tabs, a list's offset).
+    Firm,
+    /// Under-damped: a little slower, landing with a touch of life (a selection, cards
+    /// moving to new places).
+    Soft,
+}
+
+/// A spring: positions that follow their target and keep their speed when the target moves
+/// again mid-way.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Spring {
     pub(crate) value: f32,
     velocity: f32,
     pub(crate) target: f32,
     pub(crate) seen: f64,
+    feel: Feel,
 }
 
 impl Spring {
@@ -155,7 +208,13 @@ impl Spring {
             velocity: 0.0,
             target: value,
             seen: now,
+            feel: Feel::Firm,
         }
+    }
+
+    /// The same, following with `feel`.
+    pub(crate) fn feeling(self, feel: Feel) -> Self {
+        Self { feel, ..self }
     }
 
     /// Moves to `now`, toward `target`; returns whether it is still moving.
@@ -171,10 +230,26 @@ impl Spring {
         #[allow(clippy::cast_possible_truncation)] // Frame gaps.
         let dt = elapsed as f32;
         let gap = self.value - target;
-        let decay = (-STIFFNESS * dt).exp();
-        let lead = self.velocity + STIFFNESS * gap;
-        let gap = (gap + lead * dt) * decay;
-        self.velocity = (self.velocity - STIFFNESS * lead * dt) * decay;
+        let gap = match self.feel {
+            Feel::Firm => {
+                let decay = (-STIFFNESS * dt).exp();
+                let lead = self.velocity + STIFFNESS * gap;
+                self.velocity = (self.velocity - STIFFNESS * lead * dt) * decay;
+                (gap + lead * dt) * decay
+            }
+            Feel::Soft => {
+                // The closed form, so the path does not depend on the frame rate.
+                let rate = SOFT_DAMPING * SOFT_FREQUENCY;
+                let ring = SOFT_FREQUENCY * (1.0 - SOFT_DAMPING * SOFT_DAMPING).sqrt();
+                let (sin, cos) = (ring * dt).sin_cos();
+                let decay = (-rate * dt).exp();
+                let speed = self.velocity;
+                self.velocity = decay
+                    * (speed * cos
+                        - (speed * rate + SOFT_FREQUENCY * SOFT_FREQUENCY * gap) / ring * sin);
+                decay * (gap * cos + (speed + rate * gap) / ring * sin)
+            }
+        };
         self.value = target + gap;
         if gap.abs() < 0.2 && self.velocity.abs() < 2.0 {
             self.value = target;
@@ -197,6 +272,10 @@ pub struct Layer {
     pub origin: Point,
     /// Opacity, 0.0 to 1.0, times the opacity of the layers around it.
     pub alpha: f32,
+    /// Fade everything in here as one, inside this rectangle (in the layer's own units),
+    /// instead of shape by shape. For surfaces whose shapes overlap: a card's fill would show
+    /// its shadow through it. Costs an offscreen pass while it fades.
+    pub group: Option<Rect>,
 }
 
 impl Layer {
@@ -206,6 +285,7 @@ impl Layer {
         scale: 1.0,
         origin: Point::new(0.0, 0.0),
         alpha: 1.0,
+        group: None,
     };
 
     /// Faded to `alpha`.
@@ -236,6 +316,15 @@ impl Layer {
         }
     }
 
+    /// This layer, faded as one inside `bounds`: see [`Layer::group`].
+    #[must_use]
+    pub fn grouped(self, bounds: Rect) -> Self {
+        Self {
+            group: Some(bounds),
+            ..self
+        }
+    }
+
     /// A surface growing into place as `t` goes from 0.0 to 1.0: faded in, scaled up from
     /// `from` of its size about `origin` and slid by `rise` DIPs upward.
     #[must_use]
@@ -251,7 +340,10 @@ impl Layer {
 struct Transform {
     scale: f32,
     shift: Point,
+    /// What each color is multiplied by: the layers faded shape by shape.
     alpha: f32,
+    /// How much of what is drawn shows in the end, groups included.
+    shown: f32,
 }
 
 impl Transform {
@@ -259,6 +351,7 @@ impl Transform {
         scale: 1.0,
         shift: Point::new(0.0, 0.0),
         alpha: 1.0,
+        shown: 1.0,
     };
 
     /// `layer` applied inside this transform.
@@ -276,6 +369,7 @@ impl Transform {
                 local.y * self.scale + self.shift.y,
             ),
             alpha: self.alpha * layer.alpha,
+            shown: self.shown * layer.alpha,
         }
     }
 
@@ -309,7 +403,8 @@ impl Transform {
 pub struct Layers<'a> {
     inner: &'a mut dyn Canvas,
     now: Transform,
-    stack: Vec<Transform>,
+    /// The transform around each layer, and whether the layer opened a group.
+    stack: Vec<(Transform, bool)>,
 }
 
 impl<'a> Layers<'a> {
@@ -323,13 +418,26 @@ impl<'a> Layers<'a> {
     }
 
     pub(crate) fn push(&mut self, layer: Layer) {
-        self.stack.push(self.now);
-        self.now = self.now.then(layer);
+        let before = self.now;
+        self.now = before.then(layer);
+        // Nothing to fade at full opacity, and nothing to see at none.
+        let group = layer
+            .group
+            .filter(|_| layer.alpha < 0.999 && layer.alpha > 0.002 && self.inner.has_groups());
+        if let Some(bounds) = group {
+            // The group lands faded, so its shapes are not faded again one by one.
+            self.now.alpha = before.alpha;
+            self.inner.push_group(self.now.rect(bounds), layer.alpha);
+        }
+        self.stack.push((before, group.is_some()));
     }
 
     pub(crate) fn pop(&mut self) {
-        if let Some(before) = self.stack.pop() {
+        if let Some((before, grouped)) = self.stack.pop() {
             self.now = before;
+            if grouped {
+                self.inner.pop_group();
+            }
         }
     }
 
@@ -347,7 +455,7 @@ impl<'a> Layers<'a> {
     /// The opacity of the current layer.
     #[must_use]
     pub fn opacity(&self) -> f32 {
-        self.now.alpha
+        self.now.shown
     }
 
     /// Clips to `rect`, which is already in screen coordinates.
@@ -357,7 +465,7 @@ impl<'a> Layers<'a> {
 
     /// Nothing drawn now would show.
     fn invisible(&self) -> bool {
-        self.now.alpha <= 0.002
+        self.now.shown <= 0.002
     }
 }
 
@@ -448,12 +556,8 @@ impl Canvas for Layers<'_> {
             return;
         }
         let t = self.now;
-        let font = Font {
-            size: font.size * t.scale,
-            ..font
-        };
         self.inner
-            .draw_text(t.point(origin), text, font, t.color(color));
+            .draw_text_zoomed(t.point(origin), text, font, t.scale, t.color(color));
     }
 
     fn push_clip(&mut self, rect: Rect) {
@@ -464,6 +568,33 @@ impl Canvas for Layers<'_> {
     fn pop_clip(&mut self) {
         self.inner.pop_clip();
     }
+
+    fn fill_gradient(&mut self, rect: Rect, radius: f32, from: Color, to: Color, across: bool) {
+        if self.invisible() {
+            return;
+        }
+        let t = self.now;
+        self.inner.fill_gradient(
+            t.rect(rect),
+            radius * t.scale,
+            t.color(from),
+            t.color(to),
+            across,
+        );
+    }
+
+    fn has_groups(&self) -> bool {
+        self.inner.has_groups()
+    }
+
+    fn push_group(&mut self, bounds: Rect, alpha: f32) {
+        let bounds = self.now.rect(bounds);
+        self.inner.push_group(bounds, alpha);
+    }
+
+    fn pop_group(&mut self) {
+        self.inner.pop_group();
+    }
 }
 
 #[cfg(test)]
@@ -473,7 +604,14 @@ mod tests {
 
     #[test]
     fn curves_start_at_zero_and_end_at_one() {
-        for curve in [Curve::Linear, Curve::Out, Curve::InOut, Curve::Overshoot] {
+        for curve in [
+            Curve::Linear,
+            Curve::Out,
+            Curve::InOut,
+            Curve::Overshoot,
+            Curve::Emphasized,
+            Curve::Exit,
+        ] {
             assert!(curve.at(0.0).abs() < 1e-6, "{curve:?}");
             assert!((curve.at(1.0) - 1.0).abs() < 1e-6, "{curve:?}");
         }
@@ -483,6 +621,26 @@ mod tests {
             .map(|i| Curve::Overshoot.at(f32::from(i) / 100.0))
             .fold(0.0_f32, f32::max);
         assert!(peak > 1.0 && peak < 1.08, "{peak}");
+    }
+
+    #[test]
+    fn arrivals_land_softly_and_exits_leave_late() {
+        // A page arriving has done most of its move early, and creeps in at the end.
+        let early = Curve::Emphasized.at(0.3);
+        assert!(early > 0.6, "{early}");
+        assert!(Curve::Emphasized.at(0.9) > 0.98);
+        // Something leaving stays near where it was, then goes.
+        let late = Curve::Exit.at(0.3);
+        assert!(late < 0.15, "{late}");
+        // Neither ever runs backwards.
+        for curve in [Curve::Emphasized, Curve::Exit] {
+            let mut last = 0.0_f32;
+            for step in 0_u8..=100 {
+                let now = curve.at(f32::from(step) / 100.0);
+                assert!(now >= last - 1e-3, "{curve:?} at {step}");
+                last = now;
+            }
+        }
     }
 
     #[test]
@@ -497,7 +655,7 @@ mod tests {
         assert_eq!(tween.sample(1.05), (0.0, true));
         let (mid, moving) = tween.sample(1.2);
         assert!(moving && mid > 0.0 && mid < 10.0);
-        assert_eq!(tween.sample(1.3), (10.0, false));
+        assert_eq!(tween.sample(1.33), (10.0, false));
     }
 
     #[test]
@@ -522,6 +680,128 @@ mod tests {
         // A long gap with no change finishes the move.
         assert!(!spring.advance(300.0, time + 10.0));
         assert_eq!(spring.value, 300.0);
+    }
+
+    #[test]
+    fn a_soft_spring_passes_its_target_a_little_settles_and_does_not_mind_the_frame_rate() {
+        let run = |step: f64| {
+            let mut spring = Spring::at(0.0, 0.0).feeling(Feel::Soft);
+            let (mut time, mut peak, mut moving) = (0.0, 0.0_f32, true);
+            let mut settled_at = 0.0;
+            while moving {
+                time += step;
+                moving = spring.advance(100.0, time);
+                peak = peak.max(spring.value);
+                settled_at = time;
+                assert!(time < 2.0, "it settles");
+            }
+            assert_eq!(spring.value, 100.0);
+            (peak, settled_at)
+        };
+        let (peak, settled_at) = run(FRAME);
+        assert!(peak > 100.0 && peak < 103.0, "{peak}");
+        assert!(settled_at < 0.7, "{settled_at}");
+        // 144 Hz takes the same path as 60 Hz, near enough to see no difference.
+        let (fine_peak, _) = run(1.0 / 144.0);
+        assert!((peak - fine_peak).abs() < 0.5, "{peak} vs {fine_peak}");
+    }
+
+    /// A canvas with groups: what it was asked to do, in order.
+    #[derive(Default)]
+    struct Grouping {
+        inner: Recorder,
+        calls: Vec<String>,
+    }
+
+    impl Canvas for Grouping {
+        fn scale(&self) -> f32 {
+            1.0
+        }
+        fn fill_rect(&mut self, rect: Rect, radius: f32, color: Color) {
+            self.calls.push(format!("fill {}", color.a));
+            self.inner.fill_rect(rect, radius, color);
+        }
+        fn stroke_rect(&mut self, _: Rect, _: f32, _: f32, _: Color) {}
+        fn shadow(&mut self, _: Rect, _: f32, _: f32, _: f32, _: Color) {}
+        fn fill_circle(&mut self, _: Point, _: f32, _: Color) {}
+        fn polyline(&mut self, _: &[Point], _: bool, _: f32, _: Color) {}
+        fn stroke_circle(&mut self, _: Point, _: f32, _: f32, _: Color) {}
+        fn measure(&mut self, text: &str, font: Font) -> TextSize {
+            self.inner.measure(text, font)
+        }
+        fn draw_text(&mut self, _: Point, _: &str, _: Font, _: Color) {}
+        fn push_clip(&mut self, _: Rect) {}
+        fn pop_clip(&mut self) {}
+        fn has_groups(&self) -> bool {
+            true
+        }
+        fn push_group(&mut self, bounds: Rect, alpha: f32) {
+            self.calls.push(format!("group {} {alpha}", bounds.x));
+        }
+        fn pop_group(&mut self) {
+            self.calls.push("end".to_owned());
+        }
+        fn draw_text_zoomed(&mut self, _: Point, _: &str, font: Font, zoom: f32, _: Color) {
+            self.calls.push(format!("text {} {zoom}", font.size));
+        }
+    }
+
+    #[test]
+    fn a_grouped_layer_fades_as_one_and_only_while_it_is_fading() {
+        let mut canvas = Grouping::default();
+        let rect = Rect::new(10.0, 10.0, 20.0, 20.0);
+        {
+            let mut layers = Layers::new(&mut canvas);
+            layers.push(Layer::fade(0.5).shifted(5.0, 0.0).grouped(rect));
+            layers.fill_rect(rect, 0.0, Color::WHITE);
+            let shows = layers.opacity();
+            assert!((shows - 0.5).abs() < 1e-6, "it still says how much shows");
+            layers.pop();
+            // At full opacity it is just a layer: no offscreen pass at rest.
+            layers.push(Layer::fade(1.0).grouped(rect));
+            layers.fill_rect(rect, 0.0, Color::WHITE);
+            layers.pop();
+        }
+        assert_eq!(
+            canvas.calls,
+            ["group 15 0.5", "fill 255", "end", "fill 255"],
+            "the shape keeps its own color; the group lands faded"
+        );
+    }
+
+    #[test]
+    fn without_groups_a_grouped_layer_fades_shape_by_shape() {
+        let mut recorder = Recorder::default();
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let mut layers = Layers::new(&mut recorder);
+        layers.push(Layer::fade(0.0).grouped(rect));
+        layers.fill_rect(rect, 0.0, Color::WHITE);
+        layers.pop();
+        layers.push(Layer::fade(0.5).grouped(rect));
+        layers.fill_rect(rect, 0.0, Color::WHITE);
+        layers.pop();
+        assert_eq!(
+            recorder.fills,
+            [rect],
+            "invisible draws nothing; faded still draws"
+        );
+    }
+
+    #[test]
+    fn a_scaled_layer_zooms_its_text_instead_of_changing_the_font() {
+        let mut canvas = Grouping::default();
+        {
+            let mut layers = Layers::new(&mut canvas);
+            layers.push(Layer::NONE.scaled(Point::new(0.0, 0.0), 0.9));
+            layers.draw_text(
+                Point::new(10.0, 10.0),
+                "web-1",
+                Font::ui(13.0),
+                Color::WHITE,
+            );
+            layers.pop();
+        }
+        assert_eq!(canvas.calls, ["text 13 0.9"]);
     }
 
     #[test]

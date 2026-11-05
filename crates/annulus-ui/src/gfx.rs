@@ -269,6 +269,8 @@ pub enum Family {
     /// The UI font: the system's on Windows, the bundled one elsewhere.
     #[default]
     Ui,
+    /// The UI font's cut for large text: page titles.
+    Display,
     /// The monospace font: terminals, fingerprints, scripts.
     Mono,
 }
@@ -300,6 +302,16 @@ impl Font {
     pub const fn mono(size: f32) -> Self {
         Self {
             family: Family::Mono,
+            size,
+            weight: Weight::Regular,
+        }
+    }
+
+    /// The display font at `size`, regular weight.
+    #[must_use]
+    pub const fn display(size: f32) -> Self {
+        Self {
+            family: Family::Display,
             size,
             weight: Weight::Regular,
         }
@@ -371,6 +383,39 @@ pub trait Canvas {
 
     /// Ends the innermost clip.
     fn pop_clip(&mut self);
+
+    /// Fills `rect` with a blend from `from` to `to`: top to bottom, or left to right when
+    /// `across`. A renderer without gradients fills it with the color halfway.
+    fn fill_gradient(&mut self, rect: Rect, radius: f32, from: Color, to: Color, across: bool) {
+        let _ = across;
+        self.fill_rect(rect, radius, from.mix(to, 0.5));
+    }
+
+    /// Whether [`Canvas::push_group`] really fades what is drawn as one. Without it, a fading
+    /// layer fades each shape by itself, and shapes that overlap show through each other.
+    fn has_groups(&self) -> bool {
+        false
+    }
+
+    /// Until the matching [`Canvas::pop_group`], draws into a group that lands at once,
+    /// faded by `alpha` and cut to `bounds`.
+    fn push_group(&mut self, bounds: Rect, alpha: f32) {
+        let _ = (bounds, alpha);
+    }
+
+    /// Ends the innermost group: it lands on what was drawn before it.
+    fn pop_group(&mut self) {}
+
+    /// Draws `text` like [`Canvas::draw_text`], grown by `zoom` from `origin`. A renderer that
+    /// can should scale the shaped run: laying it out again at each size makes its letters
+    /// shuffle while a surface grows into place.
+    fn draw_text_zoomed(&mut self, origin: Point, text: &str, font: Font, zoom: f32, color: Color) {
+        let font = Font {
+            size: font.size * zoom,
+            ..font
+        };
+        self.draw_text(origin, text, font, color);
+    }
 
     /// Draws icon `id` scaled into `rect` in `color`, with the icon set's stroke width.
     fn icon(&mut self, id: IconId, rect: Rect, color: Color) {
