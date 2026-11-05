@@ -64,6 +64,7 @@ fn rows(
         each(ui, index, Rect::new(rect.x, y, width, ROW_H));
     }
     ui.pop_clip();
+    ui.scroll_edges(rect, offset, height, ui.theme.bg);
 }
 
 /// Small icon buttons at the right of a row, right to left; returns which was clicked and

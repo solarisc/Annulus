@@ -1926,6 +1926,30 @@ mod tests {
     }
 
     #[test]
+    fn a_list_fades_only_at_the_ends_with_more_to_scroll_to() {
+        let mut state = UiState::default();
+        let list = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let fades = |state: &mut UiState, offset: f32, content: f32| {
+            let mut canvas = Recorder::default();
+            state.begin_frame(&[], 0.0);
+            let mut ui = Ui::new(
+                &mut canvas,
+                Theme::new(Appearance::Dark),
+                state,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+            );
+            ui.scroll_edges(list, offset, content, Color::BLACK);
+            drop(ui);
+            state.end_frame();
+            canvas.fills.iter().map(|fill| fill.y).collect::<Vec<f32>>()
+        };
+        assert!(fades(&mut state, 0.0, 50.0).is_empty(), "it all fits");
+        assert_eq!(fades(&mut state, 0.0, 200.0), [30.0], "only below");
+        assert_eq!(fades(&mut state, 150.0, 200.0), [0.0], "only above");
+        assert_eq!(fades(&mut state, 50.0, 200.0), [0.0, 30.0], "both");
+    }
+
+    #[test]
     fn what_is_drawn_inert_only_shows() {
         let mut state = UiState::default();
         let id = Id::new("button");

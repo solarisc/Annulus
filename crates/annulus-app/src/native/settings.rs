@@ -327,6 +327,7 @@ impl SettingsView {
         }
         self.content_h = page.y - top + space::XL;
         ui.pop_clip();
+        ui.scroll_edges(body, offset, self.content_h, ui.theme.bg);
         ui.pop_layer();
         (changed, drawn_h)
     }

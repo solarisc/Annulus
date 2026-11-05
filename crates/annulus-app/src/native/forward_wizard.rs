@@ -447,6 +447,7 @@ impl Wizard {
         };
         self.content_h = page.y - start + space::L;
         ui.pop_clip();
+        ui.scroll_edges(area, offset, self.content_h, ui.theme.bg);
         finish.or(done)
     }
 

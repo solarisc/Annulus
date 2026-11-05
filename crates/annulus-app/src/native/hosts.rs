@@ -1282,6 +1282,7 @@ impl HostsView {
             }
         }
         ui.pop_clip();
+        ui.scroll_edges(rect, offset, content_h, ui.theme.bg);
         action
     }
 

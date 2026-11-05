@@ -407,6 +407,22 @@ impl Ui<'_> {
         self.request_repaint();
     }
 
+    /// Soft edges on a list that runs on past `rect`, where it would otherwise be cut off hard:
+    /// fading into `under`, the color behind it, at whichever end has more to scroll to.
+    pub fn scroll_edges(&mut self, rect: Rect, offset: f32, content: f32, under: Color) {
+        const FADE: f32 = 20.0;
+        if offset > 0.5 {
+            let top = Rect::new(rect.x, rect.y, rect.w, FADE);
+            self.gfx
+                .fill_gradient(top, 0.0, under, under.alpha(0.0), false);
+        }
+        if offset + rect.h < content - 0.5 {
+            let bottom = Rect::new(rect.x, rect.b() - FADE, rect.w, FADE);
+            self.gfx
+                .fill_gradient(bottom, 0.0, under.alpha(0.0), under, false);
+        }
+    }
+
     /// A card at rest: a step off the sheet, with a faint edge that keeps it crisp.
     pub fn card_surface(&mut self, rect: Rect, round: f32) {
         let t = self.theme;
