@@ -13,8 +13,8 @@ use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Typed, Ui};
 use annulus_ui::motion::{Feel, Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, KEYCAP_H, Kind, SMALL, TITLE,
-    Tone, keys_width,
+    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, KEYCAP_H, Kind, SCROLL_GUTTER,
+    SMALL, TITLE, Tone, keys_width,
 };
 
 use super::pages;
@@ -293,15 +293,13 @@ impl SettingsView {
         ui.push_layer(Layer::fade(shown).shifted(0.0, 10.0 * (1.0 - shown)));
         let mut body = column;
         section_header(ui, &mut body, self.page);
-        let offset = ui.scroll_view(Id::new("settings.scroll"), body, self.content_h);
+        let offset = ui.scroll_view(
+            Id::new("settings.scroll"),
+            body.wider(SCROLL_GUTTER),
+            self.content_h,
+        );
         ui.push_clip(body);
-        // Room for the scroll bar only while there is one, so cards end with the header.
-        let page_w = if self.content_h > body.h {
-            body.w - 12.0
-        } else {
-            body.w
-        };
-        let mut page = Rect::new(body.x, body.y - offset, page_w, f32::MAX / 4.0);
+        let mut page = Rect::new(body.x, body.y - offset, body.w, f32::MAX / 4.0);
         let top = page.y;
         let mut changed = false;
         let mut drawn_h = account_h;

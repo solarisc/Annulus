@@ -79,11 +79,7 @@ impl AccountView {
         let column = rect;
         let card_top = column.y;
         // Its height is known once its content is drawn: last frame's serves.
-        ui.gfx.fill_rect(
-            Rect::new(column.x, card_top, column.w, self.card_h),
-            12.0,
-            t.surface,
-        );
+        ui.card_surface(Rect::new(column.x, card_top, column.w, self.card_h), 12.0);
         let mut inner = Rect::new(
             column.x + space::L,
             column.y + space::M,
@@ -401,10 +397,9 @@ impl AccountView {
         ui.section_label(column.take_top(18.0), "Master password");
         column.take_top(space::S);
         let card_top = column.y;
-        ui.gfx.fill_rect(
+        ui.card_surface(
             Rect::new(column.x, card_top, column.w, self.password_h),
             12.0,
-            t.surface,
         );
         let mut inner = Rect::new(
             column.x + space::L,

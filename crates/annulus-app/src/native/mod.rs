@@ -1554,7 +1554,15 @@ impl NativeApp {
         let t = ui.theme;
         let eased = Curve::Emphasized.at(share);
         let along = |a: f32, b: f32| a + (b - a) * eased;
-        let from = flyer.from;
+        // From the tile on its card to the icon on its tab, where they sit in each.
+        let side = flyer.from.h.min(36.0);
+        let from = Rect::new(
+            flyer.from.x + space::M,
+            flyer.from.center().y - side / 2.0,
+            side,
+            side,
+        );
+        let to = Rect::new(to.x + space::M, to.center().y - 8.0, 16.0, 16.0);
         let rect = Rect::new(
             along(from.x, to.x),
             along(from.y, to.y),
@@ -1563,18 +1571,10 @@ impl NativeApp {
         );
         // It lands by melting into the tab.
         let shown = 1.0 - Curve::Exit.at(((share - LANDS_AT) / (1.0 - LANDS_AT)).clamp(0.0, 1.0));
-        ui.push_layer(Layer::fade(shown).grouped(rect.outset(40.0)));
-        ui.raised_surface(rect, 10.0);
-        ui.gfx.stroke_rect(rect, 10.0, 1.0, t.accent.alpha(0.5));
-        ui.gfx.push_clip(rect);
-        let mut inner = rect.inset(10.0, 0.0);
-        let side = along(34.0, 16.0);
-        let tile = inner.take_left(side).centered(side, side);
-        os::tile(ui, tile, &flyer.title, flyer.os);
-        inner.take_left(space::S + 2.0);
+        ui.push_layer(Layer::fade(shown).grouped(rect.outset(30.0)));
         ui.gfx
-            .text(inner, &flyer.title, BODY_MEDIUM, t.text, Align::Start);
-        ui.gfx.pop_clip();
+            .shadow(rect, rect.w * 0.26, 18.0, 6.0, t.shadow.alpha(0.8));
+        os::tile(ui, rect, &flyer.title, flyer.os);
         ui.pop_layer();
         ui.request_repaint();
     }
@@ -1843,7 +1843,7 @@ const FLIGHT: f64 = 0.44;
 /// How far through its flight, 0.0 to 1.0, a host starts to melt into its tab.
 const LANDS_AT: f32 = 0.62;
 /// How long the vault waits to come in while the lock leaves, in milliseconds.
-const AFTER_THE_LOCK: u32 = 190;
+const AFTER_THE_LOCK: u32 = 150;
 /// The space between the content panel and the window's right and bottom edges.
 const PANEL_GAP: f32 = 8.0;
 /// The content panel's corner radius.

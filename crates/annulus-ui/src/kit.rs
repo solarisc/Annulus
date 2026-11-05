@@ -279,8 +279,10 @@ pub struct Theme {
     pub chrome: Color,
     /// Behind the content.
     pub bg: Color,
-    /// Cards and list rows at rest: a step off the sheet, with no outline.
+    /// Cards and list rows at rest: a step off the sheet.
     pub surface: Color,
+    /// The faint edge that keeps a card crisp, not an outline to look at.
+    pub edge: Color,
     /// Menus, dialogs and the editor panel.
     pub raised: Color,
     /// Text fields: a veil of the text color, so they read on any surface.
@@ -339,7 +341,7 @@ impl Theme {
         let white = Color::WHITE;
         // Between two colors the text is held readable on, so it stays readable here too.
         let card = if dark {
-            surface.mix(p.bg_raised.into(), 0.65)
+            surface.mix(p.bg_raised.into(), 0.85)
         } else {
             p.bg_app.into()
         };
@@ -382,6 +384,11 @@ impl Theme {
             chrome: p.bg_app.into(),
             bg: surface,
             surface: card,
+            edge: if dark {
+                white.alpha(0.05)
+            } else {
+                black.alpha(0.055)
+            },
             raised: p.bg_raised.into(),
             field: ink.alpha(if dark { 0.06 } else { 0.045 } * veil),
             hover: ink.alpha(if dark { 0.06 } else { 0.05 } * veil),
@@ -413,6 +420,7 @@ impl Theme {
             chrome: mix(self.chrome, other.chrome),
             bg: mix(self.bg, other.bg),
             surface: mix(self.surface, other.surface),
+            edge: mix(self.edge, other.edge),
             raised: mix(self.raised, other.raised),
             field: mix(self.field, other.field),
             hover: mix(self.hover, other.hover),

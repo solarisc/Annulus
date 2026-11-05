@@ -10,7 +10,8 @@ use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::Curve;
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, button_width,
+    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SCROLL_GUTTER, SMALL,
+    button_width,
 };
 use annulus_vault::forwards::{ForwardKind, PortForward};
 
@@ -421,15 +422,13 @@ impl Wizard {
             self.steps(ui, top);
         }
         area.take_top(space::L);
-        let offset = ui.scroll_view(Id::new("wizard.scroll"), area, self.content_h);
+        let offset = ui.scroll_view(
+            Id::new("wizard.scroll"),
+            area.wider(SCROLL_GUTTER),
+            self.content_h,
+        );
         ui.push_clip(area);
-        // Room for the scroll bar only while there is one, so the page ends with the header.
-        let page_w = if self.content_h > area.h {
-            area.w - 12.0
-        } else {
-            area.w
-        };
-        let mut page = Rect::new(area.x, area.y - offset, page_w, f32::MAX / 4.0);
+        let mut page = Rect::new(area.x, area.y - offset, area.w, f32::MAX / 4.0);
         let start = page.y;
         let server = hosts
             .iter()
@@ -536,8 +535,8 @@ impl Wizard {
             let id = Id::new(("wizard.kind", index));
             let response = ui.zone(id, card, Role::Button, title);
             let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-            ui.gfx
-                .fill_rect(card, 12.0, t.hover.alpha(hover).over(t.surface));
+            ui.card_surface(card, 12.0);
+            ui.gfx.fill_rect(card, 12.0, t.hover.alpha(hover));
             ui.gfx
                 .stroke_rect(card, 12.0, 1.0, t.accent.alpha(0.5 * hover));
             if response.focus_ring {

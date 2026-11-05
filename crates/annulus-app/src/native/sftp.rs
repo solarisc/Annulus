@@ -65,6 +65,8 @@ pub struct SftpView {
     edit_dir: String,
     remote_selected: Option<String>,
     local_selected: Option<String>,
+    /// What this computer's listing is narrowed to.
+    local_filter: String,
     /// A row being dragged this frame, and where the pointer is.
     drag: Option<(Dragged, Point)>,
     /// A row let go this frame, and where.
@@ -86,6 +88,7 @@ impl SftpView {
             edit_dir: String::new(),
             remote_selected: None,
             local_selected: None,
+            local_filter: String::new(),
             drag: None,
             dropped: None,
             focus_card: false,
@@ -414,7 +417,7 @@ impl SftpView {
 
     fn pane_frame(ui: &mut Ui<'_>, rect: Rect, title: &str, path: &str, icon: IconId) -> Rect {
         let t = ui.theme;
-        ui.gfx.fill_rect(rect, 12.0, t.surface);
+        ui.card_surface(rect, 12.0);
         let mut inner = rect.inset(space::M, space::S);
         let mut head = inner.take_top(28.0);
         let mark = head.take_left(16.0).centered(16.0, 16.0);
@@ -600,6 +603,7 @@ impl SftpView {
         (response.clicked, response.double_clicked, acted, chosen)
     }
 
+    #[allow(clippy::too_many_lines)] // One pane, top to bottom.
     fn local_pane(&mut self, ui: &mut Ui<'_>, rect: Rect) {
         let dir = self.tab.local.dir.clone();
         let home = directories::BaseDirs::new()
@@ -628,10 +632,26 @@ impl SftpView {
             self.tab.local.dir = parent.to_path_buf();
             self.local_selected = None;
         }
-        // Empty where the host's pane has its filter, so the two lists line up.
-        inner.take_top(space::S + CONTROL + space::S);
+        // A filter like the host's pane has, so the two lists line up.
+        inner.take_top(space::S);
+        ui.text_field(
+            Id::new("sftp.local.filter"),
+            inner.take_top(CONTROL),
+            &mut self.local_filter,
+            FieldStyle {
+                placeholder: "Filter this folder",
+                icon: Some(icons::SEARCH),
+                ..FieldStyle::default()
+            },
+        );
+        inner.take_top(space::S);
         let list = Self::header_row(ui, inner, None);
-        let entries = read_dir(&self.tab.local.dir, self.tab.show_hidden).unwrap_or_default();
+        let filter = self.local_filter.trim().to_lowercase();
+        let entries: Vec<_> = read_dir(&self.tab.local.dir, self.tab.show_hidden)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| filter.is_empty() || entry.name.to_lowercase().contains(&filter))
+            .collect();
         #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.
         let offset = ui.scroll_view(
             Id::new("sftp.local.scroll"),
@@ -1116,7 +1136,7 @@ impl SftpView {
             // A new transfer grows into its place in the list.
             let enter = ui.entrance(id.with("enter"), Motion::POP);
             ui.push_layer(Layer::appear(enter, row.center(), 0.92, 0.0));
-            ui.gfx.fill_rect(row, 10.0, t.surface);
+            ui.card_surface(row, 10.0);
             let mut cells = row.inset(space::M, 0.0);
             let (state_color, status) = transfer_status(transfer, &t);
             // Its direction, in a tile tinted by how it is doing.

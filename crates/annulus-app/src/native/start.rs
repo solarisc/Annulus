@@ -12,7 +12,8 @@ use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_STRONG, FieldStyle, HEADING, KEYCAP_H, Kind, SMALL, TITLE, button_width, keys_width,
+    BODY, BODY_STRONG, FieldStyle, HEADING, KEYCAP_H, Kind, SCROLL_GUTTER, SMALL, TITLE,
+    button_width, keys_width,
 };
 use annulus_vault::hosts::Host;
 
@@ -326,7 +327,7 @@ impl StartView {
                 .filter(|(_, rows)| !rows.is_empty())
                 .map(|(_, rows)| LABEL_H + rows.len() as f32 * ROW_H + space::M)
                 .sum();
-            let offset = ui.scroll_view(base.with("scroll"), column, content);
+            let offset = ui.scroll_view(base.with("scroll"), column.wider(SCROLL_GUTTER), content);
             ui.push_clip(column);
             let mut y = column.y - offset;
             // Where each row is, for the highlight to glide to.
@@ -340,13 +341,7 @@ impl StartView {
                 layout.push((Rect::new(column.x, y, column.w, LABEL_H), *title, rows));
                 y += LABEL_H;
                 for _ in rows {
-                    // Room for the scroll bar only while there is one.
-                    let width = if content > column.h {
-                        column.w - 8.0
-                    } else {
-                        column.w
-                    };
-                    places.push(Rect::new(column.x, y, width, ROW_H - 4.0));
+                    places.push(Rect::new(column.x, y, column.w, ROW_H - 4.0));
                     y += ROW_H;
                 }
                 y += space::M;
@@ -367,9 +362,9 @@ impl StartView {
                         base.with(("row", index, &row.title)),
                         Motion::SLOW.staggered(index),
                     );
-                    // Grown in place, never slid: a row never covers its neighbour, even when a
+                    // Faded in place, never slid: a row never covers its neighbour, even when a
                     // search moves it.
-                    ui.push_layer(Layer::appear(enter, place.center(), 0.94, 0.0));
+                    ui.push_layer(Layer::fade(enter));
                     let highlighted = index == self.highlight;
                     match draw_row(ui, base, place, row, highlighted) {
                         RowEvent::Chosen => chosen = Some(row.choice.clone()),

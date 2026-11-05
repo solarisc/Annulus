@@ -9,8 +9,8 @@ use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Curve, Feel, Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, CONTROL, FieldStyle, HEADING, Kind, MENU_BREAK, SEARCH, SMALL, SPLIT_MENU_W,
-    Tone, button_width, split_button_width,
+    BODY, BODY_MEDIUM, CONTROL, FieldStyle, HEADING, Kind, MENU_BREAK, SCROLL_GUTTER, SEARCH,
+    SMALL, SPLIT_MENU_W, Tone, button_width, split_button_width,
 };
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
@@ -20,7 +20,7 @@ use super::os;
 use crate::{connect, groups_view};
 
 /// Width of the editor panel.
-const EDITOR_W: f32 = 364.0;
+const EDITOR_W: f32 = 340.0;
 /// The narrowest the host list gets beside the editor; below it the editor covers the list.
 const LIST_MIN_W: f32 = 420.0;
 /// Height of a chip of the tag filter.
@@ -608,16 +608,28 @@ impl HostsView {
         let extra = self.list_edge - area.r();
         let mut top = main.take_top(36.0);
         super::pages::title(ui, &mut top, "Hosts", Some(cards.len()));
-        // Labels go by the narrower of the room it has now and will have: it changes once, and
-        // never crowds the title on the way.
-        let room = top.w + extra.min(0.0);
+        // Labels go when the row really runs out of room, as the panel's edge reaches it.
+        let room = top.w + extra;
         let mut actions = top.centered(top.w, CONTROL);
         actions.w = (actions.w + extra).max(0.0);
         let empty = vault.hosts().is_empty() && vault.groups().is_empty();
         if empty {
-            // The page's own buttons say how to start.
+            // The page's own buttons say how to start; a local terminal needs no host.
             if super::shortcuts::NEW_HOST.pressed(ui) {
                 self.new_host(vault);
+            }
+            let width = button_width(&mut ui.gfx, "Terminal", Some(icons::TERMINAL));
+            if ui
+                .button(
+                    Id::new("hosts.terminal"),
+                    actions.take_right(width),
+                    "Terminal",
+                    Some(icons::TERMINAL),
+                    Kind::Ghost,
+                )
+                .clicked
+            {
+                action = Some(HostsAction::LocalTerminal);
             }
         } else if let Some(toolbar) = self.toolbar(ui, actions, room, vault, !tags.is_empty()) {
             action = Some(toolbar);
@@ -836,7 +848,6 @@ impl HostsView {
         let mut tags_w = button_width(&mut ui.gfx, "Tags", Some(icons::TAG));
         let tags_room = if tagged { tags_w + space::S } else { 0.0 };
         // Labels go when the row cannot hold them all; the icons and the names stay.
-        // (Judged by the room it will have, not the room it has while a panel slides.)
         let compact = new_w + space::S + term_w + space::S + tags_room + space::M + TOGGLE_W > room;
         if compact {
             (new_w, term_w, tags_w) = (CONTROL + SPLIT_MENU_W, CONTROL, CONTROL);
@@ -1164,25 +1175,20 @@ impl HostsView {
         };
         let content_h = group_block + heading_h + host_rows + space::XL;
         let id = Id::new("hosts.scroll");
-        let offset = ui.scroll_view(id, rect, content_h);
+        let offset = ui.scroll_view(id, rect.wider(SCROLL_GUTTER), content_h);
         // Cards still gliding into a narrower list are not cut off short of the panel.
         let reach = (self.list_edge - rect.r()).max(0.0);
         ui.push_clip(Rect::new(rect.x, rect.y, rect.w + reach, rect.h));
-        // Room for the scroll bar only while there is one, so the cards end with the search.
-        let width = if content_h > rect.h {
-            rect.w - 10.0
-        } else {
-            rect.w
-        };
+        let width = rect.w;
         let top = rect.y - offset;
         let mut y = top;
         let mut action = None;
         self.reflow(ui, cards.len() + groups.len(), columns);
         let old = self.old_grid(ui);
         let refill = self.refills;
-        // The new grid waits for the old one to have mostly gone when it has just replaced it.
+        // Two layouts are never on screen together: the new grid waits for the old one to go.
         let wait = if old.is_some() {
-            motion::EXIT / 2
+            motion::EXIT
         } else {
             self.enter_after
         };
@@ -1216,7 +1222,14 @@ impl HostsView {
             } else {
                 "Hosts".to_owned()
             };
+            // It moves with the grid, so it arrives with the new one.
+            let shown = ui.entrance(
+                Id::new("hosts.heading").with(("enter", refill)),
+                Motion::BASE.delayed(wait),
+            );
+            ui.push_layer(Layer::fade(shown));
             ui.section_label(label, &words);
+            ui.pop_layer();
             y += 28.0;
         }
         match self.mode {
@@ -2472,7 +2485,7 @@ fn host_card(
         ui.gfx
             .shadow(shape, round, 22.0, 8.0, t.shadow.alpha(lift * 0.6));
     }
-    ui.gfx.fill_rect(shape, round, t.surface);
+    ui.card_surface(shape, round);
     ui.gfx.fill_rect(shape, round, t.hover.alpha(hover));
     ui.gfx.fill_rect(shape, round, t.selected.alpha(chosen));
     if chosen > 0.0 {
@@ -2709,7 +2722,7 @@ fn group_card(ui: &mut Ui<'_>, rect: Rect, group: &GroupCard) -> bool {
     let response = ui.zone(id, rect, Role::ListItem, &group.name);
     let t = ui.theme;
     let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-    ui.gfx.fill_rect(rect, radius::CARD, t.surface);
+    ui.card_surface(rect, radius::CARD);
     ui.gfx.fill_rect(rect, radius::CARD, t.hover.alpha(hover));
     if response.focus_ring {
         ui.focus_ring(rect, radius::CARD);

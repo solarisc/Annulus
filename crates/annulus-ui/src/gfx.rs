@@ -117,6 +117,12 @@ impl Rect {
         Rect::new(self.x - d, self.y - d, self.w + 2.0 * d, self.h + 2.0 * d)
     }
 
+    /// With `d` more on its right.
+    #[must_use]
+    pub fn wider(&self, d: f32) -> Rect {
+        Rect::new(self.x, self.y, self.w + d, self.h)
+    }
+
     /// Moved by `dx`, `dy`.
     #[must_use]
     pub fn offset(&self, dx: f32, dy: f32) -> Rect {

@@ -97,7 +97,7 @@ pub fn row(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str, selected: bool) -> 
     // Still hovered on the row's buttons.
     let hovered = ui.hover_within(rect);
     let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
-    ui.gfx.fill_rect(rect, 10.0, t.surface);
+    ui.card_surface(rect, 10.0);
     ui.gfx.fill_rect(rect, 10.0, t.hover.alpha(hover));
     if selected {
         ui.gfx.fill_rect(rect, 10.0, t.selected);
@@ -139,11 +139,10 @@ pub fn two_lines(ui: &mut Ui<'_>, rect: Rect, title: &str, detail: &str, mono_de
 
 /// A titled card of settings rows; returns the inside, `height` tall, and moves `rect` past it.
 pub fn card(ui: &mut Ui<'_>, rect: &mut Rect, title: &str, height: f32) -> Rect {
-    let t = ui.theme;
     ui.section_label(rect.take_top(18.0), title);
     rect.take_top(space::S);
     let card = rect.take_top(height);
-    ui.gfx.fill_rect(card, 12.0, t.surface);
+    ui.card_surface(card, 12.0);
     rect.take_top(space::XL);
     card.inset(space::L, space::S)
 }

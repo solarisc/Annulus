@@ -179,13 +179,14 @@ pub fn tile_colors(hue: Rgb, surface: Rgb, dark: bool) -> (Rgb, Rgb) {
     };
     let white = Rgb::new(0xFF, 0xFF, 0xFF);
     let black = Rgb::new(0, 0, 0);
-    // Softened toward grey first: a row of warm hues should not read as a row of alarms.
+    // Softened toward grey first: a row of warm hues should not read as a row of alarms. The
+    // mark keeps the color, bright and clean; the wash under it stays low.
     let grey = Rgb::new(0x78, 0x78, 0x78);
-    let soft = mix(hue, grey, 0.35);
+    let soft = mix(hue, grey, 0.2);
     if dark {
-        (mix(surface, soft, 0.24), mix(soft, white, 0.62))
+        (mix(surface, soft, 0.2), mix(soft, white, 0.72))
     } else {
-        (mix(surface, soft, 0.13), mix(soft, black, 0.42))
+        (mix(surface, soft, 0.11), mix(soft, black, 0.42))
     }
 }
 

@@ -32,6 +32,9 @@ pub const TITLE: Font = Font::display(text::TITLE).weight(Weight::Semibold);
 pub const CONTROL: f32 = metrics::CONTROL_HEIGHT;
 /// Height of the large search field at the top of a screen.
 pub const SEARCH: f32 = metrics::SEARCH_HEIGHT;
+/// Pass a list's [`Ui::scroll_view`] this much wider than its content: the scroll bar then sits
+/// in the page's margin and the content keeps one right edge, scrolling or not.
+pub const SCROLL_GUTTER: f32 = 14.0;
 /// How far a floating surface's shadow reaches past it, for fading it as one.
 const MENU_SHADOW: f32 = 44.0;
 /// Height of one menu entry.
@@ -402,6 +405,13 @@ impl Ui<'_> {
         );
         self.pop_clip();
         self.request_repaint();
+    }
+
+    /// A card at rest: a step off the sheet, with a faint edge that keeps it crisp.
+    pub fn card_surface(&mut self, rect: Rect, round: f32) {
+        let t = self.theme;
+        self.gfx.fill_rect(rect, round, t.surface);
+        self.gfx.stroke_rect(rect, round, 1.0, t.edge);
     }
 
     /// The accent fill of a primary control: lit a little from above, brighter with `hover`,
@@ -1496,7 +1506,7 @@ impl Ui<'_> {
             self.gfx.fill_rect(
                 Rect::new(row.x + 8.0, row.y - 0.5, row.w - 16.0, 1.0),
                 0.0,
-                t.line,
+                t.line_strong,
             );
         }
         let mut inner = row.inset(space::S + 2.0, 0.0);
@@ -1836,11 +1846,18 @@ impl Ui<'_> {
         let offset = self.spring(id.with("glide"), target).clamp(0.0, max);
         if max > 0.0 {
             let t = self.theme;
+            // It shows while it has something to say: the pointer is over the list, or the
+            // list is moving.
+            let screen = self.gfx.to_screen(rect);
+            let near = hot
+                || (offset - target).abs() > 0.5
+                || (!self.inert() && self.pointer().is_some_and(|at| screen.contains(at)));
+            let shown = self.ease(id.with("near"), if near { 1.0 } else { 0.0 });
             let thumb_y = track.y + (track.h - thumb_h) * (offset / max);
             self.gfx.fill_rect(
                 Rect::new(track.x, thumb_y, track.w, thumb_h),
                 2.0,
-                t.text2.alpha(if hot { 0.6 } else { 0.28 }),
+                t.text2.alpha(if hot { 0.6 } else { 0.3 } * shown),
             );
         }
         offset

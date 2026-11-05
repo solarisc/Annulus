@@ -13,7 +13,7 @@ use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
 use annulus_ui::motion::Layer;
-use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SMALL, Tone, button_width};
+use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SCROLL_GUTTER, SMALL, Tone, button_width};
 use annulus_vault::forwards::{ForwardKind, PortForward};
 use annulus_vault::keychain::SshKey;
 use annulus_vault::snippets::Snippet;
@@ -52,13 +52,8 @@ fn rows(
 ) {
     #[allow(clippy::cast_precision_loss)] // Lists are short.
     let height = count as f32 * (ROW_H + GAP);
-    let offset = ui.scroll_view(Id::new(id), rect, height);
-    // Room for the scroll bar only while there is one, so rows end with the header's buttons.
-    let width = if height > rect.h {
-        rect.w - 10.0
-    } else {
-        rect.w
-    };
+    let offset = ui.scroll_view(Id::new(id), rect.wider(SCROLL_GUTTER), height);
+    let width = rect.w;
     ui.push_clip(rect);
     for index in 0..count {
         #[allow(clippy::cast_precision_loss)] // Lists are short.
