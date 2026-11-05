@@ -1173,7 +1173,7 @@ impl SftpView {
                 .text(name_cell, &fitted, BODY_STRONG, t.text, Align::Start);
             ui.gfx
                 .text(status_cell, &status, SMALL, state_color, Align::End);
-            let second = Rect::new(cells.x, row.y + 29.0, cells.w, 16.0);
+            let second = Rect::new(cells.x, row.y + 27.0, cells.w, 16.0);
             if let TransferState::Failed(message) = &transfer.state {
                 ui.gfx.text(second, message, SMALL, t.error, Align::Start);
             } else {
@@ -1191,10 +1191,16 @@ impl SftpView {
                 share,
                 Motion::new(450, annulus_ui::motion::Curve::Out),
             );
-            let track = Rect::new(cells.x, row.b() - 8.0, cells.w, 3.0);
-            ui.gfx.fill_rect(track, 1.5, t.hover);
+            let track = Rect::new(cells.x, row.b() - 10.0, cells.w, 3.0);
             let fill = Rect::new(track.x, track.y, track.w * shown.clamp(0.0, 1.0), track.h);
-            ui.gfx.fill_rect(fill, 1.5, tone);
+            // Only while it says something: a transfer that is over needs no bar.
+            if !matches!(
+                transfer.state,
+                TransferState::Done(_) | TransferState::Skipped
+            ) {
+                ui.gfx.fill_rect(track, 1.5, t.hover);
+                ui.gfx.fill_rect(fill, 1.5, tone);
+            }
             if matches!(transfer.state, TransferState::Running) && fill.w > 4.0 {
                 // A soft light running along what is done, so a slow transfer still looks alive.
                 moving = true;
@@ -1247,9 +1253,9 @@ impl SftpView {
 /// Height of the transfers panel's header.
 const TRANSFERS_HEAD: f32 = 30.0;
 /// Height of one transfer.
-const TRANSFER_ROW: f32 = 54.0;
+const TRANSFER_ROW: f32 = 60.0;
 /// Height of the transfers panel while open: three rows.
-const TRANSFERS_H: f32 = 232.0;
+const TRANSFERS_H: f32 = 244.0;
 
 /// How far `transfer` is, 0.0 to 1.0.
 fn share_of(transfer: &crate::sftp_view::Transfer) -> f32 {

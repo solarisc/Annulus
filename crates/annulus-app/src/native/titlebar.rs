@@ -450,26 +450,16 @@ fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str)
 pub(super) fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
     let t = ui.theme;
     let ink = t.accent;
-    let (x, y) = (rect.x, rect.y);
+    let unit = rect.w / 20.0;
+    let at = |x: f32, y: f32| Point::new(rect.x + x * unit, rect.y + y * unit);
     ui.gfx.polyline(
-        &[
-            Point::new(x + 5.5, y + 6.5),
-            Point::new(x + 9.0, y + 10.0),
-            Point::new(x + 5.5, y + 13.5),
-        ],
+        &[at(5.5, 6.5), at(9.0, 10.0), at(5.5, 13.5)],
         false,
-        1.8,
+        1.8 * unit,
         ink,
     );
-    ui.gfx.polyline(
-        &[
-            Point::new(x + 10.5, y + 14.0),
-            Point::new(x + 14.5, y + 14.0),
-        ],
-        false,
-        1.8,
-        ink,
-    );
+    ui.gfx
+        .polyline(&[at(10.5, 14.0), at(14.5, 14.0)], false, 1.8 * unit, ink);
 }
 
 /// The width a tab wants: fixed tabs fit their name, the others have a close button too and
@@ -554,11 +544,13 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     if dragged {
         ui.gfx.shadow(rect, 9.0, 16.0, 5.0, t.shadow.alpha(0.6));
     }
-    // Only the tab in front and the one under the pointer show a shape.
-    let fill = t
-        .selected
-        .alpha(lit)
-        .over(t.hover.alpha(hover * (1.0 - lit)));
+    // A session tab is a faint slot, so the strip reads evenly; the one in front and the one
+    // under the pointer are stronger. The fixed tabs show a shape only then.
+    let resting = if tab.fixed() { 0.0 } else { 0.55 };
+    let fill = t.selected.alpha(lit).over(
+        t.hover
+            .alpha((resting + (1.0 - resting) * hover) * (1.0 - lit)),
+    );
     ui.gfx.fill_rect(rect, 8.0, fill);
     if response.focus_ring {
         ui.focus_ring(rect, 8.0);
@@ -588,8 +580,8 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
         };
         let at = Point::new(icon.r() - 1.0, icon.y + 1.0);
         let under = t.chrome.mix(fill, f32::from(fill.a) / 255.0);
-        ui.gfx.fill_circle(at, 4.5, under);
-        ui.gfx.fill_circle(at, 3.0, color);
+        ui.gfx.fill_circle(at, 5.0, under);
+        ui.gfx.fill_circle(at, 3.5, color);
     }
     inner.take_left(8.0);
     // An agent's tab says so before its name (ADR-0020 §6).

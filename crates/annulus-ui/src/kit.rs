@@ -341,7 +341,7 @@ impl Theme {
         let white = Color::WHITE;
         // Between two colors the text is held readable on, so it stays readable here too.
         let card = if dark {
-            surface.mix(p.bg_raised.into(), 0.85)
+            surface.mix(p.bg_raised.into(), 0.52)
         } else {
             p.bg_app.into()
         };

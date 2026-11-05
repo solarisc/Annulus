@@ -2526,9 +2526,11 @@ fn host_card(
     let room = (detail.w - address).max(detail.w * 0.3);
     let (count, width) = tags_fit(ui, &card.tags, room);
     if width > 0.0 {
-        let tags = detail.take_right(width);
+        // Right after the address, so a column of cards reads as one rhythm.
+        let at = (detail.x + address).min(detail.r() - width);
+        let tags = Rect::new(at, detail.y, width, detail.h);
         draw_tags(ui, tags, &card.tags, count);
-        detail.take_right(space::S);
+        detail.w = at - space::S - detail.x;
     }
     ui.gfx
         .text(detail, &card.detail, SMALL, t.text2, Align::Start);

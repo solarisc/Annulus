@@ -1718,7 +1718,12 @@ impl NativeApp {
             Rect::new(settings.x, settings.y, settings.w, 36.0).inset(0.0, 1.0),
         ));
         // The selection: one pill that glides to the section chosen, even down to Settings.
-        if let Some((_, target)) = rows.iter().find(|(section, _)| *section == self.section) {
+        // Nothing is chosen while there is nothing to choose: the vault is locked.
+        let chosen = rows
+            .iter()
+            .find(|(section, _)| *section == self.section)
+            .filter(|_| self.vault.is_some());
+        if let Some((_, target)) = chosen {
             let t = ui.theme;
             let y = ui.spring_with(Id::new("nav.pill"), target.y, Feel::Soft);
             let pill = Rect::new(target.x, y, target.w, target.h);
@@ -1731,7 +1736,7 @@ impl NativeApp {
 
     fn nav_item(&mut self, ui: &mut Ui<'_>, rect: Rect, section: Section, compact: bool) {
         let id = Id::new(("nav", section.title()));
-        let selected = self.section == section;
+        let selected = self.section == section && self.vault.is_some();
         let response = ui.zone(id, rect, Role::Tab, section.title());
         if response.clicked {
             self.section = section;

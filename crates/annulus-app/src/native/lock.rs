@@ -8,7 +8,7 @@ use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
 use annulus_ui::motion::{Curve, Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, CONTROL, FieldStyle, Kind, SEARCH, SMALL, TITLE, shake_offset,
+    BODY, CONTROL, FieldStyle, HEADING, Kind, SEARCH, SMALL, TITLE, shake_offset,
 };
 use annulus_vault::strength::{self, Strength};
 use zeroize::Zeroizing;
@@ -461,14 +461,13 @@ impl LockView {
 /// Whose window this is, at the top of the screen.
 fn masthead(ui: &mut Ui<'_>, rect: Rect) {
     let t = ui.theme;
-    let name_w = ui.gfx.measure("Annulus", BODY_MEDIUM).width + 2.0;
-    let mut row =
-        Rect::new(rect.x, rect.y + space::L, rect.w, 24.0).centered(20.0 + 8.0 + name_w, 24.0);
-    let mark = row.take_left(20.0).centered(20.0, 20.0);
+    let name_w = ui.gfx.measure("Annulus", HEADING).width + 2.0;
+    let mut row = Rect::new(rect.x, rect.y + space::XL, rect.w, 28.0)
+        .centered(26.0 + space::S + name_w, 28.0);
+    let mark = row.take_left(26.0).centered(26.0, 26.0);
     super::titlebar::paint_mark(ui, mark);
-    row.take_left(8.0);
-    ui.gfx
-        .text(row, "Annulus", BODY_MEDIUM, t.text2, Align::Start);
+    row.take_left(space::S);
+    ui.gfx.text(row, "Annulus", HEADING, t.text, Align::Start);
 }
 
 /// A link-like button: quiet text that wakes under the pointer. Returns whether it was

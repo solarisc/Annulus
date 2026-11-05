@@ -350,7 +350,7 @@ fn swatch(canvas: &mut dyn Canvas, rect: Rect, colors: &[Color], line: Color) {
 /// the plain one is too close to its own tint to read.
 #[must_use]
 pub fn danger_ink(t: &crate::kit::Theme) -> Color {
-    t.error.mix(t.text, 0.34)
+    t.error.mix(t.text, 0.5)
 }
 
 /// Where the accent's top edge catches the light, for a control in `rect` with corners

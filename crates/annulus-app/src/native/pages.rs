@@ -115,7 +115,8 @@ pub fn row(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str, selected: bool) -> 
 /// An icon tile at the left of a row; returns the rest of the row.
 pub fn row_icon(ui: &mut Ui<'_>, rect: Rect, icon: IconId) -> Rect {
     let t = ui.theme;
-    let mut inner = rect.inset(space::M + 2.0, 0.0);
+    // Rows hand over what is left inside their own padding.
+    let mut inner = rect;
     let tile = inner.take_left(32.0).centered(32.0, 32.0);
     ui.gfx.fill_rect(tile, 8.0, t.hover);
     ui.gfx.icon(icon, tile.centered(17.0, 17.0), t.text2);
