@@ -12,7 +12,7 @@ pub use text::TextEngine;
 
 use tiny_skia::{
     FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path,
-    PathBuilder, Pattern, Pixmap, Shader, SpreadMode, Stroke, Transform,
+    PathBuilder, Pattern, Pixmap, SpreadMode, Stroke, Transform,
 };
 use annulus_ui::gfx::{Canvas, Color, Font, Point, Rect, TextSize};
 
@@ -335,13 +335,13 @@ impl Canvas for CpuCanvas {
             return;
         };
         let paint = Paint {
-            shader: Shader::from(Pattern::new(
+            shader: Pattern::new(
                 drawn.as_ref(),
                 SpreadMode::Pad,
                 FilterQuality::Nearest,
                 group.alpha,
                 Transform::identity(),
-            )),
+            ),
             ..Paint::default()
         };
         let mask = self.clips.last().map(|(_, mask)| mask);

@@ -24,7 +24,7 @@ use annulus_vault::hosts::Host;
 use super::demo::fixture_vault;
 use super::hosts::{HostsAction, Mode};
 use super::shortcuts::{self, Shortcut};
-use super::{NativeApp, TermView, WindowButtons};
+use super::{Flyer, NativeApp, TermView, WindowButtons};
 use crate::sync_screen::Attempt;
 use crate::terminal_view::TabStatus;
 
@@ -1679,8 +1679,10 @@ fn render(
             None => break,
         }
     }
-    // Settle: hover fades and focus glows finish.
-    let (output, png) = frame(&[], time + 1.0, true);
+    // Settle: what the last input moved comes to rest, hover finds what is now under the
+    // pointer, and hover fades and focus glows finish.
+    let _ = frame(&[], time + 1.0, false);
+    let (output, png) = frame(&[], time + 1.5, true);
     faults.extend(output.faults.iter().cloned());
     // Once settled, nothing asks for frames (P-06): an animation that never ends would keep
     // the CPU busy while the window sits idle.
@@ -1791,10 +1793,49 @@ const FILMS: &[Scene] = &[
         setup: settings,
         acts: &[Act::Click("Terminal")],
     },
+    // The menu leaves as it came, over a screen that already works.
+    Scene {
+        name: "motion-menu-close",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[
+            Act::Click("More ways to add hosts"),
+            Act::Press(Key::Escape, Modifiers::NONE),
+        ],
+    },
+    // A session tab comes in from its side.
+    Scene {
+        name: "motion-tab-switch",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: with_tabs,
+        acts: &[Act::Press(
+            Key::Char('3'),
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+        )],
+    },
+    // A section is left for another: one fades out over the other coming in.
+    Scene {
+        name: "motion-section-crossfade",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Click("Port Forwarding")],
+    },
 ];
 
 /// How long after the input each frame of a filmstrip is taken, in seconds.
-const FILM_AT: [f64; 4] = [0.03, 0.07, 0.12, 0.3];
+const FILM_AT: [f64; 4] = [0.03, 0.07, 0.14, 0.3];
 
 /// Frames of `film` as its last act's motion plays, taken [`FILM_AT`] after the input.
 fn filmstrip(film: &Scene, renderer: &mut dyn Renderer) -> Vec<Vec<u8>> {
@@ -1845,6 +1886,151 @@ fn filmstrip(film: &Scene, renderer: &mut dyn Renderer) -> Vec<Vec<u8>> {
         }
     }
     frames
+}
+
+/// Draws frames of `app` for `film`, one for each of `times`, keeping each as a photograph;
+/// returns what each frame output.
+fn photographed(
+    app: &mut NativeApp,
+    film: &str,
+    times: &[f64],
+    events: &[Event],
+) -> Vec<FrameOutput> {
+    let dir = out_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut renderer = Cpu(None);
+    let mut state = UiState::default();
+    let viewport = Rect::new(0.0, 0.0, 1100.0, 720.0);
+    let theme = Theme::new(Appearance::Dark);
+    let mut outputs = Vec::new();
+    for (index, time) in times.iter().enumerate() {
+        let mut output = FrameOutput::default();
+        let first = if index == 0 { events } else { &[] };
+        let png = renderer.frame((1100, 720, 1.0), true, &mut |canvas| {
+            state.begin_frame(first, *time);
+            let mut ui = Ui::new(canvas, theme, &mut state, viewport);
+            app.frame(&mut ui);
+            output = state.end_frame();
+        });
+        std::fs::write(dir.join(format!("{film}-{index}.png")), png.unwrap()).unwrap();
+        outputs.push(output);
+    }
+    outputs
+}
+
+#[test]
+fn the_vault_opens_as_the_lock_leaves_and_the_leaving_lock_takes_nothing() {
+    let vault = fixture_vault("motion-unlock", true);
+    let mut app = NativeApp::new(None);
+    // A few frames locked, so the navigation rests dim first.
+    let _ = photographed(&mut app, "motion-unlock-before", &[0.0, 0.5, 1.0], &[]);
+    app.vault = Some(vault);
+    app.lock_left = Some(2.0);
+    let outputs = photographed(&mut app, "motion-unlock", &[2.04, 2.1, 2.18, 2.3, 3.0], &[]);
+    // The vault works from the first frame, and nothing of the lock can be reached.
+    for output in &outputs {
+        assert!(output.zones.iter().any(|zone| zone.label == "New host"));
+        assert!(!output.zones.iter().any(|zone| zone.label == "Unlock"));
+    }
+    assert!(outputs[0].repaint, "it asks for frames while it leaves");
+    assert!(app.lock_left.is_none(), "and it is over");
+}
+
+#[test]
+fn a_refused_password_shakes_the_field_and_says_why() {
+    let mut app = NativeApp::new(None);
+    let _ = photographed(&mut app, "motion-refused-before", &[0.0, 0.5], &[]);
+    app.lock.refuse("Wrong password.".into());
+    let outputs = photographed(
+        &mut app,
+        "motion-refused",
+        &[1.0, 1.06, 1.12, 1.2, 2.0],
+        &[],
+    );
+    assert!(outputs[1].repaint, "it moves");
+    let field = |output: &FrameOutput| {
+        output
+            .zones
+            .iter()
+            .find(|zone| zone.label == "Master password")
+            .map(|zone| zone.rect.x)
+            .unwrap()
+    };
+    let places: Vec<f32> = outputs.iter().map(field).collect();
+    assert!(
+        places[1..4].iter().any(|x| (x - places[4]).abs() > 2.0),
+        "the field left its place: {places:?}"
+    );
+    assert!(!outputs[4].repaint, "and it comes to rest");
+}
+
+#[test]
+fn a_host_flies_from_its_card_to_its_tab_and_lands() {
+    let vault = fixture_vault("motion-flight", true);
+    let mut app = NativeApp::new(Some(vault));
+    with_tabs(&mut app);
+    let uid = app.tabs.last().unwrap().uid;
+    let _ = photographed(&mut app, "motion-flight-before", &[0.0], &[]);
+    app.flyer = Some(Flyer {
+        uid,
+        from: Rect::new(244.0, 312.0, 266.0, 64.0),
+        title: "bastion".into(),
+        os: None,
+        since: 1.0,
+    });
+    let outputs = photographed(&mut app, "motion-flight", &[1.04, 1.12, 1.24, 1.4], &[]);
+    assert!(outputs.iter().all(|output| output.repaint));
+    assert!(app.flyer.is_some(), "still in the air");
+    let _ = photographed(&mut app, "motion-flight-after", &[1.5], &[]);
+    assert!(app.flyer.is_none(), "landed");
+}
+
+#[test]
+fn the_grid_glides_when_the_editor_opens_but_follows_a_window_being_resized_at_once() {
+    let vault = fixture_vault("motion-reflow", true);
+    let mut app = NativeApp::new(Some(vault));
+    let mut state = UiState::default();
+    let _ = drive(&mut app, &mut state, &[], 0.0);
+    let output = drive(&mut app, &mut state, &[], 1.0);
+    let place = |output: &FrameOutput, label: &str| {
+        output
+            .zones
+            .iter()
+            .find(|zone| zone.label == label)
+            .map(|zone| zone.rect)
+            .unwrap()
+    };
+    let before = place(&output, "web-1");
+    let id = app.vault.as_ref().unwrap().hosts()[0].id;
+    app.hosts.edit_host(app.vault.as_ref().unwrap(), id);
+    let first = place(&drive(&mut app, &mut state, &[], 1.016), "web-1");
+    let later = place(&drive(&mut app, &mut state, &[], 1.1), "web-1");
+    let settled = place(&drive(&mut app, &mut state, &[], 3.0), "web-1");
+    assert_ne!(before, settled, "the editor took room");
+    assert!(
+        (first.x - before.x).abs() < (settled.x - before.x).abs() / 2.0,
+        "it starts near where it was: {before:?} {first:?} {settled:?}"
+    );
+    assert!(
+        (later.x - settled.x).abs() < (first.x - settled.x).abs(),
+        "on its way: {first:?} {later:?} {settled:?}"
+    );
+    // With nothing changed but the window's size, cards are where they belong at once.
+    let resized = |state: &mut UiState, app: &mut NativeApp, width: f32, time: f64| {
+        let mut canvas = Measure(TextEngine::new());
+        state.begin_frame(&[], time);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            state,
+            Rect::new(0.0, 0.0, width, 720.0),
+        );
+        app.frame(&mut ui);
+        state.end_frame()
+    };
+    let wide = place(&resized(&mut state, &mut app, 1500.0, 5.0), "web-1");
+    let wide_settled = place(&resized(&mut state, &mut app, 1500.0, 7.0), "web-1");
+    assert_eq!(wide, wide_settled);
 }
 
 #[test]
@@ -2227,7 +2413,10 @@ fn random_user(seed: u64, steps: usize, (width, height): (f32, f32)) {
         };
         let mut faults = first.faults;
         faults.extend(second.faults);
-        faults.extend(layout_faults(&second.zones, viewport));
+        // Cards gliding to new places pass over each other for a moment.
+        if !app.hosts.reflowing(time + 0.1) {
+            faults.extend(layout_faults(&second.zones, viewport));
+        }
         let tree = annulus_ui::access::tree(&second.zones, state.focus(), 1.0, "Annulus");
         faults.extend(annulus_ui::access::faults(&tree));
         let mut ids = std::collections::HashSet::new();
@@ -2419,11 +2608,13 @@ fn a_hovered_card_shows_only_edit_and_its_other_actions_are_in_its_context_menu(
             "Duplicate"
         ]
     );
-    output = step(&mut app, &mut state, &click_on(&output, "Edit"), 3.0);
+    let _ = step(&mut app, &mut state, &click_on(&output, "Edit"), 3.0);
     assert!(
         app.hosts.editor.is_some(),
         "Edit from the menu opens the editor"
     );
+    // It slides in; a moment later it is all there.
+    output = step(&mut app, &mut state, &[], 4.0);
     assert!(output.zones.iter().any(|zone| zone.label == "Label"));
 }
 
@@ -2619,14 +2810,15 @@ fn a_typed_target_can_be_saved_as_a_host() {
     let mut events = click_on(&output, search);
     events.push(Event::Text("deploy@10.0.9.9:2200".into()));
     output = step(&mut app, &mut state, &events, 1.0);
-    output = step(
+    let _ = step(
         &mut app,
         &mut state,
         &click_on(&output, "Save as host"),
         2.0,
     );
-    // The editor opens on it, filled in; Save keeps it.
-    output = step(&mut app, &mut state, &click_on(&output, "Save"), 3.0);
+    // The editor slides in on it, filled in; Save keeps it.
+    output = step(&mut app, &mut state, &[], 2.5);
+    let _ = step(&mut app, &mut state, &click_on(&output, "Save"), 3.0);
     assert_eq!(app.vault.as_ref().unwrap().hosts().len(), before + 1);
     let saved = host_named(&app, "10.0.9.9");
     assert_eq!(
@@ -3945,13 +4137,13 @@ fn tab_crosses_the_hosts_toolbar_left_to_right() {
         at("Vault"),
         at("Hosts"),
         at("Settings"),
-        at("Search hosts, or type user@host:port to connect"),
-        at("New host"),
-        at("More ways to add hosts"),
-        at("Terminal"),
-        at("Tags"),
         at("Grid view"),
         at("List view"),
+        at("Tags"),
+        at("Terminal"),
+        at("New host"),
+        at("More ways to add hosts"),
+        at("Search hosts, or type user@host:port to connect"),
         at("Homelab"),
     ];
     assert!(order.is_sorted(), "{order:?}: {focused:?}");

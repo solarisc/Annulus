@@ -159,6 +159,8 @@ impl StartView {
         let t = ui.theme;
         let base = Id::new(("start", uid));
         let shown = ui.entrance(base.with("enter"), Motion::BASE);
+        // It rises inside its sheet, never past the window's edge.
+        ui.push_clip(rect);
         ui.push_layer(Layer::fade(shown).shifted(0.0, 10.0 * (1.0 - shown)));
         let width = (rect.w - 2.0 * space::XL).clamp(0.0, WIDTH);
         let mut column = Rect::new(rect.x + (rect.w - width) / 2.0, rect.y, width, rect.h);
@@ -348,12 +350,11 @@ impl StartView {
                 let at = ui.spring(base.with("glide"), target.y);
                 let pill = Rect::new(target.x, at, target.w, target.h);
                 ui.gfx.fill_rect(pill, 10.0, t.selected);
-                ui.gfx.stroke_rect(pill, 10.0, 1.0, t.accent.alpha(0.35));
             }
             for (label, title, rows) in layout {
                 // In line with the rows' tiles.
                 let line = Rect::new(label.x + space::M, label.y + 8.0, label.w, 18.0);
-                ui.section_label(line, &format!("{title} \u{b7} {}", rows.len()));
+                ui.section_label(line, title);
                 for row in rows {
                     let place = places[index];
                     let enter = ui.entrance(
@@ -388,6 +389,7 @@ impl StartView {
             }
         }
         ui.pop_layer();
+        ui.pop_clip();
         chosen
     }
 }
@@ -442,16 +444,16 @@ fn draw_row(ui: &mut Ui<'_>, base: Id, rect: Rect, row: &Row, highlighted: bool)
             if pin.focus_ring {
                 ui.focus_ring(slot, 7.0);
             }
-            let ink = if pinned { t.accent } else { t.text2 };
+            let ink = if pinned { t.text } else { t.text2 };
             ui.gfx.icon(icons::PIN, slot.centered(15.0, 15.0), ink);
             pin_clicked = pin.clicked;
         }
     }
     let tile = inner.take_left(32.0).centered(32.0, 32.0);
     if matches!(row.choice, Choice::Quick(_)) {
-        ui.gfx.fill_rect(tile, 9.0, t.accent.alpha(0.16));
+        ui.gfx.fill_rect(tile, 9.0, t.hover);
         ui.gfx
-            .icon(icons::TERMINAL, tile.centered(18.0, 18.0), t.accent);
+            .icon(icons::TERMINAL, tile.centered(18.0, 18.0), t.text2);
     } else {
         os::tile(ui, tile, &row.title, row.os);
     }
@@ -510,9 +512,9 @@ fn welcome(ui: &mut Ui<'_>, base: Id, rect: Rect) -> Option<Choice> {
     let t = ui.theme;
     let mut column = Rect::new(rect.x, rect.y + space::L, rect.w, 220.0);
     let badge = column.take_top(56.0).centered(56.0, 56.0);
-    ui.gfx.fill_rect(badge, 16.0, t.accent.alpha(0.14));
+    ui.gfx.fill_rect(badge, 14.0, t.hover);
     ui.gfx
-        .icon(icons::SERVER, badge.centered(24.0, 24.0), t.accent);
+        .icon(icons::SERVER, badge.centered(24.0, 24.0), t.text2);
     column.take_top(space::L);
     ui.strict_text(
         column.take_top(24.0),
@@ -571,8 +573,7 @@ fn empty(ui: &mut Ui<'_>, rect: Rect, line: &str) {
     let block = Rect::new(rect.x, rect.y + space::XL, rect.w, 140.0);
     let mut column = block;
     let badge = column.take_top(56.0).centered(56.0, 56.0);
-    ui.gfx.fill_rect(badge, 16.0, t.surface.mix(t.hover, 0.5));
-    ui.gfx.stroke_rect(badge, 16.0, 1.0, t.line_strong);
+    ui.gfx.fill_rect(badge, 14.0, t.hover);
     ui.gfx
         .icon(icons::SERVER, badge.centered(24.0, 24.0), t.text2);
     column.take_top(space::L);

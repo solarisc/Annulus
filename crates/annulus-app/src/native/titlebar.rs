@@ -70,6 +70,14 @@ pub fn draw(app: &mut NativeApp, ui: &mut Ui<'_>, bar: Rect) -> Option<WindowAct
         }
     }
     let (slots, x) = layout;
+    // Where each tab is: a host connecting flies to its tab.
+    app.tab_places.clear();
+    app.tab_places.extend(
+        app.tabs
+            .iter()
+            .zip(&slots)
+            .map(|(tab, slot)| (tab.uid, *slot)),
+    );
     if slots.len() > FIXED_TABS {
         // The fixed tabs, then a hairline, then the sessions.
         let line = Rect::new(
@@ -438,11 +446,10 @@ fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str)
     response.clicked
 }
 
-/// Our mark: a teal tile with a prompt. Ours alone (ADR-0010).
+/// Our mark: a prompt in the accent. Ours alone (ADR-0010).
 fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
     let t = ui.theme;
-    ui.gfx.fill_rect(rect, 6.0, t.accent);
-    let ink = t.on_accent;
+    let ink = t.accent;
     let (x, y) = (rect.x, rect.y);
     ui.gfx.polyline(
         &[
@@ -547,23 +554,14 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     if dragged {
         ui.gfx.shadow(rect, 9.0, 16.0, 5.0, t.shadow.alpha(0.6));
     }
-    // Every tab is a soft pill; the one in front is the surface it opens onto.
-    let idle = t.hover.alpha(0.35 + 0.45 * hover);
-    let fill = idle.mix(t.surface, lit);
-    ui.gfx.fill_rect(rect, 9.0, fill);
-    if lit > 0.0 {
-        ui.gfx
-            .stroke_rect(rect, 9.0, 1.0, t.line_strong.alpha(lit * 0.8));
-        // Light from above along its top edge.
-        let top = Rect::new(rect.x + 8.0, rect.y + 0.5, rect.w - 16.0, 1.0);
-        ui.gfx.fill_rect(
-            top,
-            0.5,
-            Color::WHITE.alpha(lit * if t.dark { 0.06 } else { 0.5 }),
-        );
-    }
+    // Only the tab in front and the one under the pointer show a shape.
+    let fill = t
+        .selected
+        .alpha(lit)
+        .over(t.hover.alpha(hover * (1.0 - lit)));
+    ui.gfx.fill_rect(rect, 8.0, fill);
     if response.focus_ring {
-        ui.focus_ring(rect, 9.0);
+        ui.focus_ring(rect, 8.0);
     }
     // Squeezed narrower than it wants, a tab trims its padding and keeps room for its close
     // button only while that shows (in front or hovered), so its name keeps a few letters.
@@ -571,9 +569,13 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
     let mut inner = rect.inset(if squeezed { space::S } else { space::M }, 0.0);
     let ink = t.text2.mix(t.text, hover.max(lit));
     let icon = inner.take_left(16.0).centered(16.0, 16.0);
-    match tab_icon(app, tab) {
-        Ok(os) => super::os::tile(ui, icon, &tab.title, Some(os)),
-        Err(glyph) => ui.gfx.icon(glyph, icon, ink.mix(t.accent, lit)),
+    if app.tab_connecting(index) {
+        tab_spinner(ui, icon);
+    } else {
+        match tab_icon(app, tab) {
+            Ok(os) => super::os::tile(ui, icon, &tab.title, Some(os)),
+            Err(glyph) => ui.gfx.icon(glyph, icon, ink),
+        }
     }
     if let Some(status) = tab.status {
         // A dot on the icon's corner, ringed in the tab's own color.
@@ -650,6 +652,28 @@ fn tab(ui: &mut Ui<'_>, slot: Rect, x: f32, app: &NativeApp, index: usize) -> Ta
         ui.set_cursor(Cursor::Pointer);
     }
     event
+}
+
+/// A tab's icon while its session connects: a turning arc, which asks for frames while it is
+/// drawn.
+fn tab_spinner(ui: &mut Ui<'_>, rect: Rect) {
+    let t = ui.theme;
+    let c = rect.center();
+    ui.gfx.stroke_circle(c, 6.0, 1.5, t.line_strong);
+    #[allow(clippy::cast_possible_truncation)] // An angle for drawing.
+    let turn = if ui.state.reduce_motion {
+        0.0
+    } else {
+        (ui.time() * 320.0 % 360.0) as f32
+    };
+    let arc: Vec<Point> = annulus_ui::icons::Segment::arc_points(c.x, c.y, 6.0, turn, turn + 90.0)
+        .into_iter()
+        .map(|(x, y)| Point::new(x, y))
+        .collect();
+    ui.gfx.polyline(&arc, false, 1.5, t.accent);
+    if !ui.state.reduce_motion {
+        ui.request_repaint_after(std::time::Duration::from_millis(16));
+    }
 }
 
 /// Room the sync mark takes in the Vault tab.

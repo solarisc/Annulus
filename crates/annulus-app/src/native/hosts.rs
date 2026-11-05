@@ -1,16 +1,16 @@
 //! The Hosts screen (UI-SPEC §2): a header, a search box that also quick-connects, groups and
 //! host cards (or a list), an empty state, and the host editor in a side panel.
 
-use annulus_config::tokens::{radius, space};
+use annulus_config::tokens::{metrics, radius, space};
 use annulus_session::Target;
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Rect, Weight};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
-use annulus_ui::motion::{Layer, Motion};
+use annulus_ui::motion::{Feel, Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, SPLIT_MENU_W, TITLE,
-    Tone, button_width, split_button_width,
+    BODY, BODY_MEDIUM, CONTROL, FieldStyle, HEADING, Kind, SEARCH, SMALL, SPLIT_MENU_W, Tone,
+    button_width, split_button_width,
 };
 use annulus_vault::hosts::{DEFAULT_PORT, Host, Secret};
 use annulus_vault::vault::Vault;
@@ -20,17 +20,17 @@ use super::os;
 use crate::{connect, groups_view};
 
 /// Width of the editor panel.
-const EDITOR_W: f32 = 392.0;
+const EDITOR_W: f32 = 364.0;
 /// The narrowest the host list gets beside the editor; below it the editor covers the list.
 const LIST_MIN_W: f32 = 420.0;
 /// Height of a chip of the tag filter.
 const CHIP_H: f32 = 28.0;
 /// The narrowest a host card gets before the grid drops a column.
-const CARD_MIN_W: f32 = 264.0;
-const CARD_H: f32 = 72.0;
-const GROUP_H: f32 = 60.0;
+const CARD_MIN_W: f32 = 224.0;
+const CARD_H: f32 = metrics::HOST_CARD_HEIGHT;
+const GROUP_H: f32 = 56.0;
 const ROW_H: f32 = 44.0;
-const GAP: f32 = 12.0;
+const GAP: f32 = 8.0;
 /// Side padding of the screen.
 const PAD: f32 = 28.0;
 /// Width of the grid/list toggle.
@@ -91,8 +91,22 @@ pub struct HostsView {
     picked: Option<(u64, usize)>,
     /// Deleting a tag from every host: the tag, and whether the user said yes.
     untag: Option<(String, bool)>,
-    /// Where the editor panel was last drawn, for its surface to slide out once it closes.
+    /// Where the editor panel was last drawn, for it to slide out once it closes.
     last_panel: Option<Rect>,
+    /// The host editor that has just closed, sliding out. It holds no secrets any more.
+    leaving: Option<Editor>,
+    /// The group editor that has just closed, sliding out.
+    leaving_group: Option<GroupEditor>,
+    /// Where each card of the grid was last frame, in the list's own coordinates.
+    places: std::collections::HashMap<Id, Rect>,
+    /// Whether an editor was open last frame.
+    was_open: bool,
+    /// Until when the grid's cards glide to new places, on the window's clock.
+    reflow_until: f64,
+    /// Where the editor panel's left edge is this frame, or the sheet's right edge.
+    list_edge: f32,
+    /// The card that was just connected to, on screen: the host flies from there to its tab.
+    pub launched: Option<Rect>,
 }
 
 /// The host editor's draft.
@@ -388,6 +402,22 @@ impl HostsView {
             }
         });
         let vault = vault?;
+        // The panel travels its whole width in from the sheet's edge, and back out the same way
+        // with its form still on it; the list makes room at once and its cards glide there.
+        let shown = ui.animate(
+            Id::new("editor.shown"),
+            if open { 1.0 } else { 0.0 },
+            if open {
+                Motion::SLOW
+            } else {
+                Motion::EXIT_SLOW
+            },
+        );
+        // Where the panel's left edge is right now: the list's top row and search follow it.
+        self.list_edge = panel
+            .or(self.last_panel.filter(|_| shown > 0.0))
+            .filter(|panel| panel.x > rect.x + 0.5)
+            .map_or(rect.r(), |panel| panel.x + panel.w * (1.0 - shown));
         if !open || beside {
             action = self.listing_area(ui, area, vault).or(action);
         }
@@ -396,11 +426,11 @@ impl HostsView {
             self.start_import(vault);
         }
         if let Some(panel) = panel {
-            // The panel slides in from the right edge and fades up as it opens, never past the
-            // content card's edges.
-            let shown = ui.entrance(Id::new("editor.open"), Motion::BASE);
-            ui.push_clip(rect.outset(1.0));
-            ui.push_layer(Layer::fade(shown).shifted(32.0 * (1.0 - shown), 0.0));
+            self.last_panel = Some(panel);
+            self.leaving = None;
+            self.leaving_group = None;
+            ui.push_clip(rect);
+            ui.push_layer(Layer::NONE.shifted(panel.w * (1.0 - shown), 0.0));
             panel_backing(ui, rect, panel);
             if self.group_editor.is_some() {
                 self.group_panel(ui, panel, vault);
@@ -409,23 +439,77 @@ impl HostsView {
             }
             ui.pop_layer();
             ui.pop_clip();
-            self.last_panel = Some(panel);
-        }
-        // Closed, the panel's surface slides back out the way it came (its form is gone).
-        let present = ui.presence(Id::new("editor.presence"), open, Motion::BASE);
-        if !open && present > 0.0 {
-            if let Some(panel) = self.last_panel {
-                ui.push_clip(rect.outset(1.0));
-                ui.push_layer(Layer::fade(present).shifted(40.0 * (1.0 - present), 0.0));
-                panel_backing(ui, rect, panel);
-                ui.pop_layer();
-                ui.pop_clip();
-            }
-        } else if !open {
+        } else if let (true, Some(panel)) = (shown > 0.0, self.last_panel) {
+            ui.push_clip(rect);
+            ui.push_layer(Layer::NONE.shifted(panel.w * (1.0 - shown), 0.0));
+            panel_backing(ui, rect, panel);
+            self.panel_leaving(ui, panel, vault);
+            ui.pop_layer();
+            ui.pop_clip();
+        } else {
             self.last_panel = None;
+            self.leaving = None;
+            self.leaving_group = None;
         }
         self.import_card(ui, rect, vault);
         action
+    }
+
+    /// The form of the editor that has just closed, drawn on its panel as it slides out.
+    fn panel_leaving(&mut self, ui: &mut Ui<'_>, panel: Rect, vault: &mut Vault) {
+        ui.push_inert();
+        if let Some(leaving) = self.leaving.take() {
+            self.editor = Some(leaving);
+            self.editor_panel(ui, panel, vault);
+            self.leaving = self.editor.take();
+        } else if let Some(leaving) = self.leaving_group.take() {
+            self.group_editor = Some(leaving);
+            self.group_panel(ui, panel, vault);
+            self.leaving_group = self.group_editor.take();
+        }
+        ui.pop_inert();
+    }
+
+    /// Where the card `id` of the grid goes this frame: `cell`, or on its way there while the
+    /// grid reflows. `top` is where the list's content starts.
+    fn place(&mut self, ui: &mut Ui<'_>, id: Id, cell: Rect, top: f32) -> Rect {
+        let local = Rect::new(cell.x, cell.y - top, cell.w, cell.h);
+        self.places.insert(id, local);
+        if ui.time() >= self.reflow_until {
+            return cell;
+        }
+        Rect::new(
+            ui.spring_with(id.with("x"), local.x, Feel::Soft),
+            ui.spring_with(id.with("y"), local.y, Feel::Soft) + top,
+            ui.spring_with(id.with("w"), local.w, Feel::Soft),
+            cell.h,
+        )
+    }
+
+    /// Whether the grid's cards are gliding to new places at `now`.
+    #[cfg(test)]
+    pub fn reflowing(&self, now: f64) -> bool {
+        now < self.reflow_until
+    }
+
+    /// Starts the grid's cards gliding from where they were to where they now belong, when
+    /// the room they have or how many there are changed by something done here. A window
+    /// being resized moves them at once, with the pointer.
+    fn reflow(&mut self, ui: &mut Ui<'_>, listed: usize) {
+        /// Longer than any card takes to arrive.
+        const GLIDES: f64 = 0.7;
+        let open = self.editor.is_some() || self.group_editor.is_some();
+        let changed = open != self.was_open || listed != self.places.len();
+        self.was_open = open;
+        if changed && !self.places.is_empty() && !ui.state.reduce_motion {
+            self.reflow_until = ui.time() + GLIDES;
+            for (id, from) in &self.places {
+                ui.spring_set(id.with("x"), from.x);
+                ui.spring_set(id.with("y"), from.y);
+                ui.spring_set(id.with("w"), from.w);
+            }
+        }
+        self.places.clear();
     }
 
     /// Whether a search or the tag filter narrows the listing to matching hosts.
@@ -467,14 +551,24 @@ impl HostsView {
         let (cards, groups) = self.gather(vault);
         let mut main = area.inset(PAD, 0.0);
         main.take_top(space::XL);
-        header(ui, main.take_top(36.0), cards.len());
-        main.take_top(space::L);
-        if let Some(found) = self.search(ui, main.take_top(CONTROL), vault) {
-            action = Some(found);
-        }
-        main.take_top(space::M);
-        if let Some(toolbar) = self.toolbar(ui, main.take_top(CONTROL), vault, !tags.is_empty()) {
+        // The title and what can be done here on one line, then the search: the hosts start
+        // high up the window.
+        // How much wider or narrower the list shows right now than it will be once the panel
+        // has landed. Its top row and search follow the panel; the cards glide by themselves.
+        let extra = self.list_edge - area.r();
+        let mut top = main.take_top(36.0);
+        super::pages::title(ui, &mut top, "Hosts", Some(cards.len()));
+        let room = top.w;
+        let mut actions = top.centered(top.w, CONTROL);
+        actions.w = (actions.w + extra).max(0.0);
+        if let Some(toolbar) = self.toolbar(ui, actions, room, vault, !tags.is_empty()) {
             action = Some(toolbar);
+        }
+        main.take_top(space::L);
+        let mut search = main.take_top(SEARCH);
+        search.w = (search.w + extra).max(0.0);
+        if let Some(found) = self.search(ui, search, vault) {
+            action = Some(found);
         }
         main.take_top(space::L);
         if self.tag_bar && !tags.is_empty() {
@@ -667,12 +761,13 @@ impl HostsView {
         })
     }
 
-    /// The actions under the search: New host with its menu and Terminal on the left, the Tags
-    /// button (when any host has a tag) and the grid/list toggle on the right.
+    /// The actions beside the title, at the right end of the row: the grid/list toggle, the
+    /// Tags button (when any host has a tag), Terminal, then New host with its menu.
     fn toolbar(
         &mut self,
         ui: &mut Ui<'_>,
         rect: Rect,
+        room: f32,
         vault: &mut Vault,
         tagged: bool,
     ) -> Option<HostsAction> {
@@ -683,22 +778,68 @@ impl HostsView {
         let mut tags_w = button_width(&mut ui.gfx, "Tags", Some(icons::TAG));
         let tags_room = if tagged { tags_w + space::S } else { 0.0 };
         // Labels go when the row cannot hold them all; the icons and the names stay.
-        let compact = new_w + space::S + term_w + space::L + tags_room + TOGGLE_W > row.w;
+        // (Judged by the room it will have, not the room it has while a panel slides.)
+        let compact = new_w + space::S + term_w + space::S + tags_room + space::M + TOGGLE_W > room;
         if compact {
             (new_w, term_w, tags_w) = (CONTROL + SPLIT_MENU_W, CONTROL, CONTROL);
         }
         let label = |text: &'static str| if compact { "" } else { text };
 
-        // Laid out from both ends, drawn from the left: Tab follows the drawing order.
-        let new = row.take_left(new_w);
-        row.take_left(space::S);
-        let terminal = row.take_left(term_w);
-        let toggle = row.take_right(TOGGLE_W);
+        // Laid out from the right end, drawn from the left: Tab follows the eye.
+        let new = row.take_right(new_w);
+        row.take_right(space::S);
+        let terminal = row.take_right(term_w);
         let tags = tagged.then(|| {
             row.take_right(space::S);
             row.take_right(tags_w)
         });
-
+        row.take_right(space::M);
+        let toggle = row.take_right(TOGGLE_W);
+        // There are no labels to say what these are in the narrowest case, so the row may be
+        // too short for even its icons: then the toggle gives way first.
+        let has_toggle = toggle.w >= TOGGLE_W;
+        if has_toggle {
+            self.view_toggle(ui, toggle);
+        }
+        if let Some(tags) = tags {
+            let tags_id = Id::new("hosts.tags");
+            // Open, it is lit like the grid/list toggle's chosen half.
+            if self.tag_bar {
+                ui.gfx
+                    .fill_rect(tags, radius::SMALL + 2.0, ui.theme.selected);
+            }
+            if ui
+                .button(tags_id, tags, label("Tags"), Some(icons::TAG), Kind::Ghost)
+                .clicked
+            {
+                // Closing the chips stops filtering: a filter is never on out of sight.
+                self.tag_bar = !self.tag_bar;
+                self.tags.clear();
+            }
+            ui.set_toggled(tags_id, self.tag_bar);
+            if compact {
+                ui.set_name(tags_id, "Tags");
+                ui.tooltip(tags_id, tags, "Tags");
+            }
+        }
+        // Drawn in the order it reads, left to right.
+        let term_id = Id::new("hosts.terminal");
+        if ui
+            .button(
+                term_id,
+                terminal,
+                label("Terminal"),
+                Some(icons::TERMINAL),
+                Kind::Ghost,
+            )
+            .clicked
+        {
+            action = Some(HostsAction::LocalTerminal);
+        }
+        if compact {
+            ui.set_name(term_id, "Terminal");
+            ui.tooltip(term_id, terminal, "Terminal");
+        }
         let items = [
             "New group".to_owned(),
             "Import from ssh_config".to_owned(),
@@ -729,53 +870,11 @@ impl HostsView {
             }
             None => {}
         }
-        let term_id = Id::new("hosts.terminal");
-        if ui
-            .button(
-                term_id,
-                terminal,
-                label("Terminal"),
-                Some(icons::TERMINAL),
-                Kind::Ghost,
-            )
-            .clicked
-        {
-            action = Some(HostsAction::LocalTerminal);
-        }
-        if compact {
-            ui.set_name(term_id, "Terminal");
-            ui.tooltip(term_id, terminal, "Terminal");
-        }
-        if let Some(tags) = tags {
-            let tags_id = Id::new("hosts.tags");
-            // Open, it is lit like the grid/list toggle's chosen half.
-            if self.tag_bar {
-                ui.gfx
-                    .fill_rect(tags, radius::SMALL + 2.0, ui.theme.selected);
-            }
-            if ui
-                .button(tags_id, tags, label("Tags"), Some(icons::TAG), Kind::Ghost)
-                .clicked
-            {
-                // Closing the chips stops filtering: a filter is never on out of sight.
-                self.tag_bar = !self.tag_bar;
-                self.tags.clear();
-            }
-            ui.set_toggled(tags_id, self.tag_bar);
-            if compact {
-                ui.set_name(tags_id, "Tags");
-                ui.tooltip(tags_id, tags, "Tags");
-            }
-        }
-        self.view_toggle(ui, toggle);
         action
     }
 
-    /// The grid/list toggle: two icon buttons in one outlined segment.
+    /// The grid/list toggle: two icon buttons side by side.
     fn view_toggle(&mut self, ui: &mut Ui<'_>, toggle: Rect) {
-        let t = ui.theme;
-        ui.gfx.fill_rect(toggle, 8.0, t.surface);
-        ui.gfx.stroke_rect(toggle, 8.0, 1.0, t.line);
         let mut halves = toggle.inset(2.0, 2.0);
         let grid = halves.take_left(34.0);
         let list = halves;
@@ -913,11 +1012,10 @@ impl HostsView {
         let t = ui.theme;
         let block = rect.centered(rect.w.min(460.0), 220.0);
         let mut column = block;
-        let badge = column.take_top(64.0).centered(64.0, 64.0);
-        ui.gfx.fill_rect(badge, 18.0, t.selected);
-        ui.gfx.stroke_rect(badge, 18.0, 1.0, t.accent.alpha(0.35));
+        let badge = column.take_top(64.0).centered(52.0, 52.0);
+        ui.gfx.fill_rect(badge, 14.0, t.hover);
         ui.gfx
-            .icon(icons::SERVER, badge.centered(28.0, 28.0), t.accent);
+            .icon(icons::SERVER, badge.centered(24.0, 24.0), t.text2);
         column.take_top(space::L);
         ui.strict_text(
             column.take_top(24.0),
@@ -996,48 +1094,64 @@ impl HostsView {
             Mode::Grid => rows(cards.len(), columns, CARD_H),
             Mode::List => rows(cards.len(), 1, ROW_H) + ROW_H,
         };
+        // The page's title says these are hosts; a heading is for when something else is listed
+        // above them, or when they are what a search found.
+        let heading = !groups.is_empty() || self.filtering();
+        let heading_h = if heading { 28.0 } else { 0.0 };
         let group_block = if groups.is_empty() {
             0.0
         } else {
             28.0 + rows(groups.len(), columns, GROUP_H) + space::XL
         };
-        let content_h = group_block + 28.0 + host_rows + space::XL;
+        let content_h = group_block + heading_h + host_rows + space::XL;
         let id = Id::new("hosts.scroll");
         let offset = ui.scroll_view(id, rect, content_h);
-        ui.push_clip(rect);
-        let mut y = rect.y - offset;
+        // Cards still gliding into a narrower list are not cut off short of the panel.
+        let reach = (self.list_edge - rect.r()).max(0.0);
+        ui.push_clip(Rect::new(rect.x, rect.y, rect.w + reach, rect.h));
+        let top = rect.y - offset;
+        let mut y = top;
         let mut action = None;
+        self.reflow(ui, cards.len() + groups.len());
         if !groups.is_empty() {
-            let label = Rect::new(rect.x, y, rect.w, 20.0);
-            ui.section_label(label, &format!("Groups \u{b7} {}", groups.len()));
+            ui.section_label(Rect::new(rect.x, y, rect.w, 20.0), "Groups");
             y += 28.0;
             for (index, group) in groups.iter().enumerate() {
                 let cell = grid_cell(rect.x, y, rect.w - 8.0, columns, index, GROUP_H);
-                if group_card(ui, cell, group) {
+                let place = self.place(ui, Id::new(("group", group.uid.as_str())), cell, top);
+                if group_card(ui, place, group) {
                     self.group = Some(group.uid.clone());
                 }
             }
             y += rows(groups.len(), columns, GROUP_H) + space::XL;
         }
-        let label = Rect::new(rect.x, y, rect.w, 20.0);
-        let heading = if self.filtering() {
-            format!("Results \u{b7} {}", cards.len())
-        } else {
-            format!("Hosts \u{b7} {}", cards.len())
-        };
-        ui.section_label(label, &heading);
-        y += 28.0;
+        if heading {
+            let label = Rect::new(rect.x, y, rect.w, 20.0);
+            let words = if self.filtering() {
+                format!("Results \u{b7} {}", cards.len())
+            } else {
+                "Hosts".to_owned()
+            };
+            ui.section_label(label, &words);
+            y += 28.0;
+        }
         match self.mode {
             Mode::Grid => {
                 for (index, card) in cards.iter().enumerate() {
+                    let id = Id::new(("host", card.id));
                     let cell = grid_cell(rect.x, y, rect.w - 8.0, columns, index, CARD_H);
+                    let cell = self.place(ui, id, cell, top);
                     // Cards fill in one after another as the screen appears.
-                    let shown = ui.entrance(
-                        Id::new(("host", card.id)).with("enter"),
-                        Motion::SLOW.staggered(index),
+                    let shown = ui.entrance(id.with("enter"), Motion::SLOW.staggered(index));
+                    ui.push_layer(
+                        Layer::fade(shown)
+                            .scaled(cell.center(), 0.985 + 0.015 * shown)
+                            .shifted(0.0, 14.0 * (1.0 - shown)),
                     );
-                    ui.push_layer(Layer::fade(shown).shifted(0.0, 8.0 * (1.0 - shown)));
                     let event = host_card(ui, cell, card, self.selected == Some(card.id), menu);
+                    if matches!(event, CardEvent::Connect | CardEvent::More(MENU_CONNECT)) {
+                        self.launched = Some(ui.gfx.to_screen(cell));
+                    }
                     ui.pop_layer();
                     if let Some(found) = self.card_event(vault, card.id, event) {
                         action = Some(found);
@@ -1050,6 +1164,9 @@ impl HostsView {
                 for card in cards {
                     let row = Rect::new(rect.x, y, rect.w - 8.0, ROW_H);
                     let event = host_row(ui, row, card, self.selected == Some(card.id), menu);
+                    if matches!(event, CardEvent::Connect | CardEvent::More(MENU_CONNECT)) {
+                        self.launched = Some(ui.gfx.to_screen(row));
+                    }
                     if let Some(found) = self.card_event(vault, card.id, event) {
                         action = Some(found);
                     }
@@ -1358,14 +1475,14 @@ impl HostsView {
         let mut saved = false;
         if !editor.is_new {
             let delete_w = button_width(&mut ui.gfx, "Delete", Some(icons::TRASH));
-            let delete = Rect::new(footer.x + space::XL, cancel.y, delete_w, CONTROL);
+            let delete = Rect::new(footer.x + space::L, cancel.y, delete_w, CONTROL);
             if ui
                 .button(
                     Id::new("editor.delete"),
                     delete,
                     "Delete",
                     Some(icons::TRASH),
-                    Kind::Danger,
+                    Kind::Quiet,
                 )
                 .clicked
                 && vault.remove_host(editor.host.id).is_ok()
@@ -1379,7 +1496,7 @@ impl HostsView {
                 cancel,
                 "Cancel",
                 None,
-                Kind::Secondary,
+                Kind::Ghost,
             )
             .clicked
         {
@@ -1407,7 +1524,12 @@ impl HostsView {
             }
         }
         if saved || close_editor {
-            self.editor = None;
+            // It slides out with its form, but no secret stays in it for that.
+            self.leaving = self.editor.take().map(|mut editor| {
+                editor.password = Zeroizing::new(String::new());
+                editor.proxy = Zeroizing::new(String::new());
+                editor
+            });
         }
     }
 }
@@ -1886,14 +2008,14 @@ impl HostsView {
             let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
             if !editor.is_new {
                 let delete_w = button_width(&mut ui.gfx, "Delete", Some(icons::TRASH));
-                let delete = Rect::new(footer.x + space::XL, cancel.y, delete_w, CONTROL);
+                let delete = Rect::new(footer.x + space::L, cancel.y, delete_w, CONTROL);
                 if ui
                     .button(
                         Id::new("group.delete"),
                         delete,
                         "Delete",
                         Some(icons::TRASH),
-                        Kind::Danger,
+                        Kind::Quiet,
                     )
                     .clicked
                 {
@@ -1901,13 +2023,7 @@ impl HostsView {
                 }
             }
             if ui
-                .button(
-                    Id::new("group.cancel"),
-                    cancel,
-                    "Cancel",
-                    None,
-                    Kind::Secondary,
-                )
+                .button(Id::new("group.cancel"), cancel, "Cancel", None, Kind::Ghost)
                 .clicked
             {
                 close_editor = true;
@@ -1926,7 +2042,10 @@ impl HostsView {
             }
         }
         if done || close_editor {
-            self.group_editor = None;
+            self.leaving_group = self.group_editor.take().map(|mut editor| {
+                editor.proxy = Zeroizing::new(String::new());
+                editor
+            });
         }
     }
 }
@@ -1949,20 +2068,27 @@ impl Form {
     }
 
     fn section(&mut self, ui: &mut Ui<'_>, title: &str) {
-        ui.section_label(Rect::new(self.x, self.y, self.w, 16.0), title);
-        self.y += 16.0 + space::M;
+        let t = ui.theme;
+        ui.strict_text(
+            Rect::new(self.x, self.y, self.w, 18.0),
+            title,
+            BODY_MEDIUM,
+            t.text,
+            Align::Start,
+        );
+        self.y += 18.0 + space::M;
     }
 
     fn label(&mut self, ui: &mut Ui<'_>, label: &str) {
         let t = ui.theme;
         ui.strict_text(
-            Rect::new(self.x, self.y, self.w, 18.0),
+            Rect::new(self.x, self.y, self.w, 16.0),
             label,
-            BODY_MEDIUM,
-            t.text2.mix(t.text, 0.3),
+            SMALL,
+            t.text2,
             Align::Start,
         );
-        self.y += 18.0 + 6.0;
+        self.y += 16.0 + 5.0;
     }
 
     fn text(
@@ -1995,7 +2121,7 @@ impl Form {
             ui.gfx.text(line, error, SMALL, t.error, Align::Start);
             self.y += 20.0;
         }
-        self.y += space::L;
+        self.y += space::M + 2.0;
     }
 
     /// A field of several lines (notes) under its label, its lines wrapped at its width.
@@ -2022,7 +2148,7 @@ impl Form {
             },
         );
         ui.set_name(Id::new(id), label);
-        self.y += AREA_H + space::L;
+        self.y += AREA_H + space::M + 2.0;
     }
 
     fn secret(
@@ -2044,7 +2170,7 @@ impl Form {
                 ..FieldStyle::default()
             },
         );
-        self.y += CONTROL + space::L;
+        self.y += CONTROL + space::M + 2.0;
     }
 
     fn select(
@@ -2058,7 +2184,7 @@ impl Form {
         self.label(ui, label);
         let field = Rect::new(self.x, self.y, self.w, CONTROL);
         let chosen = ui.select(Id::new(id), field, items, selected, "");
-        self.y += CONTROL + space::L;
+        self.y += CONTROL + space::M + 2.0;
         chosen
     }
 
@@ -2094,23 +2220,6 @@ impl Form {
         ui.section_label(inner, title);
         self.y += 28.0 + space::S;
         response.clicked
-    }
-}
-
-/// The screen's title and the number of hosts listed.
-fn header(ui: &mut Ui<'_>, rect: Rect, count: usize) {
-    let t = ui.theme;
-    let mut row = rect;
-    let title = ui.gfx.measure("Hosts", TITLE).width;
-    let head = row.take_left(title + 2.0);
-    ui.strict_text(head, "Hosts", TITLE, t.text, Align::Start);
-    row.take_left(space::S + 2.0);
-    if count > 0 {
-        let label = count.to_string();
-        let width = ui.gfx.measure(&label, SMALL).width + 14.0;
-        let badge = Rect::new(row.x, row.center().y - 10.0, width, 20.0);
-        ui.gfx.fill_rect(badge, 10.0, t.hover);
-        ui.gfx.text(badge, &label, SMALL, t.text2, Align::Center);
     }
 }
 
@@ -2252,25 +2361,28 @@ fn host_card(
         if selected { 1.0 } else { 0.0 },
         Motion::BASE,
     );
-    // A hovered card lifts a little on a soft shadow; pressing sets it down again.
+    // A hovered card lifts a little on a soft shadow; pressing sets it down again and it gives
+    // a little, like a key.
     let lift = hover * (1.0 - press);
-    let shape = rect.offset(0.0, -1.5 * lift);
+    let shape = rect.offset(0.0, -1.0 * lift);
+    ui.push_layer(Layer::NONE.scaled(shape.center(), 1.0 - 0.012 * press));
+    let round = radius::CARD;
     if lift > 0.0 {
         ui.gfx
-            .shadow(shape, 12.0, 18.0, 6.0, t.shadow.alpha(lift * 0.5));
+            .shadow(shape, round, 22.0, 8.0, t.shadow.alpha(lift * 0.6));
     }
-    let fill = t
-        .surface
-        .mix(t.hover, hover * 0.3)
-        .mix(t.selected, chosen * 0.6);
-    ui.gfx.fill_rect(shape, 12.0, fill);
-    let border = t.line.mix(t.line_strong, hover).mix(t.accent, chosen);
-    ui.gfx.stroke_rect(shape, 12.0, 1.0 + 0.5 * chosen, border);
+    ui.gfx.fill_rect(shape, round, t.surface);
+    ui.gfx.fill_rect(shape, round, t.hover.alpha(hover));
+    ui.gfx.fill_rect(shape, round, t.selected.alpha(chosen));
+    if chosen > 0.0 {
+        ui.gfx
+            .stroke_rect(shape, round, 1.0, t.accent.alpha(0.6 * chosen));
+    }
     if response.focus_ring {
-        ui.focus_ring(shape, 12.0);
+        ui.focus_ring(shape, round);
     }
-    let mut inner = shape.inset(space::M + 2.0, 0.0);
-    let tile = inner.take_left(40.0).centered(40.0, 40.0);
+    let mut inner = shape.inset(space::M, 0.0);
+    let tile = inner.take_left(36.0).centered(36.0, 36.0);
     os::tile(ui, tile, &card.label, card.os);
     inner.take_left(space::M);
     // Kept for the Edit button whether it shows or not, so the text never moves under it.
@@ -2290,10 +2402,10 @@ fn host_card(
     if let Some(choice) = ui.context_menu(id, &response, menu) {
         event = CardEvent::More(choice);
     }
-    let name_line = Rect::new(inner.x, shape.y + 15.0, inner.w, 20.0);
-    let mut detail = Rect::new(inner.x, shape.y + 37.0, inner.w, 20.0);
+    let name_line = Rect::new(inner.x, shape.y + 12.0, inner.w, 20.0);
+    let mut detail = Rect::new(inner.x, shape.y + 32.0, inner.w, 20.0);
     ui.gfx
-        .text(name_line, &card.label, BODY_STRONG, t.text, Align::Start);
+        .text(name_line, &card.label, BODY_MEDIUM, t.text, Align::Start);
     // The tags share the second line with the address: the address takes what it needs (up
     // to 70 % of the line), the tags the rest, with a "+n" for those that do not fit.
     let address = ui.gfx.measure(&card.detail, SMALL).width + space::S;
@@ -2306,6 +2418,7 @@ fn host_card(
     }
     ui.gfx
         .text(detail, &card.detail, SMALL, t.text2, Align::Start);
+    ui.pop_layer();
     if response.hovered {
         ui.set_cursor(Cursor::Pointer);
     }
@@ -2392,17 +2505,18 @@ fn tag_chip(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str, on: bool) -> bool 
     let t = ui.theme;
     let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
     let round = rect.h / 2.0;
-    let (fill, border, ink) = if on {
-        (t.selected, t.accent, t.accent)
+    let (fill, ink) = if on {
+        (t.selected, t.text)
     } else {
         (
-            t.surface.mix(t.hover, hover),
-            t.line.mix(t.line_strong, hover),
+            t.hover.alpha(hover).over(t.surface),
             t.text2.mix(t.text, hover),
         )
     };
     ui.gfx.fill_rect(rect, round, fill);
-    ui.gfx.stroke_rect(rect, round, 1.0, border);
+    if on {
+        ui.gfx.stroke_rect(rect, round, 1.0, t.accent.alpha(0.6));
+    }
     if response.focus_ring {
         ui.focus_ring(rect, round);
     }
@@ -2448,8 +2562,8 @@ fn host_row(
         if selected { 1.0 } else { 0.0 },
         Motion::BASE,
     );
-    let fill = t.hover.alpha(hover * 0.7).mix(t.selected, chosen);
-    ui.gfx.fill_rect(rect, 8.0, fill);
+    ui.gfx.fill_rect(rect, 8.0, t.hover.alpha(hover));
+    ui.gfx.fill_rect(rect, 8.0, t.selected.alpha(chosen));
     if response.focus_ring {
         ui.focus_ring(rect, 8.0);
     }
@@ -2463,7 +2577,7 @@ fn host_row(
     os::tile(ui, tile, &card.label, card.os);
     name.take_left(space::M);
     ui.gfx
-        .text(name, &card.label, BODY_STRONG, t.text, Align::Start);
+        .text(name, &card.label, BODY_MEDIUM, t.text, Align::Start);
     ui.gfx
         .text(address, &card.detail, BODY, t.text2, Align::Start);
     let (count, width) = tags_fit(ui, &card.tags, tags.w);
@@ -2494,26 +2608,24 @@ fn group_card(ui: &mut Ui<'_>, rect: Rect, group: &GroupCard) -> bool {
     let response = ui.zone(id, rect, Role::ListItem, &group.name);
     let t = ui.theme;
     let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-    ui.gfx
-        .fill_rect(rect, 10.0, t.surface.mix(t.hover, hover * 0.35));
-    ui.gfx
-        .stroke_rect(rect, 10.0, 1.0, t.line.mix(t.line_strong, hover));
+    ui.gfx.fill_rect(rect, radius::CARD, t.surface);
+    ui.gfx.fill_rect(rect, radius::CARD, t.hover.alpha(hover));
     if response.focus_ring {
-        ui.focus_ring(rect, 10.0);
+        ui.focus_ring(rect, radius::CARD);
     }
-    let mut inner = rect.inset(space::M + 2.0, 0.0);
+    let mut inner = rect.inset(space::M, 0.0);
     let tile = inner.take_left(32.0).centered(32.0, 32.0);
-    ui.gfx.fill_rect(tile, 8.0, t.accent.alpha(0.14));
+    ui.gfx.fill_rect(tile, 8.0, t.hover);
     ui.gfx
-        .icon(icons::FOLDER, tile.centered(18.0, 18.0), t.accent);
+        .icon(icons::FOLDER, tile.centered(17.0, 17.0), t.text2);
     inner.take_left(space::M);
     let chevron = inner.take_right(16.0).centered(14.0, 14.0);
     ui.gfx
         .icon(icons::CHEVRON_RIGHT, chevron, t.text3.mix(t.text2, hover));
-    let name_line = Rect::new(inner.x, rect.y + 11.0, inner.w, 20.0);
-    let detail = Rect::new(inner.x, rect.y + 31.0, inner.w, 18.0);
+    let name_line = Rect::new(inner.x, rect.y + 9.0, inner.w, 20.0);
+    let detail = Rect::new(inner.x, rect.y + 29.0, inner.w, 18.0);
     ui.gfx
-        .text(name_line, &group.name, BODY_STRONG, t.text, Align::Start);
+        .text(name_line, &group.name, BODY_MEDIUM, t.text, Align::Start);
     ui.gfx
         .text(detail, &group.holds, SMALL, t.text2, Align::Start);
     if response.hovered {
@@ -2550,7 +2662,7 @@ fn no_results(ui: &mut Ui<'_>, rect: Rect, query: &str, can_save: bool) -> bool 
     ui.gfx.text(
         column.take_top(22.0),
         &title,
-        BODY_STRONG,
+        BODY_MEDIUM,
         t.text,
         Align::Center,
     );
@@ -2580,17 +2692,21 @@ fn panel_backing(ui: &mut Ui<'_>, content: Rect, panel: Rect) {
     // Beside the list, or over all of it in a narrow window.
     let beside = panel.x > content.x + 0.5;
     if beside {
-        // The shadow falls on the list only, never past the card's edges.
-        ui.push_clip(Rect::new(panel.x - 40.0, panel.y, 40.0, panel.h));
-        ui.gfx.shadow(panel, 0.0, 18.0, 0.0, t.shadow);
-        ui.pop_clip();
+        // A soft edge of shadow on the list.
+        ui.gfx.fill_gradient(
+            Rect::new(panel.x - 22.0, panel.y, 22.0, panel.h),
+            0.0,
+            t.shadow.alpha(0.0),
+            t.shadow.alpha(if t.dark { 0.55 } else { 0.4 }),
+            true,
+        );
     }
-    ui.gfx.fill_rect(panel, radius, t.raised);
+    ui.gfx.fill_rect(panel, radius, t.surface);
     if beside {
         ui.gfx.fill_rect(
             Rect::new(panel.x, panel.y, 2.0 * radius, panel.h),
             0.0,
-            t.raised,
+            t.surface,
         );
         // The card's outline on the right, which the surface covers.
         ui.push_clip(Rect::new(
@@ -2761,7 +2877,7 @@ mod tests {
         assert_eq!(grid_columns(560.0), 2);
         assert_eq!(grid_columns(400.0), 1);
         let cell = grid_cell(0.0, 0.0, 552.0, 2, 3, 72.0);
-        assert_eq!(cell, Rect::new(282.0, 84.0, 270.0, 72.0));
+        assert_eq!(cell, Rect::new(280.0, 80.0, 272.0, 72.0));
     }
 
     #[test]

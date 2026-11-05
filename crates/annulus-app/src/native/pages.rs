@@ -8,7 +8,7 @@ use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::IconId;
 use annulus_ui::kit::{Cursor, Id, Response, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
-use annulus_ui::widgets::{BODY, BODY_STRONG, CONTROL, HEADING, Kind, SMALL, TITLE, button_width};
+use annulus_ui::widgets::{BODY, BODY_MEDIUM, CONTROL, HEADING, Kind, SMALL, TITLE, button_width};
 
 /// Side padding of a page.
 pub const PAD: f32 = 28.0;
@@ -33,6 +33,29 @@ pub fn page(rect: Rect) -> Rect {
     inner
 }
 
+/// How many things a page's title stands for, set quietly beside it.
+const TITLE_COUNT: annulus_ui::gfx::Font = annulus_ui::gfx::Font::ui(15.0);
+
+/// A page's title with the number of things under it set quietly beside it, taken from the
+/// left of `row`.
+pub fn title(ui: &mut Ui<'_>, row: &mut Rect, title: &str, count: Option<usize>) {
+    let t = ui.theme;
+    let width = ui.gfx.measure(title, TITLE).width;
+    let head = row.take_left(width + 2.0);
+    ui.strict_text(head, title, TITLE, t.text, Align::Start);
+    row.take_left(space::S);
+    if let Some(count) = count.filter(|count| *count > 0) {
+        let label = count.to_string();
+        let w = ui.gfx.measure(&label, TITLE_COUNT).width + 2.0;
+        // On the title's baseline, near enough for the eye.
+        let beside = row.take_left(w);
+        let beside = Rect::new(beside.x, beside.y + 3.0, beside.w, beside.h);
+        ui.gfx
+            .text(beside, &label, TITLE_COUNT, t.text3, Align::Start);
+        row.take_left(space::S);
+    }
+}
+
 /// The title row and the subtitle under it; returns the space right of the title for
 /// actions (as tall as a control) and leaves `rect` below the header.
 pub fn header(
@@ -44,17 +67,7 @@ pub fn header(
 ) -> Rect {
     let t = ui.theme;
     let mut row = rect.take_top(36.0);
-    let width = ui.gfx.measure(title, TITLE).width;
-    let head = row.take_left(width + 2.0);
-    ui.strict_text(head, title, TITLE, t.text, Align::Start);
-    row.take_left(space::S + 2.0);
-    if let Some(count) = count.filter(|count| *count > 0) {
-        let label = count.to_string();
-        let w = ui.gfx.measure(&label, SMALL).width + 14.0;
-        let badge = Rect::new(row.x, row.center().y - 10.0, w, 20.0);
-        ui.gfx.fill_rect(badge, 10.0, t.hover);
-        ui.gfx.text(badge, &label, SMALL, t.text2, Align::Center);
-    }
+    self::title(ui, &mut row, title, count);
     rect.take_top(space::XS);
     ui.gfx
         .text(rect.take_top(20.0), subtitle, BODY, t.text2, Align::Start);
@@ -84,18 +97,12 @@ pub fn row(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str, selected: bool) -> 
     // Still hovered on the row's buttons.
     let hovered = ui.hover_within(rect);
     let hover = ui.ease(id.with("hover"), if hovered { 1.0 } else { 0.0 });
-    let fill = if selected {
-        t.selected
-    } else {
-        t.surface.mix(t.hover, hover * 0.4)
-    };
-    ui.gfx.fill_rect(rect, 10.0, fill);
-    let border = if selected {
-        t.accent.alpha(0.6)
-    } else {
-        t.line.mix(t.line_strong, hover)
-    };
-    ui.gfx.stroke_rect(rect, 10.0, 1.0, border);
+    ui.gfx.fill_rect(rect, 10.0, t.surface);
+    ui.gfx.fill_rect(rect, 10.0, t.hover.alpha(hover));
+    if selected {
+        ui.gfx.fill_rect(rect, 10.0, t.selected);
+        ui.gfx.stroke_rect(rect, 10.0, 1.0, t.accent.alpha(0.55));
+    }
     if response.focus_ring {
         ui.focus_ring(rect, 10.0);
     }
@@ -110,8 +117,8 @@ pub fn row_icon(ui: &mut Ui<'_>, rect: Rect, icon: IconId) -> Rect {
     let t = ui.theme;
     let mut inner = rect.inset(space::M + 2.0, 0.0);
     let tile = inner.take_left(32.0).centered(32.0, 32.0);
-    ui.gfx.fill_rect(tile, 8.0, t.accent.alpha(0.14));
-    ui.gfx.icon(icon, tile.centered(18.0, 18.0), t.accent);
+    ui.gfx.fill_rect(tile, 8.0, t.hover);
+    ui.gfx.icon(icon, tile.centered(17.0, 17.0), t.text2);
     inner.take_left(space::M);
     inner
 }
@@ -121,13 +128,13 @@ pub fn two_lines(ui: &mut Ui<'_>, rect: Rect, title: &str, detail: &str, mono_de
     let t = ui.theme;
     let top = Rect::new(rect.x, rect.center().y - 19.0, rect.w, 20.0);
     let bottom = Rect::new(rect.x, rect.center().y + 1.0, rect.w, 18.0);
-    ui.gfx.text(top, title, BODY_STRONG, t.text, Align::Start);
-    let font = if mono_detail {
-        annulus_ui::gfx::Font::mono(11.5)
+    ui.gfx.text(top, title, BODY_MEDIUM, t.text, Align::Start);
+    let (font, ink) = if mono_detail {
+        (annulus_ui::gfx::Font::mono(11.5), t.text3)
     } else {
-        SMALL
+        (SMALL, t.text2)
     };
-    ui.gfx.text(bottom, detail, font, t.text2, Align::Start);
+    ui.gfx.text(bottom, detail, font, ink, Align::Start);
 }
 
 /// A titled card of settings rows; returns the inside, `height` tall, and moves `rect` past it.
@@ -137,7 +144,6 @@ pub fn card(ui: &mut Ui<'_>, rect: &mut Rect, title: &str, height: f32) -> Rect 
     rect.take_top(space::S);
     let card = rect.take_top(height);
     ui.gfx.fill_rect(card, 12.0, t.surface);
-    ui.gfx.stroke_rect(card, 12.0, 1.0, t.line);
     rect.take_top(space::XL);
     card.inset(space::L, space::S)
 }
@@ -159,7 +165,7 @@ pub fn card_in(ui: &mut Ui<'_>, id: Id, area: Rect, card: Rect) {
     let open = ui.entrance(id.with("card.open"), Motion::POP);
     ui.gfx
         .fill_rect(area, 0.0, t.scrim.alpha(open.clamp(0.0, 1.0)));
-    ui.push_layer(Layer::appear(open, card.center(), 0.94, 8.0));
+    ui.push_layer(Layer::appear(open, card.center(), 0.97, 10.0).grouped(card.outset(48.0)));
 }
 
 /// Ends what [`card_in`] began.
@@ -179,10 +185,9 @@ pub fn empty(ui: &mut Ui<'_>, rect: Rect, icon: IconId, title: &str, line: &str)
     let t = ui.theme;
     let block = rect.centered(rect.w.min(460.0), 150.0);
     let mut column = block;
-    let badge = column.take_top(64.0).centered(64.0, 64.0);
-    ui.gfx.fill_rect(badge, 18.0, t.selected);
-    ui.gfx.stroke_rect(badge, 18.0, 1.0, t.accent.alpha(0.35));
-    ui.gfx.icon(icon, badge.centered(28.0, 28.0), t.accent);
+    let badge = column.take_top(64.0).centered(52.0, 52.0);
+    ui.gfx.fill_rect(badge, 14.0, t.hover);
+    ui.gfx.icon(icon, badge.centered(24.0, 24.0), t.text2);
     column.take_top(space::L);
     ui.strict_text(column.take_top(24.0), title, HEADING, t.text, Align::Center);
     column.take_top(space::XS);

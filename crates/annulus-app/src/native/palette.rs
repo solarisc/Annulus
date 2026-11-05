@@ -79,9 +79,7 @@ impl PaletteView {
             width,
             CONTROL + 2.0 * space::M + list_h + space::S,
         );
-        ui.gfx.shadow(card, 14.0, 32.0, 12.0, t.shadow);
-        ui.gfx.fill_rect(card, 14.0, t.raised);
-        ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
+        ui.raised_surface(card, 14.0);
         ui.zone(Id::new("palette.card"), card, Role::Backdrop, "");
         let mut inner = card.inset(space::M, space::M);
         let field_id = Id::new("palette.query");
@@ -153,7 +151,7 @@ impl PaletteView {
                 icon,
                 slot,
                 if index == self.selected {
-                    t.accent
+                    t.text
                 } else {
                     t.text2
                 },

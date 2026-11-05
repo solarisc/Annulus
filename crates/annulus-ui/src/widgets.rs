@@ -11,7 +11,7 @@ use crate::gfx::{Align, Canvas, Color, Font, Point, Rect, Weight};
 use crate::icons::{self, IconId};
 use crate::kit::{Cursor, Id, Key, Modifiers, Response, Role, Typed, Ui};
 use crate::motion::{Layer, Motion};
-use annulus_config::tokens::{metrics, radius, space, text};
+use annulus_config::tokens::{metrics, motion as motion_ms, radius, space, text};
 
 /// Body text.
 pub const BODY: Font = Font::ui(text::BODY);
@@ -22,28 +22,34 @@ pub const BODY_STRONG: Font = Font::ui(text::BODY).weight(Weight::Semibold);
 /// Secondary text.
 pub const SMALL: Font = Font::ui(text::SECONDARY);
 /// Section labels above groups of rows.
-pub const LABEL: Font = Font::ui(11.0).weight(Weight::Semibold);
+pub const LABEL: Font = Font::ui(text::SECONDARY).weight(Weight::Medium);
 /// Section headings.
 pub const HEADING: Font = Font::ui(text::HEADING).weight(Weight::Semibold);
 /// Page titles.
-pub const TITLE: Font = Font::ui(20.0).weight(Weight::Semibold);
+pub const TITLE: Font = Font::display(text::TITLE).weight(Weight::Semibold);
 
 /// Height of buttons and fields.
 pub const CONTROL: f32 = metrics::CONTROL_HEIGHT;
+/// Height of the large search field at the top of a screen.
+pub const SEARCH: f32 = metrics::SEARCH_HEIGHT;
+/// How far a floating surface's shadow reaches past it, for fading it as one.
+const MENU_SHADOW: f32 = 44.0;
 /// Height of one menu entry.
-const MENU_ITEM: f32 = 30.0;
+const MENU_ITEM: f32 = 32.0;
 
 /// How a button looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// The one main action of a screen: filled with the accent.
     Primary,
-    /// Other actions: a quiet outlined button.
+    /// Other actions: a quiet filled button.
     Secondary,
     /// Toolbar actions: no background until hovered.
     Ghost,
-    /// Destructive actions.
+    /// A destructive action being confirmed: unmistakably red.
     Danger,
+    /// A destructive action that sits by others: quiet until the pointer reaches it.
+    Quiet,
 }
 
 /// Text on keycaps.
@@ -335,7 +341,79 @@ fn swatch(canvas: &mut dyn Canvas, rect: Rect, colors: &[Color], line: Color) {
     }
 }
 
+/// Where the accent's top edge catches the light, for a control in `rect` with corners
+/// `round`.
+fn top_light(rect: Rect, round: f32) -> Rect {
+    Rect::new(rect.x + round, rect.y + 0.5, rect.w - 2.0 * round, 1.0)
+}
+
 impl Ui<'_> {
+    /// A floating surface (a menu, a dialog, a toast): a wide soft shadow and a tight one under
+    /// it, its fill, a hairline, and in the dark theme a line of light along its top edge.
+    pub fn raised_surface(&mut self, rect: Rect, round: f32) {
+        let t = self.theme;
+        self.gfx
+            .shadow(rect, round, 34.0, 14.0, t.shadow.alpha(0.75));
+        self.gfx.shadow(rect, round, 7.0, 2.0, t.shadow.alpha(0.55));
+        self.gfx.fill_rect(rect, round, t.raised);
+        self.gfx.stroke_rect(rect, round, 1.0, t.line);
+        if t.dark {
+            self.gfx
+                .fill_rect(top_light(rect, round), 0.5, Color::WHITE.alpha(0.05));
+        }
+    }
+
+    /// A band of light passing across `rect` again and again: work under way that cannot say
+    /// how long it will take. Asks for frames while it is drawn; nothing under reduced motion.
+    pub fn sweep(&mut self, rect: Rect) {
+        const PERIOD: f64 = 1.15;
+        if self.state.reduce_motion {
+            return;
+        }
+        #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+        let phase = ((self.time() % PERIOD) / PERIOD) as f32;
+        let band = rect.w * 0.45;
+        let x = rect.x - band + (rect.w + band) * crate::motion::Curve::InOut.at(phase);
+        let light = Color::WHITE.alpha(0.3);
+        // Clear of the corners, which the band would otherwise light past their curve.
+        self.push_clip(rect.inset(radius::MEDIUM, 0.0));
+        self.gfx.fill_gradient(
+            Rect::new(x, rect.y, band / 2.0, rect.h),
+            0.0,
+            light.alpha(0.0),
+            light,
+            true,
+        );
+        self.gfx.fill_gradient(
+            Rect::new(x + band / 2.0, rect.y, band / 2.0, rect.h),
+            0.0,
+            light,
+            light.alpha(0.0),
+            true,
+        );
+        self.pop_clip();
+        self.request_repaint();
+    }
+
+    /// The accent fill of a primary control: lit a little from above, brighter with `hover`,
+    /// deeper with `press`.
+    fn accent_fill(&mut self, rect: Rect, round: f32, hover: f32, press: f32) {
+        let t = self.theme;
+        let base = t
+            .accent
+            .mix(t.accent_hover, hover)
+            .mix(Color::BLACK, 0.14 * press);
+        self.gfx.fill_gradient(
+            rect,
+            round,
+            base.mix(Color::WHITE, 0.07),
+            base.mix(Color::BLACK, 0.05),
+            false,
+        );
+        self.gfx
+            .fill_rect(top_light(rect, round), 0.5, Color::WHITE.alpha(0.16));
+    }
+
     /// The item of the open menu of `id` under the pointer, else the one the keyboard is on:
     /// what a choice would look like can be shown before it is made.
     #[must_use]
@@ -374,34 +452,42 @@ impl Ui<'_> {
         let response = self.zone(id, rect, Role::Button, name);
         let t = self.theme;
         let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-        let (fill, border, ink) = match kind {
-            Kind::Primary => (
-                t.accent.mix(t.accent_hover, hover),
-                Color::TRANSPARENT,
-                t.on_accent,
-            ),
-            Kind::Secondary => (t.surface.mix(t.hover, hover), t.line_strong, t.text),
-            Kind::Ghost => (t.hover.alpha(hover), Color::TRANSPARENT, t.text),
-            Kind::Danger => (
-                t.error.alpha(0.12 + 0.1 * hover),
-                t.error.alpha(0.5),
-                t.error,
-            ),
-        };
-        let fill = if response.pressed {
-            fill.mix(t.press, 0.4)
-        } else {
-            fill
-        };
         // Held down, it gives a little, like a key.
         let press = self.ease(id.with("press"), if response.pressed { 1.0 } else { 0.0 });
-        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.035 * press));
-        self.gfx.fill_rect(rect, radius::SMALL + 2.0, fill);
-        if border.a > 0 {
-            self.gfx.stroke_rect(rect, radius::SMALL + 2.0, 1.0, border);
-        }
+        let round = radius::MEDIUM;
+        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.03 * press));
+        let ink = match kind {
+            Kind::Primary => {
+                self.accent_fill(rect, round, hover, press);
+                t.on_accent
+            }
+            Kind::Secondary => {
+                self.gfx.fill_rect(rect, round, t.field);
+                if !t.dark {
+                    self.gfx.stroke_rect(rect, round, 1.0, t.line);
+                }
+                self.gfx.fill_rect(rect, round, t.hover.alpha(hover));
+                self.gfx.fill_rect(rect, round, t.press.alpha(press));
+                t.text
+            }
+            Kind::Ghost => {
+                self.gfx.fill_rect(rect, round, t.hover.alpha(hover));
+                self.gfx.fill_rect(rect, round, t.press.alpha(press));
+                t.text
+            }
+            Kind::Danger => {
+                let fill = t.error.alpha(0.15 + 0.1 * hover + 0.08 * press);
+                self.gfx.fill_rect(rect, round, fill);
+                t.error
+            }
+            Kind::Quiet => {
+                let fill = t.error.alpha(0.13 * hover + 0.08 * press);
+                self.gfx.fill_rect(rect, round, fill);
+                t.text2.mix(t.error, hover)
+            }
+        };
         if response.focus_ring {
-            self.focus_ring(rect, radius::SMALL + 2.0);
+            self.focus_ring(rect, round);
         }
         let content = button_width(&mut self.gfx, label, icon) - 2.0 * space::M;
         let mut inner = rect.centered(content.min(rect.w - 2.0 * space::S), rect.h);
@@ -432,22 +518,16 @@ impl Ui<'_> {
         let response = self.zone(id, rect, Role::Button, name);
         let t = self.theme;
         let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-        let fill = if active {
-            t.selected
-        } else {
-            t.hover.alpha(hover)
-        };
+        let on = self.animate(id.with("on"), if active { 1.0 } else { 0.0 }, Motion::FAST);
         let press = self.ease(id.with("press"), if response.pressed { 1.0 } else { 0.0 });
-        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.06 * press));
-        self.gfx.fill_rect(rect, radius::SMALL + 2.0, fill);
+        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.07 * press));
+        let round = radius::MEDIUM - 1.0;
+        self.gfx.fill_rect(rect, round, t.selected.alpha(on));
+        self.gfx.fill_rect(rect, round, t.hover.alpha(hover));
         if response.focus_ring {
-            self.focus_ring(rect, radius::SMALL + 2.0);
+            self.focus_ring(rect, round);
         }
-        let ink = if active {
-            t.accent
-        } else {
-            t.text2.mix(t.text, hover)
-        };
+        let ink = t.text2.mix(t.text, hover.max(on));
         self.gfx.icon(icon, rect.centered(16.0, 16.0), ink);
         self.pop_layer();
         self.tooltip(id, rect, name);
@@ -472,20 +552,8 @@ impl Ui<'_> {
         };
         let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
         let focus = self.ease(id.with("focus"), if response.focused { 1.0 } else { 0.0 });
-        let border = if style.error {
-            t.error
-        } else {
-            t.line_strong.mix(t.text3, hover * 0.6).mix(t.accent, focus)
-        };
-        if focus > 0.0 {
-            self.gfx.fill_rect(
-                rect.outset(3.0),
-                radius::SMALL + 5.0,
-                t.accent.alpha(0.22 * focus),
-            );
-        }
-        self.gfx.fill_rect(rect, radius::SMALL + 2.0, t.field);
-        self.gfx.stroke_rect(rect, radius::SMALL + 2.0, 1.0, border);
+        let round = field_round(rect);
+        self.field_box(rect, round, hover, focus, style.error);
         if response.hovered {
             self.set_cursor(Cursor::Text);
         }
@@ -656,17 +724,9 @@ impl Ui<'_> {
         } else {
             BODY
         };
+        let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
         let focus = self.ease(id.with("focus"), if response.focused { 1.0 } else { 0.0 });
-        if focus > 0.0 {
-            self.gfx.fill_rect(
-                rect.outset(3.0),
-                radius::SMALL + 5.0,
-                t.accent.alpha(0.22 * focus),
-            );
-        }
-        self.gfx.fill_rect(rect, radius::SMALL + 2.0, t.field);
-        let border = t.line_strong.mix(t.accent, focus);
-        self.gfx.stroke_rect(rect, radius::SMALL + 2.0, 1.0, border);
+        self.field_box(rect, radius::MEDIUM, hover, focus, style.error);
         if response.hovered {
             self.set_cursor(Cursor::Text);
         }
@@ -866,6 +926,31 @@ impl Ui<'_> {
         }
     }
 
+    /// The box of a text field: a veil with no outline at rest, a faint one under the pointer,
+    /// and when focused the accent with a soft glow around it.
+    fn field_box(&mut self, rect: Rect, round: f32, hover: f32, focus: f32, error: bool) {
+        let t = self.theme;
+        if focus > 0.0 {
+            let glow = if error { t.error } else { t.accent };
+            self.gfx
+                .fill_rect(rect.outset(3.0), round + 3.0, glow.alpha(0.2 * focus));
+            // The glow stays outside: the box is see-through.
+            self.gfx.fill_rect(rect, round, t.bg.alpha(focus));
+        }
+        self.gfx.fill_rect(rect, round, t.field);
+        let at_rest = if t.dark {
+            t.line_strong.alpha(0.0)
+        } else {
+            t.line
+        };
+        let border = if error {
+            t.error
+        } else {
+            at_rest.mix(t.line_strong, hover).mix(t.accent, focus)
+        };
+        self.gfx.stroke_rect(rect, round, 1.0, border);
+    }
+
     /// The rows text area `id` shows `text` in ([`visual_rows`]). Wrapped rows are kept
     /// until the text or width changes: measuring every word each frame would be slow.
     fn text_rows(
@@ -907,18 +992,26 @@ impl Ui<'_> {
         self.set_toggled(id, *value);
         let t = self.theme;
         let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-        let on = self.ease(id.with("on"), if *value { 1.0 } else { 0.0 });
+        let on = self.animate(
+            id.with("on"),
+            if *value { 1.0 } else { 0.0 },
+            Motion::new(motion_ms::BASE, crate::motion::Curve::Overshoot),
+        );
         let mut row = rect;
         let box_rect = row.take_left(16.0).centered(16.0, 16.0);
-        let fill = t.field.mix(t.accent, on);
-        self.gfx.fill_rect(box_rect, radius::SMALL, fill);
-        let border = t.line_strong.mix(t.text3, hover).mix(t.accent, on);
+        let shown = on.clamp(0.0, 1.0);
+        self.gfx.fill_rect(box_rect, radius::SMALL, t.field);
+        self.gfx
+            .fill_rect(box_rect, radius::SMALL, t.accent.alpha(shown));
+        let border = t.line_strong.mix(t.text3, hover).mix(t.accent, shown);
         self.gfx.stroke_rect(box_rect, radius::SMALL, 1.0, border);
-        if on > 0.0 {
+        if shown > 0.0 {
+            // The check pops into place a little past its size.
+            let size = 13.0 * (0.55 + 0.45 * on);
             self.gfx.icon(
                 icons::CHECK,
-                box_rect.inset(1.5, 1.5),
-                t.on_accent.alpha(on),
+                box_rect.centered(size, size),
+                t.on_accent.alpha(shown),
             );
         }
         if response.focus_ring {
@@ -941,13 +1034,25 @@ impl Ui<'_> {
         }
         self.set_toggled(id, *value);
         let t = self.theme;
-        let on = self.ease(id.with("on"), if *value { 1.0 } else { 0.0 });
+        let on = self.animate(id.with("on"), if *value { 1.0 } else { 0.0 }, Motion::FAST);
         // Off, the track is dark enough to read as a control on a white card too.
         let off = t.line_strong.mix(t.text3, 0.55);
         self.gfx.fill_rect(track, 10.0, off.mix(t.accent, on));
-        let knob = Point::new(track.x + 10.0 + 14.0 * on, track.center().y);
-        self.gfx
-            .fill_circle(knob, 7.0, t.on_accent.mix(Color::WHITE, 0.4));
+        // The knob lands with a little life, and stretches as it travels.
+        let travel = self.spring_with(
+            id.with("knob"),
+            if *value { 14.0 } else { 0.0 },
+            crate::motion::Feel::Soft,
+        );
+        let middle = (travel / 14.0).clamp(0.0, 1.0);
+        let stretch = 5.0 * (middle * std::f32::consts::PI).sin();
+        let knob = Rect::new(
+            track.x + 3.0 + travel - stretch / 2.0,
+            track.y + 3.0,
+            14.0 + stretch,
+            14.0,
+        );
+        self.gfx.fill_rect(knob, 7.0, Color::WHITE);
         if response.focus_ring {
             self.focus_ring(track, 10.0);
         }
@@ -987,16 +1092,14 @@ impl Ui<'_> {
         let t = self.theme;
         let open = self.state.popup.as_ref().is_some_and(|p| p.owner == id);
         let hover = self.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-        self.gfx
-            .fill_rect(rect, radius::SMALL + 2.0, t.field.mix(t.hover, hover * 0.5));
-        let border = if open || response.focused {
-            t.accent
-        } else {
-            t.line_strong.mix(t.text3, hover * 0.6)
-        };
-        self.gfx.stroke_rect(rect, radius::SMALL + 2.0, 1.0, border);
+        let lit = self.ease(
+            id.with("lit"),
+            if open || response.focused { 1.0 } else { 0.0 },
+        );
+        let round = radius::MEDIUM;
+        self.field_box(rect, round, hover, lit, false);
         if response.focus_ring {
-            self.focus_ring(rect, radius::SMALL + 2.0);
+            self.focus_ring(rect, round);
         }
         let mut inner = rect.inset(space::M - 2.0, 0.0);
         let chevron = inner.take_right(16.0);
@@ -1078,12 +1181,12 @@ impl Ui<'_> {
         let response = self.zone(id, main, Role::Button, label);
         let toggle = self.zone(more_id, more, Role::Button, menu_name);
         let open = self.menu_open(more_id);
-        let corner = radius::SMALL + 2.0;
+        let corner = radius::MEDIUM;
         let held = response.pressed || toggle.pressed;
         let press = self.ease(id.with("press"), if held { 1.0 } else { 0.0 });
-        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.035 * press));
+        self.push_layer(Layer::NONE.scaled(rect.center(), 1.0 - 0.03 * press));
         // One shape; each half lights up on its own, clipped so only the outer corners round.
-        self.gfx.fill_rect(rect, corner, t.accent);
+        self.accent_fill(rect, corner, 0.0, 0.0);
         // The half with the keyboard is lit as under the pointer: it is where Enter goes.
         for (half, half_id, zone, lit) in [
             (main, id, response, response.hovered || response.focus_ring),
@@ -1095,20 +1198,15 @@ impl Ui<'_> {
             ),
         ] {
             let hover = self.ease(half_id.with("hover"), if lit { 1.0 } else { 0.0 });
-            if hover > 0.0 || zone.pressed {
-                let fill = t.accent.mix(t.accent_hover, hover);
-                let fill = if zone.pressed {
-                    fill.mix(t.press, 0.4)
-                } else {
-                    fill
-                };
+            let down = self.ease(half_id.with("down"), if zone.pressed { 1.0 } else { 0.0 });
+            if hover > 0.0 || down > 0.0 {
                 self.push_clip(half);
-                self.gfx.fill_rect(rect, corner, fill);
+                self.accent_fill(rect, corner, hover, down);
                 self.pop_clip();
             }
         }
         let divider = Rect::new(more.x, rect.y + 8.0, 1.0, rect.h - 16.0);
-        self.gfx.fill_rect(divider, 0.0, t.on_accent.alpha(0.25));
+        self.gfx.fill_rect(divider, 0.0, t.on_accent.alpha(0.22));
         let needed = button_width(&mut self.gfx, label, Some(icon));
         let full = main.w >= needed;
         if full {
@@ -1237,6 +1335,7 @@ impl Ui<'_> {
     /// Draws what floats above the frame: the open menu. Call after everything else.
     pub fn overlays(&mut self) {
         self.draw_toasts();
+        self.menu_leaving();
         let Some(popup) = self.state.popup.clone() else {
             self.draw_tooltip();
             return;
@@ -1292,14 +1391,46 @@ impl Ui<'_> {
             popup.anchor.center().x.clamp(menu.x, menu.r()),
             if below { menu.y } else { menu.b() },
         );
-        self.push_layer(Layer::appear(
-            open,
-            origin,
-            0.9,
-            if below { -6.0 } else { 6.0 },
-        ));
+        self.push_layer(
+            Layer::appear(open, origin, 0.96, if below { -4.0 } else { 4.0 })
+                .grouped(menu.outset(MENU_SHADOW)),
+        );
         self.draw_menu(&popup, menu);
         self.pop_layer();
+        self.state.menu_on_screen = Some((popup, menu));
+    }
+
+    /// The menu drawn last frame, if it has closed since: it fades out where it was, taking
+    /// nothing, while whatever is under it already works.
+    fn menu_leaving(&mut self) {
+        let open = self.state.popup.as_ref().map(|popup| popup.owner);
+        let closed = self
+            .state
+            .menu_on_screen
+            .take_if(|(popup, _)| Some(popup.owner) != open);
+        if let Some((popup, menu)) = closed
+            && !self.state.reduce_motion
+        {
+            self.state.menu_leaving = Some((popup, menu, self.time()));
+        }
+        let Some((popup, menu, since)) = self.state.menu_leaving.clone() else {
+            return;
+        };
+        #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+        let gone = ((self.time() - since) * 1000.0 / f64::from(motion_ms::EXIT)) as f32;
+        if gone >= 1.0 {
+            self.state.menu_leaving = None;
+            // One more frame draws the screen without it.
+            self.request_repaint();
+            return;
+        }
+        let fade = 1.0 - crate::motion::Curve::Exit.at(gone);
+        self.push_inert();
+        self.push_layer(Layer::fade(fade).grouped(menu.outset(MENU_SHADOW)));
+        self.draw_menu(&popup, menu);
+        self.pop_layer();
+        self.pop_inert();
+        self.request_repaint();
     }
 
     /// The search at the top of the open menu `popup`, in `rect`: it has the keyboard as the
@@ -1320,6 +1451,9 @@ impl Ui<'_> {
                 ..FieldStyle::default()
             },
         );
+        if self.inert() {
+            return;
+        }
         let Some(open) = self.state.popup.as_mut() else {
             return;
         };
@@ -1345,9 +1479,6 @@ impl Ui<'_> {
         let t = self.theme;
         let item = &popup.items[index];
         let response = self.zone(popup.owner.with(("item", index)), row, Role::MenuItem, item);
-        if response.hovered || response.focus_ring {
-            self.gfx.fill_rect(row, radius::SMALL, t.hover);
-        }
         let mut inner = row.inset(space::S + 2.0, 0.0);
         let check = inner.take_right(16.0);
         if popup.selected == Some(index) {
@@ -1367,14 +1498,13 @@ impl Ui<'_> {
 
     /// The open menu `popup`'s surface, its search when it is long, and the items the search
     /// keeps, in `menu`.
+    #[allow(clippy::too_many_lines)] // One surface, top to bottom.
     fn draw_menu(&mut self, popup: &Popup, menu: Rect) {
         let t = self.theme;
         // A click on the menu between its items (its edge, its scroll bar) stays in the menu
         // rather than reaching the backdrop and closing it.
         self.zone(popup.owner.with("menu.surface"), menu, Role::Backdrop, "");
-        self.gfx.shadow(menu, radius::MEDIUM, 16.0, 6.0, t.shadow);
-        self.gfx.fill_rect(menu, radius::MEDIUM, t.raised);
-        self.gfx.stroke_rect(menu, radius::MEDIUM, 1.0, t.line);
+        self.raised_surface(menu, radius::LARGE);
         let mut list = menu.inset(4.0, 4.0);
         let shown = popup.matches();
         if popup.searchable() {
@@ -1410,11 +1540,37 @@ impl Ui<'_> {
         } else {
             0.0
         };
-        if let Some(open) = self.state.popup.as_mut() {
+        if !self.inert()
+            && let Some(open) = self.state.popup.as_mut()
+        {
             open.shown = true;
         }
         self.push_clip(list);
         let (mut hovered, mut focused) = (None, None);
+        // One highlight that glides from row to row under the pointer or the keyboard.
+        let hot_at = popup
+            .hot
+            .and_then(|hot| shown.iter().position(|index| *index == hot));
+        let highlight = self.ease(
+            popup.owner.with("menu.lit"),
+            if hot_at.is_some() { 1.0 } else { 0.0 },
+        );
+        #[allow(clippy::cast_precision_loss)] // As above.
+        let row_at = |at: usize| at as f32 * MENU_ITEM;
+        if let Some(at) = hot_at {
+            self.state.menu_hot_row = row_at(at);
+        }
+        let glide = self.spring(popup.owner.with("menu.glide"), self.state.menu_hot_row);
+        let highlight_w = if content > list.h {
+            list.w - 8.0
+        } else {
+            list.w
+        };
+        self.gfx.fill_rect(
+            Rect::new(list.x, list.y - offset + glide, highlight_w, MENU_ITEM),
+            radius::MEDIUM - 2.0,
+            t.hover.alpha(highlight),
+        );
         // Rows stop short of the scroll bar, so it never runs over a swatch or a highlight.
         let row_w = if content > list.h {
             list.w - 8.0
@@ -1453,7 +1609,8 @@ impl Ui<'_> {
         self.pop_clip();
         // A new hot item changes what the owner previews: draw it at once.
         let hot = hovered.or(focused);
-        if let Some(open) = self.state.popup.as_mut()
+        if !self.inert()
+            && let Some(open) = self.state.popup.as_mut()
             && open.hot != hot
         {
             open.hot = hot;
@@ -1508,10 +1665,10 @@ impl Ui<'_> {
                 .max(200.0);
             let rect = Rect::new(self.viewport.r() - 20.0 - width, bottom - 44.0, width, 44.0);
             bottom -= 52.0 * shown;
-            self.push_layer(Layer::fade(shown).shifted(28.0 * (1.0 - shown), 0.0));
-            self.gfx.shadow(rect, 12.0, 20.0, 6.0, t.shadow);
-            self.gfx.fill_rect(rect, 12.0, t.raised);
-            self.gfx.stroke_rect(rect, 12.0, 1.0, t.line_strong);
+            self.push_layer(
+                Layer::appear(shown, rect.center(), 0.97, 14.0).grouped(rect.outset(MENU_SHADOW)),
+            );
+            self.raised_surface(rect, radius::LARGE);
             let color = match toast.tone {
                 Tone::Info => t.accent,
                 Tone::Done => t.ok,
@@ -1548,25 +1705,18 @@ impl Ui<'_> {
         // It fades in, rising a touch toward its control.
         let shown = self.entrance(crate::kit::Id::new(("tooltip", &text)), Motion::FAST);
         let toward = if tip.y > anchor.y { 3.0 } else { -3.0 };
-        self.push_layer(Layer::appear(shown, tip.center(), 0.97, toward));
+        self.push_layer(Layer::appear(shown, tip.center(), 0.97, toward).grouped(tip.outset(20.0)));
         self.gfx.shadow(tip, radius::SMALL, 10.0, 3.0, t.shadow);
-        self.gfx.fill_rect(tip, radius::SMALL, t.raised);
-        self.gfx.stroke_rect(tip, radius::SMALL, 1.0, t.line_strong);
+        self.gfx.fill_rect(tip, radius::MEDIUM - 2.0, t.raised);
+        self.gfx.stroke_rect(tip, radius::MEDIUM - 2.0, 1.0, t.line);
         self.gfx.text(tip, &text, SMALL, t.text, Align::Center);
         self.pop_layer();
     }
 
-    /// A small uppercase label above a group of rows.
+    /// A quiet label above a group of rows.
     pub fn section_label(&mut self, rect: Rect, label: &str) {
         let t = self.theme;
-        // Quieter than body text, yet readable on the light theme too.
-        self.gfx.text(
-            rect,
-            &label.to_uppercase(),
-            LABEL,
-            t.text3.mix(t.text2, 0.75),
-            Align::Start,
-        );
+        self.gfx.text(rect, label, LABEL, t.text2, Align::Start);
     }
 
     /// Draws the key chord `chord` ("Ctrl+Shift+K") as keycaps, one per key, from `at` (their
@@ -1580,12 +1730,13 @@ impl Ui<'_> {
             }
             let width = keycap_width(&mut self.gfx, key);
             let cap = Rect::new(x, at.y, width, KEYCAP_H);
-            // A key: its face, and a darker lip along the bottom.
+            // A key: its face, and a lip along the bottom.
             self.gfx
-                .fill_rect(cap.offset(0.0, 1.5), 5.0, t.line_strong.alpha(0.9));
-            self.gfx.fill_rect(cap, 5.0, t.surface.mix(t.hover, 0.6));
-            self.gfx.stroke_rect(cap, 5.0, 1.0, t.line_strong);
-            self.gfx.text(cap, key, KEYCAP, t.text, Align::Center);
+                .fill_rect(cap.offset(0.0, 1.0), 5.0, t.line_strong.alpha(0.8));
+            self.gfx.fill_rect(cap, 5.0, t.raised);
+            self.gfx.fill_rect(cap, 5.0, t.hover);
+            self.gfx
+                .text(cap, key, KEYCAP, t.text2.mix(t.text, 0.5), Align::Center);
             x += width;
         }
         x - at.x
@@ -1669,10 +1820,29 @@ impl Ui<'_> {
             self.gfx.fill_rect(
                 Rect::new(track.x, thumb_y, track.w, thumb_h),
                 2.0,
-                t.text2.alpha(if hot { 0.7 } else { 0.4 }),
+                t.text2.alpha(if hot { 0.6 } else { 0.28 }),
             );
         }
         offset
+    }
+}
+
+/// How far a shaken control is off its place at `t`, 0.0 to 1.0 of the shake: a few swings
+/// that die away.
+#[must_use]
+pub fn shake_offset(t: f32) -> f32 {
+    if t <= 0.0 || t >= 1.0 {
+        return 0.0;
+    }
+    (t * std::f32::consts::TAU * 3.0).sin() * 8.0 * (1.0 - t)
+}
+
+/// The corners of a text field `rect`: the large search fields round more.
+fn field_round(rect: Rect) -> f32 {
+    if rect.h >= SEARCH {
+        radius::LARGE - 2.0
+    } else {
+        radius::MEDIUM
     }
 }
 

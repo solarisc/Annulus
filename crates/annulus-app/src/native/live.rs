@@ -267,6 +267,11 @@ impl LiveTerminal {
         }
     }
 
+    /// Whether the tab still says it is connecting.
+    pub fn is_connecting(&self) -> bool {
+        self.connecting()
+    }
+
     /// An SSH session that has not drawn anything yet: the tab says it is connecting.
     fn connecting(&self) -> bool {
         #[cfg(test)]
@@ -943,8 +948,25 @@ impl LiveTerminal {
             }
         }
         self.draw_over(ui, inner, id, (grid.1, cell_h));
-        if self.connecting() {
+        // It stays a moment as the first output comes in, fading over it.
+        let connecting = self.connecting();
+        let present = ui.animate(
+            id.with("connect.present"),
+            if connecting { 1.0 } else { 0.0 },
+            if connecting {
+                Motion::FAST
+            } else {
+                Motion::EXIT_SLOW
+            },
+        );
+        if connecting {
             self.connect_card(ui, rect, id);
+        } else if present > 0.0 && self.failed.is_none() {
+            ui.push_inert();
+            ui.push_layer(Layer::fade(present).grouped(rect));
+            self.connect_card(ui, rect, id);
+            ui.pop_layer();
+            ui.pop_inert();
         }
         if let Some(bar) = bar {
             self.find_bar(ui, bar, id);
@@ -978,7 +1000,7 @@ impl LiveTerminal {
         }
         let active = active_step(self.stage, self.ask.as_ref());
         let log_h = if self.show_log { 132.0 } else { 0.0 };
-        let width = (rect.w - 2.0 * space::XL).clamp(0.0, 520.0);
+        let width = (rect.w - 2.0 * space::XL).clamp(0.0, 480.0);
         let height = CARD_H + log_h;
         // A little above the middle, as the eye reads a centered card, placed by its closed
         // height so opening the log grows it downward; raised only when the log needs room.
@@ -987,14 +1009,12 @@ impl LiveTerminal {
             .max(rect.y + space::XL);
         let card = Rect::new(rect.center().x - width / 2.0, top, width, height);
         let shown = ui.entrance(id.with("enter"), Motion::SLOW);
-        ui.push_layer(Layer::appear(shown, card.center(), 0.96, 10.0));
-        ui.gfx.shadow(card, 16.0, 30.0, 10.0, t.shadow);
-        ui.gfx.fill_rect(card, 16.0, t.raised);
-        ui.gfx.stroke_rect(card, 16.0, 1.0, t.line);
+        ui.push_layer(Layer::appear(shown, card.center(), 0.98, 10.0));
+        // No box of its own: it sits on the terminal's quiet sheet.
         let mut inner = card.inset(space::XL, space::XL);
         // The host, and Show log.
         let mut head = inner.take_top(44.0);
-        let tile = head.take_left(44.0).centered(40.0, 40.0);
+        let tile = head.take_left(40.0).centered(38.0, 38.0);
         super::os::tile(ui, tile, &who, mark);
         head.take_left(space::M);
         let label = if self.show_log {
@@ -1013,7 +1033,7 @@ impl LiveTerminal {
                 toggle.centered(toggle.w, CONTROL),
                 label,
                 None,
-                Kind::Secondary,
+                Kind::Ghost,
             )
             .clicked
         {
@@ -1028,30 +1048,36 @@ impl LiveTerminal {
         #[allow(clippy::cast_precision_loss)] // As above.
         let reached = ui.animate(id.with("track"), active.min(3) as f32, Motion::SLOW);
         let y = track.center().y;
-        ui.gfx.fill_rect(
-            Rect::new(node_x(0.0), y - 1.5, span, 3.0),
-            1.5,
-            t.line_strong,
-        );
-        ui.gfx.fill_rect(
-            Rect::new(node_x(0.0), y - 1.5, node_x(reached) - node_x(0.0), 3.0),
-            1.5,
-            t.accent,
-        );
+        // The line runs between the nodes, never under them: they sit on any background.
+        for gap in 0..STEPS.len() - 1 {
+            #[allow(clippy::cast_precision_loss)] // As above.
+            let at = gap as f32;
+            let (from, to) = (node_x(at) + 15.0, node_x(at + 1.0) - 15.0);
+            ui.gfx
+                .fill_rect(Rect::new(from, y - 1.0, to - from, 2.0), 1.0, t.line_strong);
+            let passed = (reached - at).clamp(0.0, 1.0);
+            ui.gfx.fill_rect(
+                Rect::new(from, y - 1.0, (to - from) * passed, 2.0),
+                1.0,
+                t.accent,
+            );
+        }
         let labels = inner.take_top(22.0);
         for (index, step) in STEPS.iter().enumerate() {
             #[allow(clippy::cast_precision_loss)] // As above.
             let center = Point::new(node_x(index as f32), y);
             let done = index < active;
             if done {
-                ui.gfx.fill_circle(center, 11.0, t.accent);
+                // It pops as the step passes.
+                let pop = ui.entrance(id.with(("passed", index)), Motion::POP);
+                ui.gfx.fill_circle(center, 11.0 * pop, t.accent);
+                let size = 14.0 * pop;
                 ui.gfx.icon(
                     icons::CHECK,
-                    Rect::new(center.x - 7.0, center.y - 7.0, 14.0, 14.0),
+                    Rect::new(center.x - size / 2.0, center.y - size / 2.0, size, size),
                     t.on_accent,
                 );
             } else if index == active {
-                ui.gfx.fill_circle(center, 11.0, t.raised);
                 ui.gfx.stroke_circle(center, 10.0, 2.0, t.accent.alpha(0.3));
                 // A quarter turn of the ring, going round while this step is under way.
                 #[allow(clippy::cast_possible_truncation)] // An angle for drawing.
@@ -1069,7 +1095,6 @@ impl LiveTerminal {
                 ui.gfx.polyline(&arc, false, 2.5, t.accent);
                 ui.request_repaint_after(std::time::Duration::from_millis(16));
             } else {
-                ui.gfx.fill_circle(center, 11.0, t.raised);
                 ui.gfx.stroke_circle(center, 10.0, 2.0, t.line_strong);
             }
             let cell = Rect::new(center.x - 40.0, labels.y + 4.0, 80.0, 18.0);
@@ -1086,14 +1111,16 @@ impl LiveTerminal {
                 _ => "Opening the shell\u{2026}",
             },
         };
+        // A new line of status rises in as the last one goes.
+        let said = ui.entrance(id.with(("said", waiting)), Motion::BASE);
+        ui.push_layer(Layer::fade(said).shifted(0.0, 5.0 * (1.0 - said)));
         ui.gfx
             .text(inner.take_top(20.0), waiting, BODY, t.text2, Align::Center);
+        ui.pop_layer();
         if self.show_log {
             inner.take_top(space::M);
             let box_rect = inner.take_top(log_h - space::M);
             ui.gfx.fill_rect(box_rect, 10.0, t.field);
-            // Edged too: in the light theme a field is nearly the card's own white.
-            ui.gfx.stroke_rect(box_rect, 10.0, 1.0, t.line);
             let mut lines = box_rect.inset(space::M, space::S);
             for line in self.log.iter().rev().take(6).rev() {
                 ui.gfx.text(

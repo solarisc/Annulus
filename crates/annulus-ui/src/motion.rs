@@ -68,11 +68,8 @@ impl Curve {
                 const C3: f32 = C1 + 1.0;
                 1.0 + C3 * (t - 1.0).powi(3) + C1 * (t - 1.0).powi(2)
             }
-            Curve::Emphasized if t >= 1.0 => 1.0,
-            Curve::Emphasized if t <= 0.0 => 0.0,
+            Curve::Emphasized | Curve::Exit if t <= 0.0 || t >= 1.0 => t,
             Curve::Emphasized => bezier(0.2, 0.0, 0.0, 1.0, t),
-            Curve::Exit if t >= 1.0 => 1.0,
-            Curve::Exit if t <= 0.0 => 0.0,
             Curve::Exit => bezier(0.4, 0.0, 1.0, 1.0, t),
         }
     }

@@ -12,6 +12,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
+use annulus_ui::motion::Layer;
 use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SMALL, Tone, button_width};
 use annulus_vault::forwards::{ForwardKind, PortForward};
 use annulus_vault::keychain::SshKey;
@@ -85,6 +86,13 @@ fn row_buttons(
         remainder.take_right(4.0);
     }
     let mut clicked = None;
+    // They come up with the pointer or the keyboard, so a list reads as a list; they stay
+    // reachable either way, and their room is kept so nothing moves.
+    let focused = ui.state.focus();
+    let near = ui.hover_within(row)
+        || (0..buttons.len()).any(|index| focused == Some(id.with(("button", index))));
+    let shown = ui.ease(id.with("near"), if near { 1.0 } else { 0.0 });
+    ui.push_layer(Layer::fade(shown));
     // Drawn left to right, so Tab follows the eye.
     for index in (0..buttons.len()).rev() {
         let (icon, name) = buttons[index];
@@ -95,6 +103,7 @@ fn row_buttons(
             clicked = Some(index);
         }
     }
+    ui.pop_layer();
     (clicked, remainder)
 }
 
@@ -1916,6 +1925,14 @@ impl ForwardsView {
             {
                 toggles.push((rule.id, on));
             }
+            // As in other lists: they come up with the pointer or the keyboard.
+            let focused = ui.state.focus();
+            let near = ui.hover_within(row)
+                || ["edit", "copy", "delete"]
+                    .into_iter()
+                    .any(|name| focused == Some(zone.with(name)));
+            let shown = ui.ease(zone.with("near"), if near { 1.0 } else { 0.0 });
+            ui.push_layer(Layer::fade(shown));
             if ui
                 .icon_button(zone.with("edit"), change, icons::EDIT, "Edit rule", false)
                 .clicked
@@ -1946,6 +1963,7 @@ impl ForwardsView {
             {
                 confirm_next = Some(rule.id);
             }
+            ui.pop_layer();
         });
         self.confirm = confirm_next;
         if let Some(rule) = edit {

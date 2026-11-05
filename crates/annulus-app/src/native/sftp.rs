@@ -415,11 +415,10 @@ impl SftpView {
     fn pane_frame(ui: &mut Ui<'_>, rect: Rect, title: &str, path: &str, icon: IconId) -> Rect {
         let t = ui.theme;
         ui.gfx.fill_rect(rect, 12.0, t.surface);
-        ui.gfx.stroke_rect(rect, 12.0, 1.0, t.line);
         let mut inner = rect.inset(space::M, space::S);
         let mut head = inner.take_top(28.0);
         let mark = head.take_left(16.0).centered(16.0, 16.0);
-        ui.gfx.icon(icon, mark, t.accent);
+        ui.gfx.icon(icon, mark, t.text2);
         head.take_left(space::S);
         let width = ui.gfx.measure(title, BODY_STRONG).width;
         ui.gfx.text(
@@ -560,7 +559,7 @@ impl SftpView {
         ui.gfx.icon(
             if is_dir { icons::FOLDER } else { icons::FILE },
             icon,
-            if is_dir { t.accent } else { t.text2 },
+            t.text2,
         );
         cells.take_left(space::S);
         // A long name keeps its end: "backup-2026…tar.gz".
@@ -1117,7 +1116,6 @@ impl SftpView {
             let enter = ui.entrance(id.with("enter"), Motion::POP);
             ui.push_layer(Layer::appear(enter, row.center(), 0.92, 0.0));
             ui.gfx.fill_rect(row, 10.0, t.surface);
-            ui.gfx.stroke_rect(row, 10.0, 1.0, t.line);
             let mut cells = row.inset(space::M, 0.0);
             let (state_color, status) = transfer_status(transfer, &t);
             // Its direction, in a tile tinted by how it is doing.

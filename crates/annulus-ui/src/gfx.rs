@@ -222,6 +222,28 @@ impl Color {
     }
 }
 
+impl Color {
+    /// What this color looks like drawn over `base`.
+    #[must_use]
+    pub fn over(self, base: Color) -> Self {
+        let top = f32::from(self.a) / 255.0;
+        let under = f32::from(base.a) / 255.0 * (1.0 - top);
+        let alpha = top + under;
+        if alpha <= 0.0 {
+            return Color::TRANSPARENT;
+        }
+        let channel = |a: u8, b: u8| {
+            unit_to_byte((f32::from(a) * top + f32::from(b) * under) / alpha / 255.0)
+        };
+        Self {
+            r: channel(self.r, base.r),
+            g: channel(self.g, base.g),
+            b: channel(self.b, base.b),
+            a: unit_to_byte(alpha),
+        }
+    }
+}
+
 impl From<Rgb> for Color {
     fn from(rgb: Rgb) -> Self {
         Color::rgba(rgb.r, rgb.g, rgb.b, 255)
@@ -666,6 +688,20 @@ pub(crate) mod tests {
         // Asking for more than is left takes what is left.
         assert_eq!(rect.take_left(500.0).w, 70.0);
         assert_eq!(rect.w, 0.0);
+    }
+
+    #[test]
+    fn a_color_over_another_blends_by_its_alpha() {
+        let veil = Color::WHITE.alpha(0.5);
+        let on_black = veil.over(Color::BLACK);
+        assert_eq!(on_black.a, 255);
+        assert!((126..=129).contains(&on_black.r), "{on_black:?}");
+        assert_eq!(Color::BLACK.over(Color::WHITE), Color::BLACK);
+        assert_eq!(Color::TRANSPARENT.over(Color::WHITE), Color::WHITE);
+        assert_eq!(
+            Color::TRANSPARENT.over(Color::TRANSPARENT),
+            Color::TRANSPARENT
+        );
     }
 
     #[test]

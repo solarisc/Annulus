@@ -531,7 +531,7 @@ impl Wizard {
             let response = ui.zone(id, card, Role::Button, title);
             let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
             ui.gfx
-                .fill_rect(card, 12.0, t.surface.mix(t.hover, 0.4 * hover));
+                .fill_rect(card, 12.0, t.hover.alpha(hover).over(t.surface));
             ui.gfx
                 .stroke_rect(card, 12.0, 1.0, t.line.mix(t.accent, 0.6 * hover));
             if response.focus_ring {

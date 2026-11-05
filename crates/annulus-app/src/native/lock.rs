@@ -1,12 +1,13 @@
 //! The lock screen (UI-SPEC §5, F-SEC-004): create the vault on first run, unlock it after.
 //! Password fields edit zeroizing buffers and are wiped once handed over.
 
-use annulus_config::tokens::space;
+use annulus_config::tokens::{motion as motion_ms, space};
 use annulus_ui::gfx::Canvas as _;
-use annulus_ui::gfx::{Align, Rect};
+use annulus_ui::gfx::{Align, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
-use annulus_ui::widgets::{BODY, CONTROL, FieldStyle, Kind, SMALL};
+use annulus_ui::motion::{Curve, Layer, Motion};
+use annulus_ui::widgets::{BODY, CONTROL, FieldStyle, Kind, SEARCH, SMALL, TITLE, shake_offset};
 use annulus_vault::strength::{self, Strength};
 use zeroize::Zeroizing;
 
@@ -73,6 +74,10 @@ pub struct LockView {
     /// The screen was just shown: the password field takes the keyboard, so typing the
     /// password needs no click first.
     fresh: bool,
+    /// How many times what was typed was refused: each one shakes the field.
+    refusals: u32,
+    /// How far the lock has opened, 0.0 to 1.0, as the screen leaves.
+    opened: f32,
 }
 
 /// What creating or unlocking gives: the vault, and a new vault's recovery key.
@@ -97,7 +102,31 @@ impl LockView {
             typed: String::new(),
             strength: None,
             fresh: true,
+            refusals: 0,
+            opened: 0.0,
         }
+    }
+
+    /// `why` the last try failed: said under the field, and the field shakes.
+    pub fn refuse(&mut self, why: String) {
+        self.error = Some(why);
+        self.refusals += 1;
+    }
+
+    /// Draws the screen on its way out, `t` (0.0 to 1.0) of the way: the shackle lifts, then
+    /// everything fades up and away over the vault coming in. It takes no input.
+    pub fn draw_leaving(&mut self, ui: &mut Ui<'_>, rect: Rect, t: f32) {
+        self.opened = Curve::Overshoot.at((t / 0.55).min(1.0));
+        let fade = 1.0 - Curve::Exit.at(((t - 0.3) / 0.7).clamp(0.0, 1.0));
+        ui.push_inert();
+        ui.push_layer(
+            Layer::fade(fade)
+                .scaled(rect.center(), 1.0 + 0.03 * t)
+                .grouped(rect),
+        );
+        let _ = self.draw(ui, rect);
+        ui.pop_layer();
+        ui.pop_inert();
     }
 
     /// Shows `key` for the new `vault`, which opens once the key is confirmed.
@@ -131,9 +160,7 @@ impl LockView {
     fn recovery_card(&mut self, ui: &mut Ui<'_>, rect: Rect) -> Option<LockAction> {
         let t = ui.theme;
         let card = rect.centered(rect.w.min(460.0), 330.0);
-        ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
-        ui.gfx.fill_rect(card, 14.0, t.raised);
-        ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
+        ui.raised_surface(card, 14.0);
         let mut column = card.inset(space::XL + 4.0, space::XL);
         ui.strict_text(
             column.take_top(26.0),
@@ -259,42 +286,40 @@ impl LockView {
         };
         let fields = if setup { 2.0 } else { 1.0 };
         let meter_h = if setup { space::S + METER_H } else { 0.0 };
-        let error_h = if self.error.is_some() { 28.0 } else { 0.0 };
-        let height = 64.0
+        // The line under the field opens and closes; the whole screen stays centered.
+        let says = ui.animate(
+            Id::new("lock.says"),
+            if self.error.is_some() { 1.0 } else { 0.0 },
+            Motion::BASE,
+        );
+        let error_h = 28.0 * says;
+        let height = 44.0
+            + space::M
+            + 36.0
+            + 2.0
             + 20.0
-            + 28.0
-            + 22.0
-            + 28.0
-            + fields * (CONTROL + space::M)
+            + space::XL
+            + fields * SEARCH
+            + (fields - 1.0) * space::M
             + error_h
             + meter_h
-            + CONTROL
-            + if setup { 0.0 } else { 44.0 };
-        let card = rect.centered(rect.w.min(400.0), height + 2.0 * space::XL);
-        ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
-        ui.gfx.fill_rect(card, 14.0, t.raised);
-        ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
-        let mut column = card.inset(space::XL + 4.0, space::XL);
+            + space::M
+            + SEARCH
+            + if setup { 0.0 } else { space::M + CONTROL };
+        let mut column = rect.centered(rect.w.min(380.0), height);
 
-        let mark = column.take_top(56.0).centered(56.0, 56.0);
-        ui.gfx.fill_rect(mark, 16.0, t.selected);
-        ui.gfx.stroke_rect(mark, 16.0, 1.0, t.accent.alpha(0.35));
-        ui.gfx.icon(
-            if setup { icons::SHIELD } else { icons::LOCK },
-            mark.centered(26.0, 26.0),
-            t.accent,
-        );
-        column.take_top(space::L);
-        ui.strict_text(
-            column.take_top(26.0),
-            title,
-            annulus_ui::widgets::HEADING,
-            t.text,
-            Align::Center,
-        );
+        let mark = column.take_top(44.0).centered(40.0, 40.0);
+        if setup {
+            ui.gfx
+                .icon(icons::SHIELD, mark.centered(32.0, 32.0), t.text);
+        } else {
+            lock_mark(ui, mark, self.opened);
+        }
+        column.take_top(space::M);
+        ui.strict_text(column.take_top(36.0), title, TITLE, t.text, Align::Center);
         column.take_top(2.0);
         ui.strict_text(column.take_top(20.0), detail, BODY, t.text2, Align::Center);
-        column.take_top(space::XL - 4.0);
+        column.take_top(space::XL);
 
         let placeholder = match (setup, self.recovery) {
             (true, _) => "Master password (10+ characters)",
@@ -304,9 +329,17 @@ impl LockView {
         if std::mem::take(&mut self.fresh) {
             ui.state.set_focus(Some(Id::new("lock.password")), false);
         }
+        // Refused, the field says no the way a head shakes.
+        let shake = if self.refusals > 0 {
+            let id = Id::new(("lock.shake", self.refusals));
+            ui.entrance(id, Motion::new(motion_ms::SLOW + 60, Curve::Linear))
+        } else {
+            1.0
+        };
+        ui.push_layer(Layer::NONE.shifted(shake_offset(shake), 0.0));
         let first = ui.text_field(
             Id::new("lock.password"),
-            column.take_top(CONTROL),
+            column.take_top(SEARCH),
             &mut self.password,
             FieldStyle {
                 placeholder,
@@ -330,7 +363,7 @@ impl LockView {
             column.take_top(space::M);
             let second = ui.text_field(
                 Id::new("lock.confirm"),
-                column.take_top(CONTROL),
+                column.take_top(SEARCH),
                 &mut self.confirm,
                 FieldStyle {
                     placeholder: "Type it again",
@@ -344,17 +377,20 @@ impl LockView {
                 self.error = None;
             }
         }
+        ui.pop_layer();
+        let room = column.take_top(error_h);
         if let Some(error) = &self.error {
-            column.take_top(space::S);
-            let mut line = column.take_top(20.0);
+            let mut line = Rect::new(room.x, room.y + 6.0, room.w, 20.0);
+            ui.push_layer(Layer::fade(says));
             let icon = line.take_left(16.0).centered(14.0, 14.0);
             ui.gfx.icon(icons::WARNING, icon, t.error);
             line.take_left(space::S);
             ui.gfx.text(line, error, SMALL, t.error, Align::Start);
+            ui.pop_layer();
         }
-        column.take_top(space::L);
-        let go = column.take_top(CONTROL);
-        let busy = self.working.is_some();
+        column.take_top(space::M);
+        let go = column.take_top(SEARCH);
+        let busy = self.working.is_some() || self.opened > 0.0;
         let label = if busy {
             if setup {
                 "Creating the vault\u{2026}"
@@ -368,6 +404,10 @@ impl LockView {
             .button(Id::new("lock.go"), go, label, None, Kind::Primary)
             .clicked
             && !busy;
+        // The key is being derived: that takes a moment, and nothing can say how long.
+        if self.working.is_some() {
+            ui.sweep(go);
+        }
         let mut action = None;
         if (clicked || submitted) && !busy {
             if setup {
@@ -380,7 +420,7 @@ impl LockView {
                             Zeroizing::new(String::new()),
                         )));
                     }
-                    Err(problem) => self.error = Some(problem),
+                    Err(problem) => self.refuse(problem),
                 }
             } else if !self.password.is_empty() {
                 action = Some(LockAction::Unlock {
@@ -399,10 +439,7 @@ impl LockView {
             let width = annulus_ui::widgets::button_width(&mut ui.gfx, link, None);
             let row = column.take_top(CONTROL);
             let at = row.centered(width.min(row.w), CONTROL);
-            if ui
-                .button(Id::new("lock.recovery"), at, link, None, Kind::Ghost)
-                .clicked
-            {
+            if quiet_link(ui, Id::new("lock.recovery"), at, link) {
                 self.recovery = !self.recovery;
                 self.error = None;
                 self.password = Zeroizing::new(String::new());
@@ -413,6 +450,58 @@ impl LockView {
         }
         action
     }
+}
+
+/// A link-like button: quiet text that wakes under the pointer. Returns whether it was
+/// clicked.
+fn quiet_link(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str) -> bool {
+    let response = ui.zone(id, rect, annulus_ui::kit::Role::Button, label);
+    let t = ui.theme;
+    let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
+    if response.focus_ring {
+        ui.focus_ring(rect, 8.0);
+    }
+    let ink = t.text2.mix(t.text, hover);
+    ui.strict_text(rect, label, BODY, ink, Align::Center);
+    if response.hovered {
+        ui.set_cursor(annulus_ui::kit::Cursor::Pointer);
+    }
+    response.clicked
+}
+
+/// The lock, drawn in `rect` with its shackle swung `opened` (0.0 to 1.0, a little past when it
+/// overshoots) about its right leg.
+fn lock_mark(ui: &mut Ui<'_>, rect: Rect, opened: f32) {
+    let ink = ui.theme.text;
+    let unit = rect.w / 32.0;
+    let at = |x: f32, y: f32| Point::new(rect.x + x * unit, rect.y + y * unit);
+    let body = Rect::new(at(6.5, 0.0).x, at(0.0, 14.5).y, 19.0 * unit, 14.0 * unit);
+    ui.gfx.stroke_rect(body, 4.0 * unit, 2.0 * unit, ink);
+    let (top, bottom) = (at(16.0, 20.0), at(16.0, 23.5));
+    ui.gfx.polyline(&[top, bottom], false, 2.0 * unit, ink);
+    // Up the left leg, over the arch, down the right leg.
+    let (center_x, arch_y, reach) = (16.0, 9.5, 5.5);
+    let mut points = vec![(center_x - reach, 14.5)];
+    for step in 0..=12_u8 {
+        let angle = std::f32::consts::PI * f32::from(step) / 12.0;
+        points.push((center_x - reach * angle.cos(), arch_y - reach * angle.sin()));
+    }
+    points.push((center_x + reach, 14.5));
+    // It lifts out of the body, then swings about the right leg.
+    let (sin, cos) = (opened * 0.5).sin_cos();
+    let (pivot_x, pivot_y) = (center_x + reach, 14.5);
+    let lift = 2.5 * opened;
+    let shackle: Vec<Point> = points
+        .into_iter()
+        .map(|(x, y)| {
+            let (dx, dy) = (x - pivot_x, y - pivot_y);
+            at(
+                pivot_x + dx * cos - dy * sin,
+                pivot_y + dx * sin + dy * cos - lift,
+            )
+        })
+        .collect();
+    ui.gfx.polyline(&shackle, false, 2.0 * unit, ink);
 }
 
 /// The height of [`strength_meter`].

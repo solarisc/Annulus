@@ -11,10 +11,10 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Typed, Ui};
-use annulus_ui::motion::{Layer, Motion};
+use annulus_ui::motion::{Feel, Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, KEYCAP_H, Kind, SMALL, TITLE, Tone,
-    keys_width,
+    BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, KEYCAP_H, Kind, SMALL, TITLE,
+    Tone, keys_width,
 };
 
 use super::pages;
@@ -334,7 +334,7 @@ impl SettingsView {
         ui.strict_text(
             column.take_top(32.0),
             "Settings",
-            TITLE,
+            HEADING,
             t.text,
             Align::Start,
         );
@@ -353,11 +353,9 @@ impl SettingsView {
         let rows: Vec<Rect> = pages.iter().map(|_| column.take_top(38.0)).collect();
         if let Some(at) = pages.iter().position(|page| *page == self.page) {
             let target = rows[at];
-            let y = ui.spring(Id::new("settings.nav.pill"), target.y);
+            let y = ui.spring_with(Id::new("settings.nav.pill"), target.y, Feel::Soft);
             let pill = Rect::new(target.x, y + 1.0, target.w, target.h - 2.0);
-            ui.gfx.fill_rect(pill, 9.0, t.selected);
-            let bar = Rect::new(pill.x, pill.y + 9.0, 3.0, pill.h - 18.0);
-            ui.gfx.fill_rect(bar, 1.5, t.accent);
+            ui.gfx.fill_rect(pill, 8.0, t.selected);
         }
         for (page, row) in pages.iter().zip(rows) {
             let row = row.inset(0.0, 1.0);
@@ -369,13 +367,13 @@ impl SettingsView {
             let selected = self.page == *page;
             let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
             if !selected {
-                ui.gfx.fill_rect(row, 9.0, t.hover.alpha(hover * 0.8));
+                ui.gfx.fill_rect(row, 8.0, t.hover.alpha(hover));
             }
             if response.focus_ring {
-                ui.focus_ring(row, 9.0);
+                ui.focus_ring(row, 8.0);
             }
             let mut inner = row.inset(space::M, 0.0);
-            let ink = if selected { t.accent } else { t.text2 };
+            let ink = if selected { t.text } else { t.text2 };
             ui.gfx
                 .icon(page.icon(), inner.take_left(16.0).centered(16.0, 16.0), ink);
             inner.take_left(space::M - 2.0);
@@ -395,19 +393,13 @@ impl SettingsView {
 /// The section's icon, title and what it is for; leaves `rect` below.
 fn section_header(ui: &mut Ui<'_>, rect: &mut Rect, page: Page) {
     let t = ui.theme;
-    let mut head = rect.take_top(52.0);
-    let tile = head.take_left(44.0).centered(44.0, 44.0);
-    ui.gfx.fill_rect(tile, 12.0, t.accent.alpha(0.14));
-    ui.gfx.stroke_rect(tile, 12.0, 1.0, t.accent.alpha(0.3));
-    ui.gfx
-        .icon(page.icon(), tile.centered(22.0, 22.0), t.accent);
-    head.take_left(space::M + 2.0);
-    let heading = Rect::new(head.x, head.y + 3.0, head.w, 26.0);
+    let head = rect.take_top(58.0);
+    let heading = Rect::new(head.x, head.y, head.w, 34.0);
     ui.strict_text(heading, page.title(), TITLE, t.text, Align::Start);
-    let line = Rect::new(head.x, head.y + 29.0, head.w, 18.0);
+    let line = Rect::new(head.x, head.y + 36.0, head.w, 18.0);
     ui.gfx
         .text(line, page.subtitle(), BODY, t.text2, Align::Start);
-    rect.take_top(space::XL);
+    rect.take_top(space::L);
 }
 
 /// A card of `rows` setting rows under a label; returns its inside.
@@ -442,16 +434,14 @@ fn segmented(
 ) -> Option<usize> {
     let t = ui.theme;
     ui.gfx.fill_rect(rect, 9.0, t.field);
-    ui.gfx.stroke_rect(rect, 9.0, 1.0, t.line);
     #[allow(clippy::cast_precision_loss)] // Two to four segments.
     let width = (rect.w - 4.0) / items.len() as f32;
     #[allow(clippy::cast_precision_loss)] // As above.
     let target = rect.x + 2.0 + selected as f32 * width;
-    let x = ui.spring(Id::new((id, "pill")), target);
+    let x = ui.spring_with(Id::new((id, "pill")), target, Feel::Soft);
     let pill = Rect::new(x, rect.y + 2.0, width, rect.h - 4.0);
     ui.gfx.shadow(pill, 7.0, 6.0, 1.0, t.shadow.alpha(0.5));
-    ui.gfx.fill_rect(pill, 7.0, t.surface.mix(t.hover, 0.4));
-    ui.gfx.stroke_rect(pill, 7.0, 1.0, t.line_strong);
+    ui.gfx.fill_rect(pill, 7.0, t.raised);
     let mut chosen = None;
     for (index, item) in items.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)] // As above.

@@ -4,13 +4,16 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use annulus_config::tokens::{Rgb, TILES};
+use annulus_config::tokens::{Rgb, TILES, tile_colors};
 use annulus_ui::gfx::Canvas as _;
-use annulus_ui::gfx::{Align, Color, Rect};
+use annulus_ui::gfx::{Align, Color, Font, Rect, Weight};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::Ui;
-use annulus_ui::widgets::{BODY_STRONG, SMALL};
+use annulus_ui::widgets::SMALL;
 use annulus_vault::hosts::Host;
+
+/// A tile's initials.
+const INITIALS: Font = Font::ui(12.0).weight(Weight::Semibold);
 
 /// One OS a host can show.
 pub struct Os {
@@ -123,11 +126,15 @@ pub fn learned(host: &Host, server_id: &str) -> Option<&'static str> {
 /// One of the tile hues, stable for `text`: a host's tile when no OS is known, a tag's chip.
 #[must_use]
 pub fn hue(text: &str) -> Color {
+    hue_of(text).into()
+}
+
+fn hue_of(text: &str) -> Rgb {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     #[allow(clippy::cast_possible_truncation)] // Only the low bits pick a color.
     let index = (hasher.finish() % TILES.len() as u64) as usize;
-    TILES[index].into()
+    TILES[index]
 }
 
 /// Up to two letters for a host's tile: the first letters of its first two words, or its
@@ -150,27 +157,23 @@ pub fn initials(label: &str) -> String {
     letters.to_uppercase()
 }
 
-/// Draws a host's tile into `rect`: its OS's mark when known, else its initials, on a rounded
-/// square with a faint top light so it reads as a raised key rather than a flat swatch.
+/// Draws a host's tile into `rect`: its OS's mark when known, else its initials, on a wash of
+/// its hue. It tells hosts apart at a glance and stays quieter than the screen's main action.
 pub fn tile(ui: &mut Ui<'_>, rect: Rect, label: &str, os: Option<&Os>) {
-    let fill = os.map_or_else(|| hue(label), |os| os.color.into());
-    let round = rect.w * 0.28;
+    let t = ui.theme;
+    let hue = os.map_or_else(|| hue_of(label), |os| os.color);
+    let surface = Rgb::new(t.bg.r, t.bg.g, t.bg.b);
+    let (fill, ink) = tile_colors(hue, surface, t.dark);
+    let (fill, ink) = (Color::from(fill), Color::from(ink));
+    let round = (rect.w * 0.26).round();
     ui.gfx.fill_rect(rect, round, fill);
-    // The top half a little lighter: light from above.
-    let top = Rect::new(rect.x, rect.y, rect.w, rect.h * 0.5);
-    ui.gfx.push_clip(top);
-    ui.gfx.fill_rect(rect, round, Color::WHITE.alpha(0.07));
-    ui.gfx.pop_clip();
-    ui.gfx
-        .stroke_rect(rect.inset(0.5, 0.5), round, 1.0, Color::WHITE.alpha(0.1));
     if let Some(os) = os {
-        let size = (rect.w * 0.55).round();
-        ui.gfx
-            .icon(os.icon, rect.centered(size, size), Color::WHITE);
+        let size = (rect.w * 0.56).round();
+        ui.gfx.icon(os.icon, rect.centered(size, size), ink);
     } else {
-        let font = if rect.w >= 36.0 { BODY_STRONG } else { SMALL };
+        let font = if rect.w >= 28.0 { INITIALS } else { SMALL };
         ui.gfx
-            .text(rect, &initials(label), font, Color::WHITE, Align::Center);
+            .text(rect, &initials(label), font, ink, Align::Center);
     }
 }
 
@@ -184,12 +187,15 @@ mod tests {
         assert_eq!(keys.len(), ALL.len());
         for os in &ALL {
             assert!(icons::icon(os.icon).is_some(), "{}", os.key);
-            // A white mark is a graphic: WCAG 1.4.11 asks 3:1.
-            assert!(
-                Rgb::new(255, 255, 255).contrast(os.color) >= 3.0,
-                "{} tile too light",
-                os.key
-            );
+            // A mark is a graphic: WCAG 1.4.11 asks 3:1.
+            for (theme, dark) in [
+                (annulus_config::tokens::DARK, true),
+                (annulus_config::tokens::LIGHT, false),
+            ] {
+                let (fill, ink) = tile_colors(os.color, theme.bg_surface, dark);
+                let ratio = ink.contrast(fill);
+                assert!(ratio >= 3.0, "{} mark, dark {dark}: {ratio:.2}", os.key);
+            }
         }
         // Every OS a server can name has a mark.
         for line in [

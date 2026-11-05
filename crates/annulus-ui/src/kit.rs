@@ -279,17 +279,18 @@ pub struct Theme {
     pub chrome: Color,
     /// Behind the content.
     pub bg: Color,
-    /// Cards, list panels and fields at rest.
+    /// Cards and list rows at rest: a step off the sheet, with no outline.
     pub surface: Color,
     /// Menus, dialogs and the editor panel.
     pub raised: Color,
-    /// Text fields.
+    /// Text fields: a veil of the text color, so they read on any surface.
     pub field: Color,
-    /// Hovered controls and rows.
+    /// Hovered controls and rows: a veil of the text color. Draw it over what is there, or
+    /// [`Color::over`] it.
     pub hover: Color,
-    /// Pressed controls.
+    /// Pressed controls, as `hover`.
     pub press: Color,
-    /// Selected rows and tabs: a faint accent.
+    /// Selected rows and tabs, as `hover`. Neutral: the accent is for the main action.
     pub selected: Color,
     /// Hairlines.
     pub line: Color,
@@ -333,9 +334,33 @@ impl Theme {
     #[must_use]
     pub fn from_palette(p: &Palette, dark: bool) -> Self {
         let surface = Color::from(p.bg_surface);
-        let text2 = Color::from(p.text_secondary);
         let accent = Color::from(p.accent);
+        let ink = Color::from(p.text_primary);
         let white = Color::WHITE;
+        // Between two colors the text is held readable on, so it stays readable here too.
+        let card = if dark {
+            surface.mix(p.bg_raised.into(), 0.65)
+        } else {
+            surface.mix(p.bg_app.into(), 0.6)
+        };
+        let rgb = |c: Color| Rgb::new(c.r, c.g, c.b);
+        // Veils of the text color: thinner on a scheme whose text is close to its panels, where
+        // a full one would leave the text unreadable on it.
+        let mut veil = 1.0;
+        while veil > 0.1 && rgb(ink).contrast(rgb(ink.alpha(0.11 * veil).over(card))) < 4.5 {
+            veil *= 0.8;
+        }
+        let selected = ink.alpha(if dark { 0.1 } else { 0.08 } * veil);
+        // A scheme's secondary text may sit right at the limit on its panels: it stays
+        // readable on the strongest veil over them too.
+        let strongest = selected.over(card);
+        let mut text2 = Color::from(p.text_secondary);
+        for _ in 0..8 {
+            if rgb(text2).contrast(rgb(strongest)) >= 4.5 {
+                break;
+            }
+            text2 = text2.mix(ink, 0.2);
+        }
         let black = Color::BLACK;
         // Our own themes put the window color (dark) or white (light) on the accent; a scheme's
         // accent may be too light or dark for that, and then gets whichever reads best.
@@ -355,38 +380,26 @@ impl Theme {
         Self {
             dark,
             chrome: p.bg_app.into(),
-            bg: if dark {
-                surface
-            } else {
-                Color::from(p.bg_app).mix(surface, 0.55)
-            },
-            surface: p.bg_raised.into(),
-            raised: if dark {
-                Color::from(p.bg_raised).mix(white, 0.03)
-            } else {
-                p.bg_raised.into()
-            },
-            field: if dark {
-                Color::from(p.bg_app).mix(surface, 0.5)
-            } else {
-                surface
-            },
-            hover: p.bg_hover.into(),
-            press: Color::from(p.bg_hover).mix(if dark { white } else { black }, 0.06),
-            selected: p.bg_selected.into(),
+            bg: surface,
+            surface: card,
+            raised: p.bg_raised.into(),
+            field: ink.alpha(if dark { 0.06 } else { 0.045 } * veil),
+            hover: ink.alpha(if dark { 0.06 } else { 0.05 } * veil),
+            press: ink.alpha(if dark { 0.11 } else { 0.09 } * veil),
+            selected,
             line: p.border_subtle.into(),
             line_strong: Color::from(p.border_subtle).mix(text2, 0.25),
-            text: p.text_primary.into(),
+            text: ink,
             text2,
-            text3: text2.mix(surface, 0.35),
+            text3: text2.mix(surface, 0.22),
             accent,
             accent_hover: accent.mix(if dark { white } else { black }, 0.12),
             on_accent: on_accent.into(),
             warn: p.status_warn.into(),
             error: p.status_error.into(),
             ok: p.status_ok.into(),
-            shadow: black.alpha(if dark { 0.5 } else { 0.12 }),
-            scrim: black.alpha(if dark { 0.55 } else { 0.3 }),
+            shadow: black.alpha(if dark { 0.42 } else { 0.1 }),
+            scrim: black.alpha(if dark { 0.5 } else { 0.22 }),
         }
     }
 
@@ -510,6 +523,12 @@ pub struct UiState {
     /// The rows each wrapping text area broke its text into.
     pub(crate) wraps: HashMap<Id, crate::widgets::Wrapped>,
     pub(crate) popup: Option<Popup>,
+    /// The menu drawn last frame and where.
+    pub(crate) menu_on_screen: Option<(Popup, Rect)>,
+    /// A menu that has closed, fading out, and when it closed.
+    pub(crate) menu_leaving: Option<(Popup, Rect, f64)>,
+    /// Where the open menu's highlight last went, in the menu's rows.
+    pub(crate) menu_hot_row: f32,
     /// Toasts on screen, oldest first.
     pub(crate) toasts: Vec<crate::widgets::Toast>,
     /// Text to put on the clipboard, and whether it is a secret.
@@ -1172,6 +1191,13 @@ impl<'a> Ui<'a> {
         self.state.repaint = true;
     }
 
+    /// Asks for another frame right away when `wanted`.
+    pub fn request_repaint_if(&mut self, wanted: bool) {
+        if wanted {
+            self.request_repaint();
+        }
+    }
+
     /// The scroll offset stored for `id`.
     #[must_use]
     pub fn scroll_offset(&self, id: Id) -> f32 {
@@ -1302,8 +1328,9 @@ impl<'a> Ui<'a> {
             return target;
         }
         if spring.seen + 1e-9 < self.state.prev_time {
-            *spring = Spring::at(target, now).feeling(feel);
+            *spring = Spring::at(target, now);
         }
+        *spring = spring.feeling(feel);
         if spring.advance(target, now) {
             self.state.repaint = true;
         }
@@ -1859,16 +1886,96 @@ mod tests {
     }
 
     #[test]
-    fn our_light_theme_keeps_white_cards_menus_and_fields() {
+    fn the_pointer_is_answered_at_once_and_let_go_slowly() {
+        let mut state = UiState::default();
+        let id = Id::new("hover");
+        let mut at = 0.0;
+        let run = |state: &mut UiState, target: f32, time: f64| {
+            let mut value = 0.0;
+            frame(state, &[], time, |ui| value = ui.ease(id, target));
+            value
+        };
+        run(&mut state, 0.0, at);
+        at += 1.0;
+        run(&mut state, 1.0, at);
+        let lit = run(&mut state, 1.0, at + 0.07);
+        assert!((lit - 1.0).abs() < 1e-3, "lit within 70 ms: {lit}");
+        at += 1.0;
+        run(&mut state, 0.0, at);
+        let fading = run(&mut state, 0.0, at + 0.1);
+        assert!(fading > 0.02, "still fading after 100 ms: {fading}");
+        assert!(run(&mut state, 0.0, at + 0.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn what_is_drawn_inert_only_shows() {
+        let mut state = UiState::default();
+        let id = Id::new("button");
+        let click = [
+            Event::PointerMoved(Point::new(5.0, 5.0)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ];
+        frame(&mut state, &[], 0.0, |ui| {
+            ui.zone(id, A, Role::Button, "button");
+        });
+        // A key waiting, and a click on where it was: an inert copy takes neither.
+        let keys = [Event::Key(Key::Escape, Modifiers::NONE)];
+        let events: Vec<Event> = click.iter().chain(&keys).cloned().collect();
+        let mut seen = (Response::default(), false, 0);
+        let output = frame(&mut state, &events, 1.0, |ui| {
+            ui.push_inert();
+            let response = ui.zone(id, A, Role::Button, "button");
+            let key = ui.key(Key::Escape, Modifiers::NONE);
+            seen = (response, key, ui.take_typed().len());
+            ui.pop_inert();
+            assert!(ui.key(Key::Escape, Modifiers::NONE), "still there after it");
+        });
+        assert!(!seen.0.clicked && !seen.0.hovered && !seen.1 && seen.2 == 0);
+        assert!(output.zones.is_empty(), "nothing to reach");
+    }
+
+    #[test]
+    fn a_closed_menu_fades_out_taking_nothing_then_stops_asking_for_frames() {
+        let mut state = UiState::default();
+        let id = Id::new("menu");
+        let items = ["One".to_owned(), "Two".to_owned()];
+        let run = |state: &mut UiState, events: &[Event], time: f64| {
+            frame(state, events, time, |ui| {
+                let response = ui.button(id, A, "Menu", None, crate::widgets::Kind::Ghost);
+                ui.menu_for(id, &response, A, &items, None, 200.0);
+                ui.overlays();
+            })
+        };
+        run(&mut state, &[], 0.0);
+        let click = [
+            Event::PointerMoved(Point::new(5.0, 5.0)),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ];
+        run(&mut state, &click, 1.0);
+        let open = run(&mut state, &[], 1.2);
+        assert!(open.zones.iter().any(|zone| zone.label == "One"));
+        let close = [Event::Key(Key::Escape, Modifiers::NONE)];
+        run(&mut state, &close, 2.0);
+        let leaving = run(&mut state, &[], 2.04);
+        assert!(leaving.repaint, "it asks for frames as it fades");
+        assert!(!leaving.zones.iter().any(|zone| zone.label == "One"));
+        run(&mut state, &[], 2.2);
+        assert!(!run(&mut state, &[], 2.3).repaint, "and then it is over");
+    }
+
+    #[test]
+    fn our_light_theme_is_a_white_sheet_with_white_menus_and_cards_a_step_off_it() {
         let theme = Theme::new(Appearance::Light);
         for (name, color) in [
-            ("surface", theme.surface),
+            ("bg", theme.bg),
             ("raised", theme.raised),
-            ("field", theme.field),
             ("on_accent", theme.on_accent),
         ] {
             assert_eq!(color, Color::WHITE, "{name}");
         }
+        assert_ne!(theme.surface, Color::WHITE);
         assert_eq!(
             Theme::new(Appearance::Dark).on_accent,
             Color::from(annulus_config::tokens::DARK.bg_app)
@@ -1892,7 +1999,12 @@ mod tests {
                 theme.bg,
                 theme.surface,
                 theme.raised,
-                theme.field,
+                theme.field.over(theme.bg),
+                theme.field.over(theme.raised),
+                theme.hover.over(theme.bg),
+                theme.hover.over(theme.surface),
+                theme.selected.over(theme.bg),
+                theme.selected.over(theme.surface),
             ] {
                 assert!(
                     rgb(theme.text).contrast(rgb(surface)) >= 4.5,

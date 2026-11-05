@@ -84,9 +84,11 @@ pub struct Palette {
     pub bg_surface: Rgb,
     /// Popovers, menus and dialogs.
     pub bg_raised: Rgb,
-    /// Hovered rows and controls.
+    /// What a hovered row looks like on a panel. The window draws it as a veil of the text
+    /// color, so it reads on any surface; this is the color its contrast is held to.
     pub bg_hover: Rgb,
-    /// Selected rows.
+    /// What a selected row looks like on a panel, drawn the same way as `bg_hover`. Selection
+    /// is neutral: the accent is kept for the main action and the focus ring.
     pub bg_selected: Rgb,
     /// Dividers and control outlines.
     pub border_subtle: Rgb,
@@ -127,41 +129,65 @@ impl Palette {
     }
 }
 
-/// The dark theme.
+/// The dark theme: warm graphite, so the teal is the only color that speaks.
 pub const DARK: Palette = Palette {
-    bg_app: Rgb::new(0x12, 0x14, 0x16),
-    bg_surface: Rgb::new(0x1A, 0x1D, 0x20),
-    bg_raised: Rgb::new(0x23, 0x27, 0x2B),
-    bg_hover: Rgb::new(0x2B, 0x30, 0x35),
-    bg_selected: Rgb::new(0x13, 0x3A, 0x37),
-    border_subtle: Rgb::new(0x2C, 0x31, 0x36),
-    text_primary: Rgb::new(0xE8, 0xEA, 0xED),
-    text_secondary: Rgb::new(0xA9, 0xB0, 0xB7),
-    accent: Rgb::new(0x2B, 0xB3, 0xA3),
+    bg_app: Rgb::new(0x14, 0x13, 0x12),
+    bg_surface: Rgb::new(0x1C, 0x1B, 0x19),
+    bg_raised: Rgb::new(0x28, 0x27, 0x24),
+    bg_hover: Rgb::new(0x29, 0x28, 0x26),
+    bg_selected: Rgb::new(0x31, 0x30, 0x2E),
+    border_subtle: Rgb::new(0x2E, 0x2D, 0x2A),
+    text_primary: Rgb::new(0xEE, 0xEC, 0xE8),
+    text_secondary: Rgb::new(0xAB, 0xA8, 0xA1),
+    accent: Rgb::new(0x2E, 0xB5, 0xA5),
     status_warn: Rgb::new(0xE0, 0xA4, 0x3A),
     status_error: Rgb::new(0xE8, 0x64, 0x5D),
     status_ok: Rgb::new(0x4C, 0xC2, 0x7A),
 };
 
-/// The light theme. Raised surfaces are white and set apart by a shadow.
+/// The light theme: a white sheet on warm paper. Raised surfaces are white and set apart by a
+/// shadow.
 pub const LIGHT: Palette = Palette {
-    bg_app: Rgb::new(0xF6, 0xF7, 0xF8),
+    bg_app: Rgb::new(0xF4, 0xF3, 0xEF),
     bg_surface: Rgb::new(0xFF, 0xFF, 0xFF),
     bg_raised: Rgb::new(0xFF, 0xFF, 0xFF),
-    bg_hover: Rgb::new(0xEE, 0xF0, 0xF2),
-    bg_selected: Rgb::new(0xD9, 0xF2, 0xEE),
-    border_subtle: Rgb::new(0xE2, 0xE5, 0xE8),
-    text_primary: Rgb::new(0x15, 0x18, 0x1B),
-    text_secondary: Rgb::new(0x4D, 0x56, 0x5E),
+    bg_hover: Rgb::new(0xF3, 0xF3, 0xF3),
+    bg_selected: Rgb::new(0xEC, 0xEC, 0xEB),
+    border_subtle: Rgb::new(0xE7, 0xE5, 0xE0),
+    text_primary: Rgb::new(0x1A, 0x19, 0x17),
+    text_secondary: Rgb::new(0x56, 0x53, 0x4D),
     accent: Rgb::new(0x11, 0x7C, 0x70),
     status_warn: Rgb::new(0xB9, 0x7B, 0x10),
     status_error: Rgb::new(0xC9, 0x3A, 0x33),
     status_ok: Rgb::new(0x24, 0x93, 0x4F),
 };
 
-/// Host tile colors: each host gets one from its label, so a list is easy to scan. Even in
-/// lightness, so no host looks louder than another, and dark enough that white initials
-/// meet the text contrast of WCAG AA (4.5:1, tested) in both themes.
+/// A tile in `hue` on `surface`: a wash of the hue, and the hue itself, lifted or deepened, for
+/// what is drawn on it. Tiles tell hosts apart without shouting over the screen's one main
+/// action, and their marks meet the text contrast of WCAG AA (4.5:1, tested) in both themes.
+#[must_use]
+pub fn tile_colors(hue: Rgb, surface: Rgb, dark: bool) -> (Rgb, Rgb) {
+    let mix = |a: Rgb, b: Rgb, t: f64| {
+        let channel = |a: u8, b: u8| {
+            let value = f64::from(a) + (f64::from(b) - f64::from(a)) * t;
+            // Rounded, inside 0..=255.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let value = value.round().clamp(0.0, 255.0) as u8;
+            value
+        };
+        Rgb::new(channel(a.r, b.r), channel(a.g, b.g), channel(a.b, b.b))
+    };
+    let white = Rgb::new(0xFF, 0xFF, 0xFF);
+    let black = Rgb::new(0, 0, 0);
+    if dark {
+        (mix(surface, hue, 0.26), mix(hue, white, 0.62))
+    } else {
+        (mix(surface, hue, 0.13), mix(hue, black, 0.34))
+    }
+}
+
+/// Host tile hues: each host gets one from its label, so a list is easy to scan. Even in
+/// lightness, so no host looks louder than another.
 pub const TILES: [Rgb; 8] = [
     Rgb::new(0x17, 0x7A, 0x70),
     Rgb::new(0x35, 0x63, 0xC9),
@@ -175,12 +201,16 @@ pub const TILES: [Rgb; 8] = [
 
 /// Corner radii in DIPs.
 pub mod radius {
-    /// Inputs and chips.
+    /// Chips and small marks.
     pub const SMALL: f32 = 4.0;
-    /// Cards and buttons.
+    /// Buttons, fields and list rows.
     pub const MEDIUM: f32 = 8.0;
-    /// Dialogs.
+    /// Cards.
+    pub const CARD: f32 = 10.0;
+    /// Menus, dialogs and the large search fields.
     pub const LARGE: f32 = 12.0;
+    /// The window's sheet.
+    pub const SHEET: f32 = 14.0;
 }
 
 /// The 4-DIP spacing scale.
@@ -208,7 +238,7 @@ pub mod text {
     /// Section headings.
     pub const HEADING: f32 = 15.0;
     /// Page headings.
-    pub const TITLE: f32 = 18.0;
+    pub const TITLE: f32 = 24.0;
 }
 
 /// Control and list metrics in DIPs.
@@ -216,7 +246,9 @@ pub mod metrics {
     /// Height of buttons, fields and selects.
     pub const CONTROL_HEIGHT: f32 = 32.0;
     /// Height of a host card in grid view.
-    pub const HOST_CARD_HEIGHT: f32 = 72.0;
+    pub const HOST_CARD_HEIGHT: f32 = 64.0;
+    /// Height of the large search field at the top of a screen.
+    pub const SEARCH_HEIGHT: f32 = 40.0;
     /// Height of a row in list view.
     pub const LIST_ROW_HEIGHT: f32 = 36.0;
     /// Width of the focus ring, drawn outside the control with this offset.
@@ -301,11 +333,13 @@ mod tests {
     }
 
     #[test]
-    fn white_initials_are_readable_on_every_host_tile() {
-        let white = Rgb::new(0xFF, 0xFF, 0xFF);
-        for tile in TILES {
-            let ratio = white.contrast(tile);
-            assert!(ratio >= TEXT_AA, "{tile:?}: {ratio:.2}");
+    fn marks_are_readable_on_every_host_tile_in_both_themes() {
+        for (theme, dark) in [(DARK, true), (LIGHT, false)] {
+            for hue in TILES {
+                let (fill, ink) = tile_colors(hue, theme.bg_surface, dark);
+                let ratio = ink.contrast(fill);
+                assert!(ratio >= TEXT_AA, "{hue:?}, dark {dark}: {ratio:.2}");
+            }
         }
     }
 

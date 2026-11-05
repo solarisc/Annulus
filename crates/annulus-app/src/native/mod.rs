@@ -27,7 +27,7 @@ mod terminal;
 mod titlebar;
 
 use annulus_config::settings::{OpenTab, Settings};
-use annulus_config::tokens::{Appearance, space};
+use annulus_config::tokens::{Appearance, motion, radius, space};
 use annulus_platform::window::{MenuItem, Waker, WindowApp, WindowError, WindowRequest, run};
 use annulus_session::profiles::{self, Profile};
 use annulus_session::{Program, SshFiles};
@@ -36,7 +36,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Theme, Ui};
-use annulus_ui::motion::{Layer, Motion};
+use annulus_ui::motion::{Curve, Feel, Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM, Kind, Tone};
 use annulus_vault::vault::Vault;
 
@@ -51,6 +51,21 @@ pub const NAV_W: f32 = 216.0;
 pub const NAV_COMPACT_W: f32 = 64.0;
 /// The window width under which the navigation shows icons only (UI-SPEC §2).
 pub const COLLAPSE_BELOW: f32 = 900.0;
+
+/// Where a host just connected to is on screen, its label and its OS.
+type Launch = (Rect, String, Option<&'static os::Os>);
+
+/// A host just connected to, flying from its card to its tab.
+struct Flyer {
+    /// The tab it goes to.
+    uid: u64,
+    /// The card it left, on screen.
+    from: Rect,
+    title: String,
+    os: Option<&'static os::Os>,
+    /// When it left.
+    since: f64,
+}
 
 /// A section of the vault's left navigation (F-APP-003).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +231,23 @@ pub enum WindowButtons {
 
 /// The whole window's state.
 pub struct NativeApp {
+    /// The tab that was in front last frame and its place, to tell when another comes in front.
+    front: (Option<u64>, usize),
+    /// A tab just came in front: when, and from which side.
+    switched: Option<(f64, f32)>,
+    /// When the vault opened, while the lock screen is still leaving.
+    lock_left: Option<f64>,
+    /// The section drawn last frame.
+    section_drawn: Section,
+    /// The section just left and when, while it fades out.
+    section_left: Option<(Section, f64)>,
+    /// Where each tab on the strip is, by uid.
+    tab_places: Vec<(u64, Rect)>,
+    /// A card just connected to: where it is on screen, its host's label and OS, until its
+    /// tab opens.
+    launched: Option<Launch>,
+    /// A host on its way from its card to its tab.
+    flyer: Option<Flyer>,
     /// Open tabs; the first is always the vault.
     pub tabs: Vec<Tab>,
     /// The tab in front.
@@ -299,6 +331,14 @@ impl NativeApp {
     #[must_use]
     pub fn new(vault: Option<Vault>) -> Self {
         Self {
+            front: (None, 0),
+            switched: None,
+            lock_left: None,
+            section_drawn: Section::Hosts,
+            section_left: None,
+            tab_places: Vec::new(),
+            launched: None,
+            flyer: None,
             tabs: vec![
                 Tab::new(0, TabKind::Vault, "Vault"),
                 Tab {
@@ -894,6 +934,11 @@ impl NativeApp {
                 };
                 let program = connect::host(vault, &self.ssh_files, host);
                 let title = host.label.clone();
+                self.launched = self
+                    .hosts
+                    .launched
+                    .take()
+                    .map(|from| (from, title.clone(), os::of(host)));
                 self.forwards
                     .host_opened(id, vault, &self.ssh_files, self.waker.as_ref());
                 self.opens.push((title, program, Some(OpenTab::Host(id))));
@@ -987,7 +1032,7 @@ impl NativeApp {
     }
 
     /// Takes the vault the lock screen's work opened, once it is done.
-    fn poll_lock(&mut self) {
+    fn poll_lock(&mut self, now: f64) {
         let Some(job) = &self.lock.working else {
             return;
         };
@@ -1002,16 +1047,19 @@ impl NativeApp {
             Ok((vault, Some(key))) => self.lock.show_recovery(vault, key),
             Ok((vault, None)) => {
                 self.vault = Some(vault);
+                self.lock_left = Some(now);
                 self.unlocked();
             }
             Err(annulus_vault::vault::VaultError::WrongPassword) => {
-                self.lock.error = Some(if self.lock.recovery_mode() {
+                self.lock.refuse(if self.lock.recovery_mode() {
                     "That recovery key does not open this vault.".into()
                 } else {
                     "Wrong password.".into()
                 });
             }
-            Err(error) => self.lock.error = Some(format!("Could not open the vault: {error}")),
+            Err(error) => self
+                .lock
+                .refuse(format!("Could not open the vault: {error}")),
         }
     }
 
@@ -1217,20 +1265,50 @@ impl NativeApp {
             .tabs
             .get(self.active)
             .is_some_and(|tab| tab.start.is_some() && tab.sftp.is_none());
+        let switching = self.tab_switch(ui);
+        if let Some((shown, side)) = switching {
+            // Nothing pokes out of the window as it slides, what it draws or what it takes.
+            ui.push_clip(area);
+            ui.push_layer(
+                Layer::fade(shown)
+                    .shifted(side * 10.0 * (1.0 - shown), 0.0)
+                    .grouped(area),
+            );
+            ui.request_repaint();
+        }
         if kind == Some(TabKind::Vault) {
             let compact = ui.viewport.w < COLLAPSE_BELOW;
             let nav = area.take_left(if compact { NAV_COMPACT_W } else { NAV_W });
+            // Nothing there to go to while locked: it rests dim, and wakes as the vault opens.
+            let awake = ui.animate(
+                Id::new("nav.awake"),
+                if locked { 0.38 } else { 1.0 },
+                Motion::SLOW,
+            );
+            if locked {
+                ui.push_inert();
+            }
+            ui.push_layer(Layer::fade(awake).grouped(nav));
             self.navigation(ui, nav, compact);
+            ui.pop_layer();
+            if locked {
+                ui.pop_inert();
+            }
             let content = panel(ui, area);
             if self.vault.is_none() {
-                self.poll_lock();
+                self.poll_lock(ui.time());
                 match self.lock.draw(ui, content) {
-                    Some(lock::LockAction::Confirmed) => self.vault = self.lock.take_vault(),
+                    Some(lock::LockAction::Confirmed) => {
+                        self.vault = self.lock.take_vault();
+                        self.lock_left = Some(ui.time());
+                    }
                     Some(action) => self.open_vault(ui, action),
                     None => {}
                 }
+                ui.request_repaint_if(self.lock.working.is_some());
             } else {
                 self.section_screen(ui, content);
+                self.lock_leaving(ui, content);
             }
         } else if picking {
             area.take_left(PANEL_GAP);
@@ -1375,10 +1453,15 @@ impl NativeApp {
             // A terminal tab always holds a terminal; an empty panel is never more than a frame.
             panel(ui, area);
         }
+        if switching.is_some() {
+            ui.pop_layer();
+            ui.pop_clip();
+        }
         if let Some(typed) = for_palette {
             ui.give_back_typed(typed);
         }
         self.palette_frame(ui);
+        self.flight(ui);
         ui.overlays();
         for tab in &mut self.tabs {
             if let Some(TermView::Live(panes)) = &tab.terminal {
@@ -1389,6 +1472,18 @@ impl NativeApp {
         for (title, program, origin) in std::mem::take(&mut self.opens) {
             self.open_terminal(title, program, origin);
             ui.request_repaint();
+            // The host just connected to flies to the tab it opened.
+            if let (Some((from, title, os)), Some(tab)) =
+                (self.launched.take(), self.tabs.get(self.active))
+            {
+                self.flyer = Some(Flyer {
+                    uid: tab.uid,
+                    from,
+                    title,
+                    os,
+                    since: ui.time(),
+                });
+            }
         }
         if let Some((title, programs)) = self.open_split.take()
             && let Some(panes) = panes::Panes::several(programs)
@@ -1402,14 +1497,143 @@ impl NativeApp {
         action
     }
 
-    fn section_screen(&mut self, ui: &mut Ui<'_>, content: Rect) {
-        let Some(vault) = self.vault.as_mut() else {
+    /// How far the tab that just came in front has arrived (0.0 to 1.0) and which side it
+    /// comes from, while it is arriving.
+    fn tab_switch(&mut self, ui: &Ui<'_>) -> Option<(f32, f32)> {
+        let uid = self.tabs.get(self.active).map(|tab| tab.uid);
+        if uid != self.front.0 {
+            if self.front.0.is_some() && !ui.state.reduce_motion && self.vault.is_some() {
+                let side = if self.active >= self.front.1 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                self.switched = Some((ui.time(), side));
+            }
+            self.front = (uid, self.active);
+        }
+        let (since, side) = self.switched?;
+        #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+        let share = ((ui.time() - since) * 1000.0 / f64::from(motion::BASE)) as f32;
+        if share >= 1.0 {
+            self.switched = None;
+            return None;
+        }
+        Some((Curve::Emphasized.at(share), side))
+    }
+
+    /// The lock screen on its way out, over the vault coming in.
+    fn lock_leaving(&mut self, ui: &mut Ui<'_>, content: Rect) {
+        /// How long the lock takes to open and leave, in seconds.
+        const LEAVES: f64 = 0.36;
+        let Some(since) = self.lock_left else { return };
+        #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+        let share = ((ui.time() - since) / LEAVES) as f32;
+        if ui.state.reduce_motion || share >= 1.0 {
+            self.lock_left = None;
+            return;
+        }
+        self.lock.draw_leaving(ui, content, share);
+        ui.request_repaint();
+    }
+
+    /// The host just connected to, on its way from its card to its tab.
+    fn flight(&mut self, ui: &mut Ui<'_>) {
+        /// How long the flight takes, in seconds.
+        const TAKES: f64 = 0.44;
+        let Some(flyer) = &self.flyer else { return };
+        let to = self
+            .tab_places
+            .iter()
+            .find(|(uid, _)| *uid == flyer.uid)
+            .map(|(_, place)| *place);
+        #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+        let share = ((ui.time() - flyer.since) / TAKES) as f32;
+        let (Some(to), false, true) = (to, ui.state.reduce_motion, share < 1.0) else {
+            self.flyer = None;
             return;
         };
-        // Each section fades and rises a little into place when chosen.
-        let shown = ui.entrance(Id::new(("section", self.section.title())), Motion::BASE);
-        ui.push_layer(Layer::fade(shown).shifted(0.0, 8.0 * (1.0 - shown)));
-        let action = match self.section {
+        let t = ui.theme;
+        let eased = Curve::Emphasized.at(share);
+        let along = |a: f32, b: f32| a + (b - a) * eased;
+        let from = flyer.from;
+        let rect = Rect::new(
+            along(from.x, to.x),
+            along(from.y, to.y),
+            along(from.w, to.w),
+            along(from.h, to.h),
+        );
+        // It lands by melting into the tab.
+        let shown = 1.0 - Curve::Exit.at(((share - 0.55) / 0.45).clamp(0.0, 1.0));
+        ui.push_layer(Layer::fade(shown).grouped(rect.outset(40.0)));
+        ui.raised_surface(rect, 10.0);
+        ui.gfx.stroke_rect(rect, 10.0, 1.0, t.accent.alpha(0.5));
+        ui.gfx.push_clip(rect);
+        let mut inner = rect.inset(10.0, 0.0);
+        let side = along(34.0, 16.0);
+        let tile = inner.take_left(side).centered(side, side);
+        os::tile(ui, tile, &flyer.title, flyer.os);
+        inner.take_left(space::S + 2.0);
+        ui.gfx
+            .text(inner, &flyer.title, BODY_MEDIUM, t.text, Align::Start);
+        ui.gfx.pop_clip();
+        ui.pop_layer();
+        ui.request_repaint();
+    }
+
+    /// Whether tab `index` holds a session still connecting.
+    pub(crate) fn tab_connecting(&self, index: usize) -> bool {
+        matches!(
+            self.tabs.get(index).and_then(|tab| tab.terminal.as_ref()),
+            Some(TermView::Live(panes)) if panes.connecting()
+        )
+    }
+
+    fn section_screen(&mut self, ui: &mut Ui<'_>, content: Rect) {
+        // The section left behind fades out over the one chosen, which already works.
+        if self.section != self.section_drawn {
+            self.section_left = Some((self.section_drawn, ui.time()));
+            self.section_drawn = self.section;
+        }
+        // Each section fades and rises a little into place when chosen, just after the last one
+        // has mostly gone, so their words are never read over each other.
+        let shown = ui.entrance(
+            Id::new(("section", self.section.title())),
+            Motion::BASE.delayed(motion::EXIT / 2),
+        );
+        ui.push_clip(content);
+        ui.push_layer(Layer::fade(shown).shifted(0.0, 10.0 * (1.0 - shown)));
+        let action = self.draw_section(ui, content, self.section);
+        ui.pop_layer();
+        ui.pop_clip();
+        if let Some(action) = action {
+            self.screen_action(action);
+        }
+        if let Some((left, since)) = self.section_left {
+            #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+            let gone = ((ui.time() - since) * 1000.0 / f64::from(motion::EXIT)) as f32;
+            if ui.state.reduce_motion || gone >= 1.0 {
+                self.section_left = None;
+            } else {
+                ui.push_inert();
+                ui.push_layer(Layer::fade(1.0 - Curve::Out.at(gone)));
+                let _ = self.draw_section(ui, content, left);
+                ui.pop_layer();
+                ui.pop_inert();
+                ui.request_repaint();
+            }
+        }
+    }
+
+    /// Draws `section` into `content`; returns what it asks the window to do.
+    fn draw_section(
+        &mut self,
+        ui: &mut Ui<'_>,
+        content: Rect,
+        section: Section,
+    ) -> Option<screens::ScreenAction> {
+        let vault = self.vault.as_mut()?;
+        match section {
             Section::Hosts => {
                 if let Some(action) = self.hosts.draw(ui, content, Some(vault)) {
                     self.act(action);
@@ -1462,10 +1686,6 @@ impl NativeApp {
                 }
                 None
             }
-        };
-        ui.pop_layer();
-        if let Some(action) = action {
-            self.screen_action(action);
         }
     }
 
@@ -1485,11 +1705,9 @@ impl NativeApp {
         // The selection: one pill that glides to the section chosen, even down to Settings.
         if let Some((_, target)) = rows.iter().find(|(section, _)| *section == self.section) {
             let t = ui.theme;
-            let y = ui.spring(Id::new("nav.pill"), target.y);
+            let y = ui.spring_with(Id::new("nav.pill"), target.y, Feel::Soft);
             let pill = Rect::new(target.x, y, target.w, target.h);
-            ui.gfx.fill_rect(pill, 7.0, t.selected);
-            let bar = Rect::new(pill.x, pill.y + 9.0, 3.0, pill.h - 18.0);
-            ui.gfx.fill_rect(bar, 1.5, t.accent);
+            ui.gfx.fill_rect(pill, 8.0, t.selected);
         }
         for (section, row) in rows {
             self.nav_item(ui, row, section, compact);
@@ -1506,12 +1724,12 @@ impl NativeApp {
         let t = ui.theme;
         let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
         if !selected {
-            ui.gfx.fill_rect(rect, 7.0, t.hover.alpha(hover * 0.8));
+            ui.gfx.fill_rect(rect, 8.0, t.hover.alpha(hover));
         }
         if response.focus_ring {
-            ui.focus_ring(rect, 7.0);
+            ui.focus_ring(rect, 8.0);
         }
-        let ink = if selected { t.accent } else { t.text2 };
+        let ink = if selected { t.text } else { t.text2 };
         if compact {
             ui.gfx.icon(section.icon(), rect.centered(18.0, 18.0), ink);
             if response.hovered {
@@ -1579,30 +1797,36 @@ impl crate::job::Pace for FramePace {
 
 /// The rounded content panel beside the navigation; returns its inside.
 fn panel(ui: &mut Ui<'_>, rect: Rect) -> Rect {
-    let fill = ui.theme.bg;
-    panel_filled(ui, rect, fill)
+    let shape = panel_shape(rect);
+    ui.gfx.fill_rect(shape, PANEL_RADIUS, ui.theme.bg);
+    shape
 }
 
-/// The content panel filled with `fill` (a terminal's own background).
+/// The content panel filled with `fill` (a terminal's own background), with a hairline: that
+/// background can be anything, even the window's own color.
 fn panel_filled(ui: &mut Ui<'_>, rect: Rect, fill: Color) -> Rect {
-    let t = ui.theme;
-    // A rounded panel on every side, clear of the window's right and bottom edges, so the
-    // window reads as a frame holding a card rather than one flat box.
-    let shape = Rect::new(
+    let shape = panel_shape(rect);
+    ui.gfx.fill_rect(shape, PANEL_RADIUS, fill);
+    ui.gfx
+        .stroke_rect(shape, PANEL_RADIUS, 1.0, ui.theme.line.alpha(0.7));
+    shape
+}
+
+/// A rounded sheet on every side, clear of the window's right and bottom edges, so the window
+/// reads as a frame holding a sheet rather than one flat box.
+fn panel_shape(rect: Rect) -> Rect {
+    Rect::new(
         rect.x,
         rect.y,
         (rect.w - PANEL_GAP).max(0.0),
         (rect.h - PANEL_GAP).max(0.0),
-    );
-    ui.gfx.fill_rect(shape, PANEL_RADIUS, fill);
-    ui.gfx.stroke_rect(shape, PANEL_RADIUS, 1.0, t.line);
-    shape
+    )
 }
 
 /// The space between the content panel and the window's right and bottom edges.
 const PANEL_GAP: f32 = 8.0;
 /// The content panel's corner radius.
-const PANEL_RADIUS: f32 = 12.0;
+const PANEL_RADIUS: f32 = radius::SHEET;
 
 impl Drop for NativeApp {
     /// The window closed: sessions still open keep their logs too, as when their tab closes

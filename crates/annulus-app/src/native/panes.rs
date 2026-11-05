@@ -403,6 +403,12 @@ impl Panes {
         self.pane(self.focused).and_then(Pane::title)
     }
 
+    /// Whether a pane here is still connecting.
+    #[must_use]
+    pub fn connecting(&self) -> bool {
+        self.all.iter().any(|pane| pane.terminal.is_connecting())
+    }
+
     /// The tab's dot: the most urgent of its panes.
     #[must_use]
     pub fn status(&self) -> Option<TabStatus> {
