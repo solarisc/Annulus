@@ -1119,9 +1119,11 @@ impl HostsView {
             for (index, group) in groups.iter().enumerate() {
                 let cell = grid_cell(rect.x, y, rect.w - 8.0, columns, index, GROUP_H);
                 let place = self.place(ui, Id::new(("group", group.uid.as_str())), cell, top);
+                ui.push_layer(Layer::fade(in_flight(place, cell)));
                 if group_card(ui, place, group) {
                     self.group = Some(group.uid.clone());
                 }
+                ui.pop_layer();
             }
             y += rows(groups.len(), columns, GROUP_H) + space::XL;
         }
@@ -1139,12 +1141,12 @@ impl HostsView {
             Mode::Grid => {
                 for (index, card) in cards.iter().enumerate() {
                     let id = Id::new(("host", card.id));
-                    let cell = grid_cell(rect.x, y, rect.w - 8.0, columns, index, CARD_H);
-                    let cell = self.place(ui, id, cell, top);
+                    let home = grid_cell(rect.x, y, rect.w - 8.0, columns, index, CARD_H);
+                    let cell = self.place(ui, id, home, top);
                     // Cards fill in one after another as the screen appears.
                     let shown = ui.entrance(id.with("enter"), Motion::SLOW.staggered(index));
                     ui.push_layer(
-                        Layer::fade(shown)
+                        Layer::fade(shown * in_flight(cell, home))
                             .scaled(cell.center(), 0.985 + 0.015 * shown)
                             .shifted(0.0, 14.0 * (1.0 - shown)),
                     );
@@ -2223,6 +2225,13 @@ impl Form {
     }
 }
 
+/// How solid a card gliding at `place` is on its way to `home`: dim while far off, so cards
+/// passing over each other read as a move and not as a pile, and whole when it lands.
+fn in_flight(place: Rect, home: Rect) -> f32 {
+    let away = (place.x - home.x).hypot(place.y - home.y);
+    1.0 - 0.6 * (away / (away + 40.0))
+}
+
 /// How many card columns fit in `width`.
 fn grid_columns(width: f32) -> usize {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Small, positive.
@@ -2364,7 +2373,7 @@ fn host_card(
     // A hovered card lifts a little on a soft shadow; pressing sets it down again and it gives
     // a little, like a key.
     let lift = hover * (1.0 - press);
-    let shape = rect.offset(0.0, -1.0 * lift);
+    let shape = rect.offset(0.0, -lift);
     ui.push_layer(Layer::NONE.scaled(shape.center(), 1.0 - 0.012 * press));
     let round = radius::CARD;
     if lift > 0.0 {
@@ -2869,6 +2878,16 @@ mod tests {
         for wrong in ["0", "65536", "-1", "ssh"] {
             assert!(port(wrong).is_err(), "{wrong}");
         }
+    }
+
+    #[test]
+    fn a_gliding_card_is_dim_while_far_off_and_whole_when_it_lands() {
+        let home = Rect::new(100.0, 100.0, 200.0, 64.0);
+        assert!((in_flight(home, home) - 1.0).abs() < f32::EPSILON);
+        let near = in_flight(home.offset(4.0, 0.0), home);
+        let far = in_flight(home.offset(400.0, 0.0), home);
+        assert!(far < near && near < 1.0, "{far} {near}");
+        assert!(far > 0.35, "never gone: {far}");
     }
 
     #[test]

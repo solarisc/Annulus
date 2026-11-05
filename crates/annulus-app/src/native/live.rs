@@ -856,6 +856,7 @@ impl LiveTerminal {
     }
 
     /// Draws the terminal into `rect` and feeds it the keyboard while focused.
+    #[allow(clippy::too_many_lines)] // One terminal, bottom layer to top.
     pub fn draw(
         &mut self,
         ui: &mut Ui<'_>,
