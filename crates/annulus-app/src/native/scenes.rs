@@ -1814,13 +1814,7 @@ const FILMS: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: with_tabs,
-        acts: &[Act::Press(
-            Key::Char('3'),
-            Modifiers {
-                alt: true,
-                ..Modifiers::NONE
-            },
-        )],
+        acts: &[Act::Shortcut(shortcuts::NEXT_TAB)],
     },
     // A section is left for another: one fades out over the other coming in.
     Scene {
