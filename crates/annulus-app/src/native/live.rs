@@ -970,7 +970,14 @@ impl LiveTerminal {
             ui.pop_inert();
         }
         if let Some(bar) = bar {
+            let shown = ui.entrance(id.with("find.in"), Motion::BASE);
+            ui.push_layer(
+                Layer::fade(shown)
+                    .shifted(0.0, 10.0 * (1.0 - shown))
+                    .grouped(bar),
+            );
             self.find_bar(ui, bar, id);
+            ui.pop_layer();
         }
         self.ask_card(ui, rect, id);
         self.paste_card(ui, rect, id);
@@ -1000,7 +1007,13 @@ impl LiveTerminal {
             mark = *os;
         }
         let active = active_step(self.stage, self.ask.as_ref());
-        let log_h = if self.show_log { 132.0 } else { 0.0 };
+        let log_h = ui
+            .animate(
+                id.with("log.h"),
+                if self.show_log { 132.0 } else { 0.0 },
+                Motion::BASE,
+            )
+            .max(0.0);
         let width = (rect.w - 2.0 * space::XL).clamp(0.0, 480.0);
         let height = CARD_H + log_h;
         // A little above the middle, as the eye reads a centered card, placed by its closed
@@ -1120,11 +1133,14 @@ impl LiveTerminal {
         ui.gfx
             .text(inner.take_top(20.0), waiting, BODY, t.text2, Align::Center);
         ui.pop_layer();
-        if self.show_log {
+        if log_h > space::M {
             inner.take_top(space::M);
             let box_rect = inner.take_top(log_h - space::M);
+            ui.push_clip(box_rect);
             ui.gfx.fill_rect(box_rect, 10.0, t.field);
-            let mut lines = box_rect.inset(space::M, space::S);
+            // The whole box at its final height, uncovered as the card grows.
+            let mut lines = Rect::new(box_rect.x, box_rect.y, box_rect.w, 132.0 - space::M)
+                .inset(space::M, space::S);
             for line in self.log.iter().rev().take(6).rev() {
                 ui.gfx.text(
                     lines.take_top(18.0),
@@ -1134,6 +1150,7 @@ impl LiveTerminal {
                     Align::Start,
                 );
             }
+            ui.pop_clip();
         }
         ui.pop_layer();
     }

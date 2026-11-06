@@ -8,7 +8,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
-use annulus_ui::motion::Curve;
+use annulus_ui::motion::{Curve, Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SCROLL_GUTTER, SMALL,
     button_width,
@@ -367,6 +367,9 @@ pub(crate) struct Wizard {
     content_h: f32,
     /// The name was typed: it no longer follows the server and ports.
     named: bool,
+    /// The step shown last frame, and from which side the one shown now came.
+    was_step: usize,
+    side: f32,
 }
 
 impl Wizard {
@@ -380,6 +383,8 @@ impl Wizard {
             cards: [Play::default(); 3],
             content_h: 0.0,
             named: false,
+            was_step: 0,
+            side: 0.0,
         }
     }
 
@@ -428,6 +433,13 @@ impl Wizard {
             self.content_h,
         );
         ui.push_clip(area);
+        // A step comes in from the side it lies on, forward from the right.
+        if self.step != self.was_step {
+            self.side = if self.step > self.was_step { 1.0 } else { -1.0 };
+            self.was_step = self.step;
+        }
+        let shown = ui.entrance(Id::new(("wizard.step", self.step)), Motion::SLOW);
+        ui.push_layer(Layer::fade(shown).shifted(28.0 * self.side * (1.0 - shown), 0.0));
         let mut page = Rect::new(area.x, area.y - offset, area.w, f32::MAX / 4.0);
         let start = page.y;
         let server = hosts
@@ -446,6 +458,7 @@ impl Wizard {
             _ => self.review(ui, &mut page, &server),
         };
         self.content_h = page.y - start + space::L;
+        ui.pop_layer();
         ui.pop_clip();
         ui.scroll_edges(area, offset, self.content_h, ui.theme.bg);
         finish.or(done)
@@ -456,11 +469,15 @@ impl Wizard {
         let t = ui.theme;
         let mut row = rect;
         for (index, name) in STEPS.iter().enumerate() {
-            let reached = index <= self.step;
+            let reached = ui.animate(
+                Id::new(("wizard.dot", index)),
+                if index <= self.step { 1.0 } else { 0.0 },
+                Motion::BASE,
+            );
             let dot = row.take_left(22.0).centered(22.0, 22.0);
-            let fill = if reached { t.accent } else { t.hover };
-            ui.gfx.fill_rect(dot, 11.0, fill);
-            let ink = if reached { t.on_accent } else { t.text2 };
+            ui.gfx.fill_rect(dot, 11.0, t.hover);
+            ui.gfx.fill_rect(dot, 11.0, t.accent.alpha(reached));
+            let ink = t.text2.mix(t.on_accent, reached);
             ui.gfx
                 .text(dot, &(index + 1).to_string(), SMALL, ink, Align::Center);
             row.take_left(space::S);
@@ -476,15 +493,17 @@ impl Wizard {
             if index + 1 < STEPS.len() && row.w > 40.0 {
                 row.take_left(space::M);
                 let line = row.take_left(28.0);
-                let color = if index < self.step {
-                    t.accent
-                } else {
-                    t.line_strong
-                };
+                let passed = ui.animate(
+                    Id::new(("wizard.line", index)),
+                    if index < self.step { 1.0 } else { 0.0 },
+                    Motion::BASE,
+                );
+                let track = Rect::new(line.x, line.center().y - 0.5, line.w, 1.0);
+                ui.gfx.fill_rect(track, 0.0, t.line_strong);
                 ui.gfx.fill_rect(
-                    Rect::new(line.x, line.center().y - 0.5, line.w, 1.0),
+                    Rect::new(track.x, track.y, track.w * passed, track.h),
                     0.0,
-                    color,
+                    t.accent,
                 );
                 row.take_left(space::M);
             }

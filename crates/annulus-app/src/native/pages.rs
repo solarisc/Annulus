@@ -7,7 +7,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::IconId;
 use annulus_ui::kit::{Cursor, Id, Response, Role, Ui};
-use annulus_ui::motion::{Layer, Motion};
+use annulus_ui::motion::{Curve, Feel, Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM, CONTROL, HEADING, Kind, SMALL, TITLE, button_width};
 
 /// Side padding of a page.
@@ -148,6 +148,218 @@ pub fn card(ui: &mut Ui<'_>, rect: &mut Rect, title: &str, height: f32) -> Rect 
     card.inset(space::L, space::S)
 }
 
+/// A card on a page that unfolds into place and folds away again, with the page under it
+/// gliding to make room. Holds what the card shows: what is open, or for a moment after it
+/// closes what was, drawn once more to go (and wiped of anything secret first).
+pub struct Fold<T> {
+    now: Option<T>,
+    going: Option<T>,
+    /// How tall it drew last, all open.
+    natural: f32,
+    /// Counts what replaced what was open, which fades in where it stands.
+    swaps: u32,
+}
+
+impl<T> Default for Fold<T> {
+    fn default() -> Self {
+        Self {
+            now: None,
+            going: None,
+            natural: 0.0,
+            swaps: 0,
+        }
+    }
+}
+
+impl<T> Fold<T> {
+    /// Unfolds with `value`; if one is open, `value` takes its place.
+    pub fn open(&mut self, value: T) {
+        if self.now.is_some() {
+            self.swaps += 1;
+        }
+        self.now = Some(value);
+        self.going = None;
+    }
+
+    /// Folds away what is open.
+    pub fn close(&mut self) {
+        self.close_with(|_| {});
+    }
+
+    /// Folds away what is open, after `forget` takes from it what must not stay (a secret, a
+    /// running task): it is drawn a little longer, inert.
+    pub fn close_with(&mut self, forget: impl FnOnce(&mut T)) {
+        if let Some(mut value) = self.now.take() {
+            forget(&mut value);
+            self.going = Some(value);
+        }
+        self.swaps = 0;
+    }
+
+    /// What is open.
+    #[must_use]
+    pub fn get(&self) -> Option<&T> {
+        self.now.as_ref()
+    }
+
+    /// What is open.
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        self.now.as_mut()
+    }
+
+    /// Draws it into the top of `area` with `each`, taking from `area` as much as has
+    /// unfolded so far. Call it every frame the page is drawn, open or not, so that it knows
+    /// when it opens. `each` takes from the top of the rect it is given.
+    pub fn draw(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: Id,
+        area: &mut Rect,
+        each: impl FnOnce(&mut Ui<'_>, &mut Rect, &mut T),
+    ) {
+        let open = self.now.is_some();
+        let motion = if open {
+            Motion::SLOW
+        } else {
+            Motion::EXIT_SLOW
+        };
+        let shown = ui.presence(id, open, motion);
+        if !open && shown <= 0.0 {
+            self.going = None;
+            return;
+        }
+        let Some(value) = self.now.as_mut().or(self.going.as_mut()) else {
+            return;
+        };
+        let tall = ui.spring_with(id.with("tall"), self.natural, Feel::Soft);
+        let swapped = ui.entrance_if(
+            id.with(("swap", self.swaps)),
+            Motion::BASE,
+            open && self.swaps > 0,
+        );
+        // At rest it is an ordinary card, with room for its focus rings.
+        if open && shown >= 1.0 && swapped >= 1.0 && (tall - self.natural).abs() < 0.5 {
+            let before = area.h;
+            each(ui, area, value);
+            self.natural = before - area.h;
+            return;
+        }
+        let mut inside = *area;
+        let height = tall.min(area.h) * shown;
+        let window = Rect::new(area.x - space::S, area.y, area.w + 2.0 * space::S, height);
+        ui.push_clip(window);
+        // It comes down out of the page as it opens; what it shows is ahead of its height.
+        let alpha = (shown * 1.6).min(1.0) * swapped;
+        ui.push_layer(
+            Layer::fade(alpha)
+                .shifted(0.0, -12.0 * (1.0 - shown))
+                .grouped(window),
+        );
+        if !open {
+            ui.push_inert();
+        }
+        each(ui, &mut inside, value);
+        if !open {
+            ui.pop_inert();
+        }
+        ui.pop_layer();
+        ui.pop_clip();
+        let natural = area.h - inside.h;
+        if self.natural <= 0.0 {
+            ui.spring_set(id.with("tall"), natural);
+        }
+        self.natural = natural;
+        area.take_top(height);
+    }
+}
+
+/// What a row of a list shows, kept so that it can still show it on its way out.
+#[derive(Clone)]
+pub struct RowLook {
+    /// Which row it is, for as long as the list has it.
+    pub key: u64,
+    /// The tile at its left.
+    pub icon: IconId,
+    /// Its first line.
+    pub title: String,
+    /// Its second line.
+    pub detail: String,
+    /// The second line is a key, a command or the like.
+    pub mono: bool,
+}
+
+/// How long a row takes to leave a list, in seconds.
+const ROW_LEAVES: f64 = 0.22;
+
+/// A list's rows from frame to frame: which came and which went.
+#[derive(Default)]
+pub struct ListMotion {
+    last: Vec<RowLook>,
+    /// Rows on their way out: each with its place in the list and since when.
+    leaving: Vec<(RowLook, usize, f64)>,
+    /// The frame that last drew the list.
+    drawn: Option<f64>,
+}
+
+impl ListMotion {
+    /// Notes this frame's rows; returns whether the list was on screen in the frame before.
+    /// If it was not, nothing arrives or leaves: its rows came with their page.
+    pub fn begin(&mut self, ui: &Ui<'_>, looks: &[RowLook]) -> bool {
+        let on_screen = self
+            .drawn
+            .is_some_and(|drawn| drawn + 1e-9 >= ui.frame_before());
+        if !on_screen || ui.state.reduce_motion {
+            self.leaving.clear();
+        } else {
+            for (place, look) in self.last.iter().enumerate() {
+                if looks.iter().all(|row| row.key != look.key) {
+                    self.leaving.push((look.clone(), place, ui.time()));
+                }
+            }
+        }
+        self.last = looks.to_vec();
+        self.drawn = Some(ui.time());
+        on_screen
+    }
+
+    /// Draws the rows on their way out in the list at `rect`, scrolled by `offset`, a row
+    /// every `step`.
+    pub fn draw_leaving(&mut self, ui: &mut Ui<'_>, rect: Rect, offset: f32, step: f32) {
+        let now = ui.time();
+        self.leaving
+            .retain(|(_, _, since)| now - *since < ROW_LEAVES);
+        if self.leaving.is_empty() {
+            return;
+        }
+        ui.push_inert();
+        for (look, place, since) in &self.leaving {
+            #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+            let share = ((now - *since) / ROW_LEAVES) as f32;
+            let left = 1.0 - Curve::Exit.at(share);
+            #[allow(clippy::cast_precision_loss)] // Lists are short.
+            let y = rect.y - offset + *place as f32 * step;
+            let row = Rect::new(rect.x, y, rect.w, ROW_H);
+            ui.push_layer(
+                Layer::fade(left)
+                    .scaled(row.center(), 0.97 + 0.03 * left)
+                    .grouped(row.outset(2.0)),
+            );
+            ui.card_surface(row, 10.0);
+            let inner = row_icon(ui, row.inset(space::M, 0.0), look.icon);
+            two_lines(ui, inner, &look.title, &look.detail, look.mono);
+            ui.pop_layer();
+        }
+        ui.pop_inert();
+        ui.request_repaint();
+    }
+
+    /// The list has no rows left: only those on their way out, over its empty state.
+    pub fn empty(&mut self, ui: &mut Ui<'_>, rect: Rect, step: f32) {
+        self.begin(ui, &[]);
+        self.draw_leaving(ui, rect, 0.0, step);
+    }
+}
+
 /// A settings row: a label and its explanation on the left; returns the right side for the
 /// control.
 pub fn setting(ui: &mut Ui<'_>, row: Rect, title: &str, detail: &str, control_w: f32) -> Rect {
@@ -184,6 +396,8 @@ pub fn divider(ui: &mut Ui<'_>, y: f32, rect: Rect) {
 pub fn empty(ui: &mut Ui<'_>, rect: Rect, icon: IconId, title: &str, line: &str) {
     let t = ui.theme;
     let block = rect.centered(rect.w.min(460.0), 150.0);
+    let shown = ui.entrance(Id::new(("empty", title)), Motion::BASE);
+    ui.push_layer(Layer::appear(shown, block.center(), 0.98, 8.0).grouped(block.outset(8.0)));
     let mut column = block;
     let badge = column.take_top(64.0).centered(52.0, 52.0);
     ui.gfx.fill_rect(badge, 14.0, t.hover);
@@ -193,4 +407,5 @@ pub fn empty(ui: &mut Ui<'_>, rect: Rect, icon: IconId, title: &str, line: &str)
     column.take_top(space::XS);
     ui.gfx
         .text(column.take_top(20.0), line, BODY, t.text2, Align::Center);
+    ui.pop_layer();
 }

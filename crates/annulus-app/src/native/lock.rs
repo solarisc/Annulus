@@ -317,11 +317,19 @@ impl LockView {
             lock_mark(ui, mark, self.opened);
         }
         column.take_top(space::M);
-        ui.strict_text(column.take_top(36.0), title, TITLE, t.text, Align::Center);
+        // The password or the recovery key: the words change softly.
+        let words = ui.entrance(Id::new(("lock.words", self.recovery)), Motion::BASE);
+        ui.strict_text(
+            column.take_top(36.0),
+            title,
+            TITLE,
+            t.text.alpha(words),
+            Align::Center,
+        );
         column.take_top(2.0);
         let saying = column.take_top(20.0);
         if says < 1.0 {
-            ui.push_layer(Layer::fade(1.0 - says));
+            ui.push_layer(Layer::fade((1.0 - says) * words));
             ui.strict_text(saying, detail, BODY, t.text2, Align::Center);
             ui.pop_layer();
         }

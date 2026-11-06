@@ -10,7 +10,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Id, Ui};
-use annulus_ui::motion::Layer;
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_STRONG, CONTROL, FieldStyle, Kind, SMALL, button_width};
 use annulus_vault::vault::{Vault, VaultError};
 use zeroize::Zeroizing;
@@ -430,6 +430,8 @@ impl AccountView {
             self.changing = true;
         }
         if self.changing {
+            let shown = ui.entrance(Id::new("password.form"), Motion::BASE);
+            ui.push_layer(Layer::fade(shown).shifted(0.0, 10.0 * (1.0 - shown)));
             for (id, buffer, placeholder) in [
                 ("password.current", &mut self.current, "Current password"),
                 (
@@ -500,6 +502,7 @@ impl AccountView {
             if let Some(problem) = problem.filter(|_| !self.new.is_empty()) {
                 ui.gfx.text(row, problem, SMALL, t.text2, Align::Start);
             }
+            ui.pop_layer();
         }
         if self.change.is_some() {
             inner.take_top(space::S);

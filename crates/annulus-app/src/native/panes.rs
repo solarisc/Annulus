@@ -10,6 +10,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Role, Theme, Ui};
+use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM, SMALL};
 
 use super::live::LiveTerminal;
@@ -752,8 +753,29 @@ impl Panes {
         if std::mem::take(&mut self.refocus) {
             ui.state.set_focus(Some(pane_id(self.focused)), false);
         }
+        // Into focus mode, out of it or to another pane in it: the panes settle in place.
+        let base = pane_id(0);
+        let change = ui.entrance(
+            base.with((
+                "arranged",
+                self.in_focus_mode(),
+                if self.in_focus_mode() {
+                    self.focused
+                } else {
+                    0
+                },
+            )),
+            Motion::BASE,
+        );
+        let settling = self.all.len() > 1 && change < 1.0;
+        if settling {
+            ui.push_layer(Layer::fade(0.2 + 0.8 * change).grouped(area));
+        }
         self.dividers(ui, &layout);
         self.draw_panes(ui, &layout, style, waker, &pane_id);
+        if settling {
+            ui.pop_layer();
+        }
         // The panes focus mode hides still take in their news and reconnect.
         let now = ui.time();
         for pane in &mut self.all {
@@ -764,7 +786,14 @@ impl Panes {
             }
         }
         if let Some(list) = layout.list {
+            let shown = ui.entrance(base.with("list.in"), Motion::SLOW);
+            ui.push_layer(
+                Layer::fade(shown)
+                    .shifted(24.0 * (1.0 - shown), 0.0)
+                    .grouped(list.outset(space::S)),
+            );
             self.list(ui, list, &pane_id);
+            ui.pop_layer();
         }
         for (id, bytes) in self.broadcast_out() {
             if let Some(pane) = self.pane(id) {
@@ -785,22 +814,15 @@ impl Panes {
             bar.w - 2.0 * space::S,
             bar.h - space::S - space::XS,
         );
-        let fill = if broadcasting {
-            t.surface.mix(t.warn, 0.18)
-        } else {
-            t.surface
-        };
-        ui.gfx.fill_rect(strip, 8.0, fill);
-        ui.gfx.stroke_rect(
-            strip,
-            8.0,
-            1.0,
-            if broadcasting {
-                t.warn.alpha(0.6)
-            } else {
-                t.line
-            },
+        let lit = ui.animate(
+            base.with("lit"),
+            if broadcasting { 1.0 } else { 0.0 },
+            Motion::BASE,
         );
+        ui.gfx
+            .fill_rect(strip, 8.0, t.surface.mix(t.warn, 0.18 * lit));
+        ui.gfx.stroke_rect(strip, 8.0, 1.0, t.line);
+        ui.gfx.stroke_rect(strip, 8.0, 1.0, t.warn.alpha(0.6 * lit));
         let mut inner = strip.inset(space::S, 0.0);
         let focus_w = toggle_width(ui, "Focus mode");
         let focus = inner.take_right(focus_w).centered(focus_w, 24.0);
@@ -811,6 +833,8 @@ impl Panes {
         inner.take_left(space::XS);
         let icon = inner.take_left(16.0).centered(16.0, 16.0);
         inner.take_left(space::S);
+        let said = ui.entrance(base.with(("said", broadcasting)), Motion::BASE);
+        ui.push_layer(Layer::fade(said));
         if broadcasting {
             ui.gfx.icon(icons::WARNING, icon, t.warn);
             let words = format!(
@@ -824,6 +848,7 @@ impl Panes {
             let words = format!("{} panes", self.all.len());
             ui.gfx.text(inner, &words, SMALL, t.text2, Align::Start);
         }
+        ui.pop_layer();
         if toggle(
             ui,
             base.with("broadcast"),
@@ -909,24 +934,36 @@ impl Panes {
                 self.focused = *id;
             }
             let focused = self.focused == *id;
-            if broadcasting && !focused && broadcast_toggle(ui, *area, zone.with("broadcast"), pane)
-            {
-                pane.skip_broadcast = !pane.skip_broadcast;
-                refocus = true;
+            if broadcasting && !focused {
+                let shown = ui.entrance(zone.with("broadcast.in"), Motion::BASE);
+                ui.push_layer(Layer::fade(shown));
+                if broadcast_toggle(ui, *area, zone.with("broadcast"), pane) {
+                    pane.skip_broadcast = !pane.skip_broadcast;
+                    refocus = true;
+                }
+                ui.pop_layer();
             }
             if !several {
                 continue;
             }
-            let outline = if broadcasting && (focused || !pane.skip_broadcast) {
-                Some(t.warn)
-            } else if focused && layout.list.is_none() {
-                Some(t.accent.alpha(0.7))
-            } else {
-                None
-            };
-            if let Some(color) = outline {
-                ui.gfx.stroke_rect(area.inset(1.0, 1.0), 6.0, 1.0, color);
-            }
+            let casting = broadcasting && (focused || !pane.skip_broadcast);
+            let lit = ui.animate(
+                zone.with("outline"),
+                if casting || (focused && layout.list.is_none()) {
+                    1.0
+                } else {
+                    0.0
+                },
+                Motion::FAST,
+            );
+            let warm = ui.animate(
+                zone.with("outline.warm"),
+                if casting { 1.0 } else { 0.0 },
+                Motion::FAST,
+            );
+            let color = t.accent.alpha(0.7 + 0.3 * warm).mix(t.warn, warm);
+            ui.gfx
+                .stroke_rect(area.inset(1.0, 1.0), 6.0, 1.0, color.alpha(lit));
             if let Some(status) = pane.status() {
                 ui.gfx.fill_circle(
                     Point::new(area.r() - 10.0, area.y + 10.0),
@@ -987,12 +1024,10 @@ impl Panes {
                 row_id.with("hover"),
                 if response.hovered { 1.0 } else { 0.0 },
             );
-            let fill = if selected {
-                t.selected
-            } else {
-                t.hover.alpha(hover)
-            };
-            ui.gfx.fill_rect(row, 6.0, fill);
+            let picked = ui.ease(row_id.with("picked"), if selected { 1.0 } else { 0.0 });
+            ui.gfx
+                .fill_rect(row, 6.0, t.hover.alpha(hover * (1.0 - picked)));
+            ui.gfx.fill_rect(row, 6.0, t.selected.alpha(picked));
             if response.focus_ring {
                 ui.focus_ring(row, 6.0);
             }
@@ -1032,23 +1067,16 @@ fn toggle(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str, on: bool, color: Col
     ui.set_toggled(id, on);
     let t = ui.theme;
     let hover = ui.ease(id.with("hover"), if response.hovered { 1.0 } else { 0.0 });
-    let fill = if on {
-        color.alpha(0.18 + 0.08 * hover)
-    } else {
-        t.hover.alpha(hover)
-    };
-    ui.gfx.fill_rect(rect, 6.0, fill);
-    if on {
-        ui.gfx.stroke_rect(rect, 6.0, 1.0, color.alpha(0.6));
-    }
+    let lit = ui.animate(id.with("on"), if on { 1.0 } else { 0.0 }, Motion::FAST);
+    ui.gfx
+        .fill_rect(rect, 6.0, t.hover.alpha(hover * (1.0 - lit)));
+    ui.gfx
+        .fill_rect(rect, 6.0, color.alpha((0.18 + 0.08 * hover) * lit));
+    ui.gfx.stroke_rect(rect, 6.0, 1.0, color.alpha(0.6 * lit));
     if response.focus_ring {
         ui.focus_ring(rect, 6.0);
     }
-    let ink = if on {
-        color.mix(t.text, 0.35)
-    } else {
-        t.text2.mix(t.text, hover)
-    };
+    let ink = t.text2.mix(t.text, hover).mix(color.mix(t.text, 0.35), lit);
     ui.strict_text(rect, label, BODY_MEDIUM, ink, Align::Center);
     if response.hovered {
         ui.set_cursor(Cursor::Pointer);

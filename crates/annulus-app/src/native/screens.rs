@@ -12,7 +12,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Ui};
-use annulus_ui::motion::Layer;
+use annulus_ui::motion::{Curve, Feel, Layer, Motion};
 use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SCROLL_GUTTER, SMALL, Tone, button_width};
 use annulus_vault::forwards::{ForwardKind, PortForward};
 use annulus_vault::keychain::SshKey;
@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 
 use super::ask::{self, Ask};
 use super::forward_wizard::{Finish, Wizard};
-use super::pages::{self, ROW_H};
+use super::pages::{self, Fold, ListMotion, ROW_H, RowLook};
 use crate::forwards_screen::{Draft, Running, Status, start};
 use crate::job::{Job, Poll};
 use crate::ssh_task::SshTask;
@@ -39,29 +39,62 @@ pub enum ScreenAction {
 }
 
 const GAP: f32 = 8.0;
+/// How long the accent stays on a new row, in milliseconds.
+const ROW_GLOW: u32 = 1400;
 /// Height of the script editor: about five lines.
 const SCRIPT_H: f32 = 104.0;
 
-/// Draws `count` rows of `ROW_H` in a scroll view filling `rect`.
+/// Draws a row of `ROW_H` for each of `looks` in a scroll view filling `rect`. When the list
+/// changes, what stays glides to its new place, a new row rises in with a moment of the
+/// accent on it, and a row that went fades out where it was.
 fn rows(
     ui: &mut Ui<'_>,
     id: &str,
     rect: Rect,
-    count: usize,
+    looks: &[RowLook],
+    motion: &mut ListMotion,
     mut each: impl FnMut(&mut Ui<'_>, usize, Rect),
 ) {
     #[allow(clippy::cast_precision_loss)] // Lists are short.
-    let height = count as f32 * (ROW_H + GAP);
+    let height = looks.len() as f32 * (ROW_H + GAP);
     let offset = ui.scroll_view(Id::new(id), rect.wider(SCROLL_GUTTER), height);
+    let play = motion.begin(ui, looks);
+    let list = Id::new(id);
     let width = rect.w;
     ui.push_clip(rect);
-    for index in 0..count {
+    motion.draw_leaving(ui, rect, offset, ROW_H + GAP);
+    for (index, look) in looks.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)] // Lists are short.
-        let y = rect.y - offset + index as f32 * (ROW_H + GAP);
+        let target = index as f32 * (ROW_H + GAP);
+        let at = ui.spring_with(list.with(("at", look.key)), target, Feel::Soft);
+        let arrived = ui.entrance_if(list.with(("in", look.key)), Motion::SLOW, play);
+        let glow = 1.0
+            - ui.entrance_if(
+                list.with(("glow", look.key)),
+                Motion::new(ROW_GLOW, Curve::Out),
+                play,
+            );
+        let y = rect.y - offset + at;
         if y + ROW_H < rect.y || y > rect.b() {
             continue;
         }
-        each(ui, index, Rect::new(rect.x, y, width, ROW_H));
+        let row = Rect::new(rect.x, y, width, ROW_H);
+        let arriving = arrived < 1.0;
+        if arriving {
+            ui.push_layer(
+                Layer::fade(arrived)
+                    .shifted(0.0, 14.0 * (1.0 - arrived))
+                    .grouped(row.outset(2.0)),
+            );
+        }
+        each(ui, index, row);
+        if glow > 0.0 {
+            let t = ui.theme;
+            ui.gfx.fill_rect(row, 10.0, t.accent.alpha(0.14 * glow));
+        }
+        if arriving {
+            ui.pop_layer();
+        }
     }
     ui.pop_clip();
     ui.scroll_edges(rect, offset, height, ui.theme.bg);
@@ -87,7 +120,8 @@ fn row_buttons(
     let focused = ui.state.focus();
     let near = ui.hover_within(row)
         || (0..buttons.len()).any(|index| focused == Some(id.with(("button", index))));
-    let shown = ui.ease(id.with("near"), if near { 1.0 } else { 0.0 });
+    let shown = ui.ease(id.with("near"), if near { 1.0 } else { 0.0 })
+        * ui.entrance(id.with("buttons"), Motion::BASE);
     ui.push_layer(Layer::fade(shown));
     // Drawn left to right, so Tab follows the eye.
     for index in (0..buttons.len()).rev() {
@@ -113,6 +147,8 @@ fn confirm_delete(ui: &mut Ui<'_>, row: Rect, id: Id, delete: &str) -> (Option<b
     let cancel_w = button_width(&mut ui.gfx, "Cancel", None);
     let cancel = remainder.take_right(cancel_w).centered(cancel_w, 30.0);
     let mut answer = None;
+    let shown = ui.entrance(id.with("asking"), Motion::BASE);
+    ui.push_layer(Layer::fade(shown).shifted(16.0 * (1.0 - shown), 0.0));
     // Drawn left to right, so Tab follows the eye.
     if ui
         .button(id.with("cancel"), cancel, "Cancel", None, Kind::Ghost)
@@ -126,6 +162,7 @@ fn confirm_delete(ui: &mut Ui<'_>, row: Rect, id: Id, delete: &str) -> (Option<b
     {
         answer = Some(true);
     }
+    ui.pop_layer();
     if ui.key(Key::Escape, Modifiers::NONE) {
         answer = Some(false);
     }
@@ -179,10 +216,7 @@ const LINE: f32 = 30.0;
 const KEY_H: f32 = 124.0;
 
 /// What the card at the top of the Keychain is doing.
-#[derive(Default)]
 enum KeyForm {
-    #[default]
-    Closed,
     /// Making a new key; RSA takes seconds, so it runs on another thread.
     Generate {
         label: String,
@@ -197,12 +231,86 @@ enum KeyForm {
     },
 }
 
+impl KeyForm {
+    /// Wipes what was pasted and stops what is under way, as the card folds away.
+    fn forget(&mut self) {
+        match self {
+            Self::Generate { working, .. } => *working = None,
+            Self::Import {
+                private,
+                passphrase,
+                ..
+            } => {
+                *private = Zeroizing::new(String::new());
+                *passphrase = Zeroizing::new(String::new());
+            }
+        }
+    }
+}
+
 /// Installing a key's public half on a saved host (F-KEY-004).
 struct Install {
     key_id: u64,
     host_id: Option<u64>,
     task: Option<SshTask>,
     ask: Option<Ask>,
+}
+
+impl Install {
+    /// Stops the install as its card folds away.
+    fn stop(&mut self) {
+        (self.task, self.ask) = (None, None);
+    }
+}
+
+/// What happens to the line under the Keychain's cards.
+#[derive(Default)]
+enum Say {
+    /// It stays as it is.
+    #[default]
+    Same,
+    /// It goes.
+    Nothing,
+    /// It says this; `true` for a problem.
+    Line(bool, String),
+}
+
+/// What a card on the Keychain came to.
+#[derive(Default)]
+struct CardEnd {
+    /// It folds away.
+    close: bool,
+    say: Say,
+}
+
+impl CardEnd {
+    fn closes() -> Self {
+        Self {
+            close: true,
+            say: Say::Same,
+        }
+    }
+
+    fn says(problem: bool, line: impl Into<String>) -> Self {
+        Self {
+            close: false,
+            say: Say::Line(problem, line.into()),
+        }
+    }
+
+    fn closes_saying((problem, line): (bool, String)) -> Self {
+        Self {
+            close: true,
+            say: Say::Line(problem, line),
+        }
+    }
+
+    fn quiet() -> Self {
+        Self {
+            close: false,
+            say: Say::Nothing,
+        }
+    }
 }
 
 /// Deleting a key that hosts log in with (F-KEY-004): it comes off those servers'
@@ -213,6 +321,19 @@ struct Removal {
     from_servers: bool,
     /// Each server's run, once Delete was clicked.
     runs: Vec<ServerRun>,
+    /// The key's name, which outlives it while the card folds away.
+    label: String,
+    /// What the card last said, likewise.
+    about: String,
+}
+
+impl Removal {
+    /// Stops what is running as the card folds away; a server may have taken the key off.
+    fn stop(&mut self) {
+        for run in &mut self.runs {
+            (run.task, run.ask) = (None, None);
+        }
+    }
 }
 
 /// Taking a key off one server.
@@ -272,16 +393,18 @@ fn users_of(vault: &Vault, key_id: u64) -> Vec<(u64, String)> {
 /// The Keychain screen.
 #[derive(Default)]
 pub struct KeychainView {
-    form: KeyForm,
+    form: Fold<KeyForm>,
     /// The last result, and whether it is a problem.
-    message: Option<(bool, String)>,
+    message: Fold<(bool, String)>,
     confirm_delete: Option<u64>,
-    install: Option<Install>,
-    removal: Option<Removal>,
+    install: Fold<Install>,
+    removal: Fold<Removal>,
+    rows: ListMotion,
 }
 
 impl KeychainView {
     /// Draws the screen.
+    #[allow(clippy::too_many_lines)] // Header, cards and list, top to bottom.
     pub fn draw(
         &mut self,
         ui: &mut Ui<'_>,
@@ -318,12 +441,12 @@ impl KeychainView {
             )
             .clicked
         {
-            self.form = KeyForm::Import {
+            self.form.open(KeyForm::Import {
                 label: String::new(),
                 private: Zeroizing::new(String::new()),
                 passphrase: Zeroizing::new(String::new()),
-            };
-            self.message = None;
+            });
+            self.message.close();
         }
         if ui
             .button(
@@ -335,24 +458,53 @@ impl KeychainView {
             )
             .clicked
         {
-            self.form = KeyForm::Generate {
+            self.form.open(KeyForm::Generate {
                 label: String::new(),
                 kind: KeyKind::Ed25519,
                 working: None,
-            };
-            self.message = None;
+            });
+            self.message.close();
         }
-        self.form_card(ui, &mut area, vault, waker);
-        self.install_card(ui, &mut area, vault, files, waker);
-        self.removal_card(ui, &mut area, vault, files, waker);
-        if let Some((problem, message)) = &self.message {
-            let t = ui.theme;
-            let color = if *problem { t.error } else { t.text2 };
-            ui.gfx
-                .text(area.take_top(20.0), message, SMALL, color, Align::Start);
-            area.take_top(space::S);
-        }
+        let mut end = CardEnd::default();
+        self.form
+            .draw(ui, Id::new("keys.form"), &mut area, |ui, area, form| {
+                end = form_card(form, ui, area, vault, waker);
+            });
+        self.finish_card(end, |view| view.form.close_with(KeyForm::forget));
+        let mut end = CardEnd::default();
+        self.install.draw(
+            ui,
+            Id::new("keys.install"),
+            &mut area,
+            |ui, area, install| {
+                end = install_card(install, ui, area, vault, files, waker);
+            },
+        );
+        self.finish_card(end, |view| view.install.close_with(Install::stop));
+        let mut end = CardEnd::default();
+        self.removal.draw(
+            ui,
+            Id::new("keys.removal"),
+            &mut area,
+            |ui, area, removal| {
+                end = removal_card(removal, ui, area, vault, files, waker);
+            },
+        );
+        self.finish_card(end, |view| view.removal.close_with(Removal::stop));
+        self.message.draw(
+            ui,
+            Id::new("keys.message"),
+            &mut area,
+            |ui, area, (problem, message)| {
+                let t = ui.theme;
+                let color = if *problem { t.error } else { t.text2 };
+                ui.gfx
+                    .text(area.take_top(20.0), message, SMALL, color, Align::Start);
+                area.take_top(space::S);
+            },
+        );
         if count == 0 {
+            self.rows.empty(ui, area, ROW_H + GAP);
             pages::empty(
                 ui,
                 area,
@@ -364,14 +516,14 @@ impl KeychainView {
             self.list(ui, area, vault);
         }
         // A question the install's connection asks, over the screen.
-        if let Some(install) = &mut self.install
+        if let Some(install) = self.install.get_mut()
             && let (Some(task), Some(ask_now)) = (&install.task, &mut install.ask)
             && ask::card(ui, Id::new("install.ask"), rect, ask_now, task.answers())
         {
             install.ask = None;
         }
         // One at a time, a question a server the key comes off asks.
-        if let Some(removal) = &mut self.removal
+        if let Some(removal) = self.removal.get_mut()
             && let Some((index, run)) = removal
                 .runs
                 .iter_mut()
@@ -390,74 +542,201 @@ impl KeychainView {
         }
     }
 
-    /// Deleting a key that hosts log in with: the hosts it comes off, ticked, then each
-    /// server's progress. Once every server has answered, the key leaves the vault, unless a
-    /// server still has it: then it stays, so no way in is left behind unseen.
-    #[allow(clippy::too_many_lines)] // The card, then what its runs came to.
-    fn removal_card(
-        &mut self,
-        ui: &mut Ui<'_>,
-        area: &mut Rect,
-        vault: &mut Vault,
-        files: &SshFiles,
-        waker: Option<&Waker>,
-    ) {
-        let Some(removal) = &mut self.removal else {
-            return;
-        };
-        let Some(key) = vault
-            .ssh_keys()
+    /// Applies what a card came to; `close` folds it away.
+    fn finish_card(&mut self, end: CardEnd, close: impl FnOnce(&mut Self)) {
+        if end.close {
+            close(self);
+        }
+        match end.say {
+            Say::Line(problem, line) => self.message.open((problem, line)),
+            Say::Nothing => self.message.close(),
+            Say::Same => {}
+        }
+    }
+
+    /// The keys, each with Copy, Install and Delete; Delete asks once more.
+    #[allow(clippy::too_many_lines)] // The rows, then what they asked for.
+    fn list(&mut self, ui: &mut Ui<'_>, area: Rect, vault: &mut Vault) {
+        let list = key_rows(vault);
+        let looks: Vec<RowLook> = list
             .iter()
-            .find(|key| key.id == removal.key_id)
-            .cloned()
-        else {
-            self.removal = None;
-            return;
-        };
-        for run in &mut removal.runs {
-            if let Some(task) = &mut run.task {
-                while let Some(event) = task.question() {
-                    if let Some(question) = Ask::from_event(event) {
-                        run.ask = Some(question);
-                    }
-                }
-                if let Some(outcome) = task.outcome() {
-                    run.ended = Some(keychain_screen::removal_result(outcome));
-                    (run.task, run.ask) = (None, None);
-                }
-            }
-        }
-        let busy = !removal.runs.is_empty();
-        if busy && removal.runs.iter().all(|run| run.ended.is_some()) {
-            let servers: Vec<(String, Result<usize, String>)> = removal
-                .runs
-                .iter()
-                .filter_map(|run| run.ended.clone().map(|ended| (run.label.clone(), ended)))
-                .collect();
-            let (mut problem, mut message) =
-                keychain_screen::removal_summary(&key.label, &servers, &[]);
-            if !problem && let Err(error) = vault.remove_key(key.id) {
-                problem = true;
-                message = format!(
-                    "Took {} off its servers, but could not delete it here: {error}",
-                    key.label
-                );
-            }
-            self.message = Some((problem, message));
-            self.removal = None;
-            return;
-        }
-        let users = users_of(vault, key.id);
-        let names: Vec<&str> = users.iter().map(|(_, label)| label.as_str()).collect();
-        let t = ui.theme;
-        let mut card = pages::card(
+            .map(|key| RowLook {
+                key: key.id,
+                icon: icons::KEY,
+                title: key.label.clone(),
+                detail: key.detail.clone(),
+                mono: true,
+            })
+            .collect();
+        let confirm = self.confirm_delete;
+        let mut confirm_next = confirm;
+        let (mut remove, mut install, mut copied, mut unkey) = (None, None, None, None);
+        rows(
             ui,
+            "keys.list",
             area,
-            &format!("Delete {}", key.label),
-            2.0 * CONTROL + 20.0 + 5.0 * space::S,
+            &looks,
+            &mut self.rows,
+            |ui, index, row| {
+                let key = &list[index];
+                let zone = Id::new(("key", key.id));
+                pages::row(ui, zone, row, &key.label, false);
+                let remainder = if confirm == Some(key.id) {
+                    let (answer, remainder) = confirm_delete(ui, row, zone, "Delete key");
+                    match answer {
+                        Some(true) => remove = Some(key.id),
+                        Some(false) => confirm_next = None,
+                        None => {}
+                    }
+                    remainder
+                } else {
+                    let (clicked, remainder) = row_buttons(
+                        ui,
+                        row,
+                        zone,
+                        &[
+                            (icons::TRASH, "Delete"),
+                            (icons::UPLOAD, "Install on a host"),
+                            (icons::COPY, "Copy public key"),
+                        ],
+                    );
+                    match clicked {
+                        Some(2) => {
+                            ui.copy(key.public.clone());
+                            copied = Some(key.label.clone());
+                        }
+                        Some(1) => install = Some(key.id),
+                        // A key hosts log in with is asked about in a card: their servers too?
+                        Some(0) if key.users > 0 => unkey = Some(key.id),
+                        Some(0) => confirm_next = Some(key.id),
+                        _ => {}
+                    }
+                    remainder
+                };
+                let inner = pages::row_icon(ui, remainder, icons::KEY);
+                pages::two_lines(ui, inner, &key.label, &key.detail, true);
+            },
         );
-        card.take_top(space::S);
-        let about = if busy {
+        self.confirm_delete = confirm_next;
+        if let Some(key_id) = unkey
+            && self
+                .removal
+                .get()
+                .is_none_or(|removal| removal.runs.is_empty())
+        {
+            self.removal.open(Removal {
+                key_id,
+                from_servers: true,
+                runs: Vec::new(),
+                label: list
+                    .iter()
+                    .find(|key| key.id == key_id)
+                    .map_or_else(String::new, |key| key.label.clone()),
+                about: String::new(),
+            });
+            self.install.close_with(Install::stop);
+            self.message.close();
+        }
+        if let Some(label) = copied {
+            self.message
+                .open((false, format!("Copied the public key of {label}.")));
+        }
+        if let Some(key_id) = install {
+            if vault.hosts().is_empty() {
+                self.message.open((
+                    true,
+                    "Save a host first, then install the key on it.".into(),
+                ));
+            } else {
+                self.install.open(Install {
+                    key_id,
+                    host_id: None,
+                    task: None,
+                    ask: None,
+                });
+                self.message.close();
+            }
+        }
+        if let Some(id) = remove {
+            self.confirm_delete = None;
+            self.message.open(match vault.remove_key(id) {
+                Ok(()) => (false, "Key deleted.".into()),
+                Err(error) => (true, error.to_string()),
+            });
+        }
+    }
+}
+
+/// Deleting a key that hosts log in with: the hosts it comes off, ticked, then each server's
+/// progress. Once every server has answered, the key leaves the vault, unless a server still
+/// has it: then it stays, so no way in is left behind unseen.
+#[allow(clippy::too_many_lines)] // The card, then what its runs came to.
+fn removal_card(
+    removal: &mut Removal,
+    ui: &mut Ui<'_>,
+    area: &mut Rect,
+    vault: &mut Vault,
+    files: &SshFiles,
+    waker: Option<&Waker>,
+) -> CardEnd {
+    let found = vault
+        .ssh_keys()
+        .iter()
+        .find(|key| key.id == removal.key_id)
+        .cloned();
+    // On its way out it shows what it last showed; the key itself may be gone by then.
+    if found.is_none() && !ui.inert() {
+        return CardEnd::closes();
+    }
+    for run in &mut removal.runs {
+        if let Some(task) = &mut run.task {
+            while let Some(event) = task.question() {
+                if let Some(question) = Ask::from_event(event) {
+                    run.ask = Some(question);
+                }
+            }
+            if let Some(outcome) = task.outcome() {
+                run.ended = Some(keychain_screen::removal_result(outcome));
+                (run.task, run.ask) = (None, None);
+            }
+        }
+    }
+    let busy = !removal.runs.is_empty();
+    if let Some(key) = &found
+        && busy
+        && !ui.inert()
+        && removal.runs.iter().all(|run| run.ended.is_some())
+    {
+        let servers: Vec<(String, Result<usize, String>)> = removal
+            .runs
+            .iter()
+            .filter_map(|run| run.ended.clone().map(|ended| (run.label.clone(), ended)))
+            .collect();
+        let (mut problem, mut message) =
+            keychain_screen::removal_summary(&key.label, &servers, &[]);
+        if !problem && let Err(error) = vault.remove_key(key.id) {
+            problem = true;
+            message = format!(
+                "Took {} off its servers, but could not delete it here: {error}",
+                key.label
+            );
+        }
+        return CardEnd::closes_saying((problem, message));
+    }
+    let users = found
+        .as_ref()
+        .map_or_else(Vec::new, |key| users_of(vault, key.id));
+    let names: Vec<&str> = users.iter().map(|(_, label)| label.as_str()).collect();
+    let t = ui.theme;
+    let mut card = pages::card(
+        ui,
+        area,
+        &format!("Delete {}", removal.label),
+        2.0 * CONTROL + 20.0 + 5.0 * space::S,
+    );
+    card.take_top(space::S);
+    if !ui.inert() {
+        removal.about = if busy {
             removal
                 .runs
                 .iter()
@@ -481,490 +760,403 @@ impl KeychainView {
                 names.join(", ")
             )
         };
-        ui.gfx
-            .text(card.take_top(20.0), &about, SMALL, t.text2, Align::Start);
-        card.take_top(space::S);
-        let tick = card.take_top(CONTROL);
-        if !busy {
-            let servers = if names.len() == 1 {
-                names[0].to_owned()
-            } else {
-                format!("these {} servers", names.len())
-            };
-            ui.checkbox(
-                Id::new("removal.servers"),
-                tick,
-                &mut removal.from_servers,
-                &format!("Also take it off {servers} (their ~/.ssh/authorized_keys)"),
-            );
-        }
-        card.take_top(space::S);
-        let mut line = card.take_top(CONTROL);
-        let go_label = if busy {
-            "Removing\u{2026}"
+    }
+    ui.gfx.text(
+        card.take_top(20.0),
+        &removal.about,
+        SMALL,
+        t.text2,
+        Align::Start,
+    );
+    card.take_top(space::S);
+    let tick = card.take_top(CONTROL);
+    if !busy && !names.is_empty() {
+        let servers = if names.len() == 1 {
+            names[0].to_owned()
         } else {
-            "Delete key"
+            format!("these {} servers", names.len())
         };
-        let go = line.take_right(button_width(&mut ui.gfx, "Removing\u{2026}", None));
-        line.take_right(space::S);
-        let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
-        let cancelled = ui
-            .button(
-                Id::new("removal.cancel"),
-                cancel,
-                "Cancel",
-                None,
-                Kind::Ghost,
-            )
-            .clicked
-            || ui.key(Key::Escape, Modifiers::NONE);
-        let start = ui
-            .button(Id::new("removal.go"), go, go_label, None, Kind::Danger)
-            .clicked
-            && !busy;
-        if cancelled {
-            // Dropping the runs stops them; a server may have taken the key off already.
-            if busy {
-                self.message = Some((
-                    true,
-                    format!(
-                        "Stopped. {} is kept; some servers may no longer have it.",
-                        key.label
-                    ),
-                ));
-            }
-            self.removal = None;
-            return;
-        }
-        if !start {
-            return;
-        }
-        if !removal.from_servers || users.is_empty() {
-            let kept: Vec<String> = if users.is_empty() {
-                Vec::new()
-            } else {
-                users.iter().map(|(_, label)| label.clone()).collect()
-            };
-            let (_, message) = keychain_screen::removal_summary(&key.label, &[], &kept);
-            self.message = Some(match vault.remove_key(key.id) {
-                Ok(()) => (false, message),
-                Err(error) => (true, error.to_string()),
-            });
-            self.removal = None;
-            return;
-        }
-        let Some(commands) = keys::remove_commands(&key.public) else {
-            self.message = Some((
-                true,
-                "This key's public half cannot be read, so it cannot be taken off servers. \
-                 Untick them to delete it here only."
-                    .into(),
-            ));
-            return;
-        };
-        for (host_id, label) in &users {
-            let Some(host) = vault.hosts().iter().find(|host| host.id == *host_id) else {
-                continue;
-            };
-            let waker = waker.cloned();
-            removal.runs.push(ServerRun {
-                label: label.clone(),
-                task: Some(SshTask::exec(
-                    connect::host(vault, files, host),
-                    commands.clone(),
-                    move || {
-                        if let Some(waker) = &waker {
-                            waker();
-                        }
-                    },
-                )),
-                ask: None,
-                ended: None,
-            });
-        }
-        self.message = None;
-    }
-
-    /// The Generate or Import card, while one is open.
-    #[allow(clippy::too_many_lines)] // Both forms, each top to bottom.
-    fn form_card(
-        &mut self,
-        ui: &mut Ui<'_>,
-        area: &mut Rect,
-        vault: &mut Vault,
-        waker: Option<&Waker>,
-    ) {
-        let mut done: Option<Result<SshKey, keys::KeyError>> = None;
-        let mut close = false;
-        match &mut self.form {
-            KeyForm::Closed => return,
-            KeyForm::Generate {
-                label,
-                kind,
-                working,
-            } => {
-                if let Some(job) = working {
-                    match job.poll() {
-                        Poll::Running => {}
-                        Poll::Done(result) => {
-                            done = Some(
-                                result.map(|pair| keychain_screen::stored(vault, label, &pair)),
-                            );
-                        }
-                        Poll::Lost => done = Some(Err(keys::KeyError::Generate)),
-                    }
-                }
-                if done.is_some() {
-                    *working = None;
-                }
-                let busy = working.is_some();
-                let mut card = pages::card(ui, area, "New key", 2.0 * CONTROL + 5.0 * space::S);
-                card.take_top(space::S);
-                let mut line = card.take_top(CONTROL);
-                let kind_rect = line.take_right(170.0);
-                line.take_right(space::S);
-                let name_field = ui.text_field(
-                    Id::new("key.label"),
-                    line,
-                    label,
-                    FieldStyle {
-                        placeholder: "Name, e.g. work laptop",
-                        ..FieldStyle::default()
-                    },
-                );
-                let names: Vec<String> = KeyKind::ALL
-                    .iter()
-                    .map(|choice| choice.name().to_owned())
-                    .collect();
-                let at = KeyKind::ALL.iter().position(|choice| choice == kind);
-                if let Some(chosen) = ui.select(Id::new("key.kind"), kind_rect, &names, at, "Type")
-                    && !busy
-                {
-                    *kind = KeyKind::ALL[chosen];
-                }
-                card.take_top(space::S);
-                let mut buttons = card.take_top(CONTROL);
-                let go_label = if busy {
-                    format!("Making a {} key\u{2026}", kind.name())
-                } else {
-                    "Generate".to_owned()
-                };
-                let go = buttons.take_right(button_width(&mut ui.gfx, &go_label, None).max(96.0));
-                buttons.take_right(space::S);
-                let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
-                close |= ui
-                    .button(Id::new("key.cancel"), cancel, "Cancel", None, Kind::Ghost)
-                    .clicked
-                    || ui.key(Key::Escape, Modifiers::NONE);
-                let clicked = ui
-                    .button(Id::new("key.go"), go, &go_label, None, Kind::Primary)
-                    .clicked
-                    || name_field.submitted;
-                if clicked && !busy {
-                    if label.trim().is_empty() {
-                        *label = format!("{} key {}", kind.name(), vault.ssh_keys().len() + 1);
-                    }
-                    let (kind, comment) = (*kind, keychain_screen::comment());
-                    let pace = super::FramePace::new(ui, waker.cloned());
-                    *working = Some(Job::start(&pace, move || keys::generate(kind, &comment)));
-                }
-            }
-            KeyForm::Import {
-                label,
-                private,
-                passphrase,
-            } => {
-                let mut card = pages::card(
-                    ui,
-                    area,
-                    "Import a key",
-                    2.0 * CONTROL + KEY_H + 6.0 * space::S,
-                );
-                card.take_top(space::S);
-                ui.text_field(
-                    Id::new("import.label"),
-                    card.take_top(CONTROL),
-                    label,
-                    FieldStyle {
-                        placeholder: "Name, e.g. id_ed25519",
-                        ..FieldStyle::default()
-                    },
-                );
-                card.take_top(space::S);
-                ui.text_area(
-                    Id::new("import.private"),
-                    card.take_top(KEY_H),
-                    private,
-                    FieldStyle {
-                        placeholder: "Paste the private key (-----BEGIN \u{2026} PRIVATE KEY-----)",
-                        mono: true,
-                        ..FieldStyle::default()
-                    },
-                );
-                card.take_top(space::S);
-                let mut line = card.take_top(CONTROL);
-                let go = line.take_right(button_width(&mut ui.gfx, "Import", None).max(96.0));
-                line.take_right(space::S);
-                let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
-                line.take_right(space::M);
-                let passphrase_field = ui.text_field(
-                    Id::new("import.passphrase"),
-                    line,
-                    passphrase,
-                    FieldStyle {
-                        placeholder: "Passphrase, only if the key has one",
-                        ..FieldStyle::default()
-                    },
-                );
-                close |= ui
-                    .button(
-                        Id::new("import.cancel"),
-                        cancel,
-                        "Cancel",
-                        None,
-                        Kind::Ghost,
-                    )
-                    .clicked
-                    || ui.key(Key::Escape, Modifiers::NONE);
-                let clicked = ui
-                    .button(Id::new("import.go"), go, "Import", None, Kind::Primary)
-                    .clicked
-                    || passphrase_field.submitted;
-                if clicked && !private.trim().is_empty() {
-                    done = Some(keys::import(private, Some(passphrase)).map(|pair| {
-                        let name = if label.trim().is_empty() {
-                            format!("Imported key {}", vault.ssh_keys().len() + 1)
-                        } else {
-                            label.clone()
-                        };
-                        keychain_screen::stored(vault, &name, &pair)
-                    }));
-                }
-            }
-        }
-        if close {
-            // Dropping the form wipes a pasted key and passphrase.
-            self.form = KeyForm::Closed;
-            self.message = None;
-        }
-        if let Some(result) = done {
-            match result {
-                Ok(key) => {
-                    let label = key.label.clone();
-                    self.message = Some(match vault.upsert_key(key) {
-                        Ok(()) => (
-                            false,
-                            format!(
-                                "Saved {label}. Copy its public key to a server, or install it on one."
-                            ),
-                        ),
-                        Err(error) => (true, format!("Could not save the key: {error}")),
-                    });
-                    // Dropping the form wipes the pasted key and passphrase.
-                    self.form = KeyForm::Closed;
-                }
-                Err(error) => self.message = Some((true, error.to_string())),
-            }
-        }
-    }
-
-    /// Installing a key on a host: pick the host, then connect and add the key to its
-    /// `authorized_keys`. Once it is there, the host logs in with the key.
-    fn install_card(
-        &mut self,
-        ui: &mut Ui<'_>,
-        area: &mut Rect,
-        vault: &mut Vault,
-        files: &SshFiles,
-        waker: Option<&Waker>,
-    ) {
-        let Some(install) = &mut self.install else {
-            return;
-        };
-        let Some(key) = vault
-            .ssh_keys()
-            .iter()
-            .find(|key| key.id == install.key_id)
-            .cloned()
-        else {
-            self.install = None;
-            return;
-        };
-        if let Some(task) = &mut install.task {
-            while let Some(event) = task.question() {
-                if let Some(question) = Ask::from_event(event) {
-                    install.ask = Some(question);
-                }
-            }
-            if let Some(outcome) = task.outcome() {
-                let host_id = install.host_id;
-                self.install = None;
-                self.message = Some(match keychain_screen::install_result(outcome) {
-                    Ok(()) => (false, keychain_screen::link_key(vault, host_id, &key)),
-                    Err(reason) => (true, reason),
-                });
-                return;
-            }
-        }
-        let busy = install.task.is_some();
-        let hosts: Vec<(u64, String)> = vault
-            .hosts()
-            .iter()
-            .map(|host| (host.id, host.label.clone()))
-            .collect();
-        let mut card = pages::card(
-            ui,
-            area,
-            &format!("Install {} on a host", key.label),
-            CONTROL + 4.0 * space::S,
+        ui.checkbox(
+            Id::new("removal.servers"),
+            tick,
+            &mut removal.from_servers,
+            &format!("Also take it off {servers} (their ~/.ssh/authorized_keys)"),
         );
-        card.take_top(space::S);
-        let mut line = card.take_top(CONTROL);
-        let go_label = if busy {
-            "Installing\u{2026}"
+    }
+    card.take_top(space::S);
+    let mut line = card.take_top(CONTROL);
+    let go_label = if busy {
+        "Removing\u{2026}"
+    } else {
+        "Delete key"
+    };
+    let go = line.take_right(button_width(&mut ui.gfx, "Removing\u{2026}", None));
+    line.take_right(space::S);
+    let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
+    let cancelled = ui
+        .button(
+            Id::new("removal.cancel"),
+            cancel,
+            "Cancel",
+            None,
+            Kind::Ghost,
+        )
+        .clicked
+        || ui.key(Key::Escape, Modifiers::NONE);
+    let start = ui
+        .button(Id::new("removal.go"), go, go_label, None, Kind::Danger)
+        .clicked
+        && !busy;
+    if busy && !ui.inert() {
+        ui.sweep(go);
+    }
+    if cancelled {
+        // Stopping the runs; a server may have taken the key off already.
+        if busy {
+            return CardEnd::closes_saying((
+                true,
+                format!(
+                    "Stopped. {} is kept; some servers may no longer have it.",
+                    removal.label
+                ),
+            ));
+        }
+        return CardEnd::closes();
+    }
+    let (true, Some(key)) = (start, found) else {
+        return CardEnd::default();
+    };
+    if !removal.from_servers || users.is_empty() {
+        let kept: Vec<String> = if users.is_empty() {
+            Vec::new()
         } else {
-            "Install"
+            users.iter().map(|(_, label)| label.clone()).collect()
         };
-        let go = line.take_right(button_width(&mut ui.gfx, "Installing\u{2026}", None));
-        line.take_right(space::S);
-        let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
-        line.take_right(space::M);
-        let names: Vec<String> = hosts.iter().map(|(_, label)| label.clone()).collect();
-        let at = install
-            .host_id
-            .and_then(|id| hosts.iter().position(|(host, _)| *host == id));
-        if let Some(chosen) = ui.select(Id::new("install.host"), line, &names, at, "Choose a host")
-            && !busy
-        {
-            install.host_id = Some(hosts[chosen].0);
-        }
-        let cancelled = ui
-            .button(
-                Id::new("install.cancel"),
-                cancel,
-                "Cancel",
-                None,
-                Kind::Ghost,
-            )
-            .clicked
-            || ui.key(Key::Escape, Modifiers::NONE);
-        let start = ui
-            .button(Id::new("install.go"), go, go_label, None, Kind::Primary)
-            .clicked
-            && !busy;
-        if cancelled {
-            self.install = None;
-            return;
-        }
-        if !start {
-            return;
-        }
-        let host = install
-            .host_id
-            .and_then(|id| vault.hosts().iter().find(|host| host.id == id));
-        let Some(host) = host else {
-            self.message = Some((true, "Choose the host to install the key on.".into()));
-            return;
+        let (_, message) = keychain_screen::removal_summary(&key.label, &[], &kept);
+        return CardEnd::closes_saying(match vault.remove_key(key.id) {
+            Ok(()) => (false, message),
+            Err(error) => (true, error.to_string()),
+        });
+    }
+    let Some(commands) = keys::remove_commands(&key.public) else {
+        return CardEnd::says(
+            true,
+            "This key's public half cannot be read, so it cannot be taken off servers. \
+             Untick them to delete it here only.",
+        );
+    };
+    for (host_id, label) in &users {
+        let Some(host) = vault.hosts().iter().find(|host| host.id == *host_id) else {
+            continue;
         };
         let waker = waker.cloned();
-        install.task = Some(SshTask::exec(
-            connect::host(vault, files, host),
-            keys::install_commands(&key.public),
-            move || {
-                if let Some(waker) = &waker {
-                    waker();
-                }
-            },
-        ));
-        self.message = None;
-    }
-
-    /// The keys, each with Copy, Install and Delete; Delete asks once more.
-    fn list(&mut self, ui: &mut Ui<'_>, area: Rect, vault: &mut Vault) {
-        let list = key_rows(vault);
-        let confirm = self.confirm_delete;
-        let mut confirm_next = confirm;
-        let (mut remove, mut install, mut copied, mut unkey) = (None, None, None, None);
-        rows(ui, "keys.list", area, list.len(), |ui, index, row| {
-            let key = &list[index];
-            let zone = Id::new(("key", key.id));
-            pages::row(ui, zone, row, &key.label, false);
-            let remainder = if confirm == Some(key.id) {
-                let (answer, remainder) = confirm_delete(ui, row, zone, "Delete key");
-                match answer {
-                    Some(true) => remove = Some(key.id),
-                    Some(false) => confirm_next = None,
-                    None => {}
-                }
-                remainder
-            } else {
-                let (clicked, remainder) = row_buttons(
-                    ui,
-                    row,
-                    zone,
-                    &[
-                        (icons::TRASH, "Delete"),
-                        (icons::UPLOAD, "Install on a host"),
-                        (icons::COPY, "Copy public key"),
-                    ],
-                );
-                match clicked {
-                    Some(2) => {
-                        ui.copy(key.public.clone());
-                        copied = Some(key.label.clone());
+        removal.runs.push(ServerRun {
+            label: label.clone(),
+            task: Some(SshTask::exec(
+                connect::host(vault, files, host),
+                commands.clone(),
+                move || {
+                    if let Some(waker) = &waker {
+                        waker();
                     }
-                    Some(1) => install = Some(key.id),
-                    // A key hosts log in with is asked about in a card: their servers too?
-                    Some(0) if key.users > 0 => unkey = Some(key.id),
-                    Some(0) => confirm_next = Some(key.id),
-                    _ => {}
-                }
-                remainder
-            };
-            let inner = pages::row_icon(ui, remainder, icons::KEY);
-            pages::two_lines(ui, inner, &key.label, &key.detail, true);
+                },
+            )),
+            ask: None,
+            ended: None,
         });
-        self.confirm_delete = confirm_next;
-        if let Some(key_id) = unkey
-            && self
-                .removal
-                .as_ref()
-                .is_none_or(|removal| removal.runs.is_empty())
-        {
-            self.removal = Some(Removal {
-                key_id,
-                from_servers: true,
-                runs: Vec::new(),
-            });
-            (self.install, self.message) = (None, None);
-        }
-        if let Some(label) = copied {
-            self.message = Some((false, format!("Copied the public key of {label}.")));
-        }
-        if let Some(key_id) = install {
-            if vault.hosts().is_empty() {
-                self.message = Some((
-                    true,
-                    "Save a host first, then install the key on it.".into(),
-                ));
+    }
+    CardEnd::quiet()
+}
+
+/// The Generate or Import card, while one is open.
+#[allow(clippy::too_many_lines)] // Both forms, each top to bottom.
+fn form_card(
+    form: &mut KeyForm,
+    ui: &mut Ui<'_>,
+    area: &mut Rect,
+    vault: &mut Vault,
+    waker: Option<&Waker>,
+) -> CardEnd {
+    let mut done: Option<Result<SshKey, keys::KeyError>> = None;
+    let mut close = false;
+    match form {
+        KeyForm::Generate {
+            label,
+            kind,
+            working,
+        } => {
+            if let Some(job) = working {
+                match job.poll() {
+                    Poll::Running => {}
+                    Poll::Done(result) => {
+                        done =
+                            Some(result.map(|pair| keychain_screen::stored(vault, label, &pair)));
+                    }
+                    Poll::Lost => done = Some(Err(keys::KeyError::Generate)),
+                }
+            }
+            if done.is_some() {
+                *working = None;
+            }
+            let busy = working.is_some();
+            let mut card = pages::card(ui, area, "New key", 2.0 * CONTROL + 5.0 * space::S);
+            card.take_top(space::S);
+            let mut line = card.take_top(CONTROL);
+            let kind_rect = line.take_right(170.0);
+            line.take_right(space::S);
+            let name_field = ui.text_field(
+                Id::new("key.label"),
+                line,
+                label,
+                FieldStyle {
+                    placeholder: "Name, e.g. work laptop",
+                    ..FieldStyle::default()
+                },
+            );
+            let names: Vec<String> = KeyKind::ALL
+                .iter()
+                .map(|choice| choice.name().to_owned())
+                .collect();
+            let at = KeyKind::ALL.iter().position(|choice| choice == kind);
+            if let Some(chosen) = ui.select(Id::new("key.kind"), kind_rect, &names, at, "Type")
+                && !busy
+            {
+                *kind = KeyKind::ALL[chosen];
+            }
+            card.take_top(space::S);
+            let mut buttons = card.take_top(CONTROL);
+            let go_label = if busy {
+                format!("Making a {} key\u{2026}", kind.name())
             } else {
-                self.install = Some(Install {
-                    key_id,
-                    host_id: None,
-                    task: None,
-                    ask: None,
-                });
-                self.message = None;
+                "Generate".to_owned()
+            };
+            // The button grows into its longer words rather than jumping to them.
+            let wide = button_width(&mut ui.gfx, &go_label, None).max(96.0);
+            let wide = ui.spring_with(Id::new("key.go.wide"), wide, Feel::Soft);
+            let go = buttons.take_right(wide);
+            buttons.take_right(space::S);
+            let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
+            close |= ui
+                .button(Id::new("key.cancel"), cancel, "Cancel", None, Kind::Ghost)
+                .clicked
+                || ui.key(Key::Escape, Modifiers::NONE);
+            let clicked = ui
+                .button(Id::new("key.go"), go, &go_label, None, Kind::Primary)
+                .clicked
+                || name_field.submitted;
+            if busy {
+                ui.sweep(go);
+            }
+            if clicked && !busy {
+                if label.trim().is_empty() {
+                    *label = format!("{} key {}", kind.name(), vault.ssh_keys().len() + 1);
+                }
+                let (kind, comment) = (*kind, keychain_screen::comment());
+                let pace = super::FramePace::new(ui, waker.cloned());
+                *working = Some(Job::start(&pace, move || keys::generate(kind, &comment)));
             }
         }
-        if let Some(id) = remove {
-            self.confirm_delete = None;
-            self.message = Some(match vault.remove_key(id) {
-                Ok(()) => (false, "Key deleted.".into()),
-                Err(error) => (true, error.to_string()),
+        KeyForm::Import {
+            label,
+            private,
+            passphrase,
+        } => {
+            let mut card = pages::card(
+                ui,
+                area,
+                "Import a key",
+                2.0 * CONTROL + KEY_H + 6.0 * space::S,
+            );
+            card.take_top(space::S);
+            ui.text_field(
+                Id::new("import.label"),
+                card.take_top(CONTROL),
+                label,
+                FieldStyle {
+                    placeholder: "Name, e.g. id_ed25519",
+                    ..FieldStyle::default()
+                },
+            );
+            card.take_top(space::S);
+            ui.text_area(
+                Id::new("import.private"),
+                card.take_top(KEY_H),
+                private,
+                FieldStyle {
+                    placeholder: "Paste the private key (-----BEGIN \u{2026} PRIVATE KEY-----)",
+                    mono: true,
+                    ..FieldStyle::default()
+                },
+            );
+            card.take_top(space::S);
+            let mut line = card.take_top(CONTROL);
+            let go = line.take_right(button_width(&mut ui.gfx, "Import", None).max(96.0));
+            line.take_right(space::S);
+            let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
+            line.take_right(space::M);
+            let passphrase_field = ui.text_field(
+                Id::new("import.passphrase"),
+                line,
+                passphrase,
+                FieldStyle {
+                    placeholder: "Passphrase, only if the key has one",
+                    ..FieldStyle::default()
+                },
+            );
+            close |= ui
+                .button(
+                    Id::new("import.cancel"),
+                    cancel,
+                    "Cancel",
+                    None,
+                    Kind::Ghost,
+                )
+                .clicked
+                || ui.key(Key::Escape, Modifiers::NONE);
+            let clicked = ui
+                .button(Id::new("import.go"), go, "Import", None, Kind::Primary)
+                .clicked
+                || passphrase_field.submitted;
+            if clicked && !private.trim().is_empty() {
+                done = Some(keys::import(private, Some(passphrase)).map(|pair| {
+                    let name = if label.trim().is_empty() {
+                        format!("Imported key {}", vault.ssh_keys().len() + 1)
+                    } else {
+                        label.clone()
+                    };
+                    keychain_screen::stored(vault, &name, &pair)
+                }));
+            }
+        }
+    }
+    match done {
+        Some(Ok(key)) => {
+            let label = key.label.clone();
+            CardEnd::closes_saying(match vault.upsert_key(key) {
+                Ok(()) => (
+                    false,
+                    format!(
+                        "Saved {label}. Copy its public key to a server, or install it on one."
+                    ),
+                ),
+                Err(error) => (true, format!("Could not save the key: {error}")),
+            })
+        }
+        Some(Err(error)) => CardEnd::says(true, error.to_string()),
+        None if close => CardEnd {
+            close: true,
+            say: Say::Nothing,
+        },
+        None => CardEnd::default(),
+    }
+}
+
+/// Installing a key on a host: pick the host, then connect and add the key to its
+/// `authorized_keys`. Once it is there, the host logs in with the key.
+fn install_card(
+    install: &mut Install,
+    ui: &mut Ui<'_>,
+    area: &mut Rect,
+    vault: &mut Vault,
+    files: &SshFiles,
+    waker: Option<&Waker>,
+) -> CardEnd {
+    let Some(key) = vault
+        .ssh_keys()
+        .iter()
+        .find(|key| key.id == install.key_id)
+        .cloned()
+    else {
+        return CardEnd::closes();
+    };
+    if let Some(task) = &mut install.task {
+        while let Some(event) = task.question() {
+            if let Some(question) = Ask::from_event(event) {
+                install.ask = Some(question);
+            }
+        }
+        if let Some(outcome) = task.outcome() {
+            return CardEnd::closes_saying(match keychain_screen::install_result(outcome) {
+                Ok(()) => (
+                    false,
+                    keychain_screen::link_key(vault, install.host_id, &key),
+                ),
+                Err(reason) => (true, reason),
             });
         }
     }
+    let busy = install.task.is_some();
+    let hosts: Vec<(u64, String)> = vault
+        .hosts()
+        .iter()
+        .map(|host| (host.id, host.label.clone()))
+        .collect();
+    let mut card = pages::card(
+        ui,
+        area,
+        &format!("Install {} on a host", key.label),
+        CONTROL + 4.0 * space::S,
+    );
+    card.take_top(space::S);
+    let mut line = card.take_top(CONTROL);
+    let go_label = if busy {
+        "Installing\u{2026}"
+    } else {
+        "Install"
+    };
+    let go = line.take_right(button_width(&mut ui.gfx, "Installing\u{2026}", None));
+    line.take_right(space::S);
+    let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
+    line.take_right(space::M);
+    let names: Vec<String> = hosts.iter().map(|(_, label)| label.clone()).collect();
+    let at = install
+        .host_id
+        .and_then(|id| hosts.iter().position(|(host, _)| *host == id));
+    if let Some(chosen) = ui.select(Id::new("install.host"), line, &names, at, "Choose a host")
+        && !busy
+    {
+        install.host_id = Some(hosts[chosen].0);
+    }
+    let cancelled = ui
+        .button(
+            Id::new("install.cancel"),
+            cancel,
+            "Cancel",
+            None,
+            Kind::Ghost,
+        )
+        .clicked
+        || ui.key(Key::Escape, Modifiers::NONE);
+    let start = ui
+        .button(Id::new("install.go"), go, go_label, None, Kind::Primary)
+        .clicked
+        && !busy;
+    if busy {
+        ui.sweep(go);
+    }
+    if cancelled {
+        return CardEnd::closes();
+    }
+    if !start {
+        return CardEnd::default();
+    }
+    let host = install
+        .host_id
+        .and_then(|id| vault.hosts().iter().find(|host| host.id == id));
+    let Some(host) = host else {
+        return CardEnd::says(true, "Choose the host to install the key on.");
+    };
+    let waker = waker.cloned();
+    install.task = Some(SshTask::exec(
+        connect::host(vault, files, host),
+        keys::install_commands(&key.public),
+        move || {
+            if let Some(waker) = &waker {
+                waker();
+            }
+        },
+    ));
+    CardEnd::quiet()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -973,33 +1165,33 @@ impl KeychainView {
 /// The Snippets screen.
 #[derive(Default)]
 pub struct SnippetsView {
-    draft: Option<(Snippet, String, String)>,
+    draft: Fold<(Snippet, String, String)>,
     /// The snippet whose Delete asks once more.
     confirm: Option<u64>,
     /// Running a snippet on hosts: the snippet, and the hosts ticked.
-    targets: Option<(u64, Vec<u64>)>,
+    targets: Fold<(u64, Vec<u64>)>,
+    rows: ListMotion,
 }
 
 impl SnippetsView {
     /// The hosts to run a snippet on (F-SNIP-004): tick up to [`snippets_screen::MAX_TARGETS`],
-    /// then each gets a terminal that runs it after the host's own startup command.
+    /// then each gets a terminal that runs it after the host's own startup command. Returns
+    /// whether the card closes, and what to run.
     #[allow(clippy::too_many_lines)] // The list, then its buttons.
     fn targets_card(
-        &mut self,
+        (snippet_id, ticked): &mut (u64, Vec<u64>),
         ui: &mut Ui<'_>,
         area: &mut Rect,
         vault: &Vault,
         files: &SshFiles,
-    ) -> Option<ScreenAction> {
-        let (snippet_id, ticked) = self.targets.as_mut()?;
+    ) -> (bool, Option<ScreenAction>) {
         let Some(snippet) = vault
             .snippets()
             .iter()
             .find(|s| s.id == *snippet_id)
             .cloned()
         else {
-            self.targets = None;
-            return None;
+            return (true, None);
         };
         let hosts: Vec<(u64, String)> = vault
             .hosts()
@@ -1082,11 +1274,10 @@ impl SnippetsView {
             .clicked
             && !ticked.is_empty();
         if cancelled {
-            self.targets = None;
-            return None;
+            return (true, None);
         }
         if !run {
-            return None;
+            return (false, None);
         }
         let tabs: snippets_screen::Panes = ticked
             .iter()
@@ -1101,12 +1292,11 @@ impl SnippetsView {
                 )
             })
             .collect();
-        self.targets = None;
         let title = match tabs.len() {
             1 => snippet.label.clone(),
             n => format!("{} on {n} hosts", snippet.label),
         };
-        Some(ScreenAction::Terminals(title, tabs))
+        (true, Some(ScreenAction::Terminals(title, tabs)))
     }
 
     /// Draws the screen; running a snippet opens a terminal, or one per host.
@@ -1135,70 +1325,94 @@ impl SnippetsView {
             Some(icons::PLUS),
             Kind::Primary,
         ) {
-            self.draft = Some((vault.draft_snippet(), String::new(), String::new()));
+            self.draft
+                .open((vault.draft_snippet(), String::new(), String::new()));
         }
-        if let Some((snippet, label, script)) = &mut self.draft {
-            let mut card = pages::card(
-                ui,
-                &mut area,
-                "New snippet",
-                2.0 * CONTROL + SCRIPT_H + 4.0 * space::M,
-            );
-            card.take_top(space::S);
-            ui.text_field(
-                Id::new("snippet.label"),
-                card.take_top(CONTROL),
-                label,
-                FieldStyle {
-                    placeholder: "Label, e.g. Restart nginx",
-                    ..FieldStyle::default()
-                },
-            );
-            card.take_top(space::S);
-            ui.text_area(
-                Id::new("snippet.script"),
-                card.take_top(SCRIPT_H),
-                script,
-                FieldStyle {
-                    placeholder: "sudo systemctl restart nginx",
-                    mono: true,
-                    ..FieldStyle::default()
-                },
-            );
-            card.take_top(space::S);
-            let mut line = card.take_top(CONTROL);
-            let save = line.take_right(88.0);
-            line.take_right(space::S);
-            let cancel = line.take_right(80.0);
-            let cancelled = ui
-                .button(
-                    Id::new("snippet.cancel"),
-                    cancel,
-                    "Cancel",
-                    None,
-                    Kind::Ghost,
-                )
-                .clicked
-                || ui.key(Key::Escape, Modifiers::NONE);
-            let saved = ui
-                .button(Id::new("snippet.save"), save, "Save", None, Kind::Primary)
-                .clicked;
-            if saved && !script.trim().is_empty() {
-                let mut snippet = snippet.clone();
-                snippet.label = if label.trim().is_empty() {
-                    script.trim().to_owned()
-                } else {
-                    label.trim().to_owned()
-                };
-                script.trim().clone_into(&mut snippet.script);
-                let _ = vault.upsert_snippet(snippet);
-                self.draft = None;
-            } else if cancelled {
-                self.draft = None;
-            }
+        let mut close_draft = false;
+        self.draft.draw(
+            ui,
+            Id::new("snippets.draft"),
+            &mut area,
+            |ui, area, draft| {
+                let (snippet, label, script) = draft;
+                let mut card = pages::card(
+                    ui,
+                    area,
+                    "New snippet",
+                    2.0 * CONTROL + SCRIPT_H + 4.0 * space::M,
+                );
+                card.take_top(space::S);
+                ui.text_field(
+                    Id::new("snippet.label"),
+                    card.take_top(CONTROL),
+                    label,
+                    FieldStyle {
+                        placeholder: "Label, e.g. Restart nginx",
+                        ..FieldStyle::default()
+                    },
+                );
+                card.take_top(space::S);
+                ui.text_area(
+                    Id::new("snippet.script"),
+                    card.take_top(SCRIPT_H),
+                    script,
+                    FieldStyle {
+                        placeholder: "sudo systemctl restart nginx",
+                        mono: true,
+                        ..FieldStyle::default()
+                    },
+                );
+                card.take_top(space::S);
+                let mut line = card.take_top(CONTROL);
+                let save = line.take_right(88.0);
+                line.take_right(space::S);
+                let cancel = line.take_right(80.0);
+                let cancelled = ui
+                    .button(
+                        Id::new("snippet.cancel"),
+                        cancel,
+                        "Cancel",
+                        None,
+                        Kind::Ghost,
+                    )
+                    .clicked
+                    || ui.key(Key::Escape, Modifiers::NONE);
+                let saved = ui
+                    .button(Id::new("snippet.save"), save, "Save", None, Kind::Primary)
+                    .clicked;
+                if saved && !script.trim().is_empty() {
+                    let mut snippet = snippet.clone();
+                    snippet.label = if label.trim().is_empty() {
+                        script.trim().to_owned()
+                    } else {
+                        label.trim().to_owned()
+                    };
+                    script.trim().clone_into(&mut snippet.script);
+                    let _ = vault.upsert_snippet(snippet);
+                    close_draft = true;
+                } else if cancelled {
+                    close_draft = true;
+                }
+            },
+        );
+        if close_draft {
+            self.draft.close();
         }
-        let mut action = self.targets_card(ui, &mut area, vault, files);
+        let mut action = None;
+        let mut close_targets = false;
+        self.targets.draw(
+            ui,
+            Id::new("snippets.targets"),
+            &mut area,
+            |ui, area, targets| {
+                (close_targets, action) = Self::targets_card(targets, ui, area, vault, files);
+            },
+        );
+        if close_targets {
+            self.targets.close();
+        }
         if count == 0 {
+            self.rows.empty(ui, area, ROW_H + GAP);
             pages::empty(
                 ui,
                 area,
@@ -1211,53 +1425,70 @@ impl SnippetsView {
         let list: Vec<Snippet> = vault.snippets().to_vec();
         let mut remove = None;
         let mut pick = None;
+        let looks: Vec<RowLook> = list
+            .iter()
+            .map(|snippet| RowLook {
+                key: snippet.id,
+                icon: icons::CODE,
+                title: snippet.label.clone(),
+                detail: snippet.script.lines().next().unwrap_or_default().to_owned(),
+                mono: true,
+            })
+            .collect();
         let confirm = self.confirm;
         let mut confirm_next = confirm;
-        rows(ui, "snippets.list", area, list.len(), |ui, index, row| {
-            let snippet = &list[index];
-            let zone = Id::new(("snippet", snippet.id));
-            pages::row(ui, zone, row, &snippet.label, false);
-            let (clicked, remainder) = if confirm == Some(snippet.id) {
-                let (answer, remainder) = confirm_delete(ui, row, zone, "Delete snippet");
-                match answer {
-                    Some(true) => remove = Some(snippet.id),
-                    Some(false) => confirm_next = None,
-                    None => {}
+        rows(
+            ui,
+            "snippets.list",
+            area,
+            &looks,
+            &mut self.rows,
+            |ui, index, row| {
+                let snippet = &list[index];
+                let zone = Id::new(("snippet", snippet.id));
+                pages::row(ui, zone, row, &snippet.label, false);
+                let (clicked, remainder) = if confirm == Some(snippet.id) {
+                    let (answer, remainder) = confirm_delete(ui, row, zone, "Delete snippet");
+                    match answer {
+                        Some(true) => remove = Some(snippet.id),
+                        Some(false) => confirm_next = None,
+                        None => {}
+                    }
+                    (None, remainder)
+                } else {
+                    row_buttons(
+                        ui,
+                        row,
+                        zone,
+                        &[
+                            (icons::TRASH, "Delete"),
+                            (icons::SERVER, "Run on hosts"),
+                            (icons::PLAY, "Run in a local terminal"),
+                        ],
+                    )
+                };
+                let inner = pages::row_icon(ui, remainder, icons::CODE);
+                let first = snippet.script.lines().next().unwrap_or_default();
+                pages::two_lines(ui, inner, &snippet.label, first, true);
+                match clicked {
+                    Some(1) => pick = Some(snippet.id),
+                    Some(2) => {
+                        action = Some(ScreenAction::Terminal(
+                            snippet.label.clone(),
+                            Box::new(snippets_screen::with_script(
+                                Program::DefaultShell,
+                                &snippet.script,
+                            )),
+                        ));
+                    }
+                    Some(0) => confirm_next = Some(snippet.id),
+                    _ => {}
                 }
-                (None, remainder)
-            } else {
-                row_buttons(
-                    ui,
-                    row,
-                    zone,
-                    &[
-                        (icons::TRASH, "Delete"),
-                        (icons::SERVER, "Run on hosts"),
-                        (icons::PLAY, "Run in a local terminal"),
-                    ],
-                )
-            };
-            let inner = pages::row_icon(ui, remainder, icons::CODE);
-            let first = snippet.script.lines().next().unwrap_or_default();
-            pages::two_lines(ui, inner, &snippet.label, first, true);
-            match clicked {
-                Some(1) => pick = Some(snippet.id),
-                Some(2) => {
-                    action = Some(ScreenAction::Terminal(
-                        snippet.label.clone(),
-                        Box::new(snippets_screen::with_script(
-                            Program::DefaultShell,
-                            &snippet.script,
-                        )),
-                    ));
-                }
-                Some(0) => confirm_next = Some(snippet.id),
-                _ => {}
-            }
-        });
+            },
+        );
         self.confirm = confirm_next;
         if let Some(id) = pick {
-            self.targets = Some((id, Vec::new()));
+            self.targets.open((id, Vec::new()));
         }
         if let Some(id) = remove {
             self.confirm = None;
@@ -1278,6 +1509,7 @@ const LOG_MENU: [&str; 3] = ["Open", "Export to Downloads", "Delete"];
 pub struct LogsView {
     /// The log a delete waits for a yes on.
     confirm: Option<u64>,
+    rows: ListMotion,
 }
 
 impl LogsView {
@@ -1300,6 +1532,7 @@ impl LogsView {
         };
         pages::header(ui, &mut area, "Logs", Some(count), subtitle);
         if count == 0 {
+            self.rows.empty(ui, area, ROW_H + GAP);
             pages::empty(
                 ui,
                 area,
@@ -1321,51 +1554,65 @@ impl LogsView {
         let confirm = self.confirm;
         let mut confirm_next = confirm;
         let menu: Vec<String> = LOG_MENU.iter().map(|item| (*item).to_owned()).collect();
-        rows(ui, "logs.list", area, list.len(), |ui, index, row| {
-            let (id, title, saved_at, text) = &list[index];
-            let zone = Id::new(("log", *id));
-            let response = pages::row(ui, zone, row, title, false);
-            let (clicked, remainder) = if confirm == Some(*id) {
-                let (answer, remainder) = confirm_delete(ui, row, zone, "Delete log");
-                match answer {
-                    Some(true) => remove = Some(*id),
-                    Some(false) => confirm_next = None,
-                    None => {}
-                }
-                (None, remainder)
-            } else {
-                row_buttons(
-                    ui,
-                    row,
-                    zone,
-                    &[
-                        (icons::TRASH, "Delete"),
-                        (icons::DOWNLOAD, "Export to Downloads"),
-                    ],
-                )
-            };
-            let inner = pages::row_icon(ui, remainder, icons::LOGS);
+        let about = |saved_at: u64, text: &str| {
             #[allow(clippy::cast_precision_loss)] // Logs are a few MiB at most.
             let size = format!("{:.1} KB", text.len() as f64 / 1024.0);
-            pages::two_lines(
-                ui,
-                inner,
-                title,
-                &format!("{} \u{b7} {size}", logs_screen::date(*saved_at)),
-                false,
-            );
-            // The same on a right click, or Shift+F10.
-            let picked = ui.context_menu(zone, &response, &menu);
-            match (clicked, picked) {
-                (Some(0), _) | (_, Some(2)) => confirm_next = Some(*id),
-                (Some(_), _) | (_, Some(1)) => export = Some(*id),
-                (_, Some(_)) => action = Some(ScreenAction::Log(title.clone(), text.clone())),
-                (None, None) if response.clicked && confirm != Some(*id) => {
-                    action = Some(ScreenAction::Log(title.clone(), text.clone()));
+            format!("{} \u{b7} {size}", logs_screen::date(saved_at))
+        };
+        let looks: Vec<RowLook> = list
+            .iter()
+            .map(|(id, title, saved_at, text)| RowLook {
+                key: *id,
+                icon: icons::LOGS,
+                title: title.clone(),
+                detail: about(*saved_at, text),
+                mono: false,
+            })
+            .collect();
+        rows(
+            ui,
+            "logs.list",
+            area,
+            &looks,
+            &mut self.rows,
+            |ui, index, row| {
+                let (id, title, saved_at, text) = &list[index];
+                let zone = Id::new(("log", *id));
+                let response = pages::row(ui, zone, row, title, false);
+                let (clicked, remainder) = if confirm == Some(*id) {
+                    let (answer, remainder) = confirm_delete(ui, row, zone, "Delete log");
+                    match answer {
+                        Some(true) => remove = Some(*id),
+                        Some(false) => confirm_next = None,
+                        None => {}
+                    }
+                    (None, remainder)
+                } else {
+                    row_buttons(
+                        ui,
+                        row,
+                        zone,
+                        &[
+                            (icons::TRASH, "Delete"),
+                            (icons::DOWNLOAD, "Export to Downloads"),
+                        ],
+                    )
+                };
+                let inner = pages::row_icon(ui, remainder, icons::LOGS);
+                pages::two_lines(ui, inner, title, &about(*saved_at, text), false);
+                // The same on a right click, or Shift+F10.
+                let picked = ui.context_menu(zone, &response, &menu);
+                match (clicked, picked) {
+                    (Some(0), _) | (_, Some(2)) => confirm_next = Some(*id),
+                    (Some(_), _) | (_, Some(1)) => export = Some(*id),
+                    (_, Some(_)) => action = Some(ScreenAction::Log(title.clone(), text.clone())),
+                    (None, None) if response.clicked && confirm != Some(*id) => {
+                        action = Some(ScreenAction::Log(title.clone(), text.clone()));
+                    }
+                    (None, None) => {}
                 }
-                (None, None) => {}
-            }
-        });
+            },
+        );
         self.confirm = confirm_next;
         if let Some(id) = export
             && let Some(log) = vault.logs().iter().find(|log| log.id == id)
@@ -1402,11 +1649,22 @@ pub struct KnownView {
     /// The file's size and time when `entries` was read: a change (a key trusted while
     /// connecting) reads it again (UI review #10).
     read_at: Option<(u64, Option<std::time::SystemTime>)>,
-    message: Option<String>,
+    message: Fold<String>,
+    rows: ListMotion,
+}
+
+/// Which row `entry` is for as long as the file has it: its line number changes when a line
+/// above it goes.
+fn known_key(entry: &KnownHost) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (&entry.hosts, &entry.algorithm, &entry.fingerprint).hash(&mut hash);
+    hash.finish()
 }
 
 impl KnownView {
     /// Draws the screen over the known-hosts file at `path`.
+    #[allow(clippy::too_many_lines)] // Header, message and list, top to bottom.
     pub fn draw(
         &mut self,
         ui: &mut Ui<'_>,
@@ -1443,19 +1701,25 @@ impl KnownView {
                 Kind::Secondary,
             )
         {
-            self.message = Some(match known::import(path, openssh) {
+            self.message.open(match known::import(path, openssh) {
                 Ok(_) => "Imported the keys OpenSSH trusts.".into(),
                 Err(error) => format!("Could not import: {error}"),
             });
             self.entries = None;
         }
-        if let Some(message) = &self.message {
-            let t = ui.theme;
-            ui.gfx
-                .text(area.take_top(20.0), message, SMALL, t.text2, Align::Start);
-            area.take_top(space::S);
-        }
+        self.message.draw(
+            ui,
+            Id::new("known.message"),
+            &mut area,
+            |ui, area, message| {
+                let t = ui.theme;
+                ui.gfx
+                    .text(area.take_top(20.0), message, SMALL, t.text2, Align::Start);
+                area.take_top(space::S);
+            },
+        );
         if entries.is_empty() {
+            self.rows.empty(ui, area, ROW_H + GAP);
             pages::empty(
                 ui,
                 area,
@@ -1466,27 +1730,44 @@ impl KnownView {
             return;
         }
         let mut forget = None;
-        rows(ui, "known.list", area, entries.len(), |ui, index, row| {
-            let entry = &entries[index];
-            let names = entry.hosts.join(", ");
-            let zone = Id::new(("known", entry.line));
-            pages::row(ui, zone, row, &names, false);
-            let (clicked, remainder) =
-                row_buttons(ui, row, zone, &[(icons::TRASH, "Forget this key")]);
-            let inner = pages::row_icon(ui, remainder, icons::SHIELD);
-            pages::two_lines(
-                ui,
-                inner,
-                &names,
-                &format!("{}  {}", entry.algorithm, entry.fingerprint),
-                true,
-            );
-            if clicked == Some(0) {
-                forget = Some(entry.clone());
-            }
-        });
+        let looks: Vec<RowLook> = entries
+            .iter()
+            .map(|entry| RowLook {
+                key: known_key(entry),
+                icon: icons::SHIELD,
+                title: entry.hosts.join(", "),
+                detail: format!("{}  {}", entry.algorithm, entry.fingerprint),
+                mono: true,
+            })
+            .collect();
+        rows(
+            ui,
+            "known.list",
+            area,
+            &looks,
+            &mut self.rows,
+            |ui, index, row| {
+                let entry = &entries[index];
+                let names = entry.hosts.join(", ");
+                let zone = Id::new(("known", entry.line));
+                pages::row(ui, zone, row, &names, false);
+                let (clicked, remainder) =
+                    row_buttons(ui, row, zone, &[(icons::TRASH, "Forget this key")]);
+                let inner = pages::row_icon(ui, remainder, icons::SHIELD);
+                pages::two_lines(
+                    ui,
+                    inner,
+                    &names,
+                    &format!("{}  {}", entry.algorithm, entry.fingerprint),
+                    true,
+                );
+                if clicked == Some(0) {
+                    forget = Some(entry.clone());
+                }
+            },
+        );
         if let Some(entry) = forget {
-            self.message = Some(match known::forget(path, &entry) {
+            self.message.open(match known::forget(path, &entry) {
                 Ok(()) => "Forgotten. The next connection asks again.".into(),
                 Err(error) => format!("Could not change the file: {error}"),
             });
@@ -1502,7 +1783,8 @@ impl KnownView {
 #[derive(Default)]
 pub struct ForwardsView {
     running: HashMap<u64, Running>,
-    draft: Option<Draft>,
+    draft: Fold<Draft>,
+    rows: ListMotion,
     /// Questions rules' connections are waiting on, by rule.
     asks: HashMap<u64, Ask>,
     /// The rules marked to start with the vault were started.
@@ -1527,6 +1809,19 @@ fn duplicate(rule: &PortForward, id: u64) -> PortForward {
         label: format!("{} copy", rule.label.trim()).trim().to_owned(),
         bind_port: 0,
         ..rule.clone()
+    }
+}
+
+/// The second line of `rule`'s row.
+fn forward_detail(rule: &PortForward, host: &str) -> String {
+    let kind = KINDS
+        .iter()
+        .find(|(_, kind)| *kind == rule.kind)
+        .map_or("", |(name, _)| *name);
+    if rule.label.trim().is_empty() {
+        format!("{kind} forward")
+    } else {
+        format!("{kind} \u{b7} {}", describe(rule, host))
     }
 }
 
@@ -1653,151 +1948,178 @@ impl ForwardsView {
             )
         {
             self.wizard = Some(Wizard::new(vault.draft_forward(host)));
-            self.draft = None;
+            self.draft.close();
         }
         if self.wizard.is_some() {
+            let shown = ui.entrance(Id::new("forwards.wizard"), Motion::BASE);
+            ui.push_layer(
+                Layer::fade(shown)
+                    .shifted(0.0, 10.0 * (1.0 - shown))
+                    .grouped(area),
+            );
             self.wizard_page(ui, area, vault, files, waker);
+            ui.pop_layer();
             self.ask_card(ui, rect);
             return;
         }
-        if let Some(draft) = &mut self.draft {
-            let hosts: Vec<(u64, String)> = vault
-                .hosts()
-                .iter()
-                .map(|host| (host.id, host.label.clone()))
-                .collect();
-            let mut card = pages::card(
-                ui,
-                &mut area,
-                if draft.is_new {
-                    "New rule"
-                } else {
-                    "Edit rule"
-                },
-                4.0 * CONTROL + 5.0 * space::M + 4.0,
-            );
-            card.take_top(space::S);
-            let mut line = card.take_top(CONTROL);
-            let kind_at = KINDS
-                .iter()
-                .position(|(_, kind)| *kind == draft.rule.kind)
-                .unwrap_or(0);
-            let names: Vec<&str> = KINDS.iter().map(|(name, _)| *name).collect();
-            let kinds = line.take_left(330.0);
-            if let Some(chosen) = segmented(ui, "forward.kind", kinds, &names, kind_at) {
-                draft.rule.kind = KINDS[chosen].1;
-            }
-            line.take_left(space::M);
-            let items: Vec<String> = hosts.iter().map(|(_, label)| label.clone()).collect();
-            let host_at = hosts.iter().position(|(id, _)| *id == draft.rule.host_id);
-            if let Some(chosen) = ui.select(Id::new("forward.host"), line, &items, host_at, "Host")
-            {
-                draft.rule.host_id = hosts[chosen].0;
-            }
-            card.take_top(space::S);
-            let mut line = card.take_top(CONTROL);
-            let bind = line.take_left(140.0);
-            ui.text_field(
-                Id::new("forward.bind"),
-                bind,
-                &mut draft.bind_port,
-                FieldStyle {
-                    placeholder: "Port, e.g. 8080",
-                    ..FieldStyle::default()
-                },
-            );
-            line.take_left(space::M);
-            if draft.rule.has_destination() {
-                let port = line.take_right(140.0);
-                line.take_right(space::M);
-                ui.text_field(
-                    Id::new("forward.dest"),
-                    line,
-                    &mut draft.rule.destination_host,
-                    FieldStyle {
-                        placeholder: "Destination host, e.g. localhost",
-                        ..FieldStyle::default()
+        // Coming back from the wizard, the list comes in as it went.
+        let shown = ui.entrance(Id::new("forwards.list.page"), Motion::BASE);
+        ui.push_layer(
+            Layer::fade(shown)
+                .shifted(0.0, 10.0 * (1.0 - shown))
+                .grouped(area),
+        );
+        let (mut saved, mut close_draft) = (None, false);
+        let running = &mut self.running;
+        self.draft.draw(
+            ui,
+            Id::new("forwards.draft"),
+            &mut area,
+            |ui, area, draft| {
+                let hosts: Vec<(u64, String)> = vault
+                    .hosts()
+                    .iter()
+                    .map(|host| (host.id, host.label.clone()))
+                    .collect();
+                let mut card = pages::card(
+                    ui,
+                    area,
+                    if draft.is_new {
+                        "New rule"
+                    } else {
+                        "Edit rule"
                     },
+                    4.0 * CONTROL + 5.0 * space::M + 4.0,
                 );
-                ui.text_field(
-                    Id::new("forward.dport"),
-                    port,
-                    &mut draft.destination_port,
-                    FieldStyle {
-                        placeholder: "Port, e.g. 5432",
-                        ..FieldStyle::default()
-                    },
-                );
-            }
-            card.take_top(space::S);
-            let mut line = card.take_top(CONTROL);
-            let first = line.take_left(line.w / 2.0);
-            ui.checkbox(
-                Id::new("forward.auto"),
-                first,
-                &mut draft.rule.auto_start,
-                "Start when the vault unlocks",
-            );
-            ui.checkbox(
-                Id::new("forward.with"),
-                line,
-                &mut draft.rule.with_host,
-                "Start with the host's terminal",
-            );
-            card.take_top(space::S);
-            let mut line = card.take_top(CONTROL);
-            let save = line.take_right(88.0);
-            line.take_right(space::S);
-            let cancel = line.take_right(80.0);
-            line.take_right(space::M);
-            if let Some(problem) = &draft.problem {
-                let t = ui.theme;
-                ui.gfx.text(line, problem, SMALL, t.error, Align::Start);
-            } else {
-                ui.text_field(
-                    Id::new("forward.label"),
-                    line,
-                    &mut draft.rule.label,
-                    FieldStyle {
-                        placeholder: "Label (optional)",
-                        ..FieldStyle::default()
-                    },
-                );
-            }
-            let cancelled = ui
-                .button(
-                    Id::new("forward.cancel"),
-                    cancel,
-                    "Cancel",
-                    None,
-                    Kind::Ghost,
-                )
-                .clicked
-                || ui.key(Key::Escape, Modifiers::NONE);
-            if ui
-                .button(Id::new("forward.save"), save, "Save", None, Kind::Primary)
-                .clicked
-            {
-                match draft.finish() {
-                    // A running rule starts again with what was changed. Not saved, the
-                    // form stays with the reason, so nothing typed is lost.
-                    Ok(rule) => match vault.upsert_forward(rule.clone()) {
-                        Ok(id) => {
-                            let was_running = self.running.remove(&rule.id).is_some();
-                            self.draft = None;
-                            if was_running {
-                                self.start_rule(id, vault, files, waker);
-                            }
-                        }
-                        Err(error) => {
-                            draft.problem = Some(format!("Could not save the rule: {error}"));
-                        }
-                    },
-                    Err(problem) => draft.problem = Some(problem),
+                card.take_top(space::S);
+                let mut line = card.take_top(CONTROL);
+                let kind_at = KINDS
+                    .iter()
+                    .position(|(_, kind)| *kind == draft.rule.kind)
+                    .unwrap_or(0);
+                let names: Vec<&str> = KINDS.iter().map(|(name, _)| *name).collect();
+                let kinds = line.take_left(330.0);
+                if let Some(chosen) = segmented(ui, "forward.kind", kinds, &names, kind_at) {
+                    draft.rule.kind = KINDS[chosen].1;
                 }
-            } else if cancelled {
-                self.draft = None;
-            }
+                line.take_left(space::M);
+                let items: Vec<String> = hosts.iter().map(|(_, label)| label.clone()).collect();
+                let host_at = hosts.iter().position(|(id, _)| *id == draft.rule.host_id);
+                if let Some(chosen) =
+                    ui.select(Id::new("forward.host"), line, &items, host_at, "Host")
+                {
+                    draft.rule.host_id = hosts[chosen].0;
+                }
+                card.take_top(space::S);
+                let mut line = card.take_top(CONTROL);
+                let bind = line.take_left(140.0);
+                ui.text_field(
+                    Id::new("forward.bind"),
+                    bind,
+                    &mut draft.bind_port,
+                    FieldStyle {
+                        placeholder: "Port, e.g. 8080",
+                        ..FieldStyle::default()
+                    },
+                );
+                line.take_left(space::M);
+                if draft.rule.has_destination() {
+                    let port = line.take_right(140.0);
+                    line.take_right(space::M);
+                    ui.text_field(
+                        Id::new("forward.dest"),
+                        line,
+                        &mut draft.rule.destination_host,
+                        FieldStyle {
+                            placeholder: "Destination host, e.g. localhost",
+                            ..FieldStyle::default()
+                        },
+                    );
+                    ui.text_field(
+                        Id::new("forward.dport"),
+                        port,
+                        &mut draft.destination_port,
+                        FieldStyle {
+                            placeholder: "Port, e.g. 5432",
+                            ..FieldStyle::default()
+                        },
+                    );
+                }
+                card.take_top(space::S);
+                let mut line = card.take_top(CONTROL);
+                let first = line.take_left(line.w / 2.0);
+                ui.checkbox(
+                    Id::new("forward.auto"),
+                    first,
+                    &mut draft.rule.auto_start,
+                    "Start when the vault unlocks",
+                );
+                ui.checkbox(
+                    Id::new("forward.with"),
+                    line,
+                    &mut draft.rule.with_host,
+                    "Start with the host's terminal",
+                );
+                card.take_top(space::S);
+                let mut line = card.take_top(CONTROL);
+                let save = line.take_right(88.0);
+                line.take_right(space::S);
+                let cancel = line.take_right(80.0);
+                line.take_right(space::M);
+                if let Some(problem) = &draft.problem {
+                    let t = ui.theme;
+                    ui.gfx.text(line, problem, SMALL, t.error, Align::Start);
+                } else {
+                    ui.text_field(
+                        Id::new("forward.label"),
+                        line,
+                        &mut draft.rule.label,
+                        FieldStyle {
+                            placeholder: "Label (optional)",
+                            ..FieldStyle::default()
+                        },
+                    );
+                }
+                let cancelled = ui
+                    .button(
+                        Id::new("forward.cancel"),
+                        cancel,
+                        "Cancel",
+                        None,
+                        Kind::Ghost,
+                    )
+                    .clicked
+                    || ui.key(Key::Escape, Modifiers::NONE);
+                if ui
+                    .button(Id::new("forward.save"), save, "Save", None, Kind::Primary)
+                    .clicked
+                {
+                    match draft.finish() {
+                        // A running rule starts again with what was changed. Not saved, the
+                        // form stays with the reason, so nothing typed is lost.
+                        Ok(rule) => match vault.upsert_forward(rule.clone()) {
+                            Ok(id) => {
+                                close_draft = true;
+                                if running.remove(&rule.id).is_some() {
+                                    saved = Some(id);
+                                }
+                            }
+                            Err(error) => {
+                                draft.problem = Some(format!("Could not save the rule: {error}"));
+                            }
+                        },
+                        Err(problem) => draft.problem = Some(problem),
+                    }
+                } else if cancelled {
+                    close_draft = true;
+                }
+            },
+        );
+        if close_draft {
+            self.draft.close();
+        }
+        if let Some(id) = saved {
+            self.start_rule(id, vault, files, waker);
         }
         let rules: Vec<PortForward> = vault.forwards().to_vec();
         let host_names: HashMap<u64, String> = vault
@@ -1815,160 +2137,174 @@ impl ForwardsView {
             .iter()
             .map(|(id, running)| (*id, running.status()))
             .collect();
-        rows(ui, "forwards.list", area, rules.len(), |ui, index, row| {
-            let rule = &rules[index];
-            let host = host_names.get(&rule.host_id).map_or("?", String::as_str);
-            let zone = Id::new(("forward", rule.id));
-            let title = if rule.label.trim().is_empty() {
-                describe(rule, host)
-            } else {
-                rule.label.clone()
-            };
-            // Listening beyond this computer (an imported `*:1080`) is said, seen and heard.
-            let exposed = rule.is_exposed();
-            let name = if exposed {
-                format!("{title}, open to your network")
-            } else {
-                title.clone()
-            };
-            pages::row(ui, zone, row, &name, false);
-            let confirming = confirm == Some(rule.id);
-            let mut remainder = row.inset(space::M, 0.0);
-            let mut slots = None;
-            if confirming {
-                let (answer, left) = confirm_delete(ui, row, zone, "Delete rule");
-                match answer {
-                    Some(true) => remove = Some(rule.id),
-                    Some(false) => confirm_next = None,
-                    None => {}
+        let looks: Vec<RowLook> = rules
+            .iter()
+            .map(|rule| RowLook {
+                key: rule.id,
+                icon: icons::FORWARD,
+                title: if rule.label.trim().is_empty() {
+                    describe(
+                        rule,
+                        host_names.get(&rule.host_id).map_or("?", String::as_str),
+                    )
+                } else {
+                    rule.label.clone()
+                },
+                detail: forward_detail(
+                    rule,
+                    host_names.get(&rule.host_id).map_or("?", String::as_str),
+                ),
+                mono: false,
+            })
+            .collect();
+        rows(
+            ui,
+            "forwards.list",
+            area,
+            &looks,
+            &mut self.rows,
+            |ui, index, row| {
+                let rule = &rules[index];
+                let host = host_names.get(&rule.host_id).map_or("?", String::as_str);
+                let zone = Id::new(("forward", rule.id));
+                let title = if rule.label.trim().is_empty() {
+                    describe(rule, host)
+                } else {
+                    rule.label.clone()
+                };
+                // Listening beyond this computer (an imported `*:1080`) is said, seen and heard.
+                let exposed = rule.is_exposed();
+                let name = if exposed {
+                    format!("{title}, open to your network")
+                } else {
+                    title.clone()
+                };
+                pages::row(ui, zone, row, &name, false);
+                let confirming = confirm == Some(rule.id);
+                let mut remainder = row.inset(space::M, 0.0);
+                let mut slots = None;
+                if confirming {
+                    let (answer, left) = confirm_delete(ui, row, zone, "Delete rule");
+                    match answer {
+                        Some(true) => remove = Some(rule.id),
+                        Some(false) => confirm_next = None,
+                        None => {}
+                    }
+                    remainder = left;
+                } else {
+                    let delete = remainder.take_right(30.0).centered(30.0, 30.0);
+                    remainder.take_right(4.0);
+                    let copy = remainder.take_right(30.0).centered(30.0, 30.0);
+                    remainder.take_right(4.0);
+                    let change = remainder.take_right(30.0).centered(30.0, 30.0);
+                    remainder.take_right(space::S);
+                    let switch = remainder.take_right(40.0);
+                    remainder.take_right(space::S);
+                    slots = Some((switch, change, copy, delete));
                 }
-                remainder = left;
-            } else {
-                let delete = remainder.take_right(30.0).centered(30.0, 30.0);
-                remainder.take_right(4.0);
-                let copy = remainder.take_right(30.0).centered(30.0, 30.0);
-                remainder.take_right(4.0);
-                let change = remainder.take_right(30.0).centered(30.0, 30.0);
-                remainder.take_right(space::S);
-                let switch = remainder.take_right(40.0);
-                remainder.take_right(space::S);
-                slots = Some((switch, change, copy, delete));
-            }
-            let status = statuses.get(&rule.id);
-            let t = ui.theme;
-            let (words, color) = match status {
-                None => ("Off".to_owned(), t.text3),
-                Some(Status::Starting) => ("Starting\u{2026}".to_owned(), t.warn),
-                Some(Status::Active(n)) => (format!("On \u{b7} {n} open"), t.ok),
-                Some(Status::Reconnecting(_)) => ("Reconnecting\u{2026}".to_owned(), t.warn),
-                Some(Status::Failed(why)) => (why.clone(), t.error),
-            };
-            let words_w = ui.gfx.measure(&words, SMALL).width.min(220.0);
-            let state = remainder.take_right(words_w + 14.0);
-            ui.gfx.fill_circle(
-                annulus_ui::gfx::Point::new(state.x + 4.0, state.center().y),
-                3.5,
-                color,
-            );
-            ui.gfx.text(
-                Rect::new(state.x + 12.0, state.y, state.w - 12.0, state.h),
-                &words,
-                SMALL,
-                t.text2,
-                Align::Start,
-            );
-            if exposed {
-                const OPEN: &str = "Open to your network";
-                let width = ui.gfx.measure(OPEN, SMALL).width + 20.0;
-                remainder.take_right(space::M);
-                let mark = remainder.take_right(width);
-                ui.gfx.icon(
-                    icons::WARNING,
-                    Rect::new(mark.x, mark.center().y - 7.0, 14.0, 14.0),
-                    t.warn,
+                let status = statuses.get(&rule.id);
+                let t = ui.theme;
+                let (words, color) = match status {
+                    None => ("Off".to_owned(), t.text3),
+                    Some(Status::Starting) => ("Starting\u{2026}".to_owned(), t.warn),
+                    Some(Status::Active(n)) => (format!("On \u{b7} {n} open"), t.ok),
+                    Some(Status::Reconnecting(_)) => ("Reconnecting\u{2026}".to_owned(), t.warn),
+                    Some(Status::Failed(why)) => (why.clone(), t.error),
+                };
+                let words_w = ui.gfx.measure(&words, SMALL).width.min(220.0);
+                let state = remainder.take_right(words_w + 14.0);
+                ui.gfx.fill_circle(
+                    annulus_ui::gfx::Point::new(state.x + 4.0, state.center().y),
+                    3.5,
+                    color,
                 );
                 ui.gfx.text(
-                    Rect::new(mark.x + 20.0, mark.y, mark.w - 20.0, mark.h),
-                    OPEN,
+                    Rect::new(state.x + 12.0, state.y, state.w - 12.0, state.h),
+                    &words,
                     SMALL,
-                    t.warn,
+                    t.text2,
                     Align::Start,
                 );
-            }
-            let inner = pages::row_icon(ui, remainder, icons::FORWARD);
-            let kind = KINDS
-                .iter()
-                .find(|(_, kind)| *kind == rule.kind)
-                .map_or("", |(name, _)| *name);
-            pages::two_lines(
-                ui,
-                inner,
-                &title,
-                &if rule.label.trim().is_empty() {
-                    format!("{kind} forward")
-                } else {
-                    format!("{kind} \u{b7} {}", describe(rule, host))
-                },
-                false,
-            );
-            let Some((switch, change, copy, delete)) = slots else {
-                return;
-            };
-            let mut on = status.is_some();
-            if ui
-                .switch(zone.with("switch"), switch, &mut on, "Run this rule")
-                .clicked
-            {
-                toggles.push((rule.id, on));
-            }
-            // As in other lists: they come up with the pointer or the keyboard.
-            let focused = ui.state.focus();
-            let near = ui.hover_within(row)
-                || ["edit", "copy", "delete"]
-                    .into_iter()
-                    .any(|name| focused == Some(zone.with(name)));
-            let shown = ui.ease(zone.with("near"), if near { 1.0 } else { 0.0 });
-            ui.push_layer(Layer::fade(shown));
-            if ui
-                .icon_button(zone.with("edit"), change, icons::EDIT, "Edit rule", false)
-                .clicked
-            {
-                edit = Some(rule.clone());
-            }
-            if ui
-                .icon_button(
-                    zone.with("copy"),
-                    copy,
-                    icons::COPY,
-                    "Duplicate rule",
-                    false,
-                )
-                .clicked
-            {
-                copied = Some(rule.clone());
-            }
-            if ui
-                .icon_button(
-                    zone.with("delete"),
-                    delete,
-                    icons::TRASH,
-                    "Delete rule",
-                    false,
-                )
-                .clicked
-            {
-                confirm_next = Some(rule.id);
-            }
-            ui.pop_layer();
-        });
+                if exposed {
+                    const OPEN: &str = "Open to your network";
+                    let width = ui.gfx.measure(OPEN, SMALL).width + 20.0;
+                    remainder.take_right(space::M);
+                    let mark = remainder.take_right(width);
+                    ui.gfx.icon(
+                        icons::WARNING,
+                        Rect::new(mark.x, mark.center().y - 7.0, 14.0, 14.0),
+                        t.warn,
+                    );
+                    ui.gfx.text(
+                        Rect::new(mark.x + 20.0, mark.y, mark.w - 20.0, mark.h),
+                        OPEN,
+                        SMALL,
+                        t.warn,
+                        Align::Start,
+                    );
+                }
+                let inner = pages::row_icon(ui, remainder, icons::FORWARD);
+                pages::two_lines(ui, inner, &title, &forward_detail(rule, host), false);
+                let Some((switch, change, copy, delete)) = slots else {
+                    return;
+                };
+                let mut on = status.is_some();
+                if ui
+                    .switch(zone.with("switch"), switch, &mut on, "Run this rule")
+                    .clicked
+                {
+                    toggles.push((rule.id, on));
+                }
+                // As in other lists: they come up with the pointer or the keyboard.
+                let focused = ui.state.focus();
+                let near = ui.hover_within(row)
+                    || ["edit", "copy", "delete"]
+                        .into_iter()
+                        .any(|name| focused == Some(zone.with(name)));
+                let shown = ui.ease(zone.with("near"), if near { 1.0 } else { 0.0 });
+                ui.push_layer(Layer::fade(shown));
+                if ui
+                    .icon_button(zone.with("edit"), change, icons::EDIT, "Edit rule", false)
+                    .clicked
+                {
+                    edit = Some(rule.clone());
+                }
+                if ui
+                    .icon_button(
+                        zone.with("copy"),
+                        copy,
+                        icons::COPY,
+                        "Duplicate rule",
+                        false,
+                    )
+                    .clicked
+                {
+                    copied = Some(rule.clone());
+                }
+                if ui
+                    .icon_button(
+                        zone.with("delete"),
+                        delete,
+                        icons::TRASH,
+                        "Delete rule",
+                        false,
+                    )
+                    .clicked
+                {
+                    confirm_next = Some(rule.id);
+                }
+                ui.pop_layer();
+            },
+        );
+        ui.pop_layer();
         self.confirm = confirm_next;
         if let Some(rule) = edit {
-            self.draft = Some(Draft::new(rule, false));
+            self.draft.open(Draft::new(rule, false));
         }
         // A copy opens as a new rule for its own port (F-FWD-005).
         if let Some(rule) = copied {
             let copy = duplicate(&rule, vault.draft_forward(rule.host_id).id);
-            self.draft = Some(Draft::new(copy, true));
+            self.draft.open(Draft::new(copy, true));
         }
         for (id, on) in toggles {
             if on {
@@ -2130,6 +2466,31 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn a_pasted_key_is_wiped_as_its_card_starts_to_fold_away() {
+        let mut fold = Fold::default();
+        fold.open(KeyForm::Import {
+            label: "work".into(),
+            private: Zeroizing::new("-----BEGIN".into()),
+            passphrase: Zeroizing::new("hunter2".into()),
+        });
+        let mut wiped = false;
+        fold.close_with(|form| {
+            form.forget();
+            let KeyForm::Import {
+                private,
+                passphrase,
+                ..
+            } = form
+            else {
+                return;
+            };
+            wiped = private.is_empty() && passphrase.is_empty();
+        });
+        assert!(wiped, "before it is drawn once more on its way out");
+        assert!(fold.get().is_none());
+    }
 
     fn canvas() -> annulus_platform::cpu::CpuCanvas {
         annulus_platform::cpu::CpuCanvas::new(

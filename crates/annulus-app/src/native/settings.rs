@@ -918,7 +918,17 @@ impl SettingsView {
                 .iter()
                 .filter(|shortcut| shortcut.group == group)
                 .collect();
-            let heights: Vec<f32> = rows.iter().map(|shortcut| self.row_h(shortcut)).collect();
+            // A row that says why keys were refused grows; the rows under it glide down.
+            let heights: Vec<f32> = rows
+                .iter()
+                .map(|shortcut| {
+                    ui.animate(
+                        Id::new(("shortcut.height", shortcut.id)),
+                        self.row_h(shortcut),
+                        Motion::BASE,
+                    )
+                })
+                .collect();
             let height = heights.iter().sum::<f32>() + 2.0 * space::S;
             let mut card = pages::card(ui, page, group, height);
             for (index, (shortcut, height)) in rows.into_iter().zip(heights).enumerate() {

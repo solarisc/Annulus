@@ -423,6 +423,11 @@ fn recorded(host: &str, command: &str, output: &[&str]) -> annulus_term::Emulato
 /// A tab of four recorded panes, two by two: prod-db with the keyboard and cache-eu-1 under
 /// it, web-1 and bastion on the right. Leaf order 1, 3, 2, 4.
 fn split_tab(app: &mut NativeApp) {
+    app.push_terminal("prod-db", TermView::Live(Box::new(split_panes())));
+}
+
+/// [`split_tab`]'s panes.
+pub(super) fn split_panes() -> super::panes::Panes {
     use super::panes::{Panes, Replay};
     let pane = |title: &str, emulator: annulus_term::Emulator, status: Option<TabStatus>| Replay {
         title: title.into(),
@@ -465,7 +470,7 @@ fn split_tab(app: &mut NativeApp) {
         ),
     );
     panes.focused = 1;
-    app.push_terminal("prod-db", TermView::Live(Box::new(panes)));
+    panes
 }
 
 const SCENES: &[Scene] = &[
@@ -1652,6 +1657,9 @@ fn render(
         if !events.is_empty() {
             (output, _) = frame(&[], time + 0.5, false);
             faults.extend(output.faults.iter().cloned());
+            // What the act opened has arrived by now, with its controls.
+            (output, _) = frame(&[], time + 0.9, false);
+            faults.extend(output.faults.iter().cloned());
         }
         events.clear();
         time += 1.0;
@@ -1816,6 +1824,72 @@ const FILMS: &[Scene] = &[
         setup: with_tabs,
         acts: &[Act::Shortcut(shortcuts::NEXT_TAB)],
     },
+    // A key card unfolds above the list, which glides down out of its way.
+    Scene {
+        name: "motion-key-card",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[Act::Click("Generate key")],
+    },
+    // ...and folds away again.
+    Scene {
+        name: "motion-key-card-close",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[
+            Act::Click("Generate key"),
+            Act::Press(Key::Escape, Modifiers::NONE),
+        ],
+    },
+    // A snippet's card, the same.
+    Scene {
+        name: "motion-snippet-card",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: snippets,
+        acts: &[Act::Click("New snippet")],
+    },
+    // A wizard's next step comes in from the right.
+    Scene {
+        name: "motion-wizard-step",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: forwards,
+        acts: &[
+            Act::Click("New rule"),
+            Act::Click("Reach a service behind a server"),
+        ],
+    },
+    // Into a group: its hosts fill in as the others go.
+    Scene {
+        name: "motion-group",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Click("Production")],
+    },
+    // The tag chips unfold over the hosts.
+    Scene {
+        name: "motion-tag-chips",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: nothing,
+        acts: &[Act::Click("Tags")],
+    },
     // A section is left for another: one fades out over the other coming in.
     Scene {
         name: "motion-section-crossfade",
@@ -1876,10 +1950,268 @@ fn filmstrip(film: &Scene, renderer: &mut dyn Renderer) -> Vec<Vec<u8>> {
                 frames.push(png.unwrap());
             }
         } else {
-            (output, _) = frame(&[], time + 0.5, false);
+            let _ = frame(&[], time + 0.5, false);
+            (output, _) = frame(&[], time + 0.9, false);
         }
     }
     frames
+}
+
+/// What one act of a scene did on screen.
+struct Pop {
+    scene: &'static str,
+    act: String,
+    /// The share of the act's whole change the first frame after it already shows: near 1
+    /// for something that just appears, small for something that moves there.
+    share: f64,
+    /// The share of the window the act changes.
+    area: f64,
+}
+
+/// The difference between two frames: the total, and the share of pixels that visibly differ.
+fn frame_change(a: &[u8], b: &[u8]) -> (f64, f64) {
+    let (mut total, mut seen) = (0u64, 0u64);
+    for (x, y) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
+        let d = x[..3]
+            .iter()
+            .zip(&y[..3])
+            .map(|(p, q)| u64::from(p.abs_diff(*q)))
+            .sum::<u64>();
+        total += d;
+        seen += u64::from(d > 24);
+    }
+    #[allow(clippy::cast_precision_loss)] // Frames are small.
+    (total as f64, seen as f64 / (a.len() / 4) as f64)
+}
+
+/// [`Pop`]s of every act of `scene` but typing, drawn with the CPU renderer.
+fn pops_of(scene: &'static Scene, text: &mut Option<TextEngine>) -> Vec<Pop> {
+    let vault = fixture_vault(&format!("pops-{}", scene.name), scene.populated);
+    let mut app = NativeApp::new(Some(vault));
+    app.window_buttons = WindowButtons::Ours;
+    (scene.setup)(&mut app);
+    let theme = Theme::new(Appearance::Dark);
+    let mut state = UiState::default();
+    #[allow(clippy::cast_precision_loss)] // Scene sizes.
+    let viewport = Rect::new(0.0, 0.0, scene.width as f32, scene.height as f32);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )] // Scene sizes.
+    let (width, height) = (
+        (scene.width as f32 * scene.scale).round() as u32,
+        (scene.height as f32 * scene.scale).round() as u32,
+    );
+    let mut frame = |events: &[Event], time: f64| {
+        let engine = text.take().unwrap_or_default();
+        let mut canvas = CpuCanvas::new(width, height, scene.scale, engine).unwrap();
+        state.begin_frame(events, time);
+        let mut ui = Ui::new(&mut canvas, theme, &mut state, viewport);
+        app.frame(&mut ui);
+        let output = state.end_frame();
+        let pixels = canvas.pixels().to_vec();
+        *text = Some(canvas.into_text_engine());
+        (output, pixels)
+    };
+    let mut pops = Vec::new();
+    let mut time = 0.0;
+    let _ = frame(&[], time);
+    for act in scene.acts {
+        // At rest before the act.
+        let _ = frame(&[], time + 1.0);
+        let (output, before) = frame(&[], time + 2.5);
+        time += 3.0;
+        let events = events_for(act, &output.zones);
+        let _ = frame(&events, time);
+        let (_, first) = frame(&[], time + 0.017);
+        let _ = frame(&[], time + 1.0);
+        let (_, settled) = frame(&[], time + 2.5);
+        time += 3.0;
+        if matches!(act, Act::Type(_)) {
+            continue;
+        }
+        if std::env::var("ANNULUS_POPDUMP").is_ok_and(|want| want == scene.name) {
+            let dir = out_dir();
+            for (name, px) in [
+                ("before", &before),
+                ("first", &first),
+                ("settled", &settled),
+            ] {
+                let path = dir.join(format!("pop-{}-{name}.rgba", pops.len()));
+                std::fs::write(path, px).unwrap();
+            }
+        }
+        let (whole, area) = frame_change(&before, &settled);
+        let (left, _) = frame_change(&first, &settled);
+        if whole > 0.0 {
+            pops.push(Pop {
+                scene: scene.name,
+                act: format!("{act:?}"),
+                share: 1.0 - left / whole,
+                area,
+            });
+        }
+    }
+    pops
+}
+
+/// Whether an act is meant to show at once: the pointer and the keyboard's focus are answered
+/// in a moment, which from a distance is the same thing. In focus mode another terminal does
+/// fade in, but what changes most there is the old one's many lines leaving the short new one,
+/// which the measure cannot tell from a card thrown on.
+fn answers_at_once(scene: &str, act: &str) -> bool {
+    act.starts_with("Hover")
+        || act.starts_with("Press(Tab")
+        || (scene == "terminal-focus-mode" && act.contains("Disconnected or failed"))
+}
+
+/// Anything that changes much of the window moves there. Measured from the pixels of every act
+/// of every scene: the frame after the act must not already look like where it ends up, the
+/// way a card or a dialog thrown onto the screen does.
+#[test]
+fn nothing_big_appears_at_once() {
+    /// The share of the window an act must change to count.
+    const BIG: f64 = 0.04;
+    /// How much of its change may be there in the first frame.
+    const ARRIVED: f64 = 0.75;
+    let _alone = TIMED_SHELLS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let threads = workers();
+    let mut all: Vec<Pop> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|first| {
+                scope.spawn(move || {
+                    let mut text = None;
+                    let mut pops = Vec::new();
+                    for scene in SCENES.iter().chain(FILMS).skip(first).step_by(threads) {
+                        pops.extend(pops_of(scene, &mut text));
+                    }
+                    pops
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    all.sort_by(|a, b| b.share.total_cmp(&a.share));
+    let thrown: Vec<String> = all
+        .iter()
+        .filter(|pop| {
+            pop.area >= BIG && pop.share > ARRIVED && !answers_at_once(pop.scene, &pop.act)
+        })
+        .map(|pop| {
+            format!(
+                "{:.2} of {:.1}%: {} {}",
+                pop.share,
+                pop.area * 100.0,
+                pop.scene,
+                pop.act
+            )
+        })
+        .collect();
+    assert!(thrown.is_empty(), "these appear at once: {thrown:#?}");
+}
+
+#[test]
+fn a_key_card_unfolds_over_the_list_and_folds_away_taking_nothing_as_it_goes() {
+    let mut app = NativeApp::new(Some(fixture_vault("key-fold", true)));
+    keychain(&mut app);
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let row = "Work laptop";
+    let rest = place_of(&output, row).y;
+    let click = click_on(&output, "Generate key");
+    drive(&mut app, &mut state, &click, 1.0);
+    let at = |output: &FrameOutput| place_of(output, row).y;
+    let early = at(&drive(&mut app, &mut state, &[], 1.034));
+    let later = at(&drive(&mut app, &mut state, &[], 1.1));
+    let open = at(&drive(&mut app, &mut state, &[], 2.0));
+    assert!(
+        rest <= early && early < later && later < open,
+        "the list glides down: {rest} {early} {later} {open}"
+    );
+    assert!(open - rest > 100.0, "it makes room for the card");
+    let escape = [Event::Key(Key::Escape, Modifiers::NONE)];
+    drive(&mut app, &mut state, &escape, 3.0);
+    let going = drive(&mut app, &mut state, &[], 3.05);
+    assert!(
+        at(&going) > rest && at(&going) <= open,
+        "the list glides back"
+    );
+    assert!(
+        going
+            .zones
+            .iter()
+            .all(|zone| zone.label != "Name, e.g. work laptop"),
+        "what is on its way out takes nothing"
+    );
+    drive(&mut app, &mut state, &[], 4.0);
+    let closed = drive(&mut app, &mut state, &[], 4.5);
+    assert!((at(&closed) - rest).abs() < 0.5, "it ends where it started");
+    assert!(!closed.repaint, "and nothing keeps asking for frames");
+}
+
+#[test]
+fn under_reduced_motion_a_key_card_is_simply_there() {
+    let mut app = NativeApp::new(Some(fixture_vault("key-fold-reduced", true)));
+    keychain(&mut app);
+    app.settings.reduce_motion = true;
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    drive(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Generate key"),
+        1.0,
+    );
+    let open = drive(&mut app, &mut state, &[], 1.001);
+    assert!(
+        open.zones
+            .iter()
+            .any(|zone| zone.label == "Name, e.g. work laptop"),
+        "the frame that opens it shows it"
+    );
+}
+
+#[test]
+fn a_new_key_rises_in_and_a_deleted_one_goes_while_the_others_close_up() {
+    let mut app = NativeApp::new(Some(fixture_vault("key-rows", true)));
+    keychain(&mut app);
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let first = place_of(&output, "Work laptop").y;
+    let vault = app.vault.as_mut().unwrap();
+    let pair = annulus_ssh::keys::generate(annulus_ssh::keys::KeyKind::Ed25519, "me@test").unwrap();
+    let key = crate::keychain_screen::stored(vault, "Zed key", &pair);
+    vault.upsert_key(key).unwrap();
+    let rising = place_of(&drive(&mut app, &mut state, &[], 1.0), "Zed key").y;
+    drive(&mut app, &mut state, &[], 2.0);
+    let landed = place_of(&drive(&mut app, &mut state, &[], 2.5), "Zed key").y;
+    assert!(rising > landed, "it comes up into place: {rising} {landed}");
+    // The row above it goes: this one glides up into its place.
+    let vault = app.vault.as_mut().unwrap();
+    let gone = vault
+        .ssh_keys()
+        .iter()
+        .find(|key| key.label == "Work laptop")
+        .unwrap()
+        .id;
+    vault.remove_key(gone).unwrap();
+    let moving = drive(&mut app, &mut state, &[], 3.0);
+    let closing = place_of(&drive(&mut app, &mut state, &[], 3.1), "Zed key").y;
+    assert!(moving.repaint, "the row that went is still fading");
+    assert!(
+        first < closing && closing < landed,
+        "it glides: {first} {closing} {landed}"
+    );
+    drive(&mut app, &mut state, &[], 4.0);
+    let there = drive(&mut app, &mut state, &[], 4.5);
+    assert!((place_of(&there, "Zed key").y - first).abs() < 0.5);
+    assert!(!there.repaint, "and nothing keeps asking for frames");
 }
 
 /// What film strips are photographed with: what the shipped app draws with on this OS.
@@ -2246,7 +2578,8 @@ fn drive(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) 
 /// Draws a frame with `events`, then the frame after input that the window draws too.
 fn step(app: &mut NativeApp, state: &mut UiState, events: &[Event], time: f64) -> FrameOutput {
     drive(app, state, events, time);
-    drive(app, state, &[], time)
+    drive(app, state, &[], time);
+    drive(app, state, &[], time + 0.4)
 }
 
 /// Lays out with the real fonts but draws no pixels: the random-input test runs thousands of
@@ -3514,7 +3847,7 @@ fn a_key_pasted_into_the_keychain_is_saved_under_its_name() {
     let before = app.vault.as_ref().unwrap().ssh_keys().len();
     let mut state = UiState::default();
     let mut output = drive(&mut app, &mut state, &[], 0.0);
-    output = drive(&mut app, &mut state, &click_on(&output, "Import key"), 1.0);
+    output = step(&mut app, &mut state, &click_on(&output, "Import key"), 1.0);
     let mut events = click_on(&output, "Name, e.g. id_ed25519");
     events.push(Event::Text("deploy".into()));
     output = drive(&mut app, &mut state, &events, 2.0);

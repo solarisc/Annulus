@@ -1299,6 +1299,23 @@ impl<'a> Ui<'a> {
         self.animate(id, 1.0, motion)
     }
 
+    /// [`Self::entrance`] when `play`; otherwise it is simply there already (a row of a list
+    /// that has only just come on screen, which comes in with its list and not on its own).
+    pub fn entrance_if(&mut self, id: Id, motion: Motion, play: bool) -> f32 {
+        if play {
+            return self.entrance(id, motion);
+        }
+        let now = self.state.time;
+        self.state.tweens.insert(id, Tween::at(1.0, now));
+        1.0
+    }
+
+    /// When the frame before this one was drawn: what was last drawn then is on screen still.
+    #[must_use]
+    pub fn frame_before(&self) -> f64 {
+        self.state.prev_time
+    }
+
     /// A position following `target` on a spring: it glides there, and keeps its speed when
     /// the target moves again (a dragged tab's neighbours, a sliding selection). The first time
     /// `id` is asked for, it starts at the target.

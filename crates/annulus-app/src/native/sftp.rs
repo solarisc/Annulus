@@ -15,12 +15,13 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Id, Key, Modifiers, Role, Ui};
-use annulus_ui::motion::{Layer, Motion};
+use annulus_ui::motion::{Curve, Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, button_width,
 };
 
 use super::ask::{self, Ask};
+use super::pages;
 use crate::local_pane::{read_dir, tilde};
 use crate::sftp_view::{
     Command, Dialog, SftpTab, SortBy, TransferState, conflict_name, format_time, human_size, pace,
@@ -75,6 +76,8 @@ pub struct SftpView {
     focus_card: bool,
     /// The transfers panel shows its rows, not only its header.
     transfers_open: bool,
+    /// The card that just closed, on its way out, and since when.
+    card_left: Option<(Dialog, f64)>,
 }
 
 impl SftpView {
@@ -93,6 +96,7 @@ impl SftpView {
             dropped: None,
             focus_card: false,
             transfers_open: true,
+            card_left: None,
         }
     }
 
@@ -226,15 +230,58 @@ impl SftpView {
     }
 
     /// The Delete, Permissions and Properties cards over the tab.
-    #[allow(clippy::too_many_lines)] // Three cards, each top to bottom.
     fn dialog_card(&mut self, ui: &mut Ui<'_>, rect: Rect) {
+        /// How long a card takes to leave, in seconds.
+        const GOES: f64 = 0.16;
+        let cwd = self.tab.cwd.clone().unwrap_or_default();
+        if let Some((dialog, since)) = &mut self.card_left {
+            #[allow(clippy::cast_possible_truncation)] // A share for drawing.
+            let share = ((ui.time() - *since) / GOES) as f32;
+            if share < 1.0 && !ui.state.reduce_motion {
+                ui.push_inert();
+                Self::dialog_shown(
+                    ui,
+                    rect,
+                    dialog,
+                    &cwd,
+                    false,
+                    Some(1.0 - Curve::Exit.at(share)),
+                );
+                ui.pop_inert();
+                ui.request_repaint();
+            } else {
+                self.card_left = None;
+            }
+        }
         let Some(dialog) = &mut self.tab.dialog else {
             return;
         };
-        let cwd = self.tab.cwd.clone().unwrap_or_default();
+        let focus = std::mem::take(&mut self.focus_card);
+        let (command, mut close) = Self::dialog_shown(ui, rect, dialog, &cwd, focus, None);
+        if let Some(command) = command {
+            self.tab.send(command);
+            self.remote_selected = None;
+            close = true;
+        }
+        if close {
+            self.card_left = self.tab.dialog.take().map(|dialog| (dialog, ui.time()));
+        }
+    }
+
+    /// `dialog`'s card over `rect`, coming in, or at `leaving` of itself on its way out.
+    /// Returns the command it sends and whether it closes.
+    #[allow(clippy::too_many_lines)] // Three cards, each top to bottom.
+    fn dialog_shown(
+        ui: &mut Ui<'_>,
+        rect: Rect,
+        dialog: &mut Dialog,
+        cwd: &str,
+        focus: bool,
+        leaving: Option<f32>,
+    ) -> (Option<Command>, bool) {
         let t = ui.theme;
         let facts = match dialog {
-            Dialog::Properties(entry) => properties(&cwd, entry),
+            Dialog::Properties(entry) => properties(cwd, entry),
             _ => Vec::new(),
         };
         #[allow(clippy::cast_precision_loss)] // A handful of lines.
@@ -243,15 +290,23 @@ impl SftpView {
             Dialog::Permissions { .. } => 214.0,
             Dialog::Properties(_) => 136.0 + facts.len() as f32 * 24.0,
         };
-        ui.gfx.fill_rect(rect, 0.0, t.scrim);
         ui.zone(Id::new("sftp.card.backdrop"), rect, Role::Backdrop, "");
         let card = rect.centered(rect.w.min(480.0), height);
+        if let Some(left) = leaving {
+            ui.gfx.fill_rect(rect, 0.0, t.scrim.alpha(left));
+            ui.push_layer(
+                Layer::fade(left)
+                    .scaled(card.center(), 0.98 + 0.02 * left)
+                    .grouped(card.outset(48.0)),
+            );
+        } else {
+            pages::card_in(ui, Id::new("sftp.card"), rect, card);
+        }
         ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
         ui.gfx.fill_rect(card, 14.0, t.raised);
         ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
         let mut column = card.inset(space::XL, space::XL);
         let mut buttons = Rect::new(column.x, column.b() - CONTROL, column.w, CONTROL);
-        let focus = std::mem::take(&mut self.focus_card);
         let mut command = None;
         let mut close = ui.key(Key::Escape, Modifiers::NONE);
         match dialog {
@@ -306,7 +361,7 @@ impl SftpView {
                     )
                     .clicked
                 {
-                    command = Some(Command::Remove(join(&cwd, &entry.name)));
+                    command = Some(Command::Remove(join(cwd, &entry.name)));
                 }
             }
             Dialog::Permissions { name, mode } => {
@@ -372,7 +427,7 @@ impl SftpView {
                     .clicked
                     || field.submitted;
                 if chosen && let Some(bits) = parsed {
-                    command = Some(Command::Chmod(join(&cwd, name), bits));
+                    command = Some(Command::Chmod(join(cwd, name), bits));
                 }
             }
             Dialog::Properties(_) => {
@@ -405,14 +460,8 @@ impl SftpView {
                     .clicked;
             }
         }
-        if let Some(command) = command {
-            self.tab.send(command);
-            self.remote_selected = None;
-            close = true;
-        }
-        if close {
-            self.tab.dialog = None;
-        }
+        pages::card_done(ui);
+        (command, close)
     }
 
     fn pane_frame(ui: &mut Ui<'_>, rect: Rect, title: &str, path: &str, icon: IconId) -> Rect {
@@ -542,11 +591,11 @@ impl SftpView {
         let response = ui.zone(id, row, Role::ListItem, name);
         // Still hovered on its own buttons, and while one of its menus is open.
         let hover = ui.hover_within(row) || ui.menu_open(id.with("more")) || ui.menu_open(id);
-        if selected {
-            ui.gfx.fill_rect(row, 6.0, t.selected);
-        } else if hover {
-            ui.gfx.fill_rect(row, 6.0, t.hover);
-        }
+        let lit = ui.ease(id.with("lit"), if hover { 1.0 } else { 0.0 });
+        let picked = ui.ease(id.with("picked"), if selected { 1.0 } else { 0.0 });
+        ui.gfx
+            .fill_rect(row, 6.0, t.hover.alpha(lit * (1.0 - picked)));
+        ui.gfx.fill_rect(row, 6.0, t.selected.alpha(picked));
         if response.focus_ring {
             ui.focus_ring(row, 6.0);
         }
@@ -575,7 +624,10 @@ impl SftpView {
         }
         let mut acted = false;
         let mut chosen = None;
-        if hover || selected {
+        // They come up with the row, and stay for the moment it takes them to go.
+        let near = lit.max(picked);
+        if hover || selected || near > 0.0 {
+            ui.push_layer(Layer::fade(near));
             if !is_dir {
                 acted = ui
                     .icon_button(id.with("act"), button, action.0, action.1, false)
@@ -593,6 +645,7 @@ impl SftpView {
                 ui.set_name(id.with("more"), "More actions");
                 ui.tooltip(id.with("more"), more, "More actions");
             }
+            ui.pop_layer();
         }
         // The same menu on a right click, or Shift+F10 on the row.
         if !menu.is_empty()
