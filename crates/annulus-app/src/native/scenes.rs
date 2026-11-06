@@ -2189,9 +2189,14 @@ fn a_new_key_rises_in_and_a_deleted_one_goes_while_the_others_close_up() {
     let key = crate::keychain_screen::stored(vault, "Zed key", &pair);
     vault.upsert_key(key).unwrap();
     let rising = place_of(&drive(&mut app, &mut state, &[], 1.0), "Zed key").y;
+    assert!(lists_gliding(&app, 1.1), "the layout checks wait for it");
     drive(&mut app, &mut state, &[], 2.0);
     let landed = place_of(&drive(&mut app, &mut state, &[], 2.5), "Zed key").y;
     assert!(rising > landed, "it comes up into place: {rising} {landed}");
+    assert!(
+        !lists_gliding(&app, 2.6),
+        "and look again once it has landed"
+    );
     // The row above it goes: this one glides up into its place.
     let vault = app.vault.as_mut().unwrap();
     let gone = vault
@@ -2834,8 +2839,8 @@ fn random_user(seed: u64, steps: usize, (width, height): (f32, f32)) {
         };
         let mut faults = first.faults;
         faults.extend(second.faults);
-        // Cards gliding to new places pass over each other for a moment.
-        if !app.hosts.reflowing(time + 0.1) {
+        // Cards and rows gliding to new places pass over each other for a moment.
+        if !app.hosts.reflowing(time + 0.1) && !lists_gliding(&app, time + 0.1) {
             faults.extend(layout_faults(&second.zones, viewport));
         }
         let tree = annulus_ui::access::tree(&second.zones, state.focus(), 1.0, "Annulus");
@@ -2858,6 +2863,15 @@ fn random_user(seed: u64, steps: usize, (width, height): (f32, f32)) {
         "seed {seed}: {steps} steps, {} distinct controls, sections {sections:?}",
         reached.len()
     );
+}
+
+/// Whether the rows of any of `app`'s lists are gliding to new places at `now`.
+fn lists_gliding(app: &NativeApp, now: f64) -> bool {
+    super::screens::lists_gliding(
+        (&app.keychain, &app.snippets, &app.forwards),
+        (&app.known, &app.logs),
+        now,
+    )
 }
 
 /// A few thousand random steps on every push; `ANNULUS_MONKEY_STEPS` and `ANNULUS_MONKEY_SEED`

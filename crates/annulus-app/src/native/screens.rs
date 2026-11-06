@@ -28,6 +28,24 @@ use crate::job::{Job, Poll};
 use crate::ssh_task::SshTask;
 use crate::{connect, keychain_screen, logs_screen, snippets_screen};
 
+/// Whether the rows of any of the vault's lists are gliding to new places at `now`.
+#[cfg(test)]
+pub fn lists_gliding(
+    (keychain, snippets, forwards): (&KeychainView, &SnippetsView, &ForwardsView),
+    (known, logs): (&KnownView, &LogsView),
+    now: f64,
+) -> bool {
+    [
+        &keychain.rows,
+        &snippets.rows,
+        &forwards.rows,
+        &known.rows,
+        &logs.rows,
+    ]
+    .iter()
+    .any(|rows| rows.gliding(now))
+}
+
 /// What a screen asks the window to do.
 pub enum ScreenAction {
     /// Open a terminal tab running a program.

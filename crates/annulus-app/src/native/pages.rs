@@ -299,9 +299,21 @@ pub struct ListMotion {
     leaving: Vec<(RowLook, usize, f64)>,
     /// The frame that last drew the list.
     drawn: Option<f64>,
+    /// When its rows last changed, for the layout checks.
+    #[cfg(test)]
+    changed_at: Option<f64>,
 }
 
 impl ListMotion {
+    /// Whether its rows are gliding to new places at `now`, passing over each other for a
+    /// moment on the way.
+    #[cfg(test)]
+    pub fn gliding(&self, now: f64) -> bool {
+        /// Longer than any row takes to arrive.
+        const GLIDES: f64 = 0.7;
+        self.changed_at.is_some_and(|at| now < at + GLIDES)
+    }
+
     /// Notes this frame's rows; returns whether the list was on screen in the frame before.
     /// If it was not, nothing arrives or leaves: its rows came with their page.
     pub fn begin(&mut self, ui: &Ui<'_>, looks: &[RowLook]) -> bool {
@@ -316,6 +328,16 @@ impl ListMotion {
                     self.leaving.push((look.clone(), place, ui.time()));
                 }
             }
+        }
+        #[cfg(test)]
+        if on_screen
+            && self
+                .last
+                .iter()
+                .map(|row| row.key)
+                .ne(looks.iter().map(|row| row.key))
+        {
+            self.changed_at = Some(ui.time());
         }
         self.last = looks.to_vec();
         self.drawn = Some(ui.time());
