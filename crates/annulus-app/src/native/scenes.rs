@@ -5400,6 +5400,22 @@ fn an_agent_hears_why_its_tab_could_not_connect_and_its_command_is_refused_at_on
     );
 }
 
+/// Waits for agent tab `tab` to show its shell's prompt. A shell silent for 10 s has a command
+/// typed blind, and on a runner busy with another job a new PowerShell can be that slow.
+fn await_prompt(client: &mut annulus_control::client::Client, tab: u64) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    loop {
+        let shown = client.read(tab, None).map_err(|e| e.to_string())?;
+        if shown.trim_end().ends_with(['>', '$', '#', '%']) {
+            return Ok(());
+        }
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            return Err(format!("no prompt within a minute: {shown:?}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_next() {
     use super::control::Ran;
@@ -5454,6 +5470,7 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
     let agent = std::thread::spawn(move || {
         let mut client = Client::connect(&dir).map_err(|e| e.to_string())?;
         let tab = client.open(None).map_err(|e| e.to_string())?;
+        await_prompt(&mut client, tab.id)?;
         let out = client
             // A wait shorter than the quiet that counts as done: it always runs out, however
             // slowly a busy runner draws frames.
@@ -5462,7 +5479,7 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
         client.interrupt(tab.id).map_err(|e| e.to_string())?;
         // Answered only once this one settles, which Stop never lets happen.
         let cut = client.run(tab.id, ticking, Some(60));
-        Ok::<_, String>((out, cut.is_err()))
+        Ok::<_, String>((out, cut.err().map(|e| e.to_string())))
     });
     frames(&mut app, &|app| {
         states(app).len() == 2 || agent.is_finished()
@@ -5494,7 +5511,7 @@ fn an_agents_command_runs_out_of_its_wait_is_interrupted_and_stop_cuts_off_the_n
         annulus_control::protocol::RunState::Running,
         "out of its wait, it is still running: {out:?}"
     );
-    assert!(refused, "the cut-off agent hears no answer");
+    assert!(refused.is_some(), "the cut-off agent hears no answer");
 }
 
 #[test]
