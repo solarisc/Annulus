@@ -1301,6 +1301,15 @@ impl SftpView {
     pub fn demo_transfers(&mut self) {
         self.tab.demo_transfers();
     }
+
+    /// The same, without the one that failed.
+    #[cfg(test)]
+    pub fn demo_transfers_going_well(&mut self) {
+        self.demo_transfers();
+        self.tab
+            .transfers
+            .retain(|transfer| !matches!(transfer.state, TransferState::Failed(_)));
+    }
 }
 
 /// Height of the transfers panel's header.

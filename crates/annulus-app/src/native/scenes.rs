@@ -423,16 +423,16 @@ fn recorded(host: &str, command: &str, output: &[&str]) -> annulus_term::Emulato
 /// A tab of four recorded panes, two by two: prod-db with the keyboard and cache-eu-1 under
 /// it, web-1 and bastion on the right. Leaf order 1, 3, 2, 4.
 fn split_tab(app: &mut NativeApp) {
-    app.push_terminal("prod-db", TermView::Live(Box::new(split_panes())));
+    app.push_terminal("prod-db", TermView::Live(Box::new(split_panes(true))));
 }
 
-/// [`split_tab`]'s panes.
-pub(super) fn split_panes() -> super::panes::Panes {
+/// [`split_tab`]'s panes, `with_news` of their own or all quiet.
+pub(super) fn split_panes(with_news: bool) -> super::panes::Panes {
     use super::panes::{Panes, Replay};
     let pane = |title: &str, emulator: annulus_term::Emulator, status: Option<TabStatus>| Replay {
         title: title.into(),
         emulator,
-        status,
+        status: status.filter(|_| with_news),
     };
     let mut panes = Panes::replay(pane("prod-db", super::demo::terminal(), None));
     panes.split_replay(
