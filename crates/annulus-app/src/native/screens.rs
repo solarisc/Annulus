@@ -930,9 +930,14 @@ fn form_card(
             } else {
                 "Generate".to_owned()
             };
-            // The button grows into its longer words rather than jumping to them.
-            let wide = button_width(&mut ui.gfx, &go_label, None).max(96.0);
-            let wide = ui.spring_with(Id::new("key.go.wide"), wide, Feel::Soft);
+            // The button grows, and its longer words show once they fit.
+            let wanted = button_width(&mut ui.gfx, &go_label, None).max(96.0);
+            let wide = ui.spring_with(Id::new("key.go.wide"), wanted, Feel::Soft);
+            let go_label = if wide + 0.5 < wanted {
+                "Generate"
+            } else {
+                go_label.as_str()
+            };
             let go = buttons.take_right(wide);
             buttons.take_right(space::S);
             let cancel = buttons.take_right(button_width(&mut ui.gfx, "Cancel", None));
@@ -941,7 +946,7 @@ fn form_card(
                 .clicked
                 || ui.key(Key::Escape, Modifiers::NONE);
             let clicked = ui
-                .button(Id::new("key.go"), go, &go_label, None, Kind::Primary)
+                .button(Id::new("key.go"), go, go_label, None, Kind::Primary)
                 .clicked
                 || name_field.submitted;
             if busy {
@@ -2490,6 +2495,45 @@ mod tests {
         });
         assert!(wiped, "before it is drawn once more on its way out");
         assert!(fold.get().is_none());
+    }
+
+    #[test]
+    fn a_key_being_made_never_cuts_off_the_words_on_its_button() {
+        use annulus_config::tokens::Appearance;
+        use annulus_ui::kit::{Theme, UiState};
+        let mut vault = crate::native::demo::fixture_vault("key-button", false);
+        let mut form = KeyForm::Generate {
+            label: "Build server".into(),
+            kind: KeyKind::Ed25519,
+            working: None,
+        };
+        let mut state = UiState::default();
+        // The job waits for this, so the key is being made for as long as the test looks.
+        let (finish, wait) = std::sync::mpsc::channel::<()>();
+        let mut wait = Some(wait);
+        for frame in 0..90u32 {
+            let mut canvas = canvas();
+            state.begin_frame(&[], f64::from(frame) / 60.0);
+            let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+            let theme = Theme::new(Appearance::Dark);
+            let mut ui = Ui::new(&mut canvas, theme, &mut state, viewport);
+            if frame == 10
+                && let KeyForm::Generate { working, .. } = &mut form
+                && let Some(wait) = wait.take()
+            {
+                let pace = crate::native::FramePace::new(&ui, None);
+                *working = Some(Job::start(&pace, move || {
+                    let _ = wait.recv();
+                    keys::generate(KeyKind::Ed25519, "me@test")
+                }));
+            }
+            let mut area = viewport;
+            form_card(&mut form, &mut ui, &mut area, &mut vault, None);
+            drop(ui);
+            let faults = state.end_frame().faults;
+            assert!(faults.is_empty(), "frame {frame}: {faults:?}");
+        }
+        drop(finish);
     }
 
     fn canvas() -> annulus_platform::cpu::CpuCanvas {
