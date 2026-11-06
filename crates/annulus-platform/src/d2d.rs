@@ -89,18 +89,17 @@ impl D2d {
         &self.factory
     }
 
-    /// Draws a `width` x `height` pixel frame at `scale` into memory with `draw`, and returns
-    /// it as a PNG file.
+    /// Draws a `width` x `height` pixel frame at `scale` into memory with `draw`.
     ///
     /// # Errors
-    /// When WIC or Direct2D refuse, or encoding fails.
-    pub fn render_png(
+    /// When WIC or Direct2D refuse.
+    pub fn render(
         &self,
         width: u32,
         height: u32,
         scale: f32,
         draw: impl FnOnce(&mut D2dCanvas<'_>),
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<RenderedFrame, String> {
         // SAFETY: COM is initialized for this thread before WIC is used; a second call on a
         // thread that already initialized COM only returns S_FALSE.
         let wic: IWICImagingFactory = unsafe {
@@ -149,16 +148,41 @@ impl D2d {
             // SAFETY: as above.
             unsafe { target.EndDraw(None, None) }.map_err(fail("draw"))?;
         }
-        let stride = width * 4;
-        let mut pixels = vec![0u8; (stride * height) as usize];
+        Ok(RenderedFrame {
+            bitmap,
+            width,
+            height,
+        })
+    }
+}
+
+/// A frame [`D2d::render`] drew into memory. Reading it back costs far more than a test that
+/// only looks at what was laid out needs to pay, so that happens on request.
+pub struct RenderedFrame {
+    bitmap: IWICBitmap,
+    width: u32,
+    height: u32,
+}
+
+impl RenderedFrame {
+    /// The frame as a PNG file.
+    ///
+    /// # Errors
+    /// When reading it back or encoding it fails.
+    pub fn png(&self) -> Result<Vec<u8>, String> {
+        let stride = self.width * 4;
+        let mut pixels = vec![0u8; (stride * self.height) as usize];
         // SAFETY: the buffer holds exactly `height` rows of `stride` bytes.
-        unsafe { bitmap.CopyPixels(std::ptr::null(), stride, &mut pixels) }
-            .map_err(fail("read back"))?;
+        unsafe {
+            self.bitmap
+                .CopyPixels(std::ptr::null(), stride, &mut pixels)
+        }
+        .map_err(fail("read back"))?;
         // BGRA to RGBA, both premultiplied, as tiny-skia stores them.
         for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
-        let size = tiny_skia::IntSize::from_wh(width, height).ok_or("empty frame")?;
+        let size = tiny_skia::IntSize::from_wh(self.width, self.height).ok_or("empty frame")?;
         let pixmap = tiny_skia::Pixmap::from_vec(pixels, size).ok_or("frame size")?;
         pixmap.encode_png().map_err(|e| format!("png: {e}"))
     }
@@ -648,12 +672,13 @@ mod tests {
             unreachable!("Direct2D exists on every supported Windows")
         };
         let mut width = 0.0;
-        let png = d2d.render_png(80, 40, 1.0, |canvas| {
+        let frame = d2d.render(80, 40, 1.0, |canvas| {
             canvas.fill_rect(Rect::new(0.0, 0.0, 80.0, 40.0), 0.0, Color::WHITE);
             canvas.fill_rect(Rect::new(10.0, 10.0, 20.0, 20.0), 4.0, Color::BLACK);
             width = canvas.measure("Hosts", Font::ui(13.0)).width;
             canvas.draw_text(Point::new(40.0, 10.0), "Hi", Font::ui(13.0), Color::BLACK);
         });
+        let png = frame.and_then(|frame| frame.png());
         let Ok(png) = png else {
             unreachable!("the frame renders: {png:?}")
         };
@@ -673,7 +698,7 @@ mod tests {
         let Ok(d2d) = D2d::new() else {
             unreachable!("Direct2D exists on every supported Windows")
         };
-        let Ok(png) = d2d.render_png(40, 40, 1.0, draw) else {
+        let Ok(png) = d2d.render(40, 40, 1.0, draw).and_then(|frame| frame.png()) else {
             unreachable!("the frame renders")
         };
         pixels(&png)

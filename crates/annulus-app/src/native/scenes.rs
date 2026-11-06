@@ -1495,11 +1495,11 @@ impl Renderer for Direct2D {
         keep: bool,
         draw: &mut dyn FnMut(&mut dyn Canvas),
     ) -> Option<Vec<u8>> {
-        let png = self
+        let frame = self
             .0
-            .render_png(width, height, scale, |canvas| draw(canvas))
+            .render(width, height, scale, |canvas| draw(canvas))
             .unwrap();
-        keep.then_some(png)
+        keep.then(|| frame.png().unwrap())
     }
 }
 
