@@ -4220,17 +4220,24 @@ fn e2e_the_new_keychain_installs_a_key_and_deleting_it_takes_it_off_the_host() {
     let mut state = UiState::default();
     let started = std::time::Instant::now();
     let clock = || started.elapsed().as_secs_f64();
-    let mut output = step(&mut app, &mut state, &[], clock());
+    // `step` draws ahead of the time it is given, so frames keep their own clock: a click on a
+    // card that has arrived must not land in a frame from before it did.
+    let drawn = std::cell::Cell::new(0.0);
+    let frame = || {
+        drawn.set(drawn.get() + 1.0);
+        drawn.get()
+    };
+    let mut output = step(&mut app, &mut state, &[], frame());
     let install = click_within(&output, "fresh", "Install on a host");
-    output = step(&mut app, &mut state, &install, clock());
+    output = step(&mut app, &mut state, &install, frame());
     output = step(
         &mut app,
         &mut state,
         &click_on(&output, "Choose a host"),
-        clock(),
+        frame(),
     );
-    output = step(&mut app, &mut state, &click_on(&output, "test-1"), clock());
-    output = step(&mut app, &mut state, &click_on(&output, "Install"), clock());
+    output = step(&mut app, &mut state, &click_on(&output, "test-1"), frame());
+    output = step(&mut app, &mut state, &click_on(&output, "Install"), frame());
     let key_of = |app: &NativeApp| {
         app.vault
             .as_ref()
@@ -4248,19 +4255,19 @@ fn e2e_the_new_keychain_installs_a_key_and_deleting_it_takes_it_off_the_host() {
         } else {
             Vec::new()
         };
-        output = step(&mut app, &mut state, &events, clock());
+        output = step(&mut app, &mut state, &events, frame());
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     // Delete it from the Keychain: it logs in with the fresh key to take it off the host,
     // then leaves the vault.
-    output = step(&mut app, &mut state, &[], clock());
+    output = step(&mut app, &mut state, &[], frame());
     let delete = click_within(&output, "fresh", "Delete");
-    output = step(&mut app, &mut state, &delete, clock());
+    output = step(&mut app, &mut state, &delete, frame());
     step(
         &mut app,
         &mut state,
         &click_on(&output, "Delete key"),
-        clock(),
+        frame(),
     );
     let has_fresh = |app: &NativeApp| {
         app.vault
@@ -4269,7 +4276,7 @@ fn e2e_the_new_keychain_installs_a_key_and_deleting_it_takes_it_off_the_host() {
     };
     while has_fresh(&app) {
         assert!(clock() < 90.0, "the key was not taken off and deleted");
-        step(&mut app, &mut state, &[], clock());
+        step(&mut app, &mut state, &[], frame());
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     // Logged in with the e2e key again, the host no longer lists it.
