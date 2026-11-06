@@ -2875,7 +2875,7 @@ fn lists_gliding(app: &NativeApp, now: f64) -> bool {
 }
 
 /// A few thousand random steps on every push; `ANNULUS_MONKEY_STEPS` and `ANNULUS_MONKEY_SEED`
-/// make the nightly run longer and replay a failure.
+/// make a run longer and replay a failure.
 #[test]
 fn random_input_finds_no_panic_or_fault() {
     // Its users run on every core, like the scene renders: never beside a timed shell.
