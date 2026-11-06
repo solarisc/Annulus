@@ -51,7 +51,6 @@ struct Look {
     /// The picture around the window, which is see-through without one.
     backdrop: Option<Color>,
     captions: bool,
-    appearance: Appearance,
 }
 
 impl Look {
@@ -73,7 +72,6 @@ impl Look {
             fps: 100.0 / 3.0,
             backdrop: None,
             captions: false,
-            appearance: Appearance::Dark,
         }
     }
 
@@ -92,7 +90,6 @@ impl Look {
         fps: 60.0,
         backdrop: Some(BACKDROP),
         captions: true,
-        appearance: Appearance::Dark,
     };
 
     /// The picture for link previews: the name over the window, which runs off the bottom.
@@ -110,7 +107,6 @@ impl Look {
         fps: 30.0,
         backdrop: Some(BACKDROP),
         captions: false,
-        appearance: Appearance::Dark,
     };
 
     /// The size of the whole picture, in units.
@@ -242,7 +238,7 @@ impl Film {
         let theme = super::colors::previewed_theme(
             &self.app.settings,
             self.app.settings_view.previewing,
-            Theme::new(look.appearance),
+            Theme::new(Appearance::Dark),
         );
         let mut ui = Ui::new(&mut canvas, theme, &mut self.state, viewport);
         self.app.frame(&mut ui);
@@ -318,7 +314,7 @@ impl Film {
                 self.text.take().unwrap_or_default(),
             )
             .unwrap();
-            let theme = Theme::new(look.appearance);
+            let theme = Theme::new(Appearance::Dark);
             let whole = look.whole();
             let mut ui = Ui::new(&mut canvas, theme, &mut self.around_state, whole);
             if let Some(backdrop) = look.backdrop {
@@ -810,21 +806,13 @@ fn wanted(name: &str) -> bool {
 #[ignore = "makes the README's clips; ANNULUS_FILM_PIPE names the encoder"]
 fn readme_clips() {
     const PIPE: &str = "ANNULUS_FILM_PIPE";
-    // The first thing a reader sees, in the theme they read in.
-    for look in [
-        Look::clip("hero-dark"),
-        Look {
-            appearance: Appearance::Light,
-            ..Look::clip("hero-light")
-        },
-    ] {
-        if wanted(look.name) {
-            let mut film = Film::new(look, NativeApp::new(None), PIPE);
-            film.settle();
-            shot_unlock(&mut film);
-            shot_connect(&mut film);
-            film.finish();
-        }
+    // The first thing a reader sees.
+    if wanted("hero") {
+        let mut film = Film::new(Look::clip("hero"), NativeApp::new(None), PIPE);
+        film.settle();
+        shot_unlock(&mut film);
+        shot_connect(&mut film);
+        film.finish();
     }
     let clips: [Clip; 3] = [
         ("hosts", shot_hosts, Section::Hosts),
