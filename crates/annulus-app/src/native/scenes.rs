@@ -3292,6 +3292,21 @@ fn the_host_editor_duplicates_what_it_shows_and_opens_the_copy() {
 }
 
 #[test]
+fn a_click_on_a_host_selects_it_or_with_one_click_connecting_connects() {
+    let mut app = NativeApp::new(Some(fixture_vault("one-click", true)));
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let tabs = app.tabs.len();
+    output = step(&mut app, &mut state, &click_on(&output, "grafana"), 1.0);
+    assert_eq!(app.tabs.len(), tabs, "off: nothing opens");
+    assert_eq!(app.hosts.selected, Some(host_named(&app, "grafana").id));
+    app.settings.connect_on_click = true;
+    step(&mut app, &mut state, &click_on(&output, "nas"), 2.0);
+    assert_eq!(app.tabs.len(), tabs + 1, "on: one click connects");
+    assert_eq!(app.tabs[app.active].title, "nas");
+}
+
+#[test]
 fn a_typed_target_can_be_saved_as_a_host() {
     let mut app = NativeApp::new(Some(fixture_vault("save-target", true)));
     let before = app.vault.as_ref().unwrap().hosts().len();

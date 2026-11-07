@@ -90,6 +90,8 @@ pub struct HostsView {
     was_scope: Option<(Option<String>, Vec<String>)>,
     /// The editor, while open.
     pub editor: Option<Editor>,
+    /// A click on a host connects (Settings → Sessions); else it selects.
+    pub connect_on_click: bool,
     /// The group editor, while open.
     pub group_editor: Option<GroupEditor>,
     /// The `ssh_config` import preview, while open.
@@ -1305,7 +1307,7 @@ impl HostsView {
                             .shifted(0.0, 12.0 * (1.0 - shown)),
                     );
                     let gliding = ui.time() < self.reflow_until;
-                    let event = host_card(ui, cell, card, selected && !gliding, menu);
+                    let event = self.clicks(host_card(ui, cell, card, selected && !gliding, menu));
                     if matches!(event, CardEvent::Connect | CardEvent::More(MENU_CONNECT)) {
                         self.launched = Some(ui.gfx.to_screen(cell));
                     }
@@ -1325,7 +1327,13 @@ impl HostsView {
                         Motion::BASE.staggered(index),
                     );
                     ui.push_layer(Layer::fade(shown).shifted(0.0, 8.0 * (1.0 - shown)));
-                    let event = host_row(ui, row, card, self.selected == Some(card.id), menu);
+                    let event = self.clicks(host_row(
+                        ui,
+                        row,
+                        card,
+                        self.selected == Some(card.id),
+                        menu,
+                    ));
                     ui.pop_layer();
                     if matches!(event, CardEvent::Connect | CardEvent::More(MENU_CONNECT)) {
                         self.launched = Some(ui.gfx.to_screen(row));
@@ -1342,6 +1350,18 @@ impl HostsView {
         action
     }
 
+    /// What a click on a host does: it selects, and a double-click connects; with one-click
+    /// connecting on (Settings), the click connects and the double-click it may become does
+    /// nothing more, so one host never opens twice.
+    fn clicks(&self, event: CardEvent) -> CardEvent {
+        match (event, self.connect_on_click) {
+            (CardEvent::Click, false) => CardEvent::Select,
+            (CardEvent::Click, true) | (CardEvent::DoubleClick, false) => CardEvent::Connect,
+            (CardEvent::DoubleClick, true) => CardEvent::None,
+            (event, _) => event,
+        }
+    }
+
     /// Acts on what a host's card or row did; returns a tab to open.
     fn card_event(&mut self, vault: &Vault, id: u64, event: CardEvent) -> Option<HostsAction> {
         match event {
@@ -1352,7 +1372,8 @@ impl HostsView {
             CardEvent::More(MENU_SFTP) => return Some(HostsAction::Sftp(id)),
             CardEvent::Edit | CardEvent::More(MENU_EDIT) => self.edit_host(vault, id),
             CardEvent::More(choice) => self.picked = Some((id, choice)),
-            CardEvent::None => {}
+            // A click and a double-click were made Select or Connect by `clicks` first.
+            CardEvent::None | CardEvent::Click | CardEvent::DoubleClick => {}
         }
         None
     }
@@ -2471,6 +2492,10 @@ fn grid_cell(x: f32, y: f32, width: f32, columns: usize, index: usize, height: f
 #[derive(Clone, Copy)]
 enum CardEvent {
     None,
+    /// A click (or Enter on the card); what it does is [`HostsView::clicks`]'s to say.
+    Click,
+    /// A double-click, likewise.
+    DoubleClick,
     Select,
     Connect,
     Edit,
@@ -2615,9 +2640,9 @@ fn host_card(
     let edit = inner.take_right(28.0).centered(28.0, 28.0);
     inner.take_right(space::S);
     let mut event = if response.double_clicked {
-        CardEvent::Connect
+        CardEvent::DoubleClick
     } else if response.clicked {
-        CardEvent::Select
+        CardEvent::Click
     } else {
         CardEvent::None
     };
@@ -2821,9 +2846,9 @@ fn host_row(
     } else if edited {
         CardEvent::Edit
     } else if response.double_clicked {
-        CardEvent::Connect
+        CardEvent::DoubleClick
     } else if response.clicked {
-        CardEvent::Select
+        CardEvent::Click
     } else {
         CardEvent::None
     }
@@ -2953,6 +2978,22 @@ fn panel_backing(ui: &mut Ui<'_>, content: Rect, panel: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_click_connecting_never_opens_a_host_twice_for_a_double_click() {
+        let names = |view: &HostsView| {
+            [CardEvent::Click, CardEvent::DoubleClick].map(|event| match view.clicks(event) {
+                CardEvent::Select => "select",
+                CardEvent::Connect => "connect",
+                CardEvent::None => "nothing",
+                _ => "other",
+            })
+        };
+        let mut view = HostsView::default();
+        assert_eq!(names(&view), ["select", "connect"]);
+        view.connect_on_click = true;
+        assert_eq!(names(&view), ["connect", "nothing"]);
+    }
 
     /// The Hosts screen with one selected host and no group or search, so its card sits on the
     /// list's top and left edges, drawn until it has settled. From then on the pointer rests on

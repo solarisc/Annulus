@@ -35,7 +35,7 @@ pub enum Page {
     Terminal,
     /// Auto-lock.
     Security,
-    /// Reopening tabs and session logs.
+    /// Reopening tabs, session logs and one-click connecting.
     Sessions,
     /// The shell new terminals run.
     Shells,
@@ -76,7 +76,7 @@ impl Page {
             Page::Appearance => "How Annulus looks and moves on this device.",
             Page::Terminal => "The colors programs draw with and the size of their text.",
             Page::Security => "When the vault locks itself, and what else may use Annulus.",
-            Page::Sessions => "What Annulus keeps of your sessions.",
+            Page::Sessions => "How hosts connect, and what Annulus keeps of your sessions.",
             Page::Shells => "What a new local terminal runs.",
             Page::Shortcuts => "Every shortcut. Click one's keys to give it others.",
             Page::About => "The app, its licenses and where it comes from.",
@@ -809,6 +809,25 @@ fn sessions(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
             control,
             &mut settings.record_logs,
             "Save session logs",
+        )
+        .clicked;
+    let mut hosts = self::card(ui, page, "Saved hosts", 1);
+    let control = row(
+        ui,
+        &mut hosts,
+        true,
+        (
+            "Connect with one click",
+            "In the Vault as on New Tab. Off: a click selects, a double-click connects.",
+        ),
+        SWITCH_W,
+    );
+    changed |= ui
+        .switch(
+            Id::new("settings.one-click"),
+            control,
+            &mut settings.connect_on_click,
+            "Connect with one click",
         )
         .clicked;
     changed

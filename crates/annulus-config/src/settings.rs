@@ -70,6 +70,9 @@ pub struct Settings {
     /// Agents may not close tabs, not even the ones they opened, so what they did stays on
     /// screen for the user; off, an agent may close its own tabs. On by default.
     pub stop_agents_closing_tabs: bool,
+    /// A click on a saved host in the Vault connects to it, as on the New Tab page; off, a
+    /// click selects it and a double-click connects. Off by default.
+    pub connect_on_click: bool,
 }
 
 /// A shortcut with keys of the user's choosing.
@@ -125,6 +128,7 @@ impl Default for Settings {
             close_ended_agent_tabs: false,
             agent_panel_folded: false,
             stop_agents_closing_tabs: true,
+            connect_on_click: false,
         }
     }
 }
@@ -237,6 +241,7 @@ mod tests {
             close_ended_agent_tabs: true,
             agent_panel_folded: true,
             stop_agents_closing_tabs: false,
+            connect_on_click: true,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -254,9 +259,10 @@ mod tests {
                 loaded.agents_read_my_tabs,
                 loaded.close_ended_agent_tabs,
                 loaded.agent_panel_folded,
-                loaded.stop_agents_closing_tabs
+                loaded.stop_agents_closing_tabs,
+                loaded.connect_on_click
             ),
-            (DEFAULT_SCROLLBACK, true, true, false, false, true)
+            (DEFAULT_SCROLLBACK, true, true, false, false, true, false)
         );
         // A file from before color schemes keeps its theme and draws our own colors.
         std::fs::write(&path, br#"{"theme": "light", "terminal_theme": "Nord"}"#).unwrap();

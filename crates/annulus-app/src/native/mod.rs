@@ -1652,6 +1652,7 @@ impl NativeApp {
         let vault = self.vault.as_mut()?;
         match section {
             Section::Hosts => {
+                self.hosts.connect_on_click = self.settings.connect_on_click;
                 if let Some(action) = self.hosts.draw(ui, content, Some(vault)) {
                     self.act(action);
                 }
