@@ -10,6 +10,7 @@ mod docs_check;
 mod icon;
 mod mac_app;
 mod repo;
+mod standalone;
 mod themes;
 
 use std::process::ExitCode;
@@ -24,7 +25,9 @@ commands:
   themes <dir>  regenerate the color scheme catalog from a tinted-theming/schemes checkout
   icon          redraw the app icon (annulus.ico, the exe's annulus.res, annulus.icns) from
                 our mark
-  mac-app       build the release binary into target/release/Annulus.app (macOS only)";
+  mac-app       build the release binary into target/release/Annulus.app (macOS only)
+  standalone <program.exe>...
+                fail if a Windows program needs Microsoft's C runtime installed";
 
 fn main() -> ExitCode {
     let command = std::env::args().nth(1);
@@ -33,6 +36,7 @@ fn main() -> ExitCode {
         Some("docs-check") => docs_check::run(),
         Some("icon") => icon::run(),
         Some("mac-app") => mac_app::run(),
+        Some("standalone") => standalone::run(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("themes") => themes::run(std::env::args().nth(2).as_deref()),
         _ => {
             eprintln!("{USAGE}");
