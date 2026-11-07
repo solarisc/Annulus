@@ -487,6 +487,10 @@ pub struct FrameOutput {
     /// Layout faults the widgets noticed (a button label cut off): the scene tests fail on
     /// any.
     pub faults: Vec<String>,
+    /// Widgets in full view whose focus ring a clip cut off, on screen: a list whose clip
+    /// leaves no room for its rings (see [`Ui::push_list_clip`]). Not a fault in itself, since a
+    /// list passes through such frames as it scrolls; the scene tests check settled frames.
+    pub cut_rings: Vec<Rect>,
 }
 
 /// Toolkit state that lives across frames.
@@ -545,6 +549,7 @@ pub struct UiState {
     /// Text to put on the clipboard, and whether it is a secret.
     pub(crate) clipboard_out: Option<(String, bool)>,
     faults: Vec<String>,
+    cut_rings: Vec<Rect>,
     /// What assistive technology asked for since the last frame.
     requests: Vec<crate::access::Request>,
     /// No animations (UI-SPEC §8, "reduce motion").
@@ -586,6 +591,7 @@ impl UiState {
             .iter()
             .any(|event| !matches!(event, Event::Modifiers(_)));
         self.faults.clear();
+        self.cut_rings.clear();
         self.wheel = (0.0, 0.0);
         // A click, key or text may change state after part of the frame was drawn (a card
         // opened above the list that opened it): one more frame shows it at once.
@@ -748,6 +754,7 @@ impl UiState {
             repaint_after: self.repaint_after,
             zones: self.zones.clone(),
             faults: std::mem::take(&mut self.faults),
+            cut_rings: std::mem::take(&mut self.cut_rings),
         }
     }
 
@@ -1019,6 +1026,23 @@ impl<'a> Ui<'a> {
         let rect = self.clips.last().map_or(rect, |clip| rect.intersect(clip));
         self.clips.push(rect);
         self.gfx.push_screen_clip(rect);
+    }
+
+    /// Clips a list in `rect`, scrolled by `offset` through `content`, whose items draw up to
+    /// `reach` past themselves ([`FOCUS_REACH`] for a focus ring): the clip takes in `reach`
+    /// more at the sides, and at the top and bottom while the list is scrolled to that end, less
+    /// as it scrolls away, so an item on the list's edge keeps its ring and what has scrolled
+    /// out of the list does not show past it. End it with [`Self::pop_clip`].
+    pub fn push_list_clip(&mut self, rect: Rect, offset: f32, content: f32, reach: f32) {
+        let above = (reach - offset.max(0.0)).max(0.0);
+        let below = (reach - (content - rect.h - offset).max(0.0)).max(0.0);
+        let clip = Rect::new(
+            rect.x - reach,
+            rect.y - above,
+            rect.w + 2.0 * reach,
+            rect.h + above + below,
+        );
+        self.push_clip(clip);
     }
 
     /// Ends the innermost clip.
@@ -1392,6 +1416,18 @@ impl<'a> Ui<'a> {
     /// Draws the focus ring around `rect` (UI-SPEC §8: accent, 2 px, offset 2 px). It reaches
     /// [`FOCUS_REACH`] past `rect`, so a clip around a list must leave that much room.
     pub fn focus_ring(&mut self, rect: Rect, radius: f32) {
+        if let Some(clip) = self.clips.last().copied() {
+            let screen = self.gfx.to_screen(rect);
+            let within = |r: Rect| {
+                r.x >= clip.x - 0.5
+                    && r.y >= clip.y - 0.5
+                    && r.r() <= clip.r() + 0.5
+                    && r.b() <= clip.b() + 0.5
+            };
+            if within(screen) && !within(screen.outset(FOCUS_REACH)) {
+                self.state.cut_rings.push(screen);
+            }
+        }
         let accent = self.theme.accent;
         self.gfx
             .stroke_rect(rect.outset(3.0), radius + 3.0, 2.0, accent);
@@ -1766,6 +1802,60 @@ mod tests {
         });
         assert_eq!(clicked, (false, false), "focus alone clicks nothing");
         assert_eq!(state.focus(), Some(Id::new("a")));
+    }
+
+    /// Whether a zone at `probe` shows inside a list clip around (20, 20, 100, 100), scrolled
+    /// by `offset` through 300 of content.
+    fn shows_in_list(probe: Rect, offset: f32) -> bool {
+        let mut state = UiState::default();
+        let output = frame(&mut state, &[], 0.0, |ui| {
+            ui.push_list_clip(
+                Rect::new(20.0, 20.0, 100.0, 100.0),
+                offset,
+                300.0,
+                FOCUS_REACH,
+            );
+            ui.zone(Id::new("probe"), probe, Role::Button, "probe");
+            ui.pop_clip();
+        });
+        output.zones.len() == 1
+    }
+
+    #[test]
+    fn a_list_clip_has_room_for_rings_at_its_sides_and_at_the_end_it_is_scrolled_to() {
+        let above = Rect::new(60.0, 16.0, 10.0, 2.0);
+        let below = Rect::new(60.0, 122.0, 10.0, 2.0);
+        let beside = Rect::new(16.0, 60.0, 2.0, 10.0);
+        assert!(shows_in_list(above, 0.0), "room above at the top");
+        assert!(
+            !shows_in_list(above, 50.0),
+            "what scrolled away above shows"
+        );
+        assert!(shows_in_list(below, 200.0), "room below at the end");
+        assert!(
+            !shows_in_list(below, 50.0),
+            "what is still to come below shows"
+        );
+        assert!(shows_in_list(beside, 50.0), "room at the sides");
+    }
+
+    #[test]
+    fn a_ring_cut_off_by_a_plain_clip_is_reported_and_a_list_clip_keeps_it_whole() {
+        let list = Rect::new(20.0, 20.0, 100.0, 100.0);
+        let item = Rect::new(20.0, 20.0, 100.0, 30.0);
+        let mut state = UiState::default();
+        let plain = frame(&mut state, &[], 0.0, |ui| {
+            ui.push_clip(list);
+            ui.focus_ring(item, 4.0);
+            ui.pop_clip();
+        });
+        assert_eq!(plain.cut_rings, [item]);
+        let listed = frame(&mut state, &[], 0.1, |ui| {
+            ui.push_list_clip(list, 0.0, 300.0, FOCUS_REACH);
+            ui.focus_ring(item, 4.0);
+            ui.pop_clip();
+        });
+        assert_eq!(listed.cut_rings, Vec::<Rect>::new());
     }
 
     #[test]

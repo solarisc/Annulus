@@ -11,7 +11,7 @@ use annulus_ssh::known::{self, KnownHost};
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
-use annulus_ui::kit::{Id, Key, Modifiers, Ui};
+use annulus_ui::kit::{FOCUS_REACH, Id, Key, Modifiers, Ui};
 use annulus_ui::motion::{Curve, Feel, Layer, Motion};
 use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SCROLL_GUTTER, SMALL, Tone, button_width};
 use annulus_vault::forwards::{ForwardKind, PortForward};
@@ -79,7 +79,7 @@ fn rows(
     let play = motion.begin(ui, looks);
     let list = Id::new(id);
     let width = rect.w;
-    ui.push_clip(rect);
+    ui.push_list_clip(rect, offset, height, FOCUS_REACH);
     motion.draw_leaving(ui, rect, offset, ROW_H + GAP);
     for (index, look) in looks.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)] // Lists are short.
@@ -166,6 +166,8 @@ fn confirm_delete(ui: &mut Ui<'_>, row: Rect, id: Id, delete: &str) -> (Option<b
     let cancel = remainder.take_right(cancel_w).centered(cancel_w, 30.0);
     let mut answer = None;
     let shown = ui.entrance(id.with("asking"), Motion::BASE);
+    // They slide in from behind the row's right edge, which the list's clip no longer is.
+    ui.push_clip(row);
     ui.push_layer(Layer::fade(shown).shifted(16.0 * (1.0 - shown), 0.0));
     // Drawn left to right, so Tab follows the eye.
     if ui
@@ -181,6 +183,7 @@ fn confirm_delete(ui: &mut Ui<'_>, row: Rect, id: Id, delete: &str) -> (Option<b
         answer = Some(true);
     }
     ui.pop_layer();
+    ui.pop_clip();
     if ui.key(Key::Escape, Modifiers::NONE) {
         answer = Some(false);
     }
@@ -1232,8 +1235,9 @@ impl SnippetsView {
         card.take_top(space::S);
         let list = card.take_top(list_h);
         #[allow(clippy::cast_precision_loss)] // As above.
-        let offset = ui.scroll_view(Id::new("snippet.targets"), list, hosts.len() as f32 * LINE);
-        ui.push_clip(list);
+        let content = hosts.len() as f32 * LINE;
+        let offset = ui.scroll_view(Id::new("snippet.targets"), list, content);
+        ui.push_list_clip(list, offset, content, FOCUS_REACH);
         let full = ticked.len() >= snippets_screen::MAX_TARGETS;
         for (index, (id, label)) in hosts.iter().enumerate() {
             #[allow(clippy::cast_precision_loss)] // As above.

@@ -9,7 +9,7 @@ use annulus_session::Target;
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Point, Rect};
 use annulus_ui::icons;
-use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
+use annulus_ui::kit::{Cursor, FOCUS_REACH, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_STRONG, FieldStyle, HEADING, KEYCAP_H, Kind, SCROLL_GUTTER, SMALL, TITLE,
@@ -328,7 +328,7 @@ impl StartView {
                 .map(|(_, rows)| LABEL_H + rows.len() as f32 * ROW_H + space::M)
                 .sum();
             let offset = ui.scroll_view(base.with("scroll"), column.wider(SCROLL_GUTTER), content);
-            ui.push_clip(column);
+            ui.push_list_clip(column, offset, content, FOCUS_REACH);
             let mut y = column.y - offset;
             // Where each row is, for the highlight to glide to.
             let mut places = Vec::new();

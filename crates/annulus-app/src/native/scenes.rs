@@ -1603,6 +1603,15 @@ fn out_dir() -> PathBuf {
 }
 
 /// Renders `scene` in `appearance` with `renderer`: returns the PNG and every fault found.
+/// A settled frame's focus rings that a clip cut off around a widget in full view: a list
+/// that leaves no room for them (`Ui::push_list_clip`).
+fn cut_ring_faults(output: &FrameOutput) -> impl Iterator<Item = String> + '_ {
+    output
+        .cut_rings
+        .iter()
+        .map(|ring| format!("the focus ring around {ring:?} is cut off at a clip's edge"))
+}
+
 fn render(
     scene: &Scene,
     appearance: Appearance,
@@ -1660,6 +1669,7 @@ fn render(
             // What the act opened has arrived by now, with its controls.
             (output, _) = frame(&[], time + 0.9, false);
             faults.extend(output.faults.iter().cloned());
+            faults.extend(cut_ring_faults(&output));
         }
         events.clear();
         time += 1.0;
@@ -1692,6 +1702,7 @@ fn render(
     let _ = frame(&[], time + 1.0, false);
     let (output, png) = frame(&[], time + 1.5, true);
     faults.extend(output.faults.iter().cloned());
+    faults.extend(cut_ring_faults(&output));
     // Once settled, nothing asks for frames (P-06): an animation that never ends would keep
     // the CPU busy while the window sits idle.
     let (idle, _) = frame(&[], time + 2.0, false);

@@ -16,7 +16,7 @@ use annulus_control::protocol::{
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Point, Rect};
 use annulus_ui::icons;
-use annulus_ui::kit::{Id, Role, Ui};
+use annulus_ui::kit::{FOCUS_REACH, Id, Role, Ui};
 use annulus_ui::widgets::{BODY_MEDIUM, CONTROL, Kind, SMALL, Tone, button_width};
 use annulus_vault::groups::Group;
 use annulus_vault::hosts::Host;
@@ -1092,8 +1092,10 @@ fn list_commands(ui: &mut Ui<'_>, list: Rect, log: &mut AgentLog) -> Option<Pane
         } else if response.hovered {
             ui.gfx.fill_rect(row, 0.0, t.hover);
         }
+        // Inside the row: the list runs from one edge of the panel to the other, with no room
+        // around it for a ring.
         if response.focus_ring {
-            ui.focus_ring(row.inset(2.0, 2.0), 4.0);
+            ui.focus_ring(row.inset(FOCUS_REACH, FOCUS_REACH), 4.0);
         }
         ui.gfx.fill_rect(
             Rect::new(row.x + space::M, row.b() - 1.0, row.w - space::M, 1.0),

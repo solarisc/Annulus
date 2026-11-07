@@ -6,7 +6,7 @@ use annulus_session::Target;
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Font, Rect, Weight};
 use annulus_ui::icons;
-use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Ui};
+use annulus_ui::kit::{Cursor, FOCUS_REACH, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Curve, Feel, Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_MEDIUM, CONTROL, FieldStyle, HEADING, Kind, MENU_BREAK, SCROLL_GUTTER, SEARCH,
@@ -35,7 +35,7 @@ const GAP: f32 = 8.0;
 const LIFT: f32 = 1.0;
 /// How far a card draws past its place in the list: a hovered one's lift and a focused one's
 /// ring. The list's clip leaves this much room, or both are cut off at its edges.
-const LIST_REACH: f32 = LIFT + annulus_ui::kit::FOCUS_REACH;
+const LIST_REACH: f32 = LIFT + FOCUS_REACH;
 /// Side padding of the screen.
 const PAD: f32 = 28.0;
 /// Width of the grid/list toggle.
@@ -1220,13 +1220,12 @@ impl HostsView {
         // Cards still gliding into a narrower list are not cut off short of the panel, and no
         // card's lift or focus ring is cut off at the list's top or sides.
         let reach = (self.list_edge - rect.r()).max(0.0);
-        let view = Rect::new(
-            rect.x - LIST_REACH,
-            rect.y - LIST_REACH,
-            rect.w + reach + 2.0 * LIST_REACH,
-            rect.h + LIST_REACH,
+        ui.push_list_clip(
+            Rect::new(rect.x, rect.y, rect.w + reach, rect.h),
+            offset,
+            content_h,
+            LIST_REACH,
         );
-        ui.push_clip(view);
         let width = rect.w;
         let top = rect.y - offset;
         let mut y = top;
@@ -1347,10 +1346,7 @@ impl HostsView {
             }
         }
         ui.pop_clip();
-        // The fade starts where the clip does, so a scrolled list never shows a hard band above
-        // it; the content counts that band too.
-        let fades = Rect::new(rect.x, view.y, rect.w, view.h);
-        ui.scroll_edges(fades, offset, content_h + LIST_REACH, ui.theme.bg);
+        ui.scroll_edges(rect, offset, content_h, ui.theme.bg);
         action
     }
 
@@ -1815,12 +1811,9 @@ impl HostsView {
         column.take_top(space::M);
         let list = column.take_top(list_h);
         #[allow(clippy::cast_precision_loss)] // As above.
-        let offset = ui.scroll_view(
-            Id::new("import.scroll"),
-            list,
-            preview.rows.len() as f32 * 36.0,
-        );
-        ui.push_clip(list);
+        let content = preview.rows.len() as f32 * 36.0;
+        let offset = ui.scroll_view(Id::new("import.scroll"), list, content);
+        ui.push_list_clip(list, offset, content, FOCUS_REACH);
         for (index, (entry, selected)) in preview.rows.iter_mut().enumerate() {
             #[allow(clippy::cast_precision_loss)] // As above.
             let y = list.y - offset + index as f32 * 36.0;

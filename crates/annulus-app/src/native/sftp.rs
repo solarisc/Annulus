@@ -14,7 +14,7 @@ use annulus_sftp::{Conflict, Entry, join, parent};
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
-use annulus_ui::kit::{Id, Key, Modifiers, Role, Ui};
+use annulus_ui::kit::{FOCUS_REACH, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Curve, Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, button_width,
@@ -706,12 +706,9 @@ impl SftpView {
             .filter(|entry| filter.is_empty() || entry.name.to_lowercase().contains(&filter))
             .collect();
         #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.
-        let offset = ui.scroll_view(
-            Id::new("sftp.local.scroll"),
-            list,
-            entries.len() as f32 * ROW,
-        );
-        ui.push_clip(list);
+        let content = entries.len() as f32 * ROW;
+        let offset = ui.scroll_view(Id::new("sftp.local.scroll"), list, content);
+        ui.push_list_clip(list, offset, content, FOCUS_REACH);
         let mut open = None;
         let mut upload = None;
         for (index, entry) in entries.iter().enumerate() {
@@ -970,12 +967,9 @@ impl SftpView {
             ui.gfx.text(line, &why, BODY, t.text2, Align::Center);
         }
         #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.
-        let offset = ui.scroll_view(
-            Id::new("sftp.remote.scroll"),
-            list,
-            entries.len() as f32 * ROW,
-        );
-        ui.push_clip(list);
+        let content = entries.len() as f32 * ROW;
+        let offset = ui.scroll_view(Id::new("sftp.remote.scroll"), list, content);
+        ui.push_list_clip(list, offset, content, FOCUS_REACH);
         let mut open = None;
         let mut download = None;
         let mut card = None;
