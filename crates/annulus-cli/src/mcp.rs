@@ -7,9 +7,9 @@ use std::io::{self, BufRead, Write};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
 use annulus_control::client::{Client, ClientError};
 use annulus_control::protocol::RunOutput;
+use serde_json::{Value, json};
 
 /// The MCP version spoken when the client names none.
 const PROTOCOL: &str = "2025-06-18";

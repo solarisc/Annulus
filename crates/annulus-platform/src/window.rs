@@ -301,10 +301,10 @@ mod portable {
     use std::num::NonZeroU32;
     use std::time::Instant;
 
-    use softbuffer::{Context, Surface};
     use annulus_ui::access::{self, Request};
     use annulus_ui::gfx::{Point, Rect};
     use annulus_ui::kit::{self, Button, Cursor, Event, Modifiers, Ui, UiState};
+    use softbuffer::{Context, Surface};
     use winit::application::ApplicationHandler;
     use winit::dpi::LogicalSize;
     use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};

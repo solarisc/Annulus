@@ -235,6 +235,206 @@ dependencies = [
 ]
 
 [[package]]
+name = "annulus-app"
+version = "0.1.0"
+dependencies = [
+ "annulus-config",
+ "annulus-control",
+ "annulus-import",
+ "annulus-platform",
+ "annulus-proto",
+ "annulus-session",
+ "annulus-sftp",
+ "annulus-ssh",
+ "annulus-sync",
+ "annulus-term",
+ "annulus-ui",
+ "annulus-vault",
+ "directories",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "annulus-cli"
+version = "0.1.0"
+dependencies = [
+ "annulus-control",
+ "serde_json",
+]
+
+[[package]]
+name = "annulus-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "annulus-control"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "annulus-import"
+version = "0.1.0"
+dependencies = [
+ "annulus-vault",
+]
+
+[[package]]
+name = "annulus-platform"
+version = "0.1.0"
+dependencies = [
+ "accesskit_windows",
+ "accesskit_winit",
+ "annulus-ui",
+ "arboard",
+ "libc",
+ "objc2 0.6.5",
+ "parley",
+ "softbuffer",
+ "swash",
+ "thiserror 2.0.21",
+ "tiny-skia",
+ "webbrowser",
+ "windows",
+ "windows-numerics",
+ "winit",
+ "zeroize",
+]
+
+[[package]]
+name = "annulus-proto"
+version = "0.1.0"
+dependencies = [
+ "opaque-ke",
+ "postcard",
+ "serde",
+ "sha2 0.10.9",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "annulus-server"
+version = "0.1.0"
+dependencies = [
+ "annulus-proto",
+ "axum",
+ "axum-server",
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "hyper-util",
+ "opaque-ke",
+ "rand 0.8.8",
+ "rcgen",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "annulus-session"
+version = "0.1.0"
+dependencies = [
+ "annulus-ssh",
+ "annulus-term",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "annulus-sftp"
+version = "0.1.0"
+dependencies = [
+ "annulus-ssh",
+ "russh-sftp",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "annulus-ssh"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "hmac 0.13.0",
+ "rand 0.10.3",
+ "russh",
+ "russh-sftp",
+ "sha1",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "annulus-sync"
+version = "0.1.0"
+dependencies = [
+ "annulus-proto",
+ "annulus-server",
+ "annulus-vault",
+ "axum",
+ "axum-server",
+ "opaque-ke",
+ "rand 0.8.8",
+ "rcgen",
+ "rustls",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
+name = "annulus-term"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+]
+
+[[package]]
+name = "annulus-ui"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "annulus-config",
+ "zeroize",
+]
+
+[[package]]
+name = "annulus-vault"
+version = "0.1.0"
+dependencies = [
+ "argon2 0.6.0",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "getrandom 0.4.3",
+ "hkdf 0.13.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "zeroize",
+ "zxcvbn",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5407,206 +5607,6 @@ dependencies = [
  "log",
  "once_cell",
  "pkg-config",
-]
-
-[[package]]
-name = "annulus-app"
-version = "0.1.0"
-dependencies = [
- "directories",
- "tokio",
- "annulus-config",
- "annulus-control",
- "annulus-import",
- "annulus-platform",
- "annulus-proto",
- "annulus-session",
- "annulus-sftp",
- "annulus-ssh",
- "annulus-sync",
- "annulus-term",
- "annulus-ui",
- "annulus-vault",
- "zeroize",
-]
-
-[[package]]
-name = "annulus-cli"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "annulus-control",
-]
-
-[[package]]
-name = "annulus-config"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "annulus-control"
-version = "0.1.0"
-dependencies = [
- "directories",
- "getrandom 0.4.3",
- "serde",
- "serde_json",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "annulus-import"
-version = "0.1.0"
-dependencies = [
- "annulus-vault",
-]
-
-[[package]]
-name = "annulus-platform"
-version = "0.1.0"
-dependencies = [
- "accesskit_windows",
- "accesskit_winit",
- "arboard",
- "libc",
- "objc2 0.6.5",
- "parley",
- "softbuffer",
- "swash",
- "thiserror 2.0.21",
- "tiny-skia",
- "annulus-ui",
- "webbrowser",
- "windows",
- "windows-numerics",
- "winit",
- "zeroize",
-]
-
-[[package]]
-name = "annulus-proto"
-version = "0.1.0"
-dependencies = [
- "opaque-ke",
- "postcard",
- "serde",
- "sha2 0.10.9",
- "sha2 0.11.1",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "annulus-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-server",
- "base64 0.22.1",
- "getrandom 0.4.3",
- "hyper-util",
- "opaque-ke",
- "rand 0.8.8",
- "rcgen",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "thiserror 2.0.21",
- "tokio",
- "annulus-proto",
-]
-
-[[package]]
-name = "annulus-session"
-version = "0.1.0"
-dependencies = [
- "tokio",
- "annulus-ssh",
- "annulus-term",
- "zeroize",
-]
-
-[[package]]
-name = "annulus-sftp"
-version = "0.1.0"
-dependencies = [
- "russh-sftp",
- "thiserror 2.0.21",
- "tokio",
- "annulus-ssh",
- "zeroize",
-]
-
-[[package]]
-name = "annulus-ssh"
-version = "0.1.0"
-dependencies = [
- "aws-lc-rs",
- "base64 0.22.1",
- "hmac 0.13.0",
- "rand 0.10.3",
- "russh",
- "russh-sftp",
- "sha1",
- "thiserror 2.0.21",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "annulus-sync"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-server",
- "opaque-ke",
- "rand 0.8.8",
- "rcgen",
- "rustls",
- "serde",
- "thiserror 2.0.21",
- "tokio",
- "ureq",
- "annulus-proto",
- "annulus-server",
- "annulus-vault",
-]
-
-[[package]]
-name = "annulus-term"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
-]
-
-[[package]]
-name = "annulus-ui"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "annulus-config",
- "zeroize",
-]
-
-[[package]]
-name = "annulus-vault"
-version = "0.1.0"
-dependencies = [
- "argon2 0.6.0",
- "base64 0.22.1",
- "chacha20poly1305",
- "getrandom 0.4.3",
- "hkdf 0.13.0",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "thiserror 2.0.21",
- "zeroize",
- "zxcvbn",
 ]
 
 [[package]]

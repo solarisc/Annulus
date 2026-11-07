@@ -4,6 +4,11 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use annulus_proto::{
+    Failure, History, INVITE_HEADER, Latest, LoginFinish, LoginStart, PROTOCOL_VERSION,
+    PasswordBegin, PasswordChange, Push, RegisterFinish, RegisterStart, Revoke, VERSION_HEADER,
+    decode, encode, path,
+};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
@@ -13,11 +18,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use annulus_proto::{
-    Failure, History, INVITE_HEADER, Latest, LoginFinish, LoginStart, PROTOCOL_VERSION,
-    PasswordBegin, PasswordChange, Push, RegisterFinish, RegisterStart, Revoke, VERSION_HEADER,
-    decode, encode, path,
-};
 
 use crate::store::{Caller, Server, ServerError};
 

@@ -9,11 +9,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use annulus_ssh::{Connection, SshError};
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as ProtocolError;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
-use annulus_ssh::{Connection, SshError};
 
 #[cfg(test)]
 mod tests;

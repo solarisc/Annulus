@@ -28,11 +28,11 @@ fn main() {
 mod mac {
     use std::time::{Duration, Instant};
 
+    use annulus_platform::macos::{self, NsPoint, NsRect};
+    use annulus_platform::window::{TRAFFIC_LIGHTS_LEFT, TRAFFIC_LIGHTS_W};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
-    use annulus_platform::macos::{self, NsPoint, NsRect};
-    use annulus_platform::window::{TRAFFIC_LIGHTS_LEFT, TRAFFIC_LIGHTS_W};
     use winit::application::ApplicationHandler;
     use winit::dpi::{LogicalPosition, LogicalSize};
     use winit::event::{ElementState, WindowEvent};

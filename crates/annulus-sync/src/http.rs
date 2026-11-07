@@ -5,16 +5,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use ureq::Agent;
-use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
 use annulus_proto::{
     Change, Changes, Devices, Failure, History, INVITE_HEADER, LoginFinish, LoginStart,
     LoginStartResponse, PROTOCOL_VERSION, PasswordBegin, PasswordBeginResponse, PasswordChange,
     Push, PushResult, Record, RegisterFinish, RegisterStart, RegisterStartResponse, Revoke,
     Session, VERSION_HEADER, decode, encode, path,
 };
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use ureq::Agent;
+use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
 
 use crate::account::Auth;
 use crate::engine::{SyncError, Transport};

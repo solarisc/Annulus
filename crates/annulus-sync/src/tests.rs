@@ -4,12 +4,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use opaque_ke::argon2::{Algorithm, Argon2, Params, Version};
 use annulus_proto::{
     Change, Changes, LoginFinish, LoginStart, LoginStartResponse, PushResult, RegisterFinish,
     RegisterStart, RegisterStartResponse, Session,
 };
 use annulus_server::{Caller, Server, ServerError, Signups};
+use opaque_ke::argon2::{Algorithm, Argon2, Params, Version};
 
 use crate::account::{self, Auth};
 use crate::engine::{Item, Outgoing, Replica, SyncError, Transport, sync};

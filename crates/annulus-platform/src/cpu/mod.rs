@@ -10,11 +10,11 @@ mod text;
 
 pub use text::TextEngine;
 
+use annulus_ui::gfx::{Canvas, Color, Font, Point, Rect, TextSize};
 use tiny_skia::{
     FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path,
     PathBuilder, Pattern, Pixmap, SpreadMode, Stroke, Transform,
 };
-use annulus_ui::gfx::{Canvas, Color, Font, Point, Rect, TextSize};
 
 /// Why a frame could not be made or saved.
 #[derive(Debug, thiserror::Error)]

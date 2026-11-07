@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use annulus_ui::gfx::{Color, Family, Font, Point, Rect, TextSize};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::{
     FontContext, FontFamily, FontWeight, Layout, LayoutContext, PositionedLayoutItem, StyleProperty,
@@ -14,7 +15,6 @@ use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::{Format, Vector};
 use tiny_skia::Pixmap;
-use annulus_ui::gfx::{Color, Family, Font, Point, Rect, TextSize};
 
 /// Fira Sans Regular, SIL OFL 1.1 (`fonts/FiraSans-OFL.txt`).
 pub const UI_REGULAR: &[u8] = include_bytes!("../../fonts/FiraSans-Regular.ttf");

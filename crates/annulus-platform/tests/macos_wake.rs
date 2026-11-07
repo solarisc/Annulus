@@ -31,10 +31,10 @@ mod mac {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use objc2::msg_send;
-    use objc2::runtime::AnyObject;
     use annulus_platform::macos;
     use annulus_platform::window::event_loop_waker;
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
     use winit::application::ApplicationHandler;
     use winit::dpi::{LogicalPosition, LogicalSize};
     use winit::event::WindowEvent;

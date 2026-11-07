@@ -1,5 +1,5 @@
-//! Upgrades never lose a vault: `fixtures/vault-2026-10-29.anv` was written by the
-//! build of 2026-10-29, and every later build must open it with everything in it. A format
+//! Upgrades never lose a vault: `fixtures/vault-2026-11-07.anv` was written by the
+//! build of 2026-11-07, and every later build must open it with everything in it. A format
 //! change that breaks this needs a migration, not a new fixture.
 //!
 //! The fixture was made with `ANNULUS_WRITE_FIXTURE=1 cargo test -p annulus-vault --test
@@ -17,7 +17,7 @@ use annulus_vault::vault::Vault;
 const PASSWORD: &str = "upgrade-fixture password";
 
 fn fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault-2026-10-29.anv")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault-2026-11-07.anv")
 }
 
 /// What the fixture holds: a group with defaults, a host in it with a password, tags and

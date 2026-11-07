@@ -3,16 +3,16 @@
 
 use std::path::Path;
 
+use annulus_proto::{
+    Change, LoginFinish, LoginStart, PasswordBegin, PasswordChange, RegisterFinish, RegisterStart,
+    Suite,
+};
 use opaque_ke::argon2::{Algorithm, Argon2, Params, Version};
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
 };
 use opaque_rand::rngs::OsRng;
-use annulus_proto::{
-    Change, LoginFinish, LoginStart, PasswordBegin, PasswordChange, RegisterFinish, RegisterStart,
-    Suite,
-};
 
 use super::*;
 use crate::store::Caller;

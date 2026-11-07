@@ -6,6 +6,11 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use annulus_proto::{
+    Change, Changes, Device, Devices, LoginFinish, LoginStart, LoginStartResponse, PasswordBegin,
+    PasswordBeginResponse, PasswordChange, PushResult, Record, RegisterFinish, RegisterStart,
+    RegisterStartResponse, Session, Suite,
+};
 use opaque_ke::{
     CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
     ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
@@ -13,11 +18,6 @@ use opaque_ke::{
 use opaque_rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use annulus_proto::{
-    Change, Changes, Device, Devices, LoginFinish, LoginStart, LoginStartResponse, PasswordBegin,
-    PasswordBeginResponse, PasswordChange, PushResult, Record, RegisterFinish, RegisterStart,
-    RegisterStartResponse, Session, Suite,
-};
 
 /// Versions kept per record besides the current one (ADR-0008 history).
 const HISTORY: i64 = 20;

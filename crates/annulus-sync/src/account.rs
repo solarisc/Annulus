@@ -1,16 +1,16 @@
 //! The client side of OPAQUE registration and login (ADR-0008). The password and the
 //! Argon2id work never leave this computer; the server sees only OPAQUE messages.
 
+use annulus_proto::{
+    LoginFinish, LoginStart, LoginStartResponse, PasswordBegin, PasswordChange, RegisterFinish,
+    RegisterStart, RegisterStartResponse, Session, Suite,
+};
 use opaque_ke::argon2::{Algorithm, Argon2, Params, Version};
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
 };
 use opaque_rand::rngs::OsRng;
-use annulus_proto::{
-    LoginFinish, LoginStart, LoginStartResponse, PasswordBegin, PasswordChange, RegisterFinish,
-    RegisterStart, RegisterStartResponse, Session, Suite,
-};
 
 use crate::engine::SyncError;
 

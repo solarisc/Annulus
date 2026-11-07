@@ -13,10 +13,10 @@ use std::cell::RefCell;
 use std::ffi::CString;
 use std::rc::Rc;
 
+use annulus_ui::kit::{Key, Modifiers};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{AnyThread as _, class, define_class, msg_send, sel};
-use annulus_ui::kit::{Key, Modifiers};
 
 use crate::window::MenuItem;
 

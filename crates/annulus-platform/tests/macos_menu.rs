@@ -28,13 +28,13 @@ mod mac {
     use std::ffi::{CStr, CString};
     use std::rc::Rc;
 
-    use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, Bool};
-    use objc2::{class, msg_send};
     use annulus_platform::macos::NsPoint;
     use annulus_platform::menu_bar;
     use annulus_platform::window::MenuItem;
     use annulus_ui::kit::{Key, Modifiers};
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, EventLoop};
