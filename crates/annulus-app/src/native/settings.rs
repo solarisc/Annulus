@@ -484,7 +484,10 @@ fn appearance(
         ui,
         &mut card,
         true,
-        ("Theme", "Light or dark for Annulus's own colors."),
+        (
+            "Theme",
+            "Light or dark, and which schemes are offered below.",
+        ),
         300.0,
     );
     let modes = [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark];
@@ -500,40 +503,36 @@ fn appearance(
         at,
     ) {
         settings.theme = modes[chosen];
+        // A scheme of the other kind goes with it, so the window turns as asked (ADR-0026).
+        settings.app_scheme = super::colors::scheme_kept(settings.app_scheme.take(), modes[chosen]);
         changed = true;
     }
-    let control = row(
-        ui,
-        &mut card,
-        false,
-        (
-            "Color scheme",
-            "Recolors the whole window; Annulus is our own.",
-        ),
-        260.0,
-    );
-    let schemes = super::colors::app_schemes();
-    let at = settings
-        .app_scheme
-        .as_ref()
-        .map_or(Some(0), |name| schemes.iter().position(|s| s == name));
+    let offered = match settings.theme {
+        ThemeMode::System => "Every scheme recolors the whole window; Annulus is our own.",
+        ThemeMode::Light => "The light schemes; Annulus is our own.",
+        ThemeMode::Dark => "The dark schemes; Annulus is our own.",
+    };
+    let control = row(ui, &mut card, false, ("Color scheme", offered), 260.0);
+    let menu = super::colors::scheme_menu(settings.theme);
+    let at = menu.entry(settings.app_scheme.as_deref());
     let id = Id::new("settings.scheme");
     // The window takes the colors the pointer rests on, so each can be seen before it is
-    // chosen; the window blends into them (`colors::ThemeFade`).
+    // chosen; the window blends into them (`colors::ThemeFade`). The menu's entries are this
+    // mode's; the window's preview counts in every scheme.
     let (shown, wait) = scheme.follow(ui.menu_open(id), ui.menu_hot(id), ui.time());
-    *previewing = shown;
+    *previewing = shown.and_then(|entry| menu.at.get(entry).copied());
     if let Some(wait) = wait {
         ui.request_repaint_after(std::time::Duration::from_secs_f64(wait));
     }
     if let Some(chosen) = ui.select_with_swatches(
         id,
         control,
-        schemes,
-        super::colors::app_swatches(),
+        &menu.names,
+        &menu.swatches,
         at,
         super::colors::OWN_COLORS,
     ) {
-        settings.app_scheme = (chosen > 0).then(|| schemes[chosen].clone());
+        settings.app_scheme = (chosen > 0).then(|| menu.names[chosen].clone());
         *previewing = None;
         changed = true;
     }

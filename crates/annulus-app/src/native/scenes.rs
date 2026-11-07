@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use annulus_config::settings::{KeyBinding, OpenTab};
-use annulus_config::tokens::Appearance;
+use annulus_config::tokens::{Appearance, ThemeMode};
 use annulus_platform::cpu::{CpuCanvas, TextEngine};
 use annulus_session::{Password, Program};
 use annulus_ui::gfx::{Canvas, Point, Rect};
@@ -3304,6 +3304,65 @@ fn a_click_on_a_host_selects_it_or_with_one_click_connecting_connects() {
     step(&mut app, &mut state, &click_on(&output, "nas"), 2.0);
     assert_eq!(app.tabs.len(), tabs + 1, "on: one click connects");
     assert_eq!(app.tabs[app.active].title, "nas");
+}
+
+#[test]
+fn the_theme_tabs_offer_schemes_of_their_kind_and_drop_one_of_the_other() {
+    let mut app = NativeApp::new(Some(fixture_vault("theme-tabs", true)));
+    settings(&mut app);
+    app.settings.app_scheme = Some("Dracula".into());
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    output = step(&mut app, &mut state, &click_on(&output, "Appearance"), 1.0);
+    output = step(&mut app, &mut state, &click_on(&output, "Light"), 2.0);
+    assert_eq!(app.settings.theme, ThemeMode::Light);
+    assert_eq!(app.settings.app_scheme, None, "the dark scheme went");
+    let listed = |app: &mut NativeApp, state: &mut UiState, output: &FrameOutput, at: f64| {
+        let menu = output
+            .zones
+            .iter()
+            .find(|zone| zone.role == Role::ComboBox && zone.label == "Annulus")
+            .map(|zone| zone.rect.center())
+            .unwrap();
+        let events = [
+            Event::PointerMoved(menu),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+            Event::Text("solarized".into()),
+        ];
+        let output = step(app, state, &events, at);
+        let names: Vec<String> = output
+            .zones
+            .iter()
+            .filter(|zone| zone.role == Role::MenuItem)
+            .map(|zone| zone.label.clone())
+            .collect();
+        step(
+            app,
+            state,
+            &[Event::Key(Key::Escape, Modifiers::NONE)],
+            at + 1.0,
+        );
+        names
+    };
+    // Whether each scheme found is dark.
+    let dark = |names: Vec<String>| -> Vec<bool> {
+        names
+            .iter()
+            .map(|name| annulus_config::schemes::Scheme::find(name).unwrap().dark())
+            .collect()
+    };
+    let light_mode = dark(listed(&mut app, &mut state, &output, 3.0));
+    assert!(!light_mode.is_empty() && light_mode.iter().all(|dark| !dark));
+    output = step(&mut app, &mut state, &click_on(&output, "Dark"), 5.0);
+    let dark_mode = dark(listed(&mut app, &mut state, &output, 6.0));
+    assert!(!dark_mode.is_empty() && dark_mode.iter().all(|dark| *dark));
+    output = step(&mut app, &mut state, &click_on(&output, "System"), 8.0);
+    let system = dark(listed(&mut app, &mut state, &output, 9.0));
+    assert!(
+        system.contains(&true) && system.contains(&false),
+        "every scheme"
+    );
 }
 
 #[test]

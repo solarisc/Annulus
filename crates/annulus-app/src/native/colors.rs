@@ -88,6 +88,79 @@ pub fn app_schemes() -> &'static [String] {
     })
 }
 
+/// The window's scheme menu under one theme mode (ADR-0026): our own colors, then the schemes
+/// of the mode's kind, or every scheme under System.
+pub struct SchemeMenu {
+    /// What the menu lists.
+    pub names: Vec<String>,
+    /// What each looks like in small, as [`app_swatches`].
+    pub swatches: Vec<Vec<Color>>,
+    /// Where each sits in [`app_schemes`].
+    pub at: Vec<usize>,
+}
+
+impl SchemeMenu {
+    /// The menu's entry for the scheme named `chosen`; `None` (our own colors) is the first.
+    #[must_use]
+    pub fn entry(&self, chosen: Option<&str>) -> Option<usize> {
+        let name = chosen.unwrap_or(OWN_COLORS);
+        self.names.iter().position(|known| known == name)
+    }
+}
+
+/// The scheme menu for `mode`: under Light only light schemes, under Dark only dark ones, and
+/// under System every scheme. Our own colors come first, in the mode's look.
+pub fn scheme_menu(mode: ThemeMode) -> &'static SchemeMenu {
+    static MENUS: OnceLock<[SchemeMenu; 3]> = OnceLock::new();
+    let menus = MENUS.get_or_init(|| {
+        [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark].map(|mode| {
+            let fits = |index: usize| {
+                let dark = SCHEMES[index - 1].dark();
+                match mode {
+                    ThemeMode::System => true,
+                    ThemeMode::Light => !dark,
+                    ThemeMode::Dark => dark,
+                }
+            };
+            let at: Vec<usize> = std::iter::once(0)
+                .chain((1..app_schemes().len()).filter(|&index| fits(index)))
+                .collect();
+            let mut swatches: Vec<Vec<Color>> = at
+                .iter()
+                .map(|&index| app_swatches()[index].clone())
+                .collect();
+            if mode == ThemeMode::Light {
+                let own = Theme::new(annulus_config::tokens::Appearance::Light);
+                swatches[0] = vec![own.chrome, own.text, own.accent, own.ok, own.error];
+            }
+            SchemeMenu {
+                names: at
+                    .iter()
+                    .map(|&index| app_schemes()[index].clone())
+                    .collect(),
+                swatches,
+                at,
+            }
+        })
+    });
+    match mode {
+        ThemeMode::System => &menus[0],
+        ThemeMode::Light => &menus[1],
+        ThemeMode::Dark => &menus[2],
+    }
+}
+
+/// The window's scheme once the mode becomes `mode` (ADR-0026): a scheme of the other kind
+/// goes, so the window turns light or dark as the mode says; under System any stays.
+#[must_use]
+pub fn scheme_kept(scheme: Option<String>, mode: ThemeMode) -> Option<String> {
+    let dark = scheme.as_deref().and_then(Scheme::find).map(Scheme::dark);
+    match (mode, dark) {
+        (ThemeMode::Light, Some(true)) | (ThemeMode::Dark, Some(false)) => None,
+        _ => scheme,
+    }
+}
+
 /// What each entry of [`app_schemes`] looks like in small: the window's background, then its
 /// text, accent, success and error colors.
 pub fn app_swatches() -> &'static [Vec<Color>] {
@@ -285,6 +358,44 @@ mod tests {
         assert!(names.len() > 450);
         assert_eq!(app_schemes()[0], OWN_COLORS);
         assert_eq!(app_schemes().len(), SCHEMES.len() + 1);
+    }
+
+    #[test]
+    fn the_theme_mode_lists_only_schemes_of_its_kind_and_system_lists_all() {
+        let light = scheme_menu(ThemeMode::Light);
+        let dark = scheme_menu(ThemeMode::Dark);
+        let all = scheme_menu(ThemeMode::System);
+        for menu in [light, dark, all] {
+            assert_eq!(menu.names[0], OWN_COLORS, "our own colors come first");
+            assert_eq!(menu.entry(None), Some(0));
+            assert_eq!(menu.names.len(), menu.swatches.len());
+            for (name, &index) in menu.names.iter().zip(&menu.at) {
+                assert_eq!(&app_schemes()[index], name);
+            }
+        }
+        assert!(light.entry(Some("Solarized Light")).is_some());
+        assert!(light.entry(Some("Dracula")).is_none());
+        assert!(dark.entry(Some("Dracula")).is_some());
+        assert!(dark.entry(Some("Solarized Light")).is_none());
+        assert_eq!(light.names.len() + dark.names.len() - 1, all.names.len());
+        assert_eq!(all.names, app_schemes());
+        let own_light = Theme::new(Appearance::Light);
+        assert_eq!(
+            light.swatches[0][0], own_light.chrome,
+            "ours, in its light look"
+        );
+    }
+
+    #[test]
+    fn a_mode_of_the_other_kind_drops_the_scheme_and_system_keeps_any() {
+        let dracula = || Some("Dracula".to_owned());
+        assert_eq!(scheme_kept(dracula(), ThemeMode::Light), None);
+        assert_eq!(scheme_kept(dracula(), ThemeMode::Dark), dracula());
+        assert_eq!(scheme_kept(dracula(), ThemeMode::System), dracula());
+        let solarized = || Some("Solarized Light".to_owned());
+        assert_eq!(scheme_kept(solarized(), ThemeMode::Dark), None);
+        assert_eq!(scheme_kept(solarized(), ThemeMode::Light), solarized());
+        assert_eq!(scheme_kept(None, ThemeMode::Dark), None);
     }
 
     #[test]
