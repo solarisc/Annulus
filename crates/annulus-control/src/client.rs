@@ -215,7 +215,9 @@ impl Client {
 fn open(pipe: &str) -> Result<Stream, ClientError> {
     /// All of the pipe's instances are taken: the door makes the next one in a moment.
     const PIPE_BUSY: i32 = 231;
-    for _ in 0..40 {
+    // As long as the door gives a client to show its token (5 s): a busy machine can keep the
+    // door from making the next instance for more than a second.
+    for _ in 0..200 {
         match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -321,20 +323,39 @@ mod tests {
     fn past_eight_clients_the_newest_is_turned_away_until_one_leaves() {
         let dir = temp_dir("cap");
         let door = Door::open(&dir, Arc::new(|| {})).unwrap();
-        let held: Vec<Client> = (0..8).map(|_| Client::connect(&dir).unwrap()).collect();
-        // Give the door a moment to seat all eight before the ninth knocks.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Eight clients, each seated: the door has answered a call from every one.
+        let held: Vec<Client> = std::thread::scope(|scope| {
+            let asking: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut client = Client::connect(&dir).unwrap();
+                        client.status().unwrap();
+                        client
+                    })
+                })
+                .collect();
+            answer(&door, 8);
+            asking
+                .into_iter()
+                .map(|asking| asking.join().unwrap())
+                .collect()
+        });
         let mut ninth = Client::connect(&dir).unwrap();
         assert!(ninth.status().is_err(), "the ninth gets no answer");
         drop(held);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // A seat is free once the door has seen a client go; until then a newcomer is turned
+        // away too, so it knocks until it gets in.
         let asking = std::thread::spawn({
             let dir = dir.clone();
             move || {
-                Client::connect(&dir)
-                    .unwrap()
-                    .status()
-                    .map(|status| status.tabs)
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    match Client::connect(&dir).and_then(|mut client| client.status()) {
+                        Ok(status) => return Ok(status.tabs),
+                        Err(error) if std::time::Instant::now() > deadline => return Err(error),
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                }
             }
         });
         answer(&door, 1);
