@@ -470,6 +470,9 @@ pub struct Response {
 /// How long a secret copied with [`Ui::copy_secret`] stays on the clipboard.
 pub const SECRET_ON_CLIPBOARD: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How far [`Ui::focus_ring`] draws past the rectangle it surrounds, halo included.
+pub const FOCUS_REACH: f32 = 5.0;
+
 /// What a finished frame asks of the window.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FrameOutput {
@@ -1386,14 +1389,19 @@ impl<'a> Ui<'a> {
         self.gfx.depth()
     }
 
-    /// Draws the focus ring around `rect` (UI-SPEC §8: accent, 2 px, offset 2 px).
+    /// Draws the focus ring around `rect` (UI-SPEC §8: accent, 2 px, offset 2 px). It reaches
+    /// [`FOCUS_REACH`] past `rect`, so a clip around a list must leave that much room.
     pub fn focus_ring(&mut self, rect: Rect, radius: f32) {
         let accent = self.theme.accent;
         self.gfx
             .stroke_rect(rect.outset(3.0), radius + 3.0, 2.0, accent);
         // A soft halo around it, so it reads as light and not as a hard outline.
-        self.gfx
-            .stroke_rect(rect.outset(5.0), radius + 5.0, 2.0, accent.alpha(0.18));
+        self.gfx.stroke_rect(
+            rect.outset(FOCUS_REACH),
+            radius + FOCUS_REACH,
+            2.0,
+            accent.alpha(0.18),
+        );
     }
 }
 

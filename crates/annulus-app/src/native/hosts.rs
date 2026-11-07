@@ -31,6 +31,11 @@ const CARD_H: f32 = metrics::HOST_CARD_HEIGHT;
 const GROUP_H: f32 = 56.0;
 const ROW_H: f32 = 44.0;
 const GAP: f32 = 8.0;
+/// How far a hovered host card rises.
+const LIFT: f32 = 1.0;
+/// How far a card draws past its place in the list: a hovered one's lift and a focused one's
+/// ring. The list's clip leaves this much room, or both are cut off at its edges.
+const LIST_REACH: f32 = LIFT + annulus_ui::kit::FOCUS_REACH;
 /// Side padding of the screen.
 const PAD: f32 = 28.0;
 /// Width of the grid/list toggle.
@@ -1212,9 +1217,16 @@ impl HostsView {
         let content_h = group_block + heading_h + host_rows + space::XL;
         let id = Id::new("hosts.scroll");
         let offset = ui.scroll_view(id, rect.wider(SCROLL_GUTTER), content_h);
-        // Cards still gliding into a narrower list are not cut off short of the panel.
+        // Cards still gliding into a narrower list are not cut off short of the panel, and no
+        // card's lift or focus ring is cut off at the list's top or sides.
         let reach = (self.list_edge - rect.r()).max(0.0);
-        ui.push_clip(Rect::new(rect.x, rect.y, rect.w + reach, rect.h));
+        let view = Rect::new(
+            rect.x - LIST_REACH,
+            rect.y - LIST_REACH,
+            rect.w + reach + 2.0 * LIST_REACH,
+            rect.h + LIST_REACH,
+        );
+        ui.push_clip(view);
         let width = rect.w;
         let top = rect.y - offset;
         let mut y = top;
@@ -1335,7 +1347,10 @@ impl HostsView {
             }
         }
         ui.pop_clip();
-        ui.scroll_edges(rect, offset, content_h, ui.theme.bg);
+        // The fade starts where the clip does, so a scrolled list never shows a hard band above
+        // it; the content counts that band too.
+        let fades = Rect::new(rect.x, view.y, rect.w, view.h);
+        ui.scroll_edges(fades, offset, content_h + LIST_REACH, ui.theme.bg);
         action
     }
 
@@ -2532,7 +2547,7 @@ fn host_card(
     // A hovered card lifts a little on a soft shadow; pressing sets it down again and it gives
     // a little, like a key.
     let lift = hover * (1.0 - press);
-    let shape = rect.offset(0.0, -lift);
+    let shape = rect.offset(0.0, -LIFT * lift);
     ui.push_layer(Layer::NONE.scaled(shape.center(), 1.0 - 0.012 * press));
     let round = radius::CARD;
     if lift > 0.0 {
@@ -2895,6 +2910,97 @@ fn panel_backing(ui: &mut Ui<'_>, content: Rect, panel: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Hosts screen with one selected host and no group or search, so its card sits on the
+    /// list's top and left edges, drawn until it has settled. From then on the pointer rests on
+    /// the card when `hover`, and the card has the keyboard focus with its ring when `focus`.
+    /// Returns the canvas's pixels (RGBA, 1000 wide) and where the card is.
+    fn edge_card(name: &str, hover: bool, focus: bool) -> (Vec<u8>, Rect) {
+        let mut vault = crate::native::demo::fixture_vault(name, false);
+        let mut host = vault.draft_host();
+        (host.label, host.address) = ("web".into(), "10.0.0.5".into());
+        let id = host.id;
+        vault.upsert_host(host).unwrap();
+        let mut view = HostsView {
+            selected: Some(id),
+            ..HostsView::default()
+        };
+        let mut canvas = annulus_platform::cpu::CpuCanvas::new(
+            1000,
+            640,
+            1.0,
+            annulus_platform::cpu::TextEngine::new(),
+        )
+        .unwrap();
+        let theme = annulus_ui::kit::Theme::new(annulus_config::tokens::Appearance::Dark);
+        let mut state = annulus_ui::kit::UiState::default();
+        let mut card: Option<Rect> = None;
+        for frame in 0..50 {
+            let events = match card {
+                Some(at) if hover => vec![annulus_ui::kit::Event::PointerMoved(at.center())],
+                _ => Vec::new(),
+            };
+            // The page behind the screen, as the window paints it.
+            canvas.clear(theme.bg);
+            state.begin_frame(&events, f64::from(frame) * 0.1);
+            let mut ui = Ui::new(
+                &mut canvas,
+                theme,
+                &mut state,
+                Rect::new(0.0, 0.0, 1000.0, 640.0),
+            );
+            view.draw(
+                &mut ui,
+                Rect::new(0.0, 0.0, 1000.0, 640.0),
+                Some(&mut vault),
+            );
+            let out = state.end_frame();
+            // By three seconds in, the card has come in and settled.
+            if frame == 30 {
+                let zone = out.zones.iter().find(|zone| zone.label == "web").unwrap();
+                card = Some(zone.rect);
+                if focus {
+                    state.set_focus(Some(zone.id), true);
+                }
+            }
+        }
+        (canvas.pixels().to_vec(), card.unwrap())
+    }
+
+    /// The pixel at (`x`, `y`) of an `edge_card` canvas.
+    fn pixel(pixels: &[u8], x: f32, y: f32) -> [u8; 4] {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // On the canvas.
+        let at = ((y as usize) * 1000 + x as usize) * 4;
+        [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+    }
+
+    #[test]
+    fn a_hovered_card_on_the_lists_top_edge_keeps_the_top_of_its_outline() {
+        let (pixels, card) = edge_card("top-outline", true, false);
+        // The hovered card has lifted a pixel, so its outline's top runs just above its place.
+        let outline = pixel(&pixels, card.center().x, card.y - 0.5);
+        let page = pixel(&pixels, card.center().x, card.y - 12.0);
+        assert!(
+            outline[1] > page[1].saturating_add(30),
+            "the outline's top is cut off: {outline:?} against the page's {page:?}"
+        );
+    }
+
+    #[test]
+    fn a_focused_card_on_the_lists_edges_shows_its_whole_focus_ring() {
+        let (pixels, card) = edge_card("edge-ring", false, true);
+        let page = pixel(&pixels, card.center().x, card.y - 12.0);
+        for (x, y, side) in [
+            (card.center().x, card.y - 2.0, "top"),
+            (card.x - 2.0, card.center().y, "left"),
+        ] {
+            let ring = pixel(&pixels, x, y);
+            assert!(
+                ring[1] > page[1].saturating_add(60),
+                "the ring's {side} is cut off: {ring:?} against the page's {page:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_editor_panel_stays_inside_the_rounded_content_card() {
