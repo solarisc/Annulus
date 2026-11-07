@@ -447,10 +447,9 @@ fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str)
     response.clicked
 }
 
-/// Our mark, the ring gate (`annulus_ui::mark`, ADR-0010), in the theme's colors.
+/// Our mark (`annulus_ui::mark`), on its own tile in its own colors.
 pub(super) fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
-    let colors = mark::Colors::for_theme(&ui.theme);
-    mark::paint(&mut ui.gfx, rect, &colors);
+    mark::paint(&mut ui.gfx, rect);
 }
 
 /// The width a tab wants: fixed tabs fit their name, the others have a close button too and

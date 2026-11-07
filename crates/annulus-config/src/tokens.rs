@@ -162,6 +162,28 @@ pub const LIGHT: Palette = Palette {
     status_ok: Rgb::new(0x24, 0x93, 0x4F),
 };
 
+/// The colors of our mark (UI-SPEC §8), our own design. The mark brings its own tile, so it
+/// keeps them in every theme and color scheme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkColors {
+    /// The tile.
+    pub tile: Rgb,
+    /// The ring's segments and the tile's outline.
+    pub ring: Rgb,
+    /// The letter.
+    pub letter: Rgb,
+    /// The chevrons and the spark: a teal brighter than the accent, used only in the mark.
+    pub light: Rgb,
+}
+
+/// Our mark's colors.
+pub const MARK: MarkColors = MarkColors {
+    tile: Rgb::new(0x0D, 0x0D, 0x0F),
+    ring: Rgb::new(0x34, 0x36, 0x3A),
+    letter: Rgb::new(0xDC, 0xDB, 0xDC),
+    light: Rgb::new(0x64, 0xE7, 0xD5),
+};
+
 /// A tile in `hue` on `surface`: a wash of the hue, and the hue itself, lifted or deepened, for
 /// what is drawn on it. Tiles tell hosts apart without shouting over the screen's one main
 /// action, and their marks meet the text contrast of WCAG AA (4.5:1, tested) in both themes.

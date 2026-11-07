@@ -9,7 +9,6 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-annulus-config = { path = "../crates/annulus-config" }
 annulus-ui = { path = "../crates/annulus-ui" }
 anyhow.workspace = true
 serde_json.workspace = true

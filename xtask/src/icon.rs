@@ -1,14 +1,15 @@
-//! `cargo xtask icon`: draws our mark (the ring gate of `annulus_ui::mark`, which the title bar
-//! shows, ADR-0010) in the dark theme's colors at every Windows and macOS icon size and writes:
+//! `cargo xtask icon`: draws our mark (`annulus_ui::mark`, which the title bar shows: the
+//! owner's design, on its own tile in its own colors) at every Windows and macOS icon size and
+//! writes:
 //!
-//! - `crates/annulus-app/assets/annulus.ico`, the icon file: the ring alone, on nothing;
+//! - `crates/annulus-app/assets/annulus.ico`, the icon file: the tile edge to edge;
 //! - `crates/annulus-app/assets/annulus.res`, the same images as a compiled Windows resource
 //!   (icon group 1), which `build.rs` hands to the MSVC linker so the exe carries it. Writing
 //!   the `.res` here keeps the build free of a resource compiler;
 //! - `crates/annulus-app/assets/annulus.icns`, the macOS icon `cargo xtask mac-app` puts in
-//!   `Annulus.app`: the ring on a dark tile on macOS's icon grid, a margin around it as around
-//!   every other app's in the Dock;
-//! - `docs/media/logo.svg`, the README's logo: the ring as vectors.
+//!   `Annulus.app`: the tile on macOS's icon grid, a margin around it as around every other
+//!   app's in the Dock;
+//! - `docs/media/logo.svg`, the README's logo: the mark as vectors.
 //!
 //! All four are committed, and a test fails while one is not what the mark draws now: rerun
 //! this after changing the mark.
@@ -16,15 +17,10 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use annulus_config::tokens::Appearance;
-use annulus_ui::gfx::{Color, Point};
-use annulus_ui::kit::Theme;
-use annulus_ui::mark::{self, Colors, Shape};
+use annulus_ui::gfx::Color;
+use annulus_ui::mark::{self, Shape};
 use anyhow::{Context, Result};
-use tiny_skia::{
-    FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, PathBuilder, Pixmap,
-    SpreadMode, Stroke, Transform,
-};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::repo;
 
@@ -47,12 +43,6 @@ const MAC_ICONS: [(&[u8; 4], u32); 10] = [
 ];
 /// The share of a macOS icon its tile takes: 824 of 1024 pixels on Apple's grid.
 const MAC_TILE: f32 = 824.0 / 1024.0;
-/// The tile's corner radius, as a share of its side: Apple's 185 of 824.
-const MAC_CORNER: f32 = 185.0 / 824.0;
-/// The share of the tile the ring takes.
-const MAC_RING: f32 = 0.8;
-/// How many pixels the README's logo is drawn for: enough for every detail of the mark.
-const LOGO_PIXELS: f32 = 256.0;
 
 /// Where each file goes, from the repository root.
 const ICO: &str = "crates/annulus-app/assets/annulus.ico";
@@ -82,28 +72,18 @@ pub fn run() -> Result<bool> {
 fn files() -> Result<Vec<(PathBuf, Vec<u8>)>> {
     let images = SIZES
         .iter()
-        .map(|&size| Ok((size, icon(size, false)?)))
+        .map(|&size| Ok((size, icon(size, 1.0)?)))
         .collect::<Result<Vec<_>>>()?;
     let mac = MAC_ICONS
         .iter()
-        .map(|&(kind, size)| Ok((*kind, icon(size, true)?)))
+        .map(|&(kind, size)| Ok((*kind, icon(size, MAC_TILE)?)))
         .collect::<Result<Vec<_>>>()?;
     Ok(vec![
         (ICO.into(), ico(&images)),
         (RES.into(), res(&images)),
         (ICNS.into(), icns(&mac)),
-        (LOGO.into(), svg(&colors()).into_bytes()),
+        (LOGO.into(), svg().into_bytes()),
     ])
-}
-
-/// The theme the icon is drawn in: the dark one, whose light ring with its dark outline
-/// reads on a light taskbar or Dock as well as on a dark one.
-fn theme() -> Theme {
-    Theme::new(Appearance::Dark)
-}
-
-fn colors() -> Colors {
-    Colors::for_theme(&theme())
 }
 
 fn paint(color: Color) -> Paint<'static> {
@@ -113,97 +93,50 @@ fn paint(color: Color) -> Paint<'static> {
     paint
 }
 
-/// The icon `pixels` square, as a PNG: on macOS on its tile, elsewhere the ring alone.
-fn icon(pixels: u32, macos: bool) -> Result<Vec<u8>> {
+/// The icon `pixels` square, as a PNG: the mark `share` of that wide, in the middle.
+fn icon(pixels: u32, share: f32) -> Result<Vec<u8>> {
     let mut pixmap = Pixmap::new(pixels, pixels).context("icon size")?;
     #[allow(clippy::cast_precision_loss)] // 16 to 1024.
     let canvas = pixels as f32;
-    let (mut at, mut side) = (0.0, canvas);
-    if macos {
-        let tile = canvas * MAC_TILE;
-        let margin = (canvas - tile) / 2.0;
-        let path = rounded_square(tile, tile * MAC_CORNER).context("tile path")?;
-        // Lit from above: the raised surface's color at the top, the sheet's at the bottom,
-        // so the tile stays in sight on a dark Dock.
-        let stop = |at: f32, c: Color| {
-            GradientStop::new(at, tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a))
-        };
-        let shade = LinearGradient::new(
-            tiny_skia::Point::from_xy(0.0, 0.0),
-            tiny_skia::Point::from_xy(0.0, tile),
-            vec![stop(0.0, theme().raised), stop(1.0, theme().bg)],
-            SpreadMode::Pad,
-            Transform::identity(),
-        )
-        .context("tile shade")?;
-        let mut fill = paint(theme().bg);
-        fill.shader = shade;
-        pixmap.fill_path(
-            &path,
-            &fill,
-            FillRule::Winding,
-            Transform::from_translate(margin, margin),
-            None,
-        );
-        side = tile * MAC_RING;
-        at = (canvas - side) / 2.0;
-    }
-    draw(&mut pixmap, at, side, &colors())?;
+    let side = canvas * share;
+    draw(&mut pixmap, (canvas - side) / 2.0, side)?;
     pixmap.encode_png().context("encoding PNG")
 }
 
 /// Draws the mark `side` pixels square with its top-left corner at (`at`, `at`).
-fn draw(pixmap: &mut Pixmap, at: f32, side: f32, colors: &Colors) -> Result<()> {
+fn draw(pixmap: &mut Pixmap, at: f32, side: f32) -> Result<()> {
     let unit = side / mark::GRID;
-    let place = |p: Point| (at + p.x * unit, at + p.y * unit);
-    let stroke = |width: f32| Stroke {
-        width: width * unit,
-        line_cap: LineCap::Round,
-        line_join: LineJoin::Round,
-        ..Stroke::default()
-    };
-    let line = |points: &[Point]| {
-        let mut path = PathBuilder::new();
-        for (index, &point) in points.iter().enumerate() {
-            let (x, y) = place(point);
-            if index == 0 {
-                path.move_to(x, y);
-            } else {
-                path.line_to(x, y);
-            }
-        }
-        path.finish()
-    };
-    let none = Transform::identity();
-    for (shape, tone) in mark::shapes(side) {
-        let paint = paint(colors.of(tone));
+    let place = Transform::from_translate(at, at);
+    for (shape, tone) in mark::shapes() {
+        let paint = paint(mark::color(tone));
         match shape {
-            Shape::Disc { center, radius } => {
-                let (x, y) = place(center);
-                let path = PathBuilder::from_circle(x, y, radius * unit).context("disc")?;
-                pixmap.fill_path(&path, &paint, FillRule::Winding, none, None);
+            Shape::Tile { radius } => {
+                let path = rounded_square(side, radius * unit).context("tile")?;
+                pixmap.fill_path(&path, &paint, FillRule::Winding, place, None);
             }
-            Shape::Ring {
-                center,
-                radius,
-                width,
-            } => {
-                let (x, y) = place(center);
-                let path = PathBuilder::from_circle(x, y, radius * unit).context("ring")?;
-                pixmap.stroke_path(&path, &paint, &stroke(width), none, None);
+            Shape::Outline { radius, width } => {
+                let half = width * unit / 2.0;
+                let path =
+                    rounded_square(side - 2.0 * half, radius * unit - half).context("outline")?;
+                let stroke = Stroke {
+                    width: width * unit,
+                    ..Stroke::default()
+                };
+                let inset = Transform::from_translate(at + half, at + half);
+                pixmap.stroke_path(&path, &paint, &stroke, inset, None);
             }
-            Shape::Line { from, to, width } => {
-                let path = line(&[from, to]).context("line")?;
-                pixmap.stroke_path(&path, &paint, &stroke(width), none, None);
-            }
-            Shape::Vee {
-                left,
-                tip,
-                right,
-                width,
-            } => {
-                let path = line(&[left, tip, right]).context("chevron")?;
-                pixmap.stroke_path(&path, &paint, &stroke(width), none, None);
+            Shape::Polygon(points) => {
+                let mut path = PathBuilder::new();
+                for (index, p) in points.iter().enumerate() {
+                    if index == 0 {
+                        path.move_to(p.x * unit, p.y * unit);
+                    } else {
+                        path.line_to(p.x * unit, p.y * unit);
+                    }
+                }
+                path.close();
+                let path = path.finish().context("polygon")?;
+                pixmap.fill_path(&path, &paint, FillRule::Winding, place, None);
             }
         }
     }
@@ -221,71 +154,43 @@ fn num(value: f32) -> String {
     }
 }
 
-/// `color` as an SVG paint, its alpha as an opacity attribute named `what`.
-fn svg_paint(what: &str, color: Color) -> String {
-    let mut out = format!("{what}=\"#{:02X}{:02X}{:02X}\"", color.r, color.g, color.b);
-    if color.a < 255 {
-        let _ = write!(
-            out,
-            " {what}-opacity=\"{}\"",
-            num(f32::from(color.a) / 255.0)
-        );
-    }
-    out
+/// `color` as an SVG color.
+fn hex(color: Color) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
 }
 
 /// The mark as an SVG on its 20-unit grid.
-fn svg(colors: &Colors) -> String {
+fn svg() -> String {
     let mut out = String::from(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\" role=\"img\" aria-label=\"Annulus\">\n",
     );
-    let points = |points: &[Point]| {
-        points
-            .iter()
-            .map(|p| format!("{},{}", num(p.x), num(p.y)))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let round = "fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"";
-    for (shape, tone) in mark::shapes(LOGO_PIXELS) {
-        let color = colors.of(tone);
+    for (shape, tone) in mark::shapes() {
+        let color = hex(mark::color(tone));
         let line = match shape {
-            Shape::Disc { center, radius } => format!(
-                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" {}/>",
-                num(center.x),
-                num(center.y),
-                num(radius),
-                svg_paint("fill", color)
+            Shape::Tile { radius } => format!(
+                "<rect width=\"20\" height=\"20\" rx=\"{}\" fill=\"{color}\"/>",
+                num(radius)
             ),
-            Shape::Ring {
-                center,
-                radius,
-                width,
-            } => format!(
-                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"none\" {} stroke-width=\"{}\"/>",
-                num(center.x),
-                num(center.y),
-                num(radius),
-                svg_paint("stroke", color),
-                num(width)
-            ),
-            Shape::Line { from, to, width } => format!(
-                "<polyline points=\"{}\" {round} {} stroke-width=\"{}\"/>",
-                points(&[from, to]),
-                svg_paint("stroke", color),
-                num(width)
-            ),
-            Shape::Vee {
-                left,
-                tip,
-                right,
-                width,
-            } => format!(
-                "<polyline points=\"{}\" {round} {} stroke-width=\"{}\"/>",
-                points(&[left, tip, right]),
-                svg_paint("stroke", color),
-                num(width)
-            ),
+            Shape::Outline { radius, width } => {
+                let half = width / 2.0;
+                format!(
+                    "<rect x=\"{0}\" y=\"{0}\" width=\"{1}\" height=\"{1}\" rx=\"{2}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"{3}\"/>",
+                    num(half),
+                    num(mark::GRID - width),
+                    num(radius - half),
+                    num(width)
+                )
+            }
+            Shape::Polygon(points) => {
+                let points: Vec<String> = points
+                    .iter()
+                    .map(|p| format!("{},{}", num(p.x), num(p.y)))
+                    .collect();
+                format!(
+                    "<polygon points=\"{}\" fill=\"{color}\"/>",
+                    points.join(" ")
+                )
+            }
         };
         let _ = writeln!(out, "  {line}");
     }
@@ -429,39 +334,35 @@ mod tests {
         }
     }
 
-    fn opaque(color: Color) -> [u8; 4] {
+    fn opaque(tone: mark::Tone) -> [u8; 4] {
+        let color = mark::color(tone);
         [color.r, color.g, color.b, 255]
     }
 
-    fn near(got: [u8; 4], want: [u8; 4]) -> bool {
-        got.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 2)
-    }
-
     #[test]
-    fn the_icon_is_the_ring_alone_with_its_pool_rim_and_top_chevron() {
-        // 256 pixels: 12.8 to a unit of the mark's grid, its middle at 128.
-        let at = pixels(&icon(256, false).unwrap());
-        let colors = colors();
-        for (x, y) in [(0, 0), (20, 20), (255, 255), (236, 20)] {
-            assert_eq!(at(x, y)[3], 0, "clear outside the ring at ({x}, {y})");
-        }
-        // The middle of the pool, under every layer of its glow.
-        let glows = mark::shapes(256.0)
-            .iter()
-            .filter(|(_, tone)| *tone == mark::Tone::Glow)
-            .count();
-        let pool = (0..glows).fold(colors.horizon, |under, _| colors.glow.over(under));
-        assert!(near(at(128, 128), opaque(pool)), "pool {:?}", at(128, 128));
-        // The rim, 8.85 units out halfway between two chevrons, outside the track and inside
-        // the outline.
-        assert_eq!(at(239, 147), opaque(colors.rim), "rim");
-        // The top chevron, just inside its tip 3 units from the top.
-        assert_eq!(at(128, 42), opaque(colors.chevron), "chevron");
+    fn the_icon_is_the_tile_with_its_ring_chevron_letter_and_spark() {
+        // 256 pixels: 12.8 to a unit of the mark's grid.
+        let at = pixels(&icon(256, 1.0).unwrap());
+        assert_eq!(at(0, 0)[3], 0, "the corner is rounded off");
+        assert_eq!(at(20, 128), opaque(mark::Tone::Tile), "tile");
+        assert_eq!(
+            at(191, 93),
+            opaque(mark::Tone::Ring),
+            "a segment of the ring"
+        );
+        assert_eq!(at(128, 55), opaque(mark::Tone::Light), "the top chevron");
+        assert_eq!(
+            at(87, 179),
+            opaque(mark::Tone::Letter),
+            "a leg of the letter"
+        );
+        assert_eq!(at(128, 161), opaque(mark::Tone::Light), "the spark");
+        assert_eq!(at(128, 200), opaque(mark::Tone::Tile), "between the legs");
     }
 
     #[test]
     fn on_macos_the_tile_sits_centered_with_a_clear_margin_around_it() {
-        let at = pixels(&icon(1024, true).unwrap());
+        let at = pixels(&icon(1024, MAC_TILE).unwrap());
         // 100 pixels of margin on each side of an 824-pixel tile.
         for (x, y) in [(512, 99), (99, 512), (512, 925), (925, 512)] {
             assert_eq!(at(x, y)[3], 0, "margin at ({x}, {y})");
@@ -486,15 +387,11 @@ mod tests {
 
     #[test]
     fn the_logo_draws_every_shape_of_the_mark_on_its_grid() {
-        let logo = svg(&colors());
+        let logo = svg();
         assert!(logo.starts_with("<svg ") && logo.contains("viewBox=\"0 0 20 20\""));
-        let drawn = logo.matches("<circle").count() + logo.matches("<polyline").count();
-        assert_eq!(drawn, mark::shapes(LOGO_PIXELS).len());
-        let glow = colors().glow;
-        assert!(logo.contains(&format!(
-            "fill-opacity=\"{}\"",
-            num(f32::from(glow.a) / 255.0)
-        )));
+        let drawn = logo.matches("<rect").count() + logo.matches("<polygon").count();
+        assert_eq!(drawn, mark::shapes().len());
+        assert!(logo.contains(&hex(mark::color(mark::Tone::Light))));
     }
 
     #[test]
