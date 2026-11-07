@@ -543,6 +543,15 @@ impl Canvas for Layers<'_> {
         );
     }
 
+    fn fill_polygon(&mut self, points: &[Point], color: Color) {
+        if self.invisible() {
+            return;
+        }
+        let t = self.now;
+        let mapped: Vec<Point> = points.iter().map(|p| t.point(*p)).collect();
+        self.inner.fill_polygon(&mapped, t.color(color));
+    }
+
     fn measure(&mut self, text: &str, font: Font) -> TextSize {
         // Layout happens in the layer's own units.
         self.inner.measure(text, font)
@@ -723,6 +732,7 @@ mod tests {
         fn fill_circle(&mut self, _: Point, _: f32, _: Color) {}
         fn polyline(&mut self, _: &[Point], _: bool, _: f32, _: Color) {}
         fn stroke_circle(&mut self, _: Point, _: f32, _: f32, _: Color) {}
+        fn fill_polygon(&mut self, _: &[Point], _: Color) {}
         fn measure(&mut self, text: &str, font: Font) -> TextSize {
             self.inner.measure(text, font)
         }

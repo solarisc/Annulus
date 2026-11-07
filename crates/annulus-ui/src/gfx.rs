@@ -399,6 +399,10 @@ pub trait Canvas {
     /// Strokes a circle.
     fn stroke_circle(&mut self, center: Point, radius: f32, width: f32, color: Color);
 
+    /// Fills the polygon through `points`, closed back to the first, with smoothed edges.
+    /// Where its edges cross, what they wind around (non-zero) is filled.
+    fn fill_polygon(&mut self, points: &[Point], color: Color);
+
     /// The size of `text` on one line in `font`.
     fn measure(&mut self, text: &str, font: Font) -> TextSize;
 
@@ -661,6 +665,7 @@ pub(crate) mod tests {
         fn fill_circle(&mut self, _: Point, _: f32, _: Color) {}
         fn polyline(&mut self, _: &[Point], _: bool, _: f32, _: Color) {}
         fn stroke_circle(&mut self, _: Point, _: f32, _: f32, _: Color) {}
+        fn fill_polygon(&mut self, _: &[Point], _: Color) {}
         #[allow(clippy::cast_precision_loss)] // Test strings are short.
         fn measure(&mut self, text: &str, _: Font) -> TextSize {
             let width = text

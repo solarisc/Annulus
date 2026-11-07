@@ -222,6 +222,21 @@ impl Canvas for CpuCanvas {
         }
     }
 
+    fn fill_polygon(&mut self, points: &[Point], color: Color) {
+        let mut path = PathBuilder::new();
+        for (index, point) in points.iter().enumerate() {
+            if index == 0 {
+                path.move_to(point.x, point.y);
+            } else {
+                path.line_to(point.x, point.y);
+            }
+        }
+        path.close();
+        if let Some(path) = path.finish() {
+            self.fill_path(&path, color);
+        }
+    }
+
     fn measure(&mut self, text: &str, font: Font) -> TextSize {
         self.text.measure(text, font)
     }
@@ -420,6 +435,28 @@ mod tests {
             assert_eq!(pixel(&canvas, outside, outside), [0, 0, 0, 0]);
         }
     }
+
+    #[test]
+    fn a_polygon_fills_inside_its_edges_and_leaves_its_notch_empty() {
+        let mut canvas = canvas(1.0);
+        canvas.clear(Color::BLACK);
+        // A peak with a notch under it, like a letter A without its bar.
+        canvas.fill_polygon(&LAMBDA, Color::WHITE);
+        assert_eq!(pixel(&canvas, 20, 7), [255, 255, 255, 255], "the peak");
+        assert_eq!(pixel(&canvas, 9, 30), [255, 255, 255, 255], "a leg");
+        assert_eq!(pixel(&canvas, 20, 30), [0, 0, 0, 255], "the notch");
+        assert_eq!(pixel(&canvas, 2, 10), [0, 0, 0, 255], "outside");
+    }
+
+    const LAMBDA: [Point; 7] = [
+        Point::new(18.0, 5.0),
+        Point::new(22.0, 5.0),
+        Point::new(35.0, 35.0),
+        Point::new(30.0, 35.0),
+        Point::new(20.0, 14.0),
+        Point::new(10.0, 35.0),
+        Point::new(5.0, 35.0),
+    ];
 
     #[test]
     fn a_group_lands_faded_as_one_where_overlaps_do_not_show_through() {

@@ -13,8 +13,9 @@ use std::collections::HashMap;
 
 use annulus_ui::gfx::{Canvas, Color, Family, Font, Point, Rect, TextSize, Weight};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
-    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING,
+    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BRUSH_PROPERTIES, D2D1_CAP_STYLE_ROUND,
@@ -473,6 +474,26 @@ impl Canvas for D2dCanvas<'_> {
         }
     }
 
+    fn fill_polygon(&mut self, points: &[Point], c: Color) {
+        let [first, rest @ ..] = points else { return };
+        // SAFETY: as in `polyline`: the geometry is built and closed before it is drawn.
+        unsafe {
+            let Ok(path) = self.d2d.factory.CreatePathGeometry() else {
+                return;
+            };
+            let Ok(sink) = path.Open() else { return };
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+            sink.BeginFigure(point(*first), D2D1_FIGURE_BEGIN_FILLED);
+            let rest: Vec<Vector2> = rest.iter().map(|p| point(*p)).collect();
+            sink.AddLines(&rest);
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            if sink.Close().is_err() {
+                return;
+            }
+            self.target.FillGeometry(&path, self.brush(c), None);
+        }
+    }
+
     fn stroke_circle(&mut self, center: Point, radius: f32, width: f32, c: Color) {
         let ellipse = D2D1_ELLIPSE {
             point: point(center),
@@ -736,6 +757,31 @@ mod tests {
             unreachable!("inside the frame")
         };
         assert_eq!(p.red(), 255);
+    }
+
+    #[test]
+    fn a_polygon_fills_inside_its_edges_and_leaves_its_notch_empty() {
+        // A peak with a notch under it, like a letter A without its bar.
+        let frame = render(|canvas| {
+            canvas.fill_rect(Rect::new(0.0, 0.0, 40.0, 40.0), 0.0, Color::BLACK);
+            canvas.fill_polygon(
+                &[
+                    Point::new(18.0, 5.0),
+                    Point::new(22.0, 5.0),
+                    Point::new(35.0, 35.0),
+                    Point::new(30.0, 35.0),
+                    Point::new(20.0, 14.0),
+                    Point::new(10.0, 35.0),
+                    Point::new(5.0, 35.0),
+                ],
+                Color::WHITE,
+            );
+        });
+        let red = |x, y| frame.pixel(x, y).map(tiny_skia::PremultipliedColorU8::red);
+        assert_eq!(red(20, 7), Some(255), "the peak");
+        assert_eq!(red(9, 30), Some(255), "a leg");
+        assert_eq!(red(20, 30), Some(0), "the notch");
+        assert_eq!(red(2, 10), Some(0), "outside");
     }
 
     #[test]

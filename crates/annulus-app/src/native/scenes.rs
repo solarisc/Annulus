@@ -2631,6 +2631,7 @@ impl Canvas for Measure {
     fn fill_circle(&mut self, _: Point, _: f32, _: annulus_ui::gfx::Color) {}
     fn polyline(&mut self, _: &[Point], _: bool, _: f32, _: annulus_ui::gfx::Color) {}
     fn stroke_circle(&mut self, _: Point, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn fill_polygon(&mut self, _: &[Point], _: annulus_ui::gfx::Color) {}
     fn measure(&mut self, text: &str, font: annulus_ui::gfx::Font) -> annulus_ui::gfx::TextSize {
         self.0.measure(text, font)
     }
@@ -5361,6 +5362,7 @@ impl Canvas for Words {
     fn fill_circle(&mut self, _: Point, _: f32, _: annulus_ui::gfx::Color) {}
     fn polyline(&mut self, _: &[Point], _: bool, _: f32, _: annulus_ui::gfx::Color) {}
     fn stroke_circle(&mut self, _: Point, _: f32, _: f32, _: annulus_ui::gfx::Color) {}
+    fn fill_polygon(&mut self, _: &[Point], _: annulus_ui::gfx::Color) {}
     fn measure(&mut self, text: &str, font: annulus_ui::gfx::Font) -> annulus_ui::gfx::TextSize {
         self.0.measure(text, font)
     }
