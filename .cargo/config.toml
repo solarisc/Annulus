@@ -1,2 +1,7 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# Microsoft's C runtime goes inside the Windows programs, so they start on a Windows that doesn't
+# have it (ADR-0024). `cargo xtask standalone` checks the result.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
