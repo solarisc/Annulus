@@ -748,18 +748,10 @@ impl HostsView {
                 ui.copy(connect::ssh_command(vault, &host));
                 format!("Copied the ssh command for {}.", host.label)
             }
-            1 => {
-                let label = format!("{} copy", host.label);
-                let copy = Host {
-                    id: vault.draft_host().id,
-                    label: label.clone(),
-                    ..host
-                };
-                match vault.upsert_host(copy) {
-                    Ok(()) => format!("Added {label}."),
-                    Err(error) => format!("Could not duplicate: {error}"),
-                }
-            }
+            1 => match duplicate_host(vault, host) {
+                Ok(copy) => format!("Added {}.", copy.label),
+                Err(problem) => problem,
+            },
             _ => {
                 let label = host.label.clone();
                 let group = choice
@@ -1377,6 +1369,22 @@ impl HostsView {
         let mut area = rect;
         let mut head = area.take_top(64.0).inset(space::XL, 0.0);
         let close = head.take_right(32.0).centered(32.0, 32.0);
+        // A saved host is copied from here as from its menu (F-HOST-007); the copy opens in
+        // its place. Drawn before Close, so Tab follows the eye.
+        let duplicate = (!editor.is_new).then(|| {
+            head.take_right(4.0);
+            head.take_right(32.0).centered(32.0, 32.0)
+        });
+        let duplicate_clicked = duplicate.is_some_and(|slot| {
+            ui.icon_button(
+                Id::new("editor.duplicate"),
+                slot,
+                icons::COPY,
+                "Duplicate",
+                false,
+            )
+            .clicked
+        });
         let mut close_editor = ui
             .icon_button(Id::new("editor.close"), close, icons::CLOSE, "Close", false)
             .clicked
@@ -1695,6 +1703,25 @@ impl HostsView {
                 Err(problem) => editor.problem = Some(problem),
             }
         }
+        // The copy is made of what the form shows, so nothing typed is lost; the host itself
+        // stays as it was saved.
+        let mut copied = None;
+        if duplicate_clicked && !saved && !close_editor {
+            let current = vault.hosts().iter().find(|host| host.id == editor.host.id);
+            let unsaved = current.cloned();
+            match editor.merged(current) {
+                Ok(mut host) => {
+                    crate::connect::pin_user(vault, &mut host, &annulus_session::local_user());
+                    let changed = unsaved.as_ref() != Some(&host);
+                    let original = unsaved.map_or_else(|| host.label.clone(), |saved| saved.label);
+                    match duplicate_host(vault, host) {
+                        Ok(copy) => copied = Some((copy, changed.then_some(original))),
+                        Err(problem) => editor.problem = Some(problem),
+                    }
+                }
+                Err(problem) => editor.problem = Some(problem),
+            }
+        }
         if saved || close_editor {
             // It slides out with its form, but no secret stays in it for that.
             self.leaving = self.editor.take().map(|mut editor| {
@@ -1703,7 +1730,30 @@ impl HostsView {
                 editor
             });
         }
+        if let Some((copy, changed)) = copied {
+            self.notice = Some(match changed {
+                Some(original) => format!(
+                    "Added {} with your changes; {original} stays as it was saved.",
+                    copy.label
+                ),
+                None => format!("Added {}.", copy.label),
+            });
+            self.edit_host(vault, copy.id);
+        }
     }
+}
+
+/// A copy of `host` under a new id, named "… copy" (F-HOST-007), saved at once; or why not.
+fn duplicate_host(vault: &mut Vault, host: Host) -> Result<Host, String> {
+    let copy = Host {
+        id: vault.draft_host().id,
+        label: format!("{} copy", host.label),
+        ..host
+    };
+    vault
+        .upsert_host(copy.clone())
+        .map(|()| copy)
+        .map_err(|error| format!("Could not duplicate: {error}"))
 }
 
 /// The group editor's draft (F-HOST-003): name, parent and what its hosts inherit.

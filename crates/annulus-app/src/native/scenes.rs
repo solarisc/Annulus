@@ -3247,6 +3247,51 @@ fn duplicate_saves_a_copy_with_a_new_id_and_the_same_address() {
 }
 
 #[test]
+fn the_host_editor_duplicates_what_it_shows_and_opens_the_copy() {
+    let mut app = NativeApp::new(Some(fixture_vault("duplicate-in-editor", true)));
+    let before = app.vault.as_ref().unwrap().hosts().len();
+    let original = host_named(&app, "grafana").clone();
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    app.hosts
+        .edit_host(app.vault.as_ref().unwrap(), original.id);
+    let mut output = step(&mut app, &mut state, &[], 1.0);
+    // A port typed and not saved goes with the copy; the host keeps what was saved.
+    let mut events = click_on(&output, "Port");
+    events.push(Event::Key(Key::End, Modifiers::NONE));
+    events.push(Event::Text("9".into()));
+    output = step(&mut app, &mut state, &events, 2.0);
+    step(&mut app, &mut state, &click_on(&output, "Duplicate"), 3.0);
+    assert_eq!(app.vault.as_ref().unwrap().hosts().len(), before + 1);
+    let copy = host_named(&app, "grafana copy").clone();
+    let typed = format!(
+        "{}9",
+        original
+            .port
+            .map(|port| port.to_string())
+            .unwrap_or_default()
+    );
+    assert_eq!(copy.port, typed.parse().ok());
+    assert_eq!(
+        (&copy.address, &copy.username),
+        (&original.address, &original.username)
+    );
+    assert_eq!(
+        host_named(&app, "grafana"),
+        &original,
+        "the host is as it was saved"
+    );
+    // The editor goes on with the copy.
+    assert_eq!(app.hosts.selected, Some(copy.id));
+    assert!(app.hosts.editor.is_some());
+    let output = step(&mut app, &mut state, &[], 4.0);
+    assert!(
+        output.zones.iter().any(|zone| zone.label == "grafana copy"),
+        "the copy is in the list"
+    );
+}
+
+#[test]
 fn a_typed_target_can_be_saved_as_a_host() {
     let mut app = NativeApp::new(Some(fixture_vault("save-target", true)));
     let before = app.vault.as_ref().unwrap().hosts().len();
