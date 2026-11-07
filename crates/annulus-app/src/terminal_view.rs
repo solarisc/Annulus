@@ -122,6 +122,18 @@ pub(crate) fn carried(transcript: &str) -> String {
     )
 }
 
+/// What a paste puts in: one line without the line breaks after it, so a password or a line
+/// copied with its line break goes in like a typed line, for Enter to send, and is not asked
+/// about. Several lines stay as they are.
+pub(crate) fn pasted(text: String) -> String {
+    let line = text.trim_end_matches(['\r', '\n']);
+    if line.len() < text.len() && !line.contains(['\r', '\n']) {
+        line.to_owned()
+    } else {
+        text
+    }
+}
+
 /// Whether a paste should be confirmed first: it holds a line break and the program did
 /// not ask for bracketed paste, so each line would run as a command.
 pub(crate) fn needs_confirm(text: &str, mode: TermMode) -> bool {
@@ -233,6 +245,18 @@ mod tests {
         );
         assert!(!needs_confirm("one line", TermMode::empty()));
         assert!(!needs_confirm("ls\nrm", TermMode::BRACKETED_PASTE));
+    }
+
+    #[test]
+    fn one_line_pastes_without_the_line_breaks_after_it_and_several_keep_theirs() {
+        assert_eq!(pasted("hunter2\r\n".into()), "hunter2");
+        assert_eq!(pasted("reboot\n\n".into()), "reboot");
+        assert_eq!(pasted("one line".into()), "one line");
+        assert_eq!(pasted("ls\nrm -rf x\n".into()), "ls\nrm -rf x\n");
+        assert!(!needs_confirm(
+            &pasted("reboot\r".into()),
+            TermMode::empty()
+        ));
     }
 
     #[test]

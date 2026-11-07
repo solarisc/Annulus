@@ -611,8 +611,11 @@ impl Ui<'_> {
                 let (key, modifiers) = match typed {
                     Typed::Key(key, modifiers) => (key, modifiers),
                     Typed::Text(text) | Typed::Paste(text) => {
-                        // A pasted line break becomes a space: fields are one line.
+                        // A pasted line break becomes a space: fields are one line. Those
+                        // that end the paste go, so a password copied with its line break
+                        // arrives as it is.
                         let text: String = text
+                            .trim_end_matches(['\r', '\n'])
                             .chars()
                             .map(|c| if c == '\n' { ' ' } else { c })
                             .filter(|c| !c.is_control())

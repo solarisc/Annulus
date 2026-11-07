@@ -29,6 +29,7 @@ use super::ask::{self, Ask};
 use super::terminal;
 use crate::terminal_view::{
     Reconnect, TabStatus, carried, diagnostic, needs_confirm, next_step, one_line, paste_bytes,
+    pasted,
 };
 
 /// One live session and what the tab shows about it.
@@ -593,6 +594,10 @@ impl LiveTerminal {
         let mode = session.mode();
         self.sent.clear();
         for typed in ui.take_typed() {
+            let typed = match typed {
+                Typed::Paste(text) => Typed::Paste(pasted(text)),
+                typed => typed,
+            };
             match typed {
                 Typed::Key(key, modifiers) if super::shortcuts::COPY.is(key, modifiers) => {
                     if let Some(text) = session.selection_text() {
@@ -1818,6 +1823,59 @@ mod tests {
         );
         assert_eq!(live.held_paste, None);
         assert_eq!(live.sent, [b"echo one echo two".to_vec()]);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_line_pasted_with_its_line_break_goes_in_as_one_line_without_asking() {
+        let mut live = LiveTerminal::new(shell());
+        let mut state = UiState::default();
+        let started = std::time::Instant::now();
+        let clock = || started.elapsed().as_secs_f64();
+        frame(&mut live, &mut state, &[], clock());
+        let mode = live.session.as_ref().unwrap().mode();
+        // A password copied from a password manager or a line of a file comes with its line
+        // break; it goes in like a typed line, not run and not asked about.
+        frame(
+            &mut live,
+            &mut state,
+            &[Event::Paste("hunter2\r\n".into())],
+            clock(),
+        );
+        assert_eq!(live.held_paste, None, "one line is not asked about");
+        assert_eq!(live.sent, [paste_bytes("hunter2", mode)]);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_password_pasted_when_the_server_asks_for_one_reaches_its_field_whole() {
+        let mut live = LiveTerminal::new(shell());
+        let mut state = UiState::default();
+        let started = std::time::Instant::now();
+        let clock = || started.elapsed().as_secs_f64();
+        // The terminal has the keyboard when the server asks for a password.
+        let zones = frame(&mut live, &mut state, &[], clock());
+        frame(&mut live, &mut state, &click(&zones, "Terminal"), clock());
+        live.ask = Ask::from_event(SessionEvent::Password {
+            user: "me".into(),
+            host: "web".into(),
+            keys_refused: false,
+        });
+        for _ in 0..3 {
+            frame(&mut live, &mut state, &[], clock());
+        }
+        // Ctrl+Shift+V: the window reads the clipboard and hands the frame its text.
+        frame(
+            &mut live,
+            &mut state,
+            &[Event::Paste("hunter2\r\n".into())],
+            clock(),
+        );
+        let Some(Ask::Password { secret, .. }) = &live.ask else {
+            unreachable!("the question is still open");
+        };
+        assert_eq!(secret.as_str(), "hunter2");
+        assert!(live.sent.is_empty(), "nothing reached the shell");
     }
 
     #[test]

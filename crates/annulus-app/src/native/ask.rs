@@ -195,7 +195,18 @@ pub fn card(ui: &mut Ui<'_>, id: Id, rect: Rect, ask: &mut Ask, answers: &Answer
                     ..FieldStyle::default()
                 },
             );
-            if ui.state.focus().is_none() {
+            // The keyboard comes to the question, also from the terminal behind it: what is
+            // typed or pasted (Ctrl+Shift+V) goes into the password, not nowhere.
+            let own = [
+                id.with("ask.password"),
+                id.with("ask.cancel"),
+                id.with("ask.connect"),
+            ];
+            if ui
+                .state
+                .focus()
+                .is_none_or(|focused| !own.contains(&focused))
+            {
                 ui.state.set_focus(Some(id.with("ask.password")), false);
             }
             column.take_top(space::XL);
