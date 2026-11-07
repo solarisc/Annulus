@@ -339,6 +339,19 @@ icons! {
     STOP = 55, "stop", [
         Move(4.5, 4.5), Line(11.5, 4.5), Line(11.5, 11.5), Line(4.5, 11.5), Close,
     ];
+    /// Showing a hidden secret: an open eye.
+    EYE = 56, "eye", [
+        Arc(8.0, 10.45, 6.95, 200.6, 339.4),
+        Arc(8.0, 5.55, 6.95, 20.6, 159.4),
+        Circle(8.0, 8.0, 2.0),
+    ];
+    /// Hiding a shown secret: the eye, struck through.
+    EYE_OFF = 57, "eye-off", [
+        Arc(8.0, 10.45, 6.95, 200.6, 339.4),
+        Arc(8.0, 5.55, 6.95, 20.6, 159.4),
+        Circle(8.0, 8.0, 2.0),
+        Move(2.75, 2.75), Line(13.25, 13.25),
+    ];
 }
 
 /// The geometry of `id`, or `None` for an unknown id.

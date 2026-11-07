@@ -168,6 +168,11 @@ pub trait TextBuffer {
     fn is_secret(&self) -> bool {
         false
     }
+    /// Whether the text is drawn as dots: a secret's is, unless the user asked to see it
+    /// ([`Revealed`]).
+    fn is_masked(&self) -> bool {
+        self.is_secret()
+    }
 }
 
 impl TextBuffer for String {
@@ -196,6 +201,26 @@ impl TextBuffer for Zeroizing<String> {
     }
     fn is_secret(&self) -> bool {
         true
+    }
+}
+
+/// A secret the user asked to see (a private key shown in the Keychain): drawn as it is, but
+/// still a secret otherwise. It is never copied out with Ctrl+C, a screen reader is not handed
+/// its text, and edits happen in place as in the secret itself.
+pub struct Revealed<'a>(pub &'a mut Zeroizing<String>);
+
+impl TextBuffer for Revealed<'_> {
+    fn as_str(&self) -> &str {
+        self.0
+    }
+    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
+        self.0.replace_range(range, text);
+    }
+    fn is_secret(&self) -> bool {
+        true
+    }
+    fn is_masked(&self) -> bool {
+        false
     }
 }
 
@@ -642,14 +667,14 @@ impl Ui<'_> {
         }
         let content = buffer.as_str();
         state.fit(content);
-        let shown: String = if buffer.is_secret() {
+        let shown: String = if buffer.is_masked() {
             "\u{2022}".repeat(content.chars().count())
         } else {
             content.to_owned()
         };
         // Byte offsets in `content` map to offsets in `shown` by character count.
         let to_shown = |offset: usize| -> usize {
-            if buffer.is_secret() {
+            if buffer.is_masked() {
                 content[..offset].chars().count() * '\u{2022}'.len_utf8()
             } else {
                 offset
@@ -660,7 +685,7 @@ impl Ui<'_> {
         {
             let x = pointer.x - inner.x + state.scroll;
             let at = offset_at(&mut self.gfx, &shown, font, x);
-            let at = from_shown(content, buffer.is_secret(), at);
+            let at = from_shown(content, buffer.is_masked(), at);
             state.cursor = at;
             if !state.dragging {
                 state.anchor = at;
@@ -770,7 +795,8 @@ impl Ui<'_> {
         }
         let inner = rect.inset(space::M - 2.0, space::S);
         let line_h = self.gfx.measure("Ag", font).height;
-        let secret = buffer.is_secret();
+        // Drawn as dots, unless a secret the user asked to see.
+        let secret = buffer.is_masked();
         // The width rows break at; a secret never wraps, as its dots would break elsewhere
         // than its text.
         let wrap = (style.wrap && !secret).then_some(inner.w - 2.0);
@@ -2429,6 +2455,58 @@ mod tests {
                 .texts
                 .iter()
                 .any(|(_, text)| text == &"\u{2022}".repeat(7))
+        );
+    }
+
+    #[test]
+    fn a_revealed_secret_shows_its_text_yet_never_copies_out_or_reaches_a_screen_reader() {
+        let mut state = UiState::default();
+        let mut canvas = Recorder::default();
+        let mut pem = Zeroizing::new(String::from("BEGIN KEY\nb3BlbnNzaA"));
+        let id = Id::new("key");
+        state.begin_frame(&[], 0.0);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            &mut state,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        ui.state.set_focus(Some(id), false);
+        let area = Rect::new(0.0, 0.0, 300.0, 120.0);
+        ui.text_area(id, area, &mut Revealed(&mut pem), FieldStyle::default());
+        let output = state.end_frame();
+        assert!(canvas.texts.iter().any(|(_, text)| text == "b3BlbnNzaA"));
+        let zone = output.zones.iter().find(|zone| zone.id == id).unwrap();
+        assert!(
+            zone.value
+                .as_deref()
+                .is_none_or(|value| !value.contains("b3Blbn")),
+            "the screen reader is not handed the key"
+        );
+        let copy = [
+            key(Key::Char('a'), Modifiers::COMMAND),
+            key(Key::Char('c'), Modifiers::COMMAND),
+        ];
+        frame(&mut state, &copy, |ui| {
+            ui.text_area(id, area, &mut Revealed(&mut pem), FieldStyle::default());
+        });
+        assert_eq!(state.take_clipboard(), None, "Ctrl+C copies nothing");
+        // Hidden again, the same key is dots.
+        let mut canvas = Recorder::default();
+        state.begin_frame(&[], 2.0);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            &mut state,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        ui.text_area(id, area, &mut pem, FieldStyle::default());
+        state.end_frame();
+        assert!(
+            canvas
+                .texts
+                .iter()
+                .all(|(_, text)| !text.contains("b3Blbn"))
         );
     }
 

@@ -871,6 +871,25 @@ const SCENES: &[Scene] = &[
         setup: keychain,
         acts: &[],
     },
+    // A saved key open to edit, its private key as dots, then shown on asking.
+    Scene {
+        name: "keychain-edit",
+        width: 1100,
+        height: 760,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[Act::Click("Work laptop")],
+    },
+    Scene {
+        name: "keychain-edit-shown",
+        width: 1100,
+        height: 760,
+        scale: 1.0,
+        populated: true,
+        setup: keychain,
+        acts: &[Act::Click("Work laptop"), Act::Click("Show private key")],
+    },
     Scene {
         name: "keychain-import",
         width: 1100,
@@ -3756,6 +3775,84 @@ fn enter_in_an_empty_host_search_connects_nowhere() {
     step(&mut app, &mut state, &enter, 2.0);
     step(&mut app, &mut state, &[], 3.0);
     assert_eq!(app.tabs.len(), tabs, "no tab opened");
+}
+
+#[test]
+fn a_saved_key_opens_to_edit_shows_and_copies_its_private_key_on_asking_and_can_be_replaced() {
+    let mut app = NativeApp::new(Some(fixture_vault("key-edit", true)));
+    app.section = super::Section::Keychain;
+    let saved = app.vault.as_ref().unwrap().ssh_keys()[0].clone();
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    // A click on the key opens it; its private key stays dots until the eye is clicked.
+    output = step(&mut app, &mut state, &click_on(&output, "Work laptop"), 1.0);
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Show private key")
+    );
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Show private key"),
+        2.0,
+    );
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Hide private key")
+    );
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Copy private key"),
+        3.0,
+    );
+    assert_eq!(
+        state.take_copied(),
+        Some((saved.private.expose().to_owned(), true)),
+        "copied whole, as a secret"
+    );
+    // Renamed, it keeps its key.
+    let mut events = click_on(&output, "Name, e.g. work laptop");
+    events.push(Event::Key(Key::Char('a'), Modifiers::COMMAND));
+    events.push(Event::Text("Deploy key".into()));
+    output = step(&mut app, &mut state, &events, 4.0);
+    step(&mut app, &mut state, &click_on(&output, "Save"), 5.0);
+    let renamed = app.vault.as_ref().unwrap().ssh_keys()[0].clone();
+    assert_eq!(renamed.label, "Deploy key");
+    assert_eq!(
+        (renamed.id, &renamed.private, &renamed.public),
+        (saved.id, &saved.private, &saved.public)
+    );
+    // Another key pasted over it replaces it under the same id, so its hosts keep it.
+    let other = annulus_ssh::keys::generate(annulus_ssh::keys::KeyKind::Ed25519, "other")
+        .expect("Ed25519 keys always generate");
+    output = step(&mut app, &mut state, &[], 6.0);
+    output = step(&mut app, &mut state, &click_on(&output, "Edit"), 7.0);
+    let mut events = click_on(
+        &output,
+        "Paste a private key (-----BEGIN \u{2026} PRIVATE KEY-----)",
+    );
+    events.push(Event::Key(Key::Char('a'), Modifiers::COMMAND));
+    events.push(Event::Paste(other.private.as_str().to_owned()));
+    output = step(&mut app, &mut state, &events, 8.0);
+    step(&mut app, &mut state, &click_on(&output, "Save"), 9.0);
+    let replaced = app.vault.as_ref().unwrap().ssh_keys()[0].clone();
+    assert_eq!(replaced.id, saved.id);
+    assert_eq!(replaced.label, "Deploy key");
+    assert_eq!(
+        (&replaced.public, &replaced.fingerprint),
+        (&other.public, &other.fingerprint)
+    );
+    let said = app.keychain.said().map(|(_, line)| line.clone());
+    assert!(
+        said.as_deref()
+            .is_some_and(|line| line.contains("public key changed")),
+        "{said:?}"
+    );
 }
 
 #[test]

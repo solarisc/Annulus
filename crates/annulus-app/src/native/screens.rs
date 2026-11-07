@@ -13,8 +13,11 @@ use annulus_ui::gfx::{Align, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{FOCUS_REACH, Id, Key, Modifiers, Ui};
 use annulus_ui::motion::{Curve, Feel, Layer, Motion};
-use annulus_ui::widgets::{CONTROL, FieldStyle, Kind, SCROLL_GUTTER, SMALL, Tone, button_width};
+use annulus_ui::widgets::{
+    CONTROL, FieldStyle, Kind, Revealed, SCROLL_GUTTER, SMALL, Tone, button_width,
+};
 use annulus_vault::forwards::{ForwardKind, PortForward};
+use annulus_vault::hosts::Secret;
 use annulus_vault::keychain::SshKey;
 use annulus_vault::snippets::Snippet;
 use annulus_vault::vault::Vault;
@@ -250,6 +253,17 @@ enum KeyForm {
         private: Zeroizing<String>,
         passphrase: Zeroizing<String>,
     },
+    /// Editing a saved key: its name, and its private key, hidden until
+    /// asked for and then shown, copied or replaced by another pasted in. Both secrets are
+    /// wiped when the form closes.
+    Edit {
+        id: u64,
+        label: String,
+        private: Zeroizing<String>,
+        passphrase: Zeroizing<String>,
+        /// The private key is shown as it is, not as dots.
+        shown: bool,
+    },
 }
 
 impl KeyForm {
@@ -265,6 +279,27 @@ impl KeyForm {
                 *private = Zeroizing::new(String::new());
                 *passphrase = Zeroizing::new(String::new());
             }
+            Self::Edit {
+                private,
+                passphrase,
+                shown,
+                ..
+            } => {
+                *private = Zeroizing::new(String::new());
+                *passphrase = Zeroizing::new(String::new());
+                *shown = false;
+            }
+        }
+    }
+
+    /// The form editing saved key `key`, its private key hidden.
+    fn edit(key: &SshKey) -> Self {
+        Self::Edit {
+            id: key.id,
+            label: key.label.clone(),
+            private: Zeroizing::new(key.private.expose().to_owned()),
+            passphrase: Zeroizing::new(String::new()),
+            shown: false,
         }
     }
 }
@@ -563,6 +598,12 @@ impl KeychainView {
         }
     }
 
+    /// What the line under the cards says, and whether it is a problem.
+    #[cfg(test)]
+    pub fn said(&self) -> Option<&(bool, String)> {
+        self.message.get()
+    }
+
     /// Applies what a card came to; `close` folds it away.
     fn finish_card(&mut self, end: CardEnd, close: impl FnOnce(&mut Self)) {
         if end.close {
@@ -592,6 +633,7 @@ impl KeychainView {
         let confirm = self.confirm_delete;
         let mut confirm_next = confirm;
         let (mut remove, mut install, mut copied, mut unkey) = (None, None, None, None);
+        let mut edit = None;
         rows(
             ui,
             "keys.list",
@@ -601,7 +643,10 @@ impl KeychainView {
             |ui, index, row| {
                 let key = &list[index];
                 let zone = Id::new(("key", key.id));
-                pages::row(ui, zone, row, &key.label, false);
+                // A click on the key opens it, as Edit does.
+                if pages::row(ui, zone, row, &key.label, false).clicked && confirm != Some(key.id) {
+                    edit = Some(key.id);
+                }
                 let remainder = if confirm == Some(key.id) {
                     let (answer, remainder) = confirm_delete(ui, row, zone, "Delete key");
                     match answer {
@@ -619,9 +664,11 @@ impl KeychainView {
                             (icons::TRASH, "Delete"),
                             (icons::UPLOAD, "Install on a host"),
                             (icons::COPY, "Copy public key"),
+                            (icons::EDIT, "Edit"),
                         ],
                     );
                     match clicked {
+                        Some(3) => edit = Some(key.id),
                         Some(2) => {
                             ui.copy(key.public.clone());
                             copied = Some(key.label.clone());
@@ -639,6 +686,10 @@ impl KeychainView {
             },
         );
         self.confirm_delete = confirm_next;
+        if let Some(key) = edit.and_then(|id| vault.ssh_key(id)) {
+            self.form.open(KeyForm::edit(key));
+            self.message.close();
+        }
         if let Some(key_id) = unkey
             && self
                 .removal
@@ -898,6 +949,16 @@ fn form_card(
     vault: &mut Vault,
     waker: Option<&Waker>,
 ) -> CardEnd {
+    if let KeyForm::Edit {
+        id,
+        label,
+        private,
+        passphrase,
+        shown,
+    } = form
+    {
+        return edit_card(ui, area, vault, (*id, label, private, passphrase, shown));
+    }
     let mut done: Option<Result<SshKey, keys::KeyError>> = None;
     let mut close = false;
     match form {
@@ -982,6 +1043,8 @@ fn form_card(
                 *working = Some(Job::start(&pace, move || keys::generate(kind, &comment)));
             }
         }
+        // Drawn by `edit_card`, above.
+        KeyForm::Edit { .. } => {}
         KeyForm::Import {
             label,
             private,
@@ -1075,6 +1138,181 @@ fn form_card(
         },
         None => CardEnd::default(),
     }
+}
+
+/// A saved key's card: its name; its private key as dots until the eye
+/// shows it, with Copy (kept from clipboard history and cleared after a while, as every
+/// secret); and the public half servers know it by. Another key pasted over it replaces it on
+/// Save: the hosts that log in with it go on doing so, and its new public half needs
+/// installing where the old one was.
+#[allow(clippy::too_many_lines)] // The card top to bottom, then what Save came to.
+fn edit_card(
+    ui: &mut Ui<'_>,
+    area: &mut Rect,
+    vault: &mut Vault,
+    (id, label, private, passphrase, shown): (
+        u64,
+        &mut String,
+        &mut Zeroizing<String>,
+        &mut Zeroizing<String>,
+        &mut bool,
+    ),
+) -> CardEnd {
+    let Some(saved) = vault.ssh_key(id) else {
+        return CardEnd::closes_saying((true, "That key was deleted meanwhile.".into()));
+    };
+    let (saved_label, saved_public) = (saved.label.clone(), saved.public.clone());
+    let replaced = saved.private.expose() != private.as_str();
+    let t = ui.theme;
+    let mut card = pages::card(
+        ui,
+        area,
+        "Edit key",
+        2.0 * CONTROL + KEY_H + 20.0 + 7.0 * space::S,
+    );
+    card.take_top(space::S);
+    ui.text_field(
+        Id::new("edit.label"),
+        card.take_top(CONTROL),
+        label,
+        FieldStyle {
+            placeholder: "Name, e.g. work laptop",
+            ..FieldStyle::default()
+        },
+    );
+    card.take_top(space::S);
+    let key_rect = card.take_top(KEY_H);
+    let style = FieldStyle {
+        placeholder: "Paste a private key (-----BEGIN \u{2026} PRIVATE KEY-----)",
+        mono: true,
+        ..FieldStyle::default()
+    };
+    if *shown {
+        ui.text_area(
+            Id::new("edit.private"),
+            key_rect,
+            &mut Revealed(private),
+            style,
+        );
+    } else {
+        ui.text_area(Id::new("edit.private"), key_rect, private, style);
+    }
+    card.take_top(space::S);
+    let public = if replaced {
+        "Its public key is worked out again when you save.".to_owned()
+    } else {
+        format!("Public key: {saved_public}")
+    };
+    let public_line = card.take_top(20.0);
+    let fitted = annulus_ui::gfx::fit_middle(&mut ui.gfx, &public, SMALL, public_line.w);
+    ui.gfx
+        .text(public_line, &fitted, SMALL, t.text2, Align::Start);
+    card.take_top(space::S);
+    let mut line = card.take_top(CONTROL);
+    let save = line.take_right(button_width(&mut ui.gfx, "Save", None).max(96.0));
+    line.take_right(space::S);
+    let cancel = line.take_right(button_width(&mut ui.gfx, "Cancel", None));
+    line.take_right(space::M);
+    let eye = line.take_left(CONTROL).centered(30.0, 30.0);
+    line.take_left(space::XS);
+    let copy_label = "Copy private key";
+    let copy = line.take_left(button_width(&mut ui.gfx, copy_label, Some(icons::COPY)));
+    line.take_left(space::M);
+    // Drawn left to right, so Tab follows the eye.
+    let (icon, name) = if *shown {
+        (icons::EYE_OFF, "Hide private key")
+    } else {
+        (icons::EYE, "Show private key")
+    };
+    if ui
+        .icon_button(Id::new("edit.show"), eye, icon, name, *shown)
+        .clicked
+    {
+        *shown = !*shown;
+    }
+    let mut end = CardEnd::default();
+    if ui
+        .button(
+            Id::new("edit.copy"),
+            copy,
+            copy_label,
+            Some(icons::COPY),
+            Kind::Secondary,
+        )
+        .clicked
+        && !private.trim().is_empty()
+    {
+        ui.copy_secret(private.as_str().to_owned());
+        end = CardEnd::says(
+            false,
+            format!(
+                "Copied the private key of {saved_label}. The clipboard forgets it in {} seconds.",
+                annulus_ui::kit::SECRET_ON_CLIPBOARD.as_secs()
+            ),
+        );
+    }
+    let passphrase_field = ui.text_field(
+        Id::new("edit.passphrase"),
+        line,
+        passphrase,
+        FieldStyle {
+            placeholder: "Passphrase, only if a key pasted in has one",
+            ..FieldStyle::default()
+        },
+    );
+    if ui
+        .button(Id::new("edit.cancel"), cancel, "Cancel", None, Kind::Ghost)
+        .clicked
+        || ui.key(Key::Escape, Modifiers::NONE)
+    {
+        return CardEnd {
+            close: true,
+            say: Say::Nothing,
+        };
+    }
+    let clicked = ui
+        .button(Id::new("edit.save"), save, "Save", None, Kind::Primary)
+        .clicked
+        || passphrase_field.submitted;
+    if !clicked {
+        return end;
+    }
+    let name = if label.trim().is_empty() {
+        saved_label.clone()
+    } else {
+        label.trim().to_owned()
+    };
+    let edited = if replaced {
+        match keys::import(private, Some(passphrase)) {
+            Ok(pair) => SshKey {
+                id,
+                label: name.clone(),
+                private: Secret::new(pair.private.as_str()),
+                public: pair.public.clone(),
+                fingerprint: pair.fingerprint.clone(),
+            },
+            Err(error) => return CardEnd::says(true, error.to_string()),
+        }
+    } else {
+        let Some(saved) = vault.ssh_key(id) else {
+            return CardEnd::closes_saying((true, "That key was deleted meanwhile.".into()));
+        };
+        SshKey {
+            label: name.clone(),
+            ..saved.clone()
+        }
+    };
+    let new_public = edited.public != saved_public;
+    CardEnd::closes_saying(match vault.upsert_key(edited) {
+        Ok(()) if new_public => (
+            false,
+            format!(
+                "Saved {name}. Its public key changed: install it where the old one was trusted."
+            ),
+        ),
+        Ok(()) => (false, format!("Saved {name}.")),
+        Err(error) => (true, format!("Could not save the key: {error}")),
+    })
 }
 
 /// Installing a key on a host: pick the host, then connect and add the key to its
