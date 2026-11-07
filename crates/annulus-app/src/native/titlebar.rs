@@ -9,6 +9,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{Cursor, Id, Role, Ui};
+use annulus_ui::mark;
 use annulus_ui::motion::{Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM};
 
@@ -446,20 +447,10 @@ fn caption_button(ui: &mut Ui<'_>, id: Id, rect: Rect, glyph: Glyph, name: &str)
     response.clicked
 }
 
-/// Our mark: a prompt in the accent. Ours alone (ADR-0010).
+/// Our mark, the ring gate (`annulus_ui::mark`, ADR-0010), in the theme's colors.
 pub(super) fn paint_mark(ui: &mut Ui<'_>, rect: Rect) {
-    let t = ui.theme;
-    let ink = t.accent;
-    let unit = rect.w / 20.0;
-    let at = |x: f32, y: f32| Point::new(rect.x + x * unit, rect.y + y * unit);
-    ui.gfx.polyline(
-        &[at(5.5, 6.5), at(9.0, 10.0), at(5.5, 13.5)],
-        false,
-        1.8 * unit,
-        ink,
-    );
-    ui.gfx
-        .polyline(&[at(10.5, 14.0), at(14.5, 14.0)], false, 1.8 * unit, ink);
+    let colors = mark::Colors::for_theme(&ui.theme);
+    mark::paint(&mut ui.gfx, rect, &colors);
 }
 
 /// The width a tab wants: fixed tabs fit their name, the others have a close button too and

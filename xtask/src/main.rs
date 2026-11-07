@@ -23,8 +23,8 @@ commands:
   docs-check    links and anchors, ADR index, FEATURES test names, to-do markers,
                 Last verified lines, crate dependency rules
   themes <dir>  regenerate the color scheme catalog from a tinted-theming/schemes checkout
-  icon          redraw the app icon (annulus.ico, the exe's annulus.res, annulus.icns) from
-                our mark
+  icon          redraw the app icon (annulus.ico, the exe's annulus.res, annulus.icns) and
+                the README's logo.svg from our mark
   mac-app       build the release binary into target/release/Annulus.app (macOS only)
   standalone <program.exe>...
                 fail if a Windows program needs Microsoft's C runtime installed";
