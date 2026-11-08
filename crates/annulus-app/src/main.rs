@@ -33,7 +33,7 @@ fn main() -> ExitCode {
     let ran = if args.iter().any(|arg| arg == "--preview") {
         native::run_preview(light)
     } else {
-        // The same folder the `annulus` command looks in for the control door.
+        // The same folder the `annulus-agent` command looks in for the control door.
         native::run_native(light, &annulus_control::data_dir())
     };
     if ran.is_ok() {

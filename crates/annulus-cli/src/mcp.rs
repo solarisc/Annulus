@@ -1,4 +1,4 @@
-//! `annulus mcp` (ADR-0020 §5, F-AUTO-005): an MCP server over stdin and stdout, one JSON-RPC
+//! `annulus-agent mcp` (ADR-0020 §5, F-AUTO-005): an MCP server over stdin and stdout, one JSON-RPC
 //! message per line. It offers the door's requests as tools and connects through the door as
 //! calls come, so it can start before Annulus is unlocked and survives a lock. Tool calls run
 //! side by side: an agent's `annulus_interrupt` is not held back by its own `annulus_run`.

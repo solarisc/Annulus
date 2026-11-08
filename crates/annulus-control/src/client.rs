@@ -1,4 +1,4 @@
-//! The other side of the door: what the `annulus` CLI and its MCP server talk through. Plain
+//! The other side of the door: what the `annulus-agent` CLI and its MCP server talk through. Plain
 //! blocking I/O, since a CLI does one thing at a time.
 
 use std::io::{BufRead as _, BufReader, Write as _};

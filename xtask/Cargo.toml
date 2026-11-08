@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Developer automation for the Annulus workspace: ci, docs-check, the theme import, the app icon and logo, the macOS app bundle and a check that Windows programs stand alone."
+description = "Developer automation for the Annulus workspace: ci, docs-check, the release downloads, the theme import, the app icon and logo, the macOS app bundle and a check that Windows programs stand alone."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 annulus-ui = { path = "../crates/annulus-ui" }
 anyhow.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
 serde_json.workspace = true
 tiny-skia.workspace = true
 

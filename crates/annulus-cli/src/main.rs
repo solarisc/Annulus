@@ -1,5 +1,5 @@
-//! The `annulus` command (ADR-0020, F-AUTO-002/005): drives a running Annulus through its
-//! control door, while its vault is unlocked and Settings → Automation allows it. `annulus mcp`
+//! The `annulus-agent` command (ADR-0020, ADR-0027, F-AUTO-002/005): drives a running Annulus through its
+//! control door, while its vault is unlocked and Settings → Automation allows it. `annulus-agent mcp`
 //! offers the same as tools to AI agents.
 //!
 //! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4.
@@ -20,7 +20,7 @@ const USAGE: &str = "\
 Drives a running Annulus while its vault is unlocked and Settings > Security > Automation
 allows it.
 
-Usage: annulus [--json] <command>
+Usage: annulus-agent [--json] <command>
 
 Commands:
   status                        Annulus's version and state
@@ -90,12 +90,12 @@ enum Command {
 
 fn tab_id(word: &str) -> Result<u64, String> {
     word.parse()
-        .map_err(|_| format!("`{word}` is not a tab id: see `annulus tabs`"))
+        .map_err(|_| format!("`{word}` is not a tab id: see `annulus-agent tabs`"))
 }
 
 fn host_id(word: &str) -> Result<u64, String> {
     word.parse()
-        .map_err(|_| format!("`{word}` is not a host id: see `annulus hosts`"))
+        .map_err(|_| format!("`{word}` is not a host id: see `annulus-agent hosts`"))
 }
 
 /// Reads the arguments after the program's name: the command, and whether to print JSON.
@@ -282,7 +282,9 @@ fn run(command: Command, json: bool) -> Result<Printed, ClientError> {
                     .into_iter()
                     .find(|known| known.id == host)
                     .ok_or_else(|| {
-                        ClientError::Refused(format!("no saved host {host}: see `annulus hosts`"))
+                        ClientError::Refused(format!(
+                            "no saved host {host}: see `annulus-agent hosts`"
+                        ))
                     })?,
             };
             if json {
@@ -350,7 +352,7 @@ fn main() -> ExitCode {
             return match mcp::serve(std::io::stdin().lock(), std::io::stdout()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
-                    eprintln!("annulus mcp: {error}");
+                    eprintln!("annulus-agent mcp: {error}");
                     ExitCode::FAILURE
                 }
             };
@@ -363,13 +365,13 @@ fn main() -> ExitCode {
             match printed.unfinished {
                 None => ExitCode::SUCCESS,
                 Some(why) => {
-                    eprintln!("annulus: {}", printable(why));
+                    eprintln!("annulus-agent: {}", printable(why));
                     ExitCode::from(UNFINISHED)
                 }
             }
         }
         Err(error) => {
-            eprintln!("annulus: {}", printable(&error.to_string()));
+            eprintln!("annulus-agent: {}", printable(&error.to_string()));
             ExitCode::FAILURE
         }
     }

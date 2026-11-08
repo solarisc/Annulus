@@ -48,6 +48,9 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 ureq = { version = "3.5.0", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 directories = "6.0.0"
+# The release zips (xtask) and the installer's packed programs; both already in the tree (png).
+crc32fast = "1.5.3"
+flate2 = "1.1.10"
 # The accessibility tree and its platform adapters (ADR-0017).
 accesskit = "0.25.2"
 accesskit_windows = "0.35.2"

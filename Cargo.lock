@@ -357,6 +357,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "annulus-setup"
+version = "0.1.0"
+dependencies = [
+ "annulus-config",
+ "annulus-platform",
+ "annulus-ui",
+ "directories",
+ "flate2",
+]
+
+[[package]]
 name = "annulus-sftp"
 version = "0.1.0"
 dependencies = [
@@ -6030,6 +6041,8 @@ version = "0.1.0"
 dependencies = [
  "annulus-ui",
  "anyhow",
+ "crc32fast",
+ "flate2",
  "serde_json",
  "tiny-skia",
 ]

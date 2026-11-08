@@ -1,6 +1,6 @@
 //! The local control door of a running Annulus (ADR-0020, F-AUTO): the line protocol, the
 //! [`door::Door`] the app opens while the owner allows it, and the [`client::Client`] the
-//! `annulus` CLI and the MCP server use.
+//! `annulus-agent` CLI and the MCP server use.
 //!
 //! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4.
 

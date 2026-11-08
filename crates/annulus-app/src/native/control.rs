@@ -1431,10 +1431,10 @@ fn agent_tab(app: &mut NativeApp, uid: u64) -> Result<&mut Tab, String> {
         .tabs
         .iter_mut()
         .find(|tab| tab.uid == uid)
-        .ok_or_else(|| format!("no tab {uid}: see `annulus tabs`"))?;
+        .ok_or_else(|| format!("no tab {uid}: see `annulus-agent tabs`"))?;
     if tab.agent.is_none() {
         return Err(format!(
-            "tab {uid} is not an agent's: open one with `annulus open` (yours are read-only)"
+            "tab {uid} is not an agent's: open one with `annulus-agent open` (yours are read-only)"
         ));
     }
     Ok(tab)
@@ -1500,7 +1500,7 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             if let Some(id) = host
                 && !vault.hosts().iter().any(|host| host.id == *id)
             {
-                return Err(format!("no saved host {id}: see `annulus hosts`"));
+                return Err(format!("no saved host {id}: see `annulus-agent hosts`"));
             }
             open(app, *host)
         }
@@ -1610,7 +1610,7 @@ fn read(app: &mut NativeApp, tab: u64, lines: Option<usize>) -> Result<Response,
         Some(TermView::Replay(emulator)) => {
             annulus_term::transcript::transcript(emulator.term_mut())
         }
-        None => return Err(format!("no terminal tab {tab}: see `annulus tabs`")),
+        None => return Err(format!("no terminal tab {tab}: see `annulus-agent tabs`")),
     };
     let wanted = lines.unwrap_or(READ_MAX).min(READ_MAX);
     Ok(Response::Text(last_lines(&text, Some(wanted))))
@@ -1626,7 +1626,7 @@ fn set_notes(app: &mut NativeApp, host: u64, notes: &str) -> Result<Response, St
         .iter()
         .find(|known| known.id == host)
         .cloned()
-        .ok_or_else(|| format!("no saved host {host}: see `annulus hosts`"))?;
+        .ok_or_else(|| format!("no saved host {host}: see `annulus-agent hosts`"))?;
     if saved.notes != notes {
         saved.notes = notes;
         let label = saved.label.clone();

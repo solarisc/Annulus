@@ -1,0 +1,26 @@
+[package]
+name = "annulus-setup"
+description = "The Windows installer: puts Annulus and annulus-agent in place for the current user, with shortcuts, PATH and an Apps & features entry that removes them again."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "annulus-setup"
+path = "src/main.rs"
+
+[dependencies]
+annulus-config = { path = "../annulus-config" }
+annulus-platform = { path = "../annulus-platform" }
+annulus-ui = { path = "../annulus-ui" }
+directories.workspace = true
+flate2.workspace = true
+
+[build-dependencies]
+flate2.workspace = true
