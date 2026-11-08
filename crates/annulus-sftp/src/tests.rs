@@ -248,6 +248,35 @@ async fn listing_puts_directories_first_and_reports_sizes() {
     assert!(entries[0].is_dir());
     assert_eq!(entries[2].kind, Kind::File);
     assert_eq!(entries[2].size, 5);
+    assert!(
+        entries[2].accessed.is_some(),
+        "the last access, for its column"
+    );
+}
+
+#[tokio::test]
+async fn the_host_names_its_owners_where_anyone_may_read_them() {
+    let root = temp_dir("owners");
+    fs::create_dir(root.join("etc")).unwrap();
+    fs::write(
+        root.join("etc/passwd"),
+        "root:x:0:0:root:/root:/bin/bash\n# a comment\nbroken line\ndeploy:x:1000:1000::/home/deploy:/bin/sh\n",
+    )
+    .unwrap();
+    fs::write(root.join("etc/group"), "root:x:0:\nwww-data:x:33:deploy\n").unwrap();
+    let sftp = client(root).await;
+    let owners = sftp.owner_names().await;
+    assert_eq!(owners.users.get(&0).map(String::as_str), Some("root"));
+    assert_eq!(owners.users.get(&1000).map(String::as_str), Some("deploy"));
+    assert_eq!(
+        owners.users.len(),
+        2,
+        "comments and broken lines are passed over"
+    );
+    assert_eq!(owners.groups.get(&33).map(String::as_str), Some("www-data"));
+    // A host without them (Windows) names nobody, and the listing shows the ids.
+    let bare = client(temp_dir("owners-none")).await;
+    assert_eq!(bare.owner_names().await, crate::Owners::default());
 }
 
 #[tokio::test]
@@ -493,6 +522,108 @@ async fn an_upload_lands_under_its_local_name_and_respects_conflicts() {
     .await
     .unwrap();
     assert_eq!(fs::read(remote.join("inbox/report.txt")).unwrap(), b"new");
+}
+
+#[tokio::test]
+async fn a_transfer_renamed_by_the_user_lands_under_its_new_name_and_never_leaves_the_folder() {
+    let remote = temp_dir("as-remote");
+    let local = temp_dir("as-local");
+    fs::create_dir(remote.join("inbox")).unwrap();
+    fs::write(remote.join("inbox/report.txt"), b"old").unwrap();
+    fs::write(local.join("report.txt"), b"new").unwrap();
+    fs::create_dir_all(local.join("site/css")).unwrap();
+    fs::write(local.join("site/css/main.css"), b"a{}").unwrap();
+    let sftp = client(remote.clone()).await;
+
+    let up = sftp
+        .upload_as(
+            &local.join("report.txt"),
+            "/inbox",
+            "report-v2.txt",
+            Conflict::KeepBoth,
+            &mut no_progress(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        up,
+        Outcome::Done {
+            to: "/inbox/report-v2.txt".into(),
+            bytes: 3
+        }
+    );
+    assert_eq!(fs::read(remote.join("inbox/report.txt")).unwrap(), b"old");
+    assert_eq!(
+        fs::read(remote.join("inbox/report-v2.txt")).unwrap(),
+        b"new"
+    );
+
+    sftp.download_as(
+        "/inbox/report.txt",
+        &local,
+        "report-from-host.txt",
+        Conflict::KeepBoth,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(local.join("report-from-host.txt")).unwrap(),
+        b"old"
+    );
+    assert_eq!(fs::read(local.join("report.txt")).unwrap(), b"new");
+
+    sftp.upload_tree_as(
+        &local.join("site"),
+        "/inbox",
+        "site-2",
+        Conflict::KeepBoth,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(remote.join("inbox/site-2/css/main.css")).unwrap(),
+        b"a{}"
+    );
+    sftp.download_tree_as(
+        "/inbox/site-2",
+        &local,
+        "site-back",
+        Conflict::KeepBoth,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(local.join("site-back/css/main.css")).unwrap(),
+        b"a{}"
+    );
+
+    // A typed name is one entry in the folder, never a path out of it.
+    for name in ["../escape.txt", "a/b.txt", "..", ""] {
+        let up = sftp
+            .upload_as(
+                &local.join("report.txt"),
+                "/inbox",
+                name,
+                Conflict::KeepBoth,
+                &mut no_progress(),
+            )
+            .await;
+        assert!(matches!(up, Err(SftpError::UnsafeName(_))), "{name:?}");
+        let down = sftp
+            .download_as(
+                "/inbox/report.txt",
+                &local,
+                name,
+                Conflict::KeepBoth,
+                &mut no_progress(),
+            )
+            .await;
+        assert!(matches!(down, Err(SftpError::UnsafeName(_))), "{name:?}");
+    }
+    assert!(!remote.join("escape.txt").exists());
 }
 
 #[tokio::test]

@@ -84,6 +84,12 @@ pub struct Entry {
     pub modified: Option<u32>,
     /// Unix permission bits, without the file type.
     pub permissions: Option<u32>,
+    /// The owner's user id, when the server says.
+    pub uid: Option<u32>,
+    /// The group id, when the server says.
+    pub gid: Option<u32>,
+    /// Last access, seconds since the Unix epoch.
+    pub accessed: Option<u32>,
 }
 
 impl Entry {
@@ -92,6 +98,48 @@ impl Entry {
     pub fn is_dir(&self) -> bool {
         matches!(self.kind, Kind::Dir | Kind::Link { to_dir: true })
     }
+}
+
+/// A host's user and group names by id (see [`Sftp::owner_names`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owners {
+    /// User names by user id.
+    pub users: std::collections::HashMap<u32, String>,
+    /// Group names by group id.
+    pub groups: std::collections::HashMap<u32, String>,
+}
+
+/// The `name:x:id:…` lines of `/etc/passwd` or `/etc/group`, by id; lines that do not read so
+/// are passed over, and the first name of an id wins.
+#[must_use]
+pub fn id_names(text: &str) -> std::collections::HashMap<u32, String> {
+    let mut names = std::collections::HashMap::new();
+    for line in text.lines() {
+        let mut fields = line.split(':');
+        let (Some(name), Some(_), Some(id)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        if let Ok(id) = id.trim().parse()
+            && !name.is_empty()
+            && !name.starts_with('#')
+        {
+            names.entry(id).or_insert_with(|| name.to_owned());
+        }
+    }
+    names
+}
+
+/// The name of local file `local`, as the host will know it.
+fn local_name(local: &Path) -> Result<&str, SftpError> {
+    local
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| SftpError::UnsafeName(local.display().to_string()))
+}
+
+/// A name for one entry on the host: not empty, no `/`, not `.` or `..`.
+fn is_plain_remote_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])
 }
 
 /// What to do when the target of a transfer already exists (F-SFTP-005).
@@ -199,6 +247,9 @@ impl Sftp {
                 size: attrs.len(),
                 modified: attrs.mtime,
                 permissions: attrs.permissions.map(|mode| mode & 0o7777),
+                uid: attrs.uid,
+                gid: attrs.gid,
+                accessed: attrs.atime,
             });
         }
         entries.sort_by(|a, b| {
@@ -207,6 +258,23 @@ impl Sftp {
                 .then_with(|| a.name.cmp(&b.name))
         });
         Ok(entries)
+    }
+
+    /// The names of the host's users and groups by id, read from `/etc/passwd` and
+    /// `/etc/group` where the server lets anyone read them (most Unix hosts); empty where it
+    /// does not (Windows), and the listing then shows the ids.
+    pub async fn owner_names(&self) -> Owners {
+        let read = |path: &'static str| async move {
+            self.session
+                .read(path)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default()
+        };
+        Owners {
+            users: id_names(&read("/etc/passwd").await),
+            groups: id_names(&read("/etc/group").await),
+        }
     }
 
     /// Creates the directory `path`.
@@ -285,7 +353,23 @@ impl Sftp {
         conflict: Conflict,
         progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
     ) -> Result<Outcome, SftpError> {
-        let name = file_name(remote);
+        self.download_as(remote, local_dir, file_name(remote), conflict, progress)
+            .await
+    }
+
+    /// [`Self::download`] under another name: `name` in `local_dir` (the user renamed it
+    /// when the name was taken).
+    ///
+    /// # Errors
+    /// As [`Self::download`]; `name` is checked as the remote name would be.
+    pub async fn download_as(
+        &self,
+        remote: &str,
+        local_dir: &Path,
+        name: &str,
+        conflict: Conflict,
+        progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
+    ) -> Result<Outcome, SftpError> {
         if !is_safe_local_name(name) {
             return Err(SftpError::UnsafeName(name.to_owned()));
         }
@@ -400,14 +484,31 @@ impl Sftp {
         conflict: Conflict,
         progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
     ) -> Result<Outcome, SftpError> {
+        let name = local_name(local)?;
+        self.upload_as(local, remote_dir, name, conflict, progress)
+            .await
+    }
+
+    /// [`Self::upload`] under another name: `name` in `remote_dir` (the user renamed it when
+    /// the name was taken).
+    ///
+    /// # Errors
+    /// As [`Self::upload`], or `name` is not a plain file name.
+    pub async fn upload_as(
+        &self,
+        local: &Path,
+        remote_dir: &str,
+        name: &str,
+        conflict: Conflict,
+        progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
+    ) -> Result<Outcome, SftpError> {
         let local_error = |source| SftpError::Local {
             path: local.to_path_buf(),
             source,
         };
-        let name = local
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| SftpError::UnsafeName(local.display().to_string()))?;
+        if !is_plain_remote_name(name) {
+            return Err(SftpError::UnsafeName(name.to_owned()));
+        }
         // Skip before copying anything; the target is chosen again once the copy is done.
         if self
             .place_remote(conflict, remote_dir, name)
@@ -480,7 +581,23 @@ impl Sftp {
         conflict: Conflict,
         progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
     ) -> Result<Outcome, SftpError> {
-        let name = file_name(remote);
+        self.download_tree_as(remote, local_dir, file_name(remote), conflict, progress)
+            .await
+    }
+
+    /// [`Self::download_tree`] into a folder named `name` (the user renamed it when the name
+    /// was taken); what is inside keeps its names.
+    ///
+    /// # Errors
+    /// As [`Self::download_tree`].
+    pub async fn download_tree_as(
+        &self,
+        remote: &str,
+        local_dir: &Path,
+        name: &str,
+        conflict: Conflict,
+        progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
+    ) -> Result<Outcome, SftpError> {
         if !is_safe_local_name(name) {
             return Err(SftpError::UnsafeName(name.to_owned()));
         }
@@ -542,10 +659,27 @@ impl Sftp {
         conflict: Conflict,
         progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
     ) -> Result<Outcome, SftpError> {
-        let name = local
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| SftpError::UnsafeName(local.display().to_string()))?;
+        let name = local_name(local)?;
+        self.upload_tree_as(local, remote_dir, name, conflict, progress)
+            .await
+    }
+
+    /// [`Self::upload_tree`] into a folder named `name` (the user renamed it when the name was
+    /// taken); what is inside keeps its names.
+    ///
+    /// # Errors
+    /// As [`Self::upload_tree`], or `name` is not a plain file name.
+    pub async fn upload_tree_as(
+        &self,
+        local: &Path,
+        remote_dir: &str,
+        name: &str,
+        conflict: Conflict,
+        progress: &mut (dyn FnMut(u64, u64) -> bool + Send),
+    ) -> Result<Outcome, SftpError> {
+        if !is_plain_remote_name(name) {
+            return Err(SftpError::UnsafeName(name.to_owned()));
+        }
         let top = join(remote_dir, name);
         // Everything is found first, so progress has a total; folders come before what is
         // in them.
