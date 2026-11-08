@@ -348,7 +348,7 @@ mod tests {
     fn the_terminal_menu_lists_built_ins_first_and_each_name_once() {
         let names = terminal_themes();
         assert_eq!(
-            &names[..7],
+            &names[..annulus_term::themes::THEMES.len()],
             &annulus_term::themes::THEMES.map(str::to_owned)[..]
         );
         let mut sorted = names.to_vec();

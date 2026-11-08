@@ -24,6 +24,8 @@ pub struct ThemePicker {
     opened: bool,
     previous_focus: Option<Id>,
     preview: colors::ThemeFade,
+    terminal_fade: preview::TerminalFade,
+    terminal: Option<annulus_term::Emulator>,
     reveal: bool,
     pointer: Option<annulus_ui::gfx::Point>,
     focus: Option<Id>,

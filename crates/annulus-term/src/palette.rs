@@ -54,6 +54,35 @@ impl Palette {
         }
     }
 
+    /// "Annulus Light": cool silver, dark text and the mark's teal hue.
+    #[must_use]
+    pub fn annulus_light() -> Self {
+        Self {
+            ansi: [
+                rgb(0x1B, 0x1D, 0x21),
+                rgb(0xB9, 0x2E, 0x36),
+                rgb(0x16, 0x6B, 0x35),
+                rgb(0x86, 0x57, 0x00),
+                rgb(0x14, 0x57, 0xA6),
+                rgb(0x78, 0x45, 0xA5),
+                rgb(0x08, 0x6F, 0x64),
+                rgb(0xA5, 0xAB, 0xB3),
+                rgb(0x60, 0x68, 0x73),
+                rgb(0xC3, 0x37, 0x40),
+                rgb(0x1A, 0x77, 0x3F),
+                rgb(0x91, 0x62, 0x0B),
+                rgb(0x1A, 0x65, 0xB5),
+                rgb(0x88, 0x50, 0xB0),
+                rgb(0x08, 0x75, 0x69),
+                rgb(0xFF, 0xFF, 0xFF),
+            ],
+            foreground: rgb(0x1B, 0x1D, 0x21),
+            background: rgb(0xF2, 0xF4, 0xF6),
+            cursor: rgb(0x08, 0x75, 0x69),
+            selection: rgb(0xC9, 0xE4, 0xDF),
+        }
+    }
+
     /// The color of indexed color `index` (0–255) when the program did not redefine it.
     #[must_use]
     pub fn indexed(&self, index: u8) -> Rgb {

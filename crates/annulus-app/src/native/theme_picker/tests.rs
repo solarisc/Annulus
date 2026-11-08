@@ -63,3 +63,45 @@ fn search_and_variant_filters_intersect_without_changing_preferences() {
     assert!(picker.results().is_empty());
     assert!(settings.app_scheme.is_none());
 }
+
+#[test]
+fn the_theme_preview_uses_the_selected_schemes_actual_terminal_palette() {
+    use annulus_config::tokens::Appearance;
+    use annulus_platform::cpu::{CpuCanvas, TextEngine};
+    use annulus_ui::{
+        gfx::Rect,
+        kit::{Theme, Ui, UiState},
+    };
+    for name in [
+        "Dracula",
+        "Solarized Light",
+        "rbit Dark Colorblind",
+        colors::OWN_LIGHT,
+    ] {
+        let settings = Settings::default();
+        let mut picker = ThemePicker::new(&settings);
+        picker.selected = colors::app_schemes()
+            .iter()
+            .position(|known| known == name)
+            .unwrap();
+        let mut canvas = CpuCanvas::new(440, 500, 1.0, TextEngine::new()).unwrap();
+        let mut state = UiState::default();
+        state.begin_frame(&[], 0.0);
+        state.reduce_motion = true;
+        let rect = Rect::new(0.0, 0.0, 440.0, 500.0);
+        let system = Theme::new(Appearance::Dark);
+        let mut ui = Ui::new(&mut canvas, system, &mut state, rect);
+        picker.preview(&mut ui, rect, &settings, system);
+        let screen = picker.terminal.as_ref().unwrap().screen();
+        let palette = colors::terminal_palette(name);
+        assert_eq!(screen.background, palette.background, "{name}");
+        assert!(
+            screen
+                .rows
+                .iter()
+                .flatten()
+                .any(|cell| cell.fg == palette.ansi[2] && cell.ch != ' '),
+            "{name}: actual ANSI green output"
+        );
+    }
+}

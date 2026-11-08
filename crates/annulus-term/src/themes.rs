@@ -7,8 +7,9 @@ use alacritty_terminal::vte::ansi::Rgb;
 use crate::palette::Palette;
 
 /// The theme names, in menu order; the first is the default.
-pub const THEMES: [&str; 7] = [
+pub const THEMES: [&str; 8] = [
     "Annulus Dark",
+    "Annulus Light",
     "Solarized Dark",
     "Solarized Light",
     "Dracula",
@@ -138,6 +139,7 @@ const GRUVBOX_LIGHT: [[u8; 3]; 16] = [
 pub fn theme(name: &str) -> Option<Palette> {
     Some(match name {
         "Annulus Dark" => Palette::annulus_dark(),
+        "Annulus Light" => Palette::annulus_light(),
         "Solarized Dark" => scheme(
             SOLARIZED,
             [0x83, 0x94, 0x96],
