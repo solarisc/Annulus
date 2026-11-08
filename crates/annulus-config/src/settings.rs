@@ -73,6 +73,20 @@ pub struct Settings {
     /// A click on a saved host in the Vault connects to it, as on the New Tab page; off, a
     /// click selects it and a double-click connects. Off by default.
     pub connect_on_click: bool,
+    /// The columns the SFTP tab shows beside Name for this computer's files, by name
+    /// (`size`, `type`, `modified`, `permissions`, `owner`, `group`, `accessed`, `created`).
+    pub sftp_local_columns: Vec<String>,
+    /// The same for the host's files.
+    pub sftp_remote_columns: Vec<String>,
+}
+
+/// The columns an SFTP pane shows until the user chooses others, in the order they are kept
+/// when a narrow pane has no room for all of them.
+#[must_use]
+pub fn default_sftp_columns() -> Vec<String> {
+    ["modified", "size", "permissions", "type", "owner"]
+        .map(str::to_owned)
+        .to_vec()
 }
 
 /// A shortcut with keys of the user's choosing.
@@ -129,6 +143,8 @@ impl Default for Settings {
             agent_panel_folded: false,
             stop_agents_closing_tabs: true,
             connect_on_click: false,
+            sftp_local_columns: default_sftp_columns(),
+            sftp_remote_columns: default_sftp_columns(),
         }
     }
 }
@@ -242,6 +258,8 @@ mod tests {
             agent_panel_folded: true,
             stop_agents_closing_tabs: false,
             connect_on_click: true,
+            sftp_local_columns: vec!["size".into(), "created".into()],
+            sftp_remote_columns: vec!["permissions".into(), "group".into()],
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -264,6 +282,7 @@ mod tests {
             ),
             (DEFAULT_SCROLLBACK, true, true, false, false, true, false)
         );
+        assert_eq!(loaded.sftp_remote_columns, default_sftp_columns());
         // A file from before color schemes keeps its theme and draws our own colors.
         std::fs::write(&path, br#"{"theme": "light", "terminal_theme": "Nord"}"#).unwrap();
         let loaded = Settings::load(&path);

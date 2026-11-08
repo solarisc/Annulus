@@ -185,7 +185,7 @@ pub fn fixture_vault(name: &str, populated: bool) -> Vault {
 
 /// A temporary path for the `what` of demo `name`, never handed out twice in this process:
 /// the scenes render side by side and must not write into each other's files.
-fn scratch(what: &str, name: &str) -> std::path::PathBuf {
+pub(crate) fn scratch(what: &str, name: &str) -> std::path::PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!("annulus-{what}-{}-{name}-{n}", std::process::id()))
@@ -232,6 +232,14 @@ pub fn sftp_tab(name: &str) -> crate::sftp_view::SftpTab {
         size,
         modified: Some(modified),
         permissions: Some(permissions),
+        // The deploy user's, but the log, which the web server's group may read.
+        uid: Some(1000),
+        gid: Some(if name == "app.log" { 33 } else { 1000 }),
+        accessed: Some(modified + 3_600),
+    };
+    tab.owners = annulus_sftp::Owners {
+        users: [(0, "root".to_owned()), (1000, "deploy".to_owned())].into(),
+        groups: [(33, "www-data".to_owned()), (1000, "deploy".to_owned())].into(),
     };
     tab.entries = vec![
         entry("config", Kind::Dir, 0, 1_761_662_520, 0o755),

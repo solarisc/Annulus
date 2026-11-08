@@ -460,12 +460,21 @@ impl NativeApp {
         });
     }
 
+    /// A view over `tab` with the columns the settings name.
+    fn sftp_view(&self, tab: crate::sftp_view::SftpTab) -> sftp::SftpView {
+        sftp::SftpView::new(tab).with_columns(
+            &self.settings.sftp_local_columns,
+            &self.settings.sftp_remote_columns,
+        )
+    }
+
     /// Adds an SFTP tab in front.
     pub fn push_sftp(&mut self, tab: crate::sftp_view::SftpTab) {
         let uid = self.take_uid();
         let title = tab.title.clone();
+        let view = self.sftp_view(tab);
         self.place(Tab {
-            sftp: Some(Box::new(sftp::SftpView::new(tab))),
+            sftp: Some(Box::new(view)),
             ..Tab::new(uid, TabKind::Sftp, title)
         });
     }
@@ -588,7 +597,8 @@ impl NativeApp {
             if let start::Choice::Host(id) = choice
                 && let Some(files) = self.sftp_for(id)
             {
-                self.tabs[index].sftp = Some(Box::new(sftp::SftpView::new(files)));
+                let view = self.sftp_view(files);
+                self.tabs[index].sftp = Some(Box::new(view));
             }
             return;
         }
@@ -1353,6 +1363,14 @@ impl NativeApp {
             }
             if let Some(view) = tab.sftp.as_mut() {
                 view.draw(ui, content, self.waker.as_ref());
+                // Columns picked in one SFTP tab are the next one's too.
+                if let Some((local, remote)) = view.take_columns() {
+                    self.settings.sftp_local_columns = local;
+                    self.settings.sftp_remote_columns = remote;
+                    if let Some(path) = &self.settings_path {
+                        let _ = self.settings.save(path);
+                    }
+                }
             }
         } else if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(view) = tab.terminal.as_mut()

@@ -1,34 +1,50 @@
 //! An SFTP tab in the new UI (UI-SPEC §4, F-SFTP-001…005): this computer on the left, the
-//! host on the right, transfers along the bottom. The host's listing filters by name, sorts
-//! by its column headers, and each entry's More menu downloads, renames, sets permissions,
-//! shows properties or deletes it (after a yes: it cannot be undone). A file dragged from one
-//! pane onto the other uploads or downloads it, and files dropped from the OS (Explorer,
-//! Finder, a file manager) upload to the host's folder shown, folders with everything in them. The connection, listings and
-//! resumable transfers are `sftp_view::SftpTab`'s; this draws them.
+//! host on the right, transfers along the bottom. Both listings filter by name, sort by their
+//! column headers and show the columns the user picks (a right click on the headers): size,
+//! type, modified, permissions, owner, group, accessed and created. A right click on an entry
+//! (or its More button) offers what a file manager does; on empty space, what the folder
+//! does. A file dragged from one pane onto the other uploads or downloads it, and files
+//! dragged in from the OS (Explorer, Finder, a file manager) upload to the host or, let go
+//! over this computer's pane, are copied into its folder; while anything is dragged, the pane
+//! it would land in lights up and says what will happen there. A name already taken where a
+//! file goes asks first: skip, replace or rename it. The connection, listings and resumable
+//! transfers are `sftp_view::SftpTab`'s; this draws them.
 
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use annulus_config::tokens::space;
-use annulus_platform::window::Waker;
-use annulus_sftp::{Conflict, Entry, join, parent};
+use annulus_platform::window::{self as platform, Waker};
+use annulus_sftp::{Conflict, Entry, Owners, join, keep_both_name, parent};
 use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons::{self, IconId};
 use annulus_ui::kit::{FOCUS_REACH, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Curve, Layer, Motion};
 use annulus_ui::widgets::{
-    BODY, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, button_width,
+    BODY, BODY_STRONG, CONTROL, FieldStyle, HEADING, Kind, SMALL, Tone, button_width,
 };
 
 use super::ask::{self, Ask};
 use super::pages;
 use crate::local_pane::{read_dir, tilde};
 use crate::sftp_view::{
-    Command, Dialog, SftpTab, SortBy, TransferState, conflict_name, format_time, human_size, pace,
-    parse_mode, properties, sort_entries, valid_name,
+    ASK_NAME, Column, Command, Dialog, Row, SftpTab, TransferState, conflict_name, format_time,
+    human_size, pace, parse_mode, properties, sort_rows, valid_name,
 };
 
 const ROW: f32 = 30.0;
+
+/// Which pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Side {
+    /// This computer, on the left.
+    Local,
+    /// The host, on the right.
+    Remote,
+}
 
 /// What is being dragged from one pane to the other.
 #[derive(Clone)]
@@ -51,27 +67,95 @@ impl Dragged {
     }
 }
 
-/// A rename or new folder being typed, on the host.
+/// A rename or new folder being typed, in one pane.
 enum Edit {
     NewFolder(String),
     Rename { from: String, to: String },
 }
 
+/// What comes into a folder where its name is already taken, waiting on the user.
+#[derive(Clone, Debug)]
+enum Incoming {
+    /// A file or folder on this computer, to upload to the host's folder shown.
+    Upload(PathBuf),
+    /// An entry on the host, to download into this computer's folder shown.
+    Download(Entry),
+    /// A file or folder dragged in from the OS, to copy into this computer's folder shown.
+    Copy(PathBuf),
+}
+
+/// A name taken where something goes (F-SFTP-005): skip it, replace what is there, or give
+/// it another name.
+#[derive(Debug)]
+struct Clash {
+    incoming: Incoming,
+    name: String,
+    /// A folder: replacing merges it, what is inside replacing files of the same name.
+    folder: bool,
+    /// Where it goes, as the pane shows it.
+    place: String,
+    /// What is there now and what comes, as "12.3 KiB · 2026-11-01 10:22".
+    there: String,
+    coming: String,
+    /// The names taken where it goes, so a new name can be checked.
+    taken: HashSet<String>,
+    /// The name typed for Rename; a free one to start with.
+    rename: String,
+}
+
+/// The user's answer to a clash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Answer {
+    Skip,
+    Replace,
+    Rename(String),
+}
+
+/// What a card's button asks for.
+enum Act {
+    /// A command for the host.
+    Send(Command),
+    /// Delete this file or folder on this computer.
+    DeleteLocal(PathBuf),
+}
+
+/// A copy into this computer's folder finished on its thread: the name, or why it failed.
+type CopyNews = Result<String, String>;
+
 /// The SFTP tab's view state around the engine.
+#[allow(clippy::struct_excessive_bools)] // Separate switches of one view.
 pub struct SftpView {
     tab: SftpTab,
     ask: Option<Ask>,
-    edit: Option<Edit>,
+    /// A rename or new folder being typed, and in which pane.
+    edit: Option<(Side, Edit)>,
     /// The folder the edit was started in: it ends when another folder is shown.
     edit_dir: String,
     remote_selected: Option<String>,
     local_selected: Option<String>,
+    /// The pane last clicked in: F2 and Delete act on its selection.
+    active: Side,
     /// What this computer's listing is narrowed to.
     local_filter: String,
+    /// The column this computer's listing is sorted by, and whether ascending.
+    local_sort: (Column, bool),
+    /// The columns each pane shows beside Name.
+    local_columns: Vec<Column>,
+    remote_columns: Vec<Column>,
+    /// The user changed the columns since [`Self::take_columns`] last looked.
+    columns_changed: bool,
     /// A row being dragged this frame, and where the pointer is.
     drag: Option<(Dragged, Point)>,
     /// A row let go this frame, and where.
     dropped: Option<(Dragged, Point)>,
+    /// Names taken where things go, asked one after another.
+    clashes: VecDeque<Clash>,
+    /// The answer given to one clash goes for the others waiting.
+    clash_all: bool,
+    /// Copies into this computer's folder report here when done.
+    copies: (Sender<CopyNews>, Receiver<CopyNews>),
+    /// Wakes the window when a copy is done.
+    waker: Option<Waker>,
     /// A card just opened: its first control takes the keyboard.
     focus_card: bool,
     /// The transfers panel shows its rows, not only its header.
@@ -84,6 +168,17 @@ impl SftpView {
     /// A view over `tab`.
     #[must_use]
     pub fn new(tab: SftpTab) -> Self {
+        // In the order they are kept when room runs short.
+        let defaults = || {
+            [
+                Column::Modified,
+                Column::Size,
+                Column::Permissions,
+                Column::Type,
+                Column::Owner,
+            ]
+            .to_vec()
+        };
         Self {
             tab,
             ask: None,
@@ -91,13 +186,43 @@ impl SftpView {
             edit_dir: String::new(),
             remote_selected: None,
             local_selected: None,
+            active: Side::Remote,
             local_filter: String::new(),
+            local_sort: (Column::Name, true),
+            local_columns: defaults(),
+            remote_columns: defaults(),
+            columns_changed: false,
             drag: None,
             dropped: None,
+            clashes: VecDeque::new(),
+            clash_all: false,
+            copies: channel(),
+            waker: None,
             focus_card: false,
             transfers_open: true,
             card_left: None,
         }
+    }
+
+    /// The same view showing the columns named in the settings (`local`, `remote`).
+    #[must_use]
+    pub fn with_columns(mut self, local: &[String], remote: &[String]) -> Self {
+        let read = |keys: &[String]| -> Vec<Column> {
+            keys.iter()
+                .filter_map(|key| Column::from_key(key))
+                .filter(|column| *column != Column::Name)
+                .collect()
+        };
+        self.local_columns = read(local);
+        self.remote_columns = read(remote);
+        self
+    }
+
+    /// The columns of each pane by name, once the user changed them, for the settings.
+    pub fn take_columns(&mut self) -> Option<(Vec<String>, Vec<String>)> {
+        let names = |columns: &[Column]| columns.iter().map(|c| c.key().to_owned()).collect();
+        std::mem::take(&mut self.columns_changed)
+            .then(|| (names(&self.local_columns), names(&self.remote_columns)))
     }
 
     /// Opens `dialog` over the tab.
@@ -113,6 +238,7 @@ impl SftpView {
 
     /// Draws the tab into `rect`.
     pub fn draw(&mut self, ui: &mut Ui<'_>, rect: Rect, waker: Option<&Waker>) {
+        self.waker = waker.cloned();
         let waker = waker.cloned();
         self.tab.start_with(move || {
             if let Some(waker) = &waker {
@@ -127,7 +253,13 @@ impl SftpView {
             } else {
                 "Downloaded"
             };
-            ui.toast(format!("{what} {name}"), annulus_ui::widgets::Tone::Done);
+            ui.toast(format!("{what} {name}"), Tone::Done);
+        }
+        for news in self.copies.1.try_iter().collect::<Vec<_>>() {
+            match news {
+                Ok(name) => ui.toast(format!("Copied {name}"), Tone::Done),
+                Err(why) => ui.toast(why, Tone::Problem),
+            }
         }
         for event in std::mem::take(&mut self.tab.questions) {
             if let Some(question) = Ask::from_event(event) {
@@ -174,9 +306,16 @@ impl SftpView {
             let half = (area.w - space::M) / 2.0;
             let local = area.take_left(half);
             area.take_left(space::M);
+            // Each pane keeps to its place: in a small window its list does not run under
+            // the transfers.
+            ui.push_clip(local);
             self.local_pane(ui, local);
+            ui.pop_clip();
+            ui.push_clip(area);
             self.remote_pane(ui, area);
+            ui.pop_clip();
             self.drag_and_drop(ui, local, area);
+            self.keys(ui);
             if transfers_h > 1.0 && !self.tab.transfers.is_empty() {
                 ui.push_clip(transfers);
                 self.transfers(ui, transfers);
@@ -184,6 +323,9 @@ impl SftpView {
             }
         }
         self.dialog_card(ui, rect);
+        if self.tab.dialog.is_none() && self.card_left.is_none() {
+            self.clash_card(ui, rect);
+        }
         if let (Some(ask), Some(answers)) = (self.ask.as_mut(), self.tab.answers())
             && ask::card(ui, Id::new("sftp.ask"), rect, ask, answers)
         {
@@ -191,42 +333,556 @@ impl SftpView {
         }
     }
 
-    /// Rows dragged between the panes, and files dropped from the OS: what was let go over
-    /// the other pane is uploaded or downloaded, and while it moves a label follows the
-    /// pointer and the pane it would land in lights up.
+    /// F2 renames and Delete deletes (after a yes) the selection of the pane last clicked in.
+    fn keys(&mut self, ui: &mut Ui<'_>) {
+        if self.tab.dialog.is_some() || !self.clashes.is_empty() || self.edit.is_some() {
+            return;
+        }
+        let rename = ui.key(Key::F(2), Modifiers::NONE);
+        let delete = ui.key(Key::Delete, Modifiers::NONE);
+        if !rename && !delete {
+            return;
+        }
+        match self.active {
+            Side::Remote => {
+                let Some(entry) = self
+                    .remote_selected
+                    .as_ref()
+                    .and_then(|name| self.tab.entries.iter().find(|entry| &entry.name == name))
+                else {
+                    return;
+                };
+                if rename {
+                    self.start_edit(Side::Remote, Some(entry.name.clone()));
+                } else {
+                    // It cannot be undone, so it asks first.
+                    let card = Dialog::Delete(entry.clone());
+                    self.open_card(card);
+                }
+            }
+            Side::Local => {
+                let Some(name) = self.local_selected.clone() else {
+                    return;
+                };
+                if rename {
+                    self.start_edit(Side::Local, Some(name));
+                } else {
+                    self.ask_delete_local(&name);
+                }
+            }
+        }
+    }
+
+    /// Starts typing a new folder's name (`None`) or `rename`'s new one in `side`'s folder.
+    fn start_edit(&mut self, side: Side, rename: Option<String>) {
+        let edit = match rename {
+            Some(name) => Edit::Rename {
+                from: name.clone(),
+                to: name,
+            },
+            None => Edit::NewFolder(String::new()),
+        };
+        self.edit = Some((side, edit));
+        self.edit_dir = self.folder_of(side);
+    }
+
+    /// The folder `side` shows, as text.
+    fn folder_of(&self, side: Side) -> String {
+        match side {
+            Side::Local => self.tab.local.dir.display().to_string(),
+            Side::Remote => self.tab.cwd.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Opens the card that asks before `name` in this computer's folder is deleted.
+    fn ask_delete_local(&mut self, name: &str) {
+        let path = self.tab.local.dir.join(name);
+        let folder = path.is_dir();
+        self.open_card(Dialog::DeleteLocal { path, folder });
+    }
+
+    /// Rows dragged between the panes, and files dragged in from the OS: what is let go over a
+    /// pane that takes it is uploaded, downloaded or copied there. While anything moves, the
+    /// pane it may land in is outlined, and the one under the pointer lights up and says what
+    /// will happen and where.
     fn drag_and_drop(&mut self, ui: &mut Ui<'_>, local: Rect, remote: Rect) {
         let t = ui.theme;
-        for path in ui.take_dropped_files() {
-            self.tab.upload(path);
+        let dropped = ui.take_dropped_files();
+        if !dropped.is_empty() {
+            // Over this computer's pane: copied into its folder. Anywhere else, and where the
+            // OS does not say: up to the host.
+            let here = ui.dropped_at().is_some_and(|at| local.contains(at));
+            for path in dropped {
+                if here {
+                    self.copy_in(path);
+                } else {
+                    self.send_up(path);
+                }
+            }
         }
         if let Some((dragged, at)) = self.dropped.take() {
             match dragged {
-                Dragged::Local(path) if remote.contains(at) => self.tab.upload(path),
-                Dragged::Remote(entry) if local.contains(at) => self.tab.download(&entry),
+                Dragged::Local(path) if remote.contains(at) => self.send_up(path),
+                Dragged::Remote(entry) if local.contains(at) => self.send_down(entry),
                 _ => {}
             }
         }
-        let Some((dragged, at)) = self.drag.take() else {
+        // Where a drag on the way may land: the other pane for a row; for files from the OS
+        // either pane, or the host's only when the OS does not say where they are.
+        let os = ui.files_hovering().map(|(paths, at)| (paths.to_vec(), at));
+        let row = self.drag.take();
+        let from_os = match &os {
+            Some((_, Some(at))) => FromOs::At(*at),
+            Some((_, None)) => FromOs::Somewhere,
+            None => FromOs::No,
+        };
+        let targets = drop_targets(row.as_ref(), from_os);
+        let (at, what) = match (&row, &os) {
+            (Some((dragged, at)), _) => (Some(*at), dragged.name()),
+            (None, Some((paths, at))) => (*at, items_named(paths)),
+            (None, None) => (None, String::new()),
+        };
+        for side in [Side::Local, Side::Remote] {
+            let pane = if side == Side::Local { local } else { remote };
+            let target = targets.contains(&side);
+            let over = target && at.is_none_or(|at| pane.contains(at));
+            let lit = ui.ease(
+                Id::new(("sftp.drop.lit", side == Side::Local)),
+                if over { 1.0 } else { 0.0 },
+            );
+            let shown = ui.ease(
+                Id::new(("sftp.drop.shown", side == Side::Local)),
+                if target { 1.0 } else { 0.0 },
+            );
+            if shown <= 0.01 && lit <= 0.01 {
+                continue;
+            }
+            // Every pane that would take it is outlined; the one under the pointer is filled.
+            let outline = pane.inset(1.0, 1.0);
+            ui.gfx.fill_rect(outline, 12.0, t.accent.alpha(0.10 * lit));
+            ui.gfx.stroke_rect(
+                outline,
+                12.0,
+                1.0 + lit,
+                t.accent.alpha(shown * (0.35 + 0.65 * lit)),
+            );
+            if lit <= 0.01 {
+                continue;
+            }
+            let (icon, title) = match (side, &row) {
+                (Side::Remote, _) => (icons::UPLOAD, format!("Upload to {}", self.host_name())),
+                (Side::Local, Some(_)) => (icons::DOWNLOAD, "Download here".to_owned()),
+                (Side::Local, None) => (icons::COPY, "Copy here".to_owned()),
+            };
+            let folder = match side {
+                Side::Local => {
+                    let home = home_dir();
+                    tilde(&self.tab.local.dir.display().to_string(), &home)
+                }
+                Side::Remote => tilde(&self.tab.cwd.clone().unwrap_or_default(), &self.tab.home),
+            };
+            Self::drop_badge(ui, pane, lit, icon, &title, &what, &folder);
+        }
+        let Some((dragged, at)) = row else {
             return;
         };
-        let (target, words, icon) = match dragged {
-            Dragged::Local(_) => (remote, "Upload to the host", icons::UPLOAD),
-            Dragged::Remote(_) => (local, "Download here", icons::DOWNLOAD),
+        // A label follows the pointer, saying what letting go there does.
+        let over = match dragged {
+            Dragged::Local(_) => remote.contains(at),
+            Dragged::Remote(_) => local.contains(at),
         };
-        if target.contains(at) {
-            ui.gfx.stroke_rect(target, 12.0, 2.0, t.accent);
-        }
+        let (words, icon) = match (&dragged, over) {
+            (Dragged::Local(_), true) => ("Upload to the host", icons::UPLOAD),
+            (Dragged::Remote(_), true) => ("Download here", icons::DOWNLOAD),
+            (Dragged::Local(_), false) => ("Drop on the host's side", icons::UPLOAD),
+            (Dragged::Remote(_), false) => ("Drop on this computer's side", icons::DOWNLOAD),
+        };
         let label = format!("{}  \u{b7}  {words}", dragged.name());
         let width = ui.gfx.measure(&label, SMALL).width + 16.0 + 3.0 * space::S;
         let chip = Rect::new(at.x + 14.0, at.y + 10.0, width, 28.0);
         ui.gfx.shadow(chip, 8.0, 12.0, 4.0, t.shadow);
         ui.gfx.fill_rect(chip, 8.0, t.raised);
-        ui.gfx.stroke_rect(chip, 8.0, 1.0, t.line_strong);
-        let mut inner = chip.inset(space::S, 0.0);
         ui.gfx
-            .icon(icon, inner.take_left(16.0).centered(14.0, 14.0), t.accent);
+            .stroke_rect(chip, 8.0, 1.0, if over { t.accent } else { t.line_strong });
+        let mut inner = chip.inset(space::S, 0.0);
+        ui.gfx.icon(
+            icon,
+            inner.take_left(16.0).centered(14.0, 14.0),
+            if over { t.accent } else { t.text2 },
+        );
         inner.take_left(space::S);
         ui.gfx.text(inner, &label, SMALL, t.text, Align::Start);
+    }
+
+    /// The host's name, as its pane's title shows it.
+    fn host_name(&self) -> String {
+        self.tab
+            .title
+            .strip_suffix(" files")
+            .unwrap_or(&self.tab.title)
+            .to_owned()
+    }
+
+    /// The badge in the middle of a pane something would land in: what happens (`title`), to
+    /// what, and into which folder; `lit` of the way in.
+    fn drop_badge(
+        ui: &mut Ui<'_>,
+        pane: Rect,
+        lit: f32,
+        icon: IconId,
+        title: &str,
+        what: &str,
+        folder: &str,
+    ) {
+        let t = ui.theme;
+        let width = (pane.w - 2.0 * space::L).clamp(0.0, 320.0);
+        // Low in the pane, clear of the rows near the top and of the pointer's label.
+        let height = 128.0;
+        let top = (pane.b() - height - 3.0 * space::XL).max(pane.y + space::XL);
+        let badge = Rect::new(pane.center().x - width / 2.0, top, width, height);
+        ui.push_layer(Layer::appear(lit, badge.center(), 0.94, 0.0));
+        ui.gfx.shadow(badge, 14.0, 24.0, 8.0, t.shadow);
+        ui.gfx.fill_rect(badge, 14.0, t.raised);
+        ui.gfx.stroke_rect(badge, 14.0, 1.0, t.accent.alpha(0.6));
+        let mut column = badge.inset(space::L, space::M);
+        let disc = column.take_top(40.0).centered(40.0, 40.0);
+        ui.gfx.fill_rect(disc, 20.0, t.accent.alpha(0.16));
+        ui.gfx.icon(icon, disc.centered(20.0, 20.0), t.accent);
+        column.take_top(space::S);
+        let fitted = annulus_ui::gfx::fit_middle(&mut ui.gfx, title, BODY_STRONG, column.w);
+        ui.gfx.text(
+            column.take_top(20.0),
+            &fitted,
+            BODY_STRONG,
+            t.text,
+            Align::Center,
+        );
+        let fitted = annulus_ui::gfx::fit_middle(&mut ui.gfx, what, SMALL, column.w);
+        ui.gfx.text(
+            column.take_top(18.0),
+            &fitted,
+            SMALL,
+            t.text2,
+            Align::Center,
+        );
+        let into = format!("into {folder}");
+        let fitted = annulus_ui::gfx::fit_path(&mut ui.gfx, &into, Font::mono(11.5), column.w);
+        ui.gfx.text(
+            column.take_top(18.0),
+            &fitted,
+            Font::mono(11.5),
+            t.text3,
+            Align::Center,
+        );
+        ui.pop_layer();
+    }
+
+    /// Uploads `path` to the host's folder shown, asking first when its name is taken there.
+    fn send_up(&mut self, path: PathBuf) {
+        let Some(cwd) = self.tab.cwd.clone() else {
+            return;
+        };
+        let name = file_name(&path);
+        let there = self.tab.entries.iter().find(|entry| entry.name == name);
+        match there {
+            Some(entry) if self.tab.ask_on_clash => {
+                let taken = self.tab.entries.iter().map(|e| e.name.clone()).collect();
+                let folder = path.is_dir();
+                let clash = Clash {
+                    name: name.clone(),
+                    folder,
+                    place: tilde(&cwd, &self.tab.home),
+                    there: facts(entry.is_dir(), entry.size, entry.modified),
+                    coming: local_facts(&path),
+                    rename: free_name(&name, &taken),
+                    taken,
+                    incoming: Incoming::Upload(path),
+                };
+                self.clashes.push_back(clash);
+            }
+            Some(_) => self.tab.upload(path),
+            None => self.tab.upload_named(path, None, Conflict::KeepBoth),
+        }
+    }
+
+    /// Downloads `entry` into this computer's folder shown, asking first when its name is
+    /// taken there.
+    fn send_down(&mut self, entry: Entry) {
+        let target = self.tab.local.dir.join(&entry.name);
+        let taken_here = target.symlink_metadata().is_ok();
+        if taken_here && self.tab.ask_on_clash {
+            let taken = local_names(&self.tab.local.dir);
+            let clash = Clash {
+                name: entry.name.clone(),
+                folder: entry.is_dir(),
+                place: tilde(&self.tab.local.dir.display().to_string(), &home_dir()),
+                there: local_facts(&target),
+                coming: facts(entry.is_dir(), entry.size, entry.modified),
+                rename: free_name(&entry.name, &taken),
+                taken,
+                incoming: Incoming::Download(entry),
+            };
+            self.clashes.push_back(clash);
+        } else if taken_here {
+            self.tab.download(&entry);
+        } else {
+            self.tab.download_named(&entry, None, Conflict::KeepBoth);
+        }
+    }
+
+    /// Copies `path`, dragged in from the OS, into this computer's folder shown, asking first
+    /// when its name is taken there. A file already in that folder stays as it is.
+    fn copy_in(&mut self, path: PathBuf) {
+        let dir = self.tab.local.dir.clone();
+        let name = file_name(&path);
+        if path.parent() == Some(dir.as_path()) {
+            return;
+        }
+        if dir.starts_with(&path) {
+            self.copy_failed(format!("{name} cannot be copied into itself"));
+            return;
+        }
+        let target = dir.join(&name);
+        if target.symlink_metadata().is_ok() {
+            let taken = local_names(&dir);
+            let clash = Clash {
+                name: name.clone(),
+                folder: path.is_dir(),
+                place: tilde(&dir.display().to_string(), &home_dir()),
+                there: local_facts(&target),
+                coming: local_facts(&path),
+                rename: free_name(&name, &taken),
+                taken,
+                incoming: Incoming::Copy(path),
+            };
+            self.clashes.push_back(clash);
+        } else {
+            self.copy_now(path, target, false);
+        }
+    }
+
+    /// Copies `from` to `to` on a thread of its own, replacing what is there when `replace`;
+    /// the toast says how it went.
+    fn copy_now(&mut self, from: PathBuf, to: PathBuf, replace: bool) {
+        let news = self.copies.0.clone();
+        let waker = self.waker.clone();
+        let name = file_name(&to);
+        let spawned = std::thread::Builder::new()
+            .name("local copy".into())
+            .spawn(move || {
+                let result = copy_into(&from, &to, replace)
+                    .map(|()| name.clone())
+                    .map_err(|error| format!("Could not copy {name}: {error}"));
+                let _ = news.send(result);
+                if let Some(waker) = waker {
+                    waker();
+                }
+            });
+        if let Err(error) = spawned {
+            self.copy_failed(format!("Could not copy: {error}"));
+        }
+    }
+
+    fn copy_failed(&self, why: String) {
+        let _ = self.copies.0.send(Err(why));
+    }
+
+    /// Does what `answer` says with the first clash waiting; with "the same for the others",
+    /// with those too (a rename then takes free names of their own).
+    fn answer_clash(&mut self, answer: &Answer) {
+        let Some(first) = self.clashes.pop_front() else {
+            return;
+        };
+        let mut settled = vec![(first, answer.clone())];
+        if self.clash_all {
+            while let Some(next) = self.clashes.pop_front() {
+                let answer = match answer {
+                    Answer::Rename(_) => Answer::Rename(next.rename.clone()),
+                    other => other.clone(),
+                };
+                settled.push((next, answer));
+            }
+        }
+        for (clash, answer) in settled {
+            let (name, conflict) = match &answer {
+                Answer::Skip => continue,
+                Answer::Replace => (None, Conflict::Overwrite),
+                Answer::Rename(name) => (Some(name.trim().to_owned()), Conflict::KeepBoth),
+            };
+            match clash.incoming {
+                Incoming::Upload(path) => self.tab.upload_named(path, name, conflict),
+                Incoming::Download(entry) => self.tab.download_named(&entry, name, conflict),
+                Incoming::Copy(path) => {
+                    let to = self
+                        .tab
+                        .local
+                        .dir
+                        .join(name.unwrap_or_else(|| clash.name.clone()));
+                    self.copy_now(path, to, conflict == Conflict::Overwrite);
+                }
+            }
+        }
+        if self.clashes.is_empty() {
+            self.clash_all = false;
+        }
+    }
+
+    /// The card asking what to do with the first name taken (F-SFTP-005): Skip, Replace (for a
+    /// folder, Merge) or Rename under the name in its field, which starts free.
+    #[allow(clippy::too_many_lines)] // One card, top to bottom.
+    fn clash_card(&mut self, ui: &mut Ui<'_>, rect: Rect) {
+        let waiting = self.clashes.len().saturating_sub(1);
+        let Some(clash) = self.clashes.front_mut() else {
+            return;
+        };
+        let t = ui.theme;
+        let height = if waiting > 0 { 330.0 } else { 296.0 };
+        ui.zone(Id::new("sftp.clash.backdrop"), rect, Role::Backdrop, "");
+        let card = rect.centered(rect.w.min(500.0), height);
+        let card_id = Id::new(("sftp.clash", clash.name.as_str()));
+        let first = !ui.state.focus().is_some_and(|focus| {
+            [
+                Id::new("sftp.clash.name"),
+                Id::new("sftp.clash.skip"),
+                Id::new("sftp.clash.replace"),
+                Id::new("sftp.clash.rename"),
+                Id::new("sftp.clash.all"),
+            ]
+            .contains(&focus)
+        });
+        pages::card_in(ui, card_id, rect, card);
+        ui.gfx.shadow(card, 14.0, 28.0, 10.0, t.shadow);
+        ui.gfx.fill_rect(card, 14.0, t.raised);
+        ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
+        let mut column = card.inset(space::XL, space::XL);
+        let mut buttons = Rect::new(column.x, column.b() - CONTROL, column.w, CONTROL);
+        let what = if clash.folder { "A folder" } else { "A file" };
+        ui.strict_text(
+            column.take_top(24.0),
+            &format!("{what} by this name is already there"),
+            HEADING,
+            t.text,
+            Align::Start,
+        );
+        column.take_top(space::S);
+        let fitted =
+            annulus_ui::gfx::fit_middle(&mut ui.gfx, &clash.name, Font::mono(13.0), column.w);
+        ui.gfx.text(
+            column.take_top(20.0),
+            &fitted,
+            Font::mono(13.0),
+            t.text,
+            Align::Start,
+        );
+        let into = format!("in {}", clash.place);
+        let fitted = annulus_ui::gfx::fit_path(&mut ui.gfx, &into, SMALL, column.w);
+        ui.gfx
+            .text(column.take_top(18.0), &fitted, SMALL, t.text2, Align::Start);
+        column.take_top(space::S);
+        for (label, value) in [("There now", &clash.there), ("Coming", &clash.coming)] {
+            let mut line = column.take_top(20.0);
+            ui.gfx
+                .text(line.take_left(90.0), label, SMALL, t.text3, Align::Start);
+            ui.gfx.text(line, value, SMALL, t.text2, Align::Start);
+        }
+        column.take_top(space::M);
+        let field_id = Id::new("sftp.clash.name");
+        if first {
+            ui.state.set_focus(Some(field_id), false);
+        }
+        let typed = clash.rename.trim().to_owned();
+        let taken = clash.taken.contains(&typed);
+        let bad = !valid_name(&typed) || taken;
+        let field = ui.text_field(
+            field_id,
+            column.take_top(CONTROL),
+            &mut clash.rename,
+            FieldStyle {
+                placeholder: "New name",
+                mono: true,
+                error: bad,
+                ..FieldStyle::default()
+            },
+        );
+        ui.set_name(field_id, "Rename to");
+        column.take_top(space::XS);
+        let hint = if taken {
+            "That name is taken too."
+        } else if bad {
+            "A name, without / or a folder of its own."
+        } else {
+            "Rename keeps both, under this name."
+        };
+        ui.gfx.text(
+            column.take_top(18.0),
+            hint,
+            SMALL,
+            if bad { t.error } else { t.text3 },
+            Align::Start,
+        );
+        if waiting > 0 {
+            column.take_top(space::S);
+            let label = format!(
+                "Do the same for the {waiting} other{} waiting",
+                if waiting == 1 { "" } else { "s" }
+            );
+            ui.checkbox(
+                Id::new("sftp.clash.all"),
+                column.take_top(24.0),
+                &mut self.clash_all,
+                &label,
+            );
+        }
+        let replace_label = if clash.folder { "Merge" } else { "Replace" };
+        let rename = buttons.take_right(button_width(&mut ui.gfx, "Rename", None).max(88.0));
+        buttons.take_right(space::S);
+        let replace = buttons.take_right(button_width(&mut ui.gfx, replace_label, None));
+        buttons.take_right(space::S);
+        let skip = buttons.take_right(button_width(&mut ui.gfx, "Skip", None));
+        let mut answer = None;
+        if ui
+            .button(Id::new("sftp.clash.skip"), skip, "Skip", None, Kind::Ghost)
+            .clicked
+            || ui.key(Key::Escape, Modifiers::NONE)
+        {
+            answer = Some(Answer::Skip);
+        }
+        if ui
+            .button(
+                Id::new("sftp.clash.replace"),
+                replace,
+                replace_label,
+                None,
+                Kind::Secondary,
+            )
+            .clicked
+        {
+            answer = Some(Answer::Replace);
+        }
+        if clash.folder {
+            ui.tooltip(
+                Id::new("sftp.clash.replace"),
+                replace,
+                "Copies into the folder there; files of the same name are replaced",
+            );
+        }
+        let renamed = ui
+            .button(
+                Id::new("sftp.clash.rename"),
+                rename,
+                "Rename",
+                None,
+                Kind::Primary,
+            )
+            .clicked
+            || field.submitted;
+        if renamed && !bad {
+            answer = Some(Answer::Rename(typed));
+        }
+        pages::card_done(ui);
+        if let Some(answer) = answer {
+            self.answer_clash(&answer);
+        }
     }
 
     /// The Delete, Permissions and Properties cards over the tab.
@@ -243,7 +899,7 @@ impl SftpView {
                     ui,
                     rect,
                     dialog,
-                    &cwd,
+                    (&cwd, &self.tab.owners),
                     false,
                     Some(1.0 - Curve::Exit.at(share)),
                 );
@@ -257,38 +913,59 @@ impl SftpView {
             return;
         };
         let focus = std::mem::take(&mut self.focus_card);
-        let (command, mut close) = Self::dialog_shown(ui, rect, dialog, &cwd, focus, None);
-        if let Some(command) = command {
-            self.tab.send(command);
-            self.remote_selected = None;
-            close = true;
+        let (act, mut close) =
+            Self::dialog_shown(ui, rect, dialog, (&cwd, &self.tab.owners), focus, None);
+        match act {
+            Some(Act::Send(command)) => {
+                self.tab.send(command);
+                self.remote_selected = None;
+                close = true;
+            }
+            Some(Act::DeleteLocal(path)) => {
+                let result = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                if let Err(error) = result {
+                    ui.toast(
+                        format!("Could not delete {}: {error}", file_name(&path)),
+                        Tone::Problem,
+                    );
+                }
+                self.local_selected = None;
+                close = true;
+            }
+            None => {}
         }
         if close {
             self.card_left = self.tab.dialog.take().map(|dialog| (dialog, ui.time()));
         }
     }
 
-    /// `dialog`'s card over `rect`, coming in, or at `leaving` of itself on its way out.
-    /// Returns the command it sends and whether it closes.
-    #[allow(clippy::too_many_lines)] // Three cards, each top to bottom.
+    /// `dialog`'s card over `rect`, coming in, or at `leaving` of itself on its way out;
+    /// `(cwd, owners)` are the host's folder shown and its names. Returns what its button
+    /// asks for and whether it closes.
+    #[allow(clippy::too_many_lines)] // Five cards, each top to bottom.
     fn dialog_shown(
         ui: &mut Ui<'_>,
         rect: Rect,
         dialog: &mut Dialog,
-        cwd: &str,
+        (cwd, owners): (&str, &Owners),
         focus: bool,
         leaving: Option<f32>,
-    ) -> (Option<Command>, bool) {
+    ) -> (Option<Act>, bool) {
         let t = ui.theme;
         let facts = match dialog {
-            Dialog::Properties(entry) => properties(cwd, entry),
+            Dialog::Properties(entry) => properties(cwd, entry, owners),
+            Dialog::LocalProperties(lines) => lines.clone(),
             _ => Vec::new(),
         };
         #[allow(clippy::cast_precision_loss)] // A handful of lines.
         let height = match dialog {
-            Dialog::Delete(_) => 200.0,
+            Dialog::Delete(_) | Dialog::DeleteLocal { .. } => 200.0,
             Dialog::Permissions { .. } => 214.0,
-            Dialog::Properties(_) => 136.0 + facts.len() as f32 * 24.0,
+            Dialog::Properties(_) | Dialog::LocalProperties(_) => 136.0 + facts.len() as f32 * 24.0,
         };
         ui.zone(Id::new("sftp.card.backdrop"), rect, Role::Backdrop, "");
         let card = rect.centered(rect.w.min(480.0), height);
@@ -307,27 +984,30 @@ impl SftpView {
         ui.gfx.stroke_rect(card, 14.0, 1.0, t.line);
         let mut column = card.inset(space::XL, space::XL);
         let mut buttons = Rect::new(column.x, column.b() - CONTROL, column.w, CONTROL);
-        let mut command = None;
+        let mut act = None;
         let mut close = ui.key(Key::Escape, Modifiers::NONE);
         match dialog {
-            Dialog::Delete(entry) => {
-                ui.strict_text(
-                    column.take_top(24.0),
-                    "Delete from the host?",
-                    HEADING,
-                    t.text,
-                    Align::Start,
-                );
+            Dialog::Delete(_) | Dialog::DeleteLocal { .. } => {
+                let (title, name, folder) = match dialog {
+                    Dialog::Delete(entry) => {
+                        ("Delete from the host?", entry.name.clone(), entry.is_dir())
+                    }
+                    Dialog::DeleteLocal { path, folder } => {
+                        ("Delete from this computer?", file_name(path), *folder)
+                    }
+                    _ => unreachable!("matched above"),
+                };
+                ui.strict_text(column.take_top(24.0), title, HEADING, t.text, Align::Start);
                 column.take_top(space::S);
                 ui.gfx.text(
                     column.take_top(20.0),
-                    &entry.name,
+                    &name,
                     Font::mono(13.0),
                     t.text,
                     Align::Start,
                 );
                 column.take_top(space::XS);
-                let warning = if entry.is_dir() {
+                let warning = if folder {
                     "The folder goes with everything in it. This cannot be undone."
                 } else {
                     "This cannot be undone."
@@ -361,7 +1041,11 @@ impl SftpView {
                     )
                     .clicked
                 {
-                    command = Some(Command::Remove(join(cwd, &entry.name)));
+                    act = Some(match dialog {
+                        Dialog::Delete(entry) => Act::Send(Command::Remove(join(cwd, &entry.name))),
+                        Dialog::DeleteLocal { path, .. } => Act::DeleteLocal(path.clone()),
+                        _ => unreachable!("matched above"),
+                    });
                 }
             }
             Dialog::Permissions { name, mode } => {
@@ -427,10 +1111,10 @@ impl SftpView {
                     .clicked
                     || field.submitted;
                 if chosen && let Some(bits) = parsed {
-                    command = Some(Command::Chmod(join(cwd, name), bits));
+                    act = Some(Act::Send(Command::Chmod(join(cwd, name), bits)));
                 }
             }
-            Dialog::Properties(_) => {
+            Dialog::Properties(_) | Dialog::LocalProperties(_) => {
                 ui.strict_text(
                     column.take_top(24.0),
                     "Properties",
@@ -443,7 +1127,8 @@ impl SftpView {
                     let mut line = column.take_top(24.0);
                     let label = line.take_left(110.0);
                     ui.gfx.text(label, fact, SMALL, t.text2, Align::Start);
-                    ui.gfx.text(line, value, BODY, t.text, Align::Start);
+                    let fitted = annulus_ui::gfx::fit_middle(&mut ui.gfx, value, BODY, line.w);
+                    ui.gfx.text(line, &fitted, BODY, t.text, Align::Start);
                 }
                 let done = buttons.take_right(button_width(&mut ui.gfx, "Close", None).max(88.0));
                 if focus {
@@ -461,7 +1146,7 @@ impl SftpView {
             }
         }
         pages::card_done(ui);
-        (command, close)
+        (act, close)
     }
 
     fn pane_frame(ui: &mut Ui<'_>, rect: Rect, title: &str, path: &str, icon: IconId) -> Rect {
@@ -489,146 +1174,292 @@ impl SftpView {
         inner
     }
 
-    /// The widths of the Size and Modified columns of a listing whose rows are `width` wide
-    /// (their buttons taken off): the name keeps at least half, so in a narrow pane Modified
-    /// goes first, then Size narrows.
-    fn column_widths(width: f32) -> (f32, f32) {
-        let name = width * 0.5;
-        let (mut size, mut modified) = (80.0, 130.0);
-        if width - size - modified < name {
-            modified = 0.0;
+    /// The listing's header, its rows' empty space and its rows for `side`: `rows` sorted and
+    /// filtered already. Returns, for the row clicked, double-clicked, acted on or whose menu
+    /// item was chosen, what happened, and the empty space's menu item chosen.
+    #[allow(clippy::too_many_lines)] // The header, the empty space, then the rows.
+    fn listing(
+        &mut self,
+        ui: &mut Ui<'_>,
+        side: Side,
+        area: Rect,
+        rows: &[Row],
+        empty: Option<&str>,
+    ) -> Listed {
+        let t = ui.theme;
+        let available = available_columns(side);
+        let (shown, sort) = match side {
+            Side::Local => (&mut self.local_columns, &mut self.local_sort),
+            Side::Remote => (&mut self.remote_columns, &mut self.tab.sort),
+        };
+        let header_line = Rect::new(area.x, area.y, area.w, 22.0);
+        // As wide as the rows, which leave room for the scroll bar, so the columns line up.
+        let cells_w = header_line.w - 10.0 - 2.0 * space::S;
+        let laid = lay_out(shown, &available, cells_w);
+        let changed = Self::header_row(ui, side, header_line, &laid, sort, shown, &available);
+        if changed {
+            self.columns_changed = true;
         }
-        if width - size - modified < name {
-            size = 64.0;
+        let mut list = area;
+        list.take_top(22.0);
+        let selected = match side {
+            Side::Local => self.local_selected.clone(),
+            Side::Remote => self.remote_selected.clone(),
+        };
+        let mut listed = Listed::default();
+        // The empty space under and between the rows: a right click offers what the folder
+        // does. Drawn first, so the rows over it take their own clicks.
+        let blank_id = Id::new(("sftp.blank", side == Side::Local));
+        let blank = ui.zone(blank_id, list, Role::ScrollView, "");
+        if blank.clicked {
+            match side {
+                Side::Local => self.local_selected = None,
+                Side::Remote => self.remote_selected = None,
+            }
         }
-        (size, modified)
+        let blank_menu = folder_menu(side, self.tab.show_hidden);
+        if let Some(choice) = ui.context_menu(blank_id, &blank, &blank_menu) {
+            listed.folder_choice = blank_menu.get(choice).cloned();
+        }
+        if let Some(why) = empty {
+            let line = Rect::new(list.x, list.y + space::XL, list.w, 20.0);
+            ui.gfx.text(line, why, BODY, t.text2, Align::Center);
+        }
+        #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.
+        let content = rows.len() as f32 * ROW;
+        let scroll_id = match side {
+            Side::Local => Id::new("sftp.local.scroll"),
+            Side::Remote => Id::new("sftp.remote.scroll"),
+        };
+        let offset = ui.scroll_view(scroll_id, list, content);
+        ui.push_list_clip(list, offset, content, FOCUS_REACH);
+        let prefix = match side {
+            Side::Local => "local",
+            Side::Remote => "remote",
+        };
+        let action = match side {
+            Side::Local => (icons::UPLOAD, "Upload to the host"),
+            Side::Remote => (icons::DOWNLOAD, "Download to this computer"),
+        };
+        for (index, row) in rows.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // As above.
+            let y = list.y - offset + index as f32 * ROW;
+            if y + ROW < list.y || y > list.b() {
+                continue;
+            }
+            let rect = Rect::new(list.x, y, list.w - 10.0, ROW);
+            let id = Id::new((prefix, row.name.as_str()));
+            let menu = row_menu(side, row.is_dir());
+            let (clicked, double, acted, chosen) = Self::file_row(
+                ui,
+                id,
+                rect,
+                row,
+                &laid,
+                selected.as_deref() == Some(row.name.as_str()),
+                action,
+                &menu,
+            );
+            if clicked || chosen.is_some() {
+                listed.clicked = Some(row.name.clone());
+            }
+            if double {
+                listed.double = Some(row.name.clone());
+            }
+            if acted {
+                listed.acted = Some(row.name.clone());
+            }
+            if let Some(item) = chosen.and_then(|at| menu.get(at)) {
+                listed.choice = Some((row.name.clone(), item.clone()));
+            }
+            if let Some(at) = ui.drag_moved(id) {
+                listed.drag = Some((row.name.clone(), at));
+            }
+            if let Some(at) = ui.drag_released(id) {
+                listed.released = Some((row.name.clone(), at));
+            }
+        }
+        ui.pop_clip();
+        if let Some(name) = &listed.clicked {
+            self.active = side;
+            match side {
+                Side::Local => self.local_selected = Some(name.clone()),
+                Side::Remote => self.remote_selected = Some(name.clone()),
+            }
+        }
+        if blank.clicked || blank.secondary_clicked {
+            self.active = side;
+        }
+        listed
     }
 
-    /// The column titles over a listing; with `sort`, clicking one sorts by it (again: the
-    /// other way round).
-    fn header_row(ui: &mut Ui<'_>, rect: Rect, mut sort: Option<&mut (SortBy, bool)>) -> Rect {
+    /// The column titles over a listing: a click sorts by one (again: the other way round),
+    /// and a right click on any offers to show or hide the columns `available` to the pane.
+    /// Returns whether the shown columns changed.
+    fn header_row(
+        ui: &mut Ui<'_>,
+        side: Side,
+        line: Rect,
+        laid: &[(Column, Rect)],
+        sort: &mut (Column, bool),
+        shown: &mut Vec<Column>,
+        available: &[Column],
+    ) -> bool {
         let t = ui.theme;
-        let mut row = rect;
-        let line = row.take_top(22.0);
-        // As wide as the rows, which leave room for the scroll bar, so the columns line up.
-        let mut cells = Rect::new(line.x, line.y, line.w - 10.0, line.h).inset(space::S, 0.0);
-        // Where the rows' buttons are.
-        cells.take_right(2.0 * 26.0 + 2.0 * space::S);
-        let (size_w, modified_w) = Self::column_widths(cells.w);
-        let modified = cells.take_right(modified_w);
-        let size = cells.take_right(size_w);
-        for (cell, title, align, by) in [
-            (cells, "Name", Align::Start, SortBy::Name),
-            (size, "Size", Align::End, SortBy::Size),
-            (modified, "Modified", Align::End, SortBy::Modified),
-        ] {
+        let mut changed = false;
+        // A column shown but cut for room says so: the window is too narrow for it now.
+        let menu: Vec<String> = available
+            .iter()
+            .map(|column| {
+                let title = column.title();
+                match (
+                    shown.contains(column),
+                    laid.iter().any(|(c, _)| c == column),
+                ) {
+                    (true, true) => format!("Hide {title}"),
+                    (true, false) => format!("Hide {title} (no room for it now)"),
+                    (false, _) => format!("Show {title}"),
+                }
+            })
+            .collect();
+        let origin = Rect::new(line.x + space::S, line.y, 0.0, line.h);
+        for &(column, cell) in laid {
+            let cell = Rect::new(origin.x + cell.x, line.y, cell.w, line.h);
             if cell.w <= 0.0 {
                 continue;
             }
+            let title = column.title();
+            let align = column_align(column);
             let width = ui.gfx.measure(title, SMALL).width;
             let mut color = t.text3.mix(t.text2, 0.5);
-            if let Some(sort) = sort.as_deref_mut() {
-                let id = Id::new(("sftp.sort", title));
-                let response = ui.zone(
-                    id,
-                    cell,
-                    Role::Button,
-                    &format!("Sort by {}", title.to_lowercase()),
-                );
-                if response.clicked {
-                    *sort = (by, sort.0 != by || !sort.1);
-                }
-                if response.focus_ring {
-                    ui.focus_ring(cell, 4.0);
-                }
-                if response.hovered {
-                    color = t.text;
-                    ui.set_cursor(annulus_ui::kit::Cursor::Pointer);
-                }
-                if sort.0 == by {
-                    color = t.text;
-                    let x = match align {
-                        Align::End => cell.r() - width - 14.0,
-                        _ => cell.x + width + 4.0,
-                    };
-                    let arrow = Rect::new(x, cell.center().y - 5.0, 10.0, 10.0);
-                    let icon = if sort.1 {
-                        icons::CHEVRON_UP
-                    } else {
-                        icons::CHEVRON_DOWN
-                    };
-                    ui.gfx.icon(icon, arrow, color);
-                }
+            let id = Id::new(("sftp.sort", side == Side::Local, title));
+            let response = ui.zone(
+                id,
+                cell,
+                Role::Button,
+                &format!("Sort by {}", title.to_lowercase()),
+            );
+            if response.clicked {
+                *sort = (column, sort.0 != column || !sort.1);
             }
-            let text_cell = match (align, sort.as_deref()) {
-                (Align::End, Some(sort)) if sort.0 == by => {
-                    Rect::new(cell.x, cell.y, cell.w - 14.0, cell.h)
+            if let Some(choice) = ui.context_menu(id, &response, &menu)
+                && let Some(column) = available.get(choice)
+            {
+                if let Some(at) = shown.iter().position(|c| c == column) {
+                    shown.remove(at);
+                } else {
+                    // What was asked for last is kept first when room runs short.
+                    shown.insert(0, *column);
                 }
+                changed = true;
+            }
+            if response.focus_ring {
+                ui.focus_ring(cell, 4.0);
+            }
+            if response.hovered {
+                color = t.text;
+                ui.set_cursor(annulus_ui::kit::Cursor::Pointer);
+            }
+            if sort.0 == column {
+                color = t.text;
+                let x = match align {
+                    Align::End => cell.r() - width - 14.0,
+                    _ => cell.x + width + 4.0,
+                };
+                let arrow = Rect::new(x, cell.center().y - 5.0, 10.0, 10.0);
+                let icon = if sort.1 {
+                    icons::CHEVRON_UP
+                } else {
+                    icons::CHEVRON_DOWN
+                };
+                ui.gfx.icon(icon, arrow, color);
+            }
+            let text_cell = match align {
+                Align::End if sort.0 == column => Rect::new(cell.x, cell.y, cell.w - 14.0, cell.h),
                 _ => cell,
             };
-            ui.gfx.text(text_cell, title, SMALL, color, align);
+            let fitted = annulus_ui::gfx::fit_middle(&mut ui.gfx, title, SMALL, text_cell.w);
+            ui.gfx.text(text_cell, &fitted, SMALL, color, align);
         }
         ui.gfx
             .fill_rect(Rect::new(line.x, line.b() - 1.0, line.w, 1.0), 0.0, t.line);
-        row
+        changed
     }
 
-    /// One file row; returns whether it was clicked, double-clicked, its action button
-    /// clicked, and the item of its More menu (`menu`, when not empty) chosen.
+    /// One file row with its columns as `laid` out; returns whether it was clicked,
+    /// double-clicked, its action button clicked, and the item of its menu (More, or a right
+    /// click) chosen. Its buttons come up over its last columns while it is hovered.
     #[allow(clippy::too_many_arguments)] // One row's every part.
     fn file_row(
         ui: &mut Ui<'_>,
         id: Id,
-        row: Rect,
-        (name, is_dir): (&str, bool),
-        size: &str,
-        modified: &str,
+        rect: Rect,
+        row: &Row,
+        laid: &[(Column, Rect)],
         selected: bool,
         action: (IconId, &str),
         menu: &[String],
     ) -> (bool, bool, bool, Option<usize>) {
         let t = ui.theme;
-        let response = ui.zone(id, row, Role::ListItem, name);
+        let response = ui.zone(id, rect, Role::ListItem, &row.name);
         // Still hovered on its own buttons, and while one of its menus is open.
-        let hover = ui.hover_within(row) || ui.menu_open(id.with("more")) || ui.menu_open(id);
+        let hover = ui.hover_within(rect) || ui.menu_open(id.with("more")) || ui.menu_open(id);
         let lit = ui.ease(id.with("lit"), if hover { 1.0 } else { 0.0 });
         let picked = ui.ease(id.with("picked"), if selected { 1.0 } else { 0.0 });
-        ui.gfx
-            .fill_rect(row, 6.0, t.hover.alpha(lit * (1.0 - picked)));
-        ui.gfx.fill_rect(row, 6.0, t.selected.alpha(picked));
-        if response.focus_ring {
-            ui.focus_ring(row, 6.0);
-        }
-        let mut cells = row.inset(space::S, 0.0);
-        let more = cells.take_right(26.0).centered(26.0, 26.0);
-        cells.take_right(space::S);
-        let button = cells.take_right(26.0).centered(26.0, 26.0);
-        cells.take_right(space::S);
-        let (size_w, modified_w) = Self::column_widths(cells.w);
-        let modified_cell = cells.take_right(modified_w);
-        let size_cell = cells.take_right(size_w);
-        let icon = cells.take_left(16.0).centered(16.0, 16.0);
-        ui.gfx.icon(
-            if is_dir { icons::FOLDER } else { icons::FILE },
-            icon,
-            t.text2,
-        );
-        cells.take_left(space::S);
-        // A long name keeps its end: "backup-2026…tar.gz".
-        let shown = annulus_ui::gfx::fit_middle(&mut ui.gfx, name, BODY, cells.w);
-        ui.gfx.text(cells, &shown, BODY, t.text, Align::Start);
-        ui.gfx.text(size_cell, size, SMALL, t.text2, Align::End);
-        if modified_cell.w > 0.0 {
+        let veils = |ui: &mut Ui<'_>, area: Rect| {
             ui.gfx
-                .text(modified_cell, modified, SMALL, t.text2, Align::End);
+                .fill_rect(area, 6.0, t.hover.alpha(lit * (1.0 - picked)));
+            ui.gfx.fill_rect(area, 6.0, t.selected.alpha(picked));
+        };
+        veils(ui, rect);
+        if response.focus_ring {
+            ui.focus_ring(rect, 6.0);
+        }
+        let origin_x = rect.x + space::S;
+        for &(column, cell) in laid {
+            let cell = Rect::new(origin_x + cell.x, rect.y, cell.w, rect.h);
+            if column == Column::Name {
+                let mut cell = cell;
+                let icon = cell.take_left(16.0).centered(16.0, 16.0);
+                let glyph = match row.kind {
+                    annulus_sftp::Kind::Dir | annulus_sftp::Kind::Link { to_dir: true } => {
+                        icons::FOLDER
+                    }
+                    _ => icons::FILE,
+                };
+                ui.gfx.icon(glyph, icon, t.text2);
+                cell.take_left(space::S);
+                // A long name keeps its end: "backup-2026…tar.gz".
+                let shown = annulus_ui::gfx::fit_middle(&mut ui.gfx, &row.name, BODY, cell.w);
+                ui.gfx.text(cell, &shown, BODY, t.text, Align::Start);
+                continue;
+            }
+            let text = row.cell(column);
+            let fitted = annulus_ui::gfx::fit_middle(&mut ui.gfx, &text, SMALL, cell.w);
+            ui.gfx
+                .text(cell, &fitted, SMALL, t.text2, column_align(column));
         }
         let mut acted = false;
         let mut chosen = None;
         // They come up with the row, and stay for the moment it takes them to go.
         let near = lit.max(picked);
         if hover || selected || near > 0.0 {
+            let mut end = rect.inset(space::S, 0.0);
+            let more = end.take_right(26.0).centered(26.0, 26.0);
+            end.take_right(space::XS);
+            let button = end.take_right(26.0).centered(26.0, 26.0);
             ui.push_layer(Layer::fade(near));
-            if !is_dir {
+            // Over the last columns, on the row's own color, so their text does not show
+            // through.
+            let backing = Rect::new(
+                button.x - space::S,
+                rect.y,
+                rect.r() - button.x + space::S,
+                rect.h,
+            );
+            ui.gfx.fill_rect(backing, 6.0, t.surface);
+            veils(ui, backing);
+            if !row.is_dir() {
                 acted = ui
                     .icon_button(id.with("act"), button, action.0, action.1, false)
                     .clicked;
@@ -656,12 +1487,93 @@ impl SftpView {
         (response.clicked, response.double_clicked, acted, chosen)
     }
 
+    /// The inline field for a new folder's name or a new name, over `side`'s listing; Enter or
+    /// Save makes it so.
+    fn edit_line(&mut self, ui: &mut Ui<'_>, side: Side, inner: &mut Rect) {
+        // A rename typed for one folder never applies to the next one (UI review #9).
+        if self.edit_dir != self.folder_of(side) && self.edit.as_ref().is_some_and(|e| e.0 == side)
+        {
+            self.edit = None;
+        }
+        let Some((_, edit)) = self.edit.as_mut().filter(|(at, _)| *at == side) else {
+            return;
+        };
+        let mut line = inner.take_top(CONTROL);
+        let save = line.take_right(80.0);
+        line.take_right(space::S);
+        let (buffer, placeholder) = match edit {
+            Edit::NewFolder(name) => (name, "Folder name"),
+            Edit::Rename { to, .. } => (to, "New name"),
+        };
+        let field_id = Id::new(("sftp.edit", side == Side::Local));
+        let field = ui.text_field(
+            field_id,
+            line,
+            buffer,
+            FieldStyle {
+                placeholder,
+                ..FieldStyle::default()
+            },
+        );
+        let done = ui
+            .button(
+                Id::new(("sftp.edit.save", side == Side::Local)),
+                save,
+                "Save",
+                None,
+                Kind::Primary,
+            )
+            .clicked
+            || field.submitted;
+        inner.take_top(space::S);
+        if done && valid_name(buffer.trim()) {
+            let Some((side, edit)) = self.edit.take() else {
+                return;
+            };
+            match side {
+                Side::Remote => {
+                    let cwd = self.tab.cwd.clone().unwrap_or_default();
+                    let command = match edit {
+                        Edit::NewFolder(name) => Command::CreateDir(join(&cwd, name.trim())),
+                        Edit::Rename { from, to } => {
+                            Command::Rename(join(&cwd, &from), join(&cwd, to.trim()))
+                        }
+                    };
+                    self.tab.send(command);
+                }
+                Side::Local => {
+                    let dir = self.tab.local.dir.clone();
+                    let result = match &edit {
+                        Edit::NewFolder(name) => std::fs::create_dir(dir.join(name.trim())),
+                        Edit::Rename { from, to } => {
+                            let target = dir.join(to.trim());
+                            if target.symlink_metadata().is_ok() && from != to.trim() {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::AlreadyExists,
+                                    "that name is taken",
+                                ))
+                            } else {
+                                std::fs::rename(dir.join(from), target)
+                            }
+                        }
+                    };
+                    if let Err(error) = result {
+                        ui.toast(format!("Could not do that: {error}"), Tone::Problem);
+                    }
+                    if let Edit::Rename { to, .. } = edit {
+                        self.local_selected = Some(to.trim().to_owned());
+                    }
+                }
+            }
+        } else if ui.key(Key::Escape, Modifiers::NONE) {
+            self.edit = None;
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // One pane, top to bottom.
     fn local_pane(&mut self, ui: &mut Ui<'_>, rect: Rect) {
         let dir = self.tab.local.dir.clone();
-        let home = directories::BaseDirs::new()
-            .map(|dirs| dirs.home_dir().display().to_string())
-            .unwrap_or_default();
+        let home = home_dir();
         let mut inner = Self::pane_frame(
             ui,
             rect,
@@ -671,6 +1583,8 @@ impl SftpView {
         );
         let mut bar = inner.take_top(CONTROL);
         let up = bar.take_left(CONTROL);
+        bar.take_left(4.0);
+        let make = bar.take_left(CONTROL);
         if ui
             .icon_button(
                 Id::new("sftp.local.up"),
@@ -685,6 +1599,19 @@ impl SftpView {
             self.tab.local.dir = parent.to_path_buf();
             self.local_selected = None;
         }
+        if ui
+            .icon_button(
+                Id::new("sftp.local.mkdir"),
+                make,
+                icons::PLUS,
+                "New folder on this computer",
+                false,
+            )
+            .clicked
+        {
+            self.start_edit(Side::Local, None);
+        }
+        ui.tooltip(Id::new("sftp.local.mkdir"), make, "New folder");
         // A filter like the host's pane has, so the two lists line up.
         inner.take_top(space::S);
         ui.text_field(
@@ -698,80 +1625,111 @@ impl SftpView {
             },
         );
         inner.take_top(space::S);
-        let list = Self::header_row(ui, inner, None);
+        self.edit_line(ui, Side::Local, &mut inner);
         let filter = self.local_filter.trim().to_lowercase();
-        let entries: Vec<_> = read_dir(&self.tab.local.dir, self.tab.show_hidden)
+        let entries = read_dir(&self.tab.local.dir, self.tab.show_hidden);
+        let read_error = entries.as_ref().err().map(ToString::to_string);
+        let mut rows: Vec<Row> = entries
             .unwrap_or_default()
-            .into_iter()
-            .filter(|entry| filter.is_empty() || entry.name.to_lowercase().contains(&filter))
+            .iter()
+            .map(crate::local_pane::LocalEntry::row)
+            .filter(|row| filter.is_empty() || row.name.to_lowercase().contains(&filter))
             .collect();
-        #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.
-        let content = entries.len() as f32 * ROW;
-        let offset = ui.scroll_view(Id::new("sftp.local.scroll"), list, content);
-        ui.push_list_clip(list, offset, content, FOCUS_REACH);
-        let mut open = None;
-        let mut upload = None;
-        for (index, entry) in entries.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)] // As above.
-            let y = list.y - offset + index as f32 * ROW;
-            if y + ROW < list.y || y > list.b() {
-                continue;
-            }
-            let row = Rect::new(list.x, y, list.w - 10.0, ROW);
-            let size = if entry.is_dir {
-                String::new()
+        sort_rows(&mut rows, self.local_sort.0, self.local_sort.1);
+        let empty = if let Some(error) = &read_error {
+            Some(format!("Cannot read this folder: {error}"))
+        } else if rows.is_empty() && !filter.is_empty() {
+            Some(format!(
+                "Nothing here matches \u{201c}{}\u{201d}.",
+                self.local_filter.trim()
+            ))
+        } else if rows.is_empty() {
+            Some("This folder is empty.".to_owned())
+        } else {
+            None
+        };
+        let listed = self.listing(ui, Side::Local, inner, &rows, empty.as_deref());
+        let shown_dir = self.tab.local.dir.clone();
+        let path_of = |name: &str| shown_dir.join(name);
+        let is_dir = |name: &str| rows.iter().any(|row| row.name == name && row.is_dir());
+        if let Some((name, at)) = &listed.drag {
+            self.drag = Some((Dragged::Local(path_of(name)), *at));
+        }
+        if let Some((name, at)) = &listed.released {
+            self.dropped = Some((Dragged::Local(path_of(name)), *at));
+        }
+        // A folder opens; a file goes up.
+        if let Some(name) = &listed.double {
+            if is_dir(name) {
+                self.tab.local.dir = path_of(name);
+                self.local_selected = None;
             } else {
-                human_size(entry.size)
-            };
-            let modified = entry.modified.map(format_time).unwrap_or_default();
-            // A folder opens or goes up whole; a file goes up.
-            let menu: Vec<String> = if entry.is_dir {
-                vec!["Open".into(), "Upload to the host".into()]
-            } else {
-                vec!["Upload to the host".into()]
-            };
-            let (clicked, double, mut acted, chosen) = Self::file_row(
-                ui,
-                Id::new(("local", entry.name.as_str())),
-                row,
-                (&entry.name, entry.is_dir),
-                &size,
-                &modified,
-                self.local_selected.as_deref() == Some(entry.name.as_str()),
-                (icons::UPLOAD, "Upload to the host"),
-                &menu,
-            );
-            if clicked {
-                self.local_selected = Some(entry.name.clone());
-            }
-            let mut double = double;
-            match chosen {
-                Some(0) if entry.is_dir => double = true,
-                Some(_) => acted = true,
-                None => {}
-            }
-            // A file or a whole folder.
-            let id = Id::new(("local", entry.name.as_str()));
-            let path = self.tab.local.dir.join(&entry.name);
-            if let Some(at) = ui.drag_moved(id) {
-                self.drag = Some((Dragged::Local(path.clone()), at));
-            }
-            if let Some(at) = ui.drag_released(id) {
-                self.dropped = Some((Dragged::Local(path), at));
-            }
-            if double && entry.is_dir {
-                open = Some(entry.name.clone());
-            } else if (double && !entry.is_dir) || acted {
-                upload = Some(self.tab.local.dir.join(&entry.name));
+                self.send_up(path_of(name));
             }
         }
-        ui.pop_clip();
-        if let Some(name) = open {
-            self.tab.local.dir = self.tab.local.dir.join(name);
-            self.local_selected = None;
+        if let Some(name) = &listed.acted {
+            self.send_up(path_of(name));
         }
-        if let Some(path) = upload {
-            self.tab.upload(path);
+        if let Some((name, item)) = listed.choice {
+            let path = path_of(&name);
+            match item.as_str() {
+                OPEN if is_dir(&name) => {
+                    self.tab.local.dir = path;
+                    self.local_selected = None;
+                }
+                OPEN => {
+                    if let Err(error) = platform::open_path(&path) {
+                        ui.toast(format!("Could not open {name}: {error}"), Tone::Problem);
+                    }
+                }
+                UPLOAD => self.send_up(path),
+                RENAME => self.start_edit(Side::Local, Some(name)),
+                COPY_PATH => ui.copy(path.display().to_string()),
+                PROPERTIES => {
+                    if let Some(row) = rows.iter().find(|row| row.name == name) {
+                        let lines = local_properties(&path, row);
+                        self.open_card(Dialog::LocalProperties(lines));
+                    }
+                }
+                NEW_FOLDER => self.start_edit(Side::Local, None),
+                REFRESH => self.tab.local.refresh(self.tab.show_hidden),
+                DELETE => self.ask_delete_local(&name),
+                _ if item.starts_with(SHOW_IN) => {
+                    if let Err(error) = platform::reveal_path(&path) {
+                        ui.toast(format!("Could not show {name}: {error}"), Tone::Problem);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(item) = listed.folder_choice {
+            self.folder_action(ui, Side::Local, &item);
+        }
+    }
+
+    /// What the empty space's menu item `item` does in `side`'s folder.
+    fn folder_action(&mut self, ui: &mut Ui<'_>, side: Side, item: &str) {
+        match item {
+            NEW_FOLDER => self.start_edit(side, None),
+            REFRESH => match side {
+                Side::Local => self.tab.local.refresh(self.tab.show_hidden),
+                Side::Remote => self.tab.reload(),
+            },
+            COPY_PATH => {
+                let path = self.folder_of(side);
+                ui.copy(path);
+            }
+            SHOW_HIDDEN | HIDE_HIDDEN => {
+                self.tab.show_hidden = !self.tab.show_hidden;
+                self.tab.reload();
+                self.tab.local.refresh(self.tab.show_hidden);
+            }
+            _ if item.starts_with(SHOW_IN) => {
+                if let Err(error) = platform::open_path(&self.tab.local.dir) {
+                    ui.toast(format!("Could not open the folder: {error}"), Tone::Problem);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -840,8 +1798,7 @@ impl SftpView {
             clicked
         };
         if make {
-            self.edit = Some(Edit::NewFolder(String::new()));
-            self.edit_dir.clone_from(&cwd);
+            self.start_edit(Side::Remote, None);
         }
         let kind = if self.tab.show_hidden {
             Kind::Secondary
@@ -858,10 +1815,16 @@ impl SftpView {
         }
         inner.take_top(space::S);
         let mut options = inner.take_top(CONTROL);
-        let conflicts = [Conflict::KeepBoth, Conflict::Overwrite, Conflict::Skip];
-        let names: Vec<String> = conflicts
+        // Asking first, then the fixed answers.
+        let policies = [
+            None,
+            Some(Conflict::KeepBoth),
+            Some(Conflict::Overwrite),
+            Some(Conflict::Skip),
+        ];
+        let names: Vec<String> = policies
             .iter()
-            .map(|choice| conflict_name(*choice).to_owned())
+            .map(|policy| policy.map_or(ASK_NAME, conflict_name).to_owned())
             .collect();
         let widest = names
             .iter()
@@ -879,9 +1842,8 @@ impl SftpView {
                 ..FieldStyle::default()
             },
         );
-        let at = conflicts
-            .iter()
-            .position(|choice| *choice == self.tab.conflict);
+        let current = (!self.tab.ask_on_clash).then_some(self.tab.conflict);
+        let at = policies.iter().position(|policy| *policy == current);
         if let Some(chosen) = ui.select(
             Id::new("sftp.conflict"),
             conflict,
@@ -889,48 +1851,16 @@ impl SftpView {
             at,
             "Existing files",
         ) {
-            self.tab.conflict = conflicts[chosen];
+            match policies[chosen] {
+                None => self.tab.ask_on_clash = true,
+                Some(policy) => {
+                    self.tab.ask_on_clash = false;
+                    self.tab.conflict = policy;
+                }
+            }
         }
         inner.take_top(space::S);
-        // A rename typed for one folder never applies to the next one (UI review #9).
-        if self.edit_dir != cwd {
-            self.edit = None;
-        }
-        if let Some(edit) = &mut self.edit {
-            let mut line = inner.take_top(CONTROL);
-            let save = line.take_right(80.0);
-            line.take_right(space::S);
-            let (buffer, placeholder) = match edit {
-                Edit::NewFolder(name) => (name, "Folder name"),
-                Edit::Rename { to, .. } => (to, "New name"),
-            };
-            let field = ui.text_field(
-                Id::new("sftp.edit"),
-                line,
-                buffer,
-                FieldStyle {
-                    placeholder,
-                    ..FieldStyle::default()
-                },
-            );
-            let done = ui
-                .button(Id::new("sftp.edit.save"), save, "Save", None, Kind::Primary)
-                .clicked
-                || field.submitted;
-            if done && valid_name(buffer.trim()) {
-                let command = match edit {
-                    Edit::NewFolder(name) => Command::CreateDir(join(&cwd, name.trim())),
-                    Edit::Rename { from, to } => {
-                        Command::Rename(join(&cwd, from), join(&cwd, to.trim()))
-                    }
-                };
-                self.tab.send(command);
-                self.edit = None;
-            } else if ui.key(Key::Escape, Modifiers::NONE) {
-                self.edit = None;
-            }
-            inner.take_top(space::S);
-        }
+        self.edit_line(ui, Side::Remote, &mut inner);
         if let Some(message) = self
             .tab
             .list_error
@@ -940,20 +1870,19 @@ impl SftpView {
             ui.gfx
                 .text(inner.take_top(20.0), &message, SMALL, t.error, Align::Start);
         }
-        let list = Self::header_row(ui, inner, Some(&mut self.tab.sort));
         let filter = self.tab.filter.trim().to_lowercase();
-        let mut entries: Vec<Entry> = self
+        let mut rows: Vec<Row> = self
             .tab
             .entries
             .iter()
             .filter(|entry| self.tab.show_hidden || !entry.name.starts_with('.'))
             .filter(|entry| filter.is_empty() || entry.name.to_lowercase().contains(&filter))
-            .cloned()
+            .map(|entry| Row::remote(entry, &self.tab.owners))
             .collect();
-        sort_entries(&mut entries, self.tab.sort.0, self.tab.sort.1);
+        sort_rows(&mut rows, self.tab.sort.0, self.tab.sort.1);
         // An empty listing says why: nothing there, only hidden files, or nothing matches.
-        if entries.is_empty() && self.tab.cwd.is_some() {
-            let why = if !filter.is_empty() {
+        let empty = (rows.is_empty() && self.tab.cwd.is_some()).then(|| {
+            if !filter.is_empty() {
                 format!(
                     "Nothing here matches \u{201c}{}\u{201d}.",
                     self.tab.filter.trim()
@@ -962,121 +1891,53 @@ impl SftpView {
                 "This folder is empty.".to_owned()
             } else {
                 "Only hidden files here; Hidden files shows them.".to_owned()
-            };
-            let line = Rect::new(list.x, list.y + space::XL, list.w, 20.0);
-            ui.gfx.text(line, &why, BODY, t.text2, Align::Center);
-        }
-        #[allow(clippy::cast_precision_loss)] // Folders hold thousands at most.
-        let content = entries.len() as f32 * ROW;
-        let offset = ui.scroll_view(Id::new("sftp.remote.scroll"), list, content);
-        ui.push_list_clip(list, offset, content, FOCUS_REACH);
-        let mut open = None;
-        let mut download = None;
-        let mut card = None;
-        let mut rename = None;
-        let file_menu: Vec<String> = [
-            "Download",
-            "Rename",
-            "Permissions\u{2026}",
-            "Properties",
-            "Delete",
-        ]
-        .map(str::to_owned)
-        .to_vec();
-        let dir_menu: Vec<String> = [
-            "Open",
-            "Rename",
-            "Permissions\u{2026}",
-            "Properties",
-            "Delete",
-        ]
-        .map(str::to_owned)
-        .to_vec();
-        for (index, entry) in entries.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)] // As above.
-            let y = list.y - offset + index as f32 * ROW;
-            if y + ROW < list.y || y > list.b() {
-                continue;
             }
-            let row = Rect::new(list.x, y, list.w - 10.0, ROW);
-            let size = if entry.is_dir() {
-                String::new()
-            } else {
-                human_size(entry.size)
-            };
-            let modified = entry.modified.map(format_time).unwrap_or_default();
-            let menu = if entry.is_dir() {
-                &dir_menu
-            } else {
-                &file_menu
-            };
-            let (clicked, double, acted, chosen) = Self::file_row(
-                ui,
-                Id::new(("remote", entry.name.as_str())),
-                row,
-                (&entry.name, entry.is_dir()),
-                &size,
-                &modified,
-                self.remote_selected.as_deref() == Some(entry.name.as_str()),
-                (icons::DOWNLOAD, "Download to this computer"),
-                menu,
-            );
-            match chosen.and_then(|at| menu.get(at)).map(String::as_str) {
-                Some("Open") => open = Some(join(&cwd, &entry.name)),
-                Some("Download") => download = Some(entry.clone()),
-                Some("Rename") => rename = Some(entry.name.clone()),
-                Some("Delete") => card = Some(Dialog::Delete(entry.clone())),
-                Some("Properties") => card = Some(Dialog::Properties(entry.clone())),
-                Some(_) => card = Some(Dialog::permissions(entry)),
-                None => {}
-            }
-            if clicked {
-                self.remote_selected = Some(entry.name.clone());
-            }
-            // A file or a whole folder.
-            let id = Id::new(("remote", entry.name.as_str()));
-            if let Some(at) = ui.drag_moved(id) {
-                self.drag = Some((Dragged::Remote(entry.clone()), at));
-            }
-            if let Some(at) = ui.drag_released(id) {
-                self.dropped = Some((Dragged::Remote(entry.clone()), at));
-            }
-            if double && entry.is_dir() {
-                open = Some(join(&cwd, &entry.name));
-            } else if (double && !entry.is_dir()) || acted {
-                download = Some(entry.clone());
-            }
-        }
-        ui.pop_clip();
-        if let Some(dir) = open {
-            self.remote_selected = None;
-            self.tab.navigate(dir);
-        }
-        if let Some(entry) = download {
-            self.tab.download(&entry);
-        }
-        if let Some(name) = self.remote_selected.clone()
-            && self.tab.dialog.is_none()
+        });
+        let listed = self.listing(ui, Side::Remote, inner, &rows, empty.as_deref());
+        let entries = self.tab.entries.clone();
+        let entry_of = |name: &str| entries.iter().find(|entry| entry.name == name).cloned();
+        if let Some((name, at)) = &listed.drag
+            && let Some(entry) = entry_of(name)
         {
-            if ui.key(Key::F(2), Modifiers::NONE) {
-                rename = Some(name.clone());
-            }
-            // Delete asks first: it cannot be undone.
-            if ui.key(Key::Delete, Modifiers::NONE)
-                && let Some(entry) = self.tab.entries.iter().find(|entry| entry.name == name)
-            {
-                card = Some(Dialog::Delete(entry.clone()));
+            self.drag = Some((Dragged::Remote(entry), *at));
+        }
+        if let Some((name, at)) = &listed.released
+            && let Some(entry) = entry_of(name)
+        {
+            self.dropped = Some((Dragged::Remote(entry), *at));
+        }
+        if let Some(entry) = listed.double.as_deref().and_then(entry_of) {
+            if entry.is_dir() {
+                self.remote_selected = None;
+                self.tab.navigate(join(&cwd, &entry.name));
+            } else {
+                self.send_down(entry);
             }
         }
-        if let Some(name) = rename {
-            self.edit = Some(Edit::Rename {
-                from: name.clone(),
-                to: name,
-            });
-            self.edit_dir = self.tab.cwd.clone().unwrap_or_default();
+        if let Some(entry) = listed.acted.as_deref().and_then(entry_of) {
+            self.send_down(entry);
         }
-        if let Some(card) = card {
-            self.open_card(card);
+        if let Some((name, item)) = listed.choice
+            && let Some(entry) = entry_of(&name)
+        {
+            match item.as_str() {
+                OPEN => {
+                    self.remote_selected = None;
+                    self.tab.navigate(join(&cwd, &entry.name));
+                }
+                DOWNLOAD => self.send_down(entry),
+                RENAME => self.start_edit(Side::Remote, Some(entry.name)),
+                PERMISSIONS => self.open_card(Dialog::permissions(&entry)),
+                PROPERTIES => self.open_card(Dialog::Properties(entry)),
+                COPY_PATH => ui.copy(join(&cwd, &entry.name)),
+                NEW_FOLDER => self.start_edit(Side::Remote, None),
+                REFRESH => self.tab.reload(),
+                DELETE => self.open_card(Dialog::Delete(entry)),
+                _ => {}
+            }
+        }
+        if let Some(item) = listed.folder_choice {
+            self.folder_action(ui, Side::Remote, &item);
         }
     }
 
@@ -1290,6 +2151,17 @@ impl SftpView {
         }
     }
 
+    /// README.md dragged up where the host has one, and app.log waiting behind it, for the
+    /// scenes.
+    #[cfg(test)]
+    pub fn demo_clash(&mut self) {
+        for name in ["README.md", "app.log"] {
+            let path = self.tab.local.dir.join(name);
+            std::fs::write(&path, "mine").expect("a temporary file");
+            self.send_up(path);
+        }
+    }
+
     /// Transfers in each state, for the scenes.
     #[cfg(test)]
     pub fn demo_transfers(&mut self) {
@@ -1375,6 +2247,297 @@ fn destination(transfer: &crate::sftp_view::Transfer, home: &str) -> String {
         (_, Recipe::Download { to, .. } | Recipe::DownloadTree { to, .. }) => local(to),
         (_, Recipe::Upload { dir, .. } | Recipe::UploadTree { dir, .. }) => dir.clone(),
     }
+}
+
+/// The panes a drag may land in: the other one for a row (`row`); for files from the OS
+/// (`os`: where they are, when the OS says) either pane, or only the host's when the OS does not
+/// say, since a drop there uploads.
+fn drop_targets(row: Option<&(Dragged, Point)>, os: FromOs) -> Vec<Side> {
+    match (row, os) {
+        (Some((Dragged::Local(_), _)), _) | (None, FromOs::Somewhere) => vec![Side::Remote],
+        (Some((Dragged::Remote(_), _)), _) => vec![Side::Local],
+        (None, FromOs::At(_)) => vec![Side::Local, Side::Remote],
+        (None, FromOs::No) => Vec::new(),
+    }
+}
+
+/// Files dragged in from the OS: none, over a point, or somewhere the OS does not say.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FromOs {
+    No,
+    At(Point),
+    Somewhere,
+}
+
+/// What one listing reported this frame, by entry name.
+#[derive(Default)]
+struct Listed {
+    clicked: Option<String>,
+    double: Option<String>,
+    /// Its action button (upload or download).
+    acted: Option<String>,
+    /// An item of its menu: the entry's name and the item.
+    choice: Option<(String, String)>,
+    drag: Option<(String, Point)>,
+    released: Option<(String, Point)>,
+    /// An item of the empty space's menu.
+    folder_choice: Option<String>,
+}
+
+const OPEN: &str = "Open";
+const DOWNLOAD: &str = "Download";
+const UPLOAD: &str = "Upload to the host";
+const RENAME: &str = "Rename";
+const PERMISSIONS: &str = "Permissions\u{2026}";
+const PROPERTIES: &str = "Properties";
+const COPY_PATH: &str = "Copy path";
+const NEW_FOLDER: &str = "New folder";
+const REFRESH: &str = "Refresh";
+const DELETE: &str = "Delete";
+const SHOW_IN: &str = "Show in ";
+const SHOW_HIDDEN: &str = "Show hidden files";
+const HIDE_HIDDEN: &str = "Hide hidden files";
+
+/// "Show in Explorer", "Show in Finder" or "Show in the file manager".
+fn show_in() -> String {
+    format!("{SHOW_IN}{}", platform::file_manager_name())
+}
+
+/// The menu of an entry in `side`'s listing: what a file manager offers, then the folder's
+/// own items, Delete last.
+fn row_menu(side: Side, folder: bool) -> Vec<String> {
+    let items: Vec<String> = match side {
+        Side::Remote => {
+            let first = if folder {
+                vec![OPEN, DOWNLOAD]
+            } else {
+                vec![DOWNLOAD]
+            };
+            first
+                .into_iter()
+                .chain([
+                    RENAME,
+                    PERMISSIONS,
+                    PROPERTIES,
+                    COPY_PATH,
+                    NEW_FOLDER,
+                    REFRESH,
+                    DELETE,
+                ])
+                .map(str::to_owned)
+                .collect()
+        }
+        Side::Local => [OPEN.to_owned(), UPLOAD.to_owned(), show_in()]
+            .into_iter()
+            .chain([RENAME, COPY_PATH, PROPERTIES, NEW_FOLDER, REFRESH, DELETE].map(str::to_owned))
+            .collect(),
+    };
+    items
+}
+
+/// The menu of the empty space in `side`'s listing.
+fn folder_menu(side: Side, hidden_shown: bool) -> Vec<String> {
+    let hidden = if hidden_shown {
+        HIDE_HIDDEN
+    } else {
+        SHOW_HIDDEN
+    };
+    let mut items: Vec<String> = [NEW_FOLDER, REFRESH, COPY_PATH, hidden]
+        .map(str::to_owned)
+        .to_vec();
+    if side == Side::Local {
+        items.insert(2, show_in());
+    }
+    items
+}
+
+/// The columns `side` can fill: the host says no creation time, and Windows keeps no Unix
+/// owner or group.
+fn available_columns(side: Side) -> Vec<Column> {
+    Column::OPTIONAL
+        .into_iter()
+        .filter(|column| match side {
+            Side::Remote => *column != Column::Created,
+            Side::Local => cfg!(unix) || !matches!(column, Column::Owner | Column::Group),
+        })
+        .collect()
+}
+
+/// How wide `column` is, its gap after it included.
+fn column_width(column: Column) -> f32 {
+    match column {
+        Column::Name => 0.0,
+        Column::Size => 76.0,
+        Column::Type => 100.0,
+        Column::Owner | Column::Group => 84.0,
+        Column::Permissions => 104.0,
+        Column::Modified | Column::Accessed | Column::Created => 124.0,
+    }
+}
+
+fn column_align(column: Column) -> Align {
+    if column == Column::Size {
+        Align::End
+    } else {
+        Align::Start
+    }
+}
+
+/// The cells of a listing whose rows are `width` wide: Name first, then those of `shown` the
+/// pane fills (`available`), left to right, each as `(column, x and width from the row's
+/// start)`. Name keeps at least a third, so when room runs short the columns last in `shown`
+/// are cut first (the user's newest choice is first in it).
+fn lay_out(shown: &[Column], available: &[Column], width: f32) -> Vec<(Column, Rect)> {
+    let mut room = width - (width * 0.34).max(140.0);
+    let mut kept = Vec::new();
+    for &column in shown {
+        let wide = column_width(column);
+        if column != Column::Name && available.contains(&column) && wide <= room {
+            room -= wide;
+            kept.push(column);
+        }
+    }
+    let used: f32 = kept.iter().map(|column| column_width(*column)).sum();
+    let name = (width - used).max(0.0);
+    let mut laid = vec![(Column::Name, Rect::new(0.0, 0.0, name - space::S, 0.0))];
+    let mut x = name;
+    for column in Column::OPTIONAL {
+        if kept.contains(&column) {
+            let wide = column_width(column);
+            laid.push((column, Rect::new(x, 0.0, wide - space::S, 0.0)));
+            x += wide;
+        }
+    }
+    laid
+}
+
+/// The last part of `path`.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// This computer's home folder, for `~`.
+fn home_dir() -> String {
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().display().to_string())
+        .unwrap_or_default()
+}
+
+/// What files dragged in are called on a badge: the one's name, or how many.
+fn items_named(paths: &[PathBuf]) -> String {
+    match paths {
+        [one] => file_name(one),
+        many => format!("{} items", many.len()),
+    }
+}
+
+/// "12.3 KiB · 2026-11-01 10:22" (a folder: "Folder · …").
+fn facts(folder: bool, size: u64, modified: Option<u32>) -> String {
+    let what = if folder {
+        "Folder".to_owned()
+    } else {
+        human_size(size)
+    };
+    match modified {
+        Some(at) => format!("{what} \u{b7} modified {}", format_time(at)),
+        None => what,
+    }
+}
+
+/// [`facts`] of a file or folder on this computer.
+fn local_facts(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|since| u32::try_from(since.as_secs()).ok());
+            facts(meta.is_dir(), meta.len(), modified)
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// The names in `dir` on this computer, hidden ones too.
+fn local_names(dir: &Path) -> HashSet<String> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `name` with a number, as Keep both names it, that none of `taken` has.
+fn free_name(name: &str, taken: &HashSet<String>) -> String {
+    (1..1000)
+        .map(|n| keep_both_name(name, n))
+        .find(|candidate| !taken.contains(candidate))
+        .unwrap_or_else(|| name.to_owned())
+}
+
+/// Copies `from` (a file, or a folder with everything in it) to `to` on this computer. Links
+/// are passed over, never followed. A file already at a target stays unless `replace`; a
+/// replaced one goes only once the whole new copy is there, so a failed copy loses nothing.
+fn copy_into(from: &Path, to: &Path, replace: bool) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_into(&entry.path(), &to.join(entry.file_name()), replace)?;
+        }
+        return Ok(());
+    }
+    if meta.file_type().is_symlink() || (to.symlink_metadata().is_ok() && !replace) {
+        return Ok(());
+    }
+    let part = to.with_file_name(format!(".{}.annulus-part", file_name(to)));
+    std::fs::copy(from, &part)?;
+    std::fs::rename(&part, to).inspect_err(|_| {
+        let _ = std::fs::remove_file(&part);
+    })
+}
+
+/// The Properties card's lines for `row`, at `path` on this computer.
+fn local_properties(path: &Path, row: &Row) -> Vec<(&'static str, String)> {
+    let mut lines = vec![
+        ("Name", row.name.clone()),
+        ("Path", path.display().to_string()),
+        ("Kind", row.cell(Column::Type)),
+    ];
+    if !row.is_dir() {
+        lines.push((
+            "Size",
+            format!("{} ({} bytes)", human_size(row.size), row.size),
+        ));
+    }
+    for (label, column) in [
+        ("Modified", Column::Modified),
+        ("Created", Column::Created),
+        ("Accessed", Column::Accessed),
+        ("Permissions", Column::Permissions),
+    ] {
+        let value = row.cell(column);
+        if !value.is_empty() {
+            lines.push((label, value));
+        }
+    }
+    if let Some(owner) = &row.owner {
+        let group = row
+            .group
+            .as_ref()
+            .map(|group| format!(", group {group}"))
+            .unwrap_or_default();
+        lines.push(("Owner", format!("{owner}{group}")));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -1508,9 +2671,23 @@ mod tests {
         // Choosing from it acts like the More menu: Download starts the download.
         let zones = frame(&mut view, &mut state, &click(&zones, "Download"), 2.0);
         assert_eq!(view.tab.transfers.len(), 1);
-        // On this computer: a file goes up.
+        // On this computer: what a file manager offers, and up to the host.
         let zones = frame(&mut view, &mut state, &right_click(&zones, "todo.txt"), 3.0);
-        assert_eq!(items(&zones), ["Upload to the host"]);
+        let menu = items(&zones);
+        for item in [
+            "Open",
+            "Upload to the host",
+            "Rename",
+            "Copy path",
+            "Properties",
+            "Delete",
+        ] {
+            assert!(menu.contains(&item.to_owned()), "{item} in {menu:?}");
+        }
+        assert!(
+            menu.iter().any(|item| item.starts_with("Show in ")),
+            "{menu:?}"
+        );
         frame(
             &mut view,
             &mut state,
@@ -1518,6 +2695,329 @@ mod tests {
             4.0,
         );
         assert_eq!(view.tab.transfers.len(), 2);
+    }
+
+    /// The labels of `view`'s transfers.
+    fn labels(view: &SftpView) -> Vec<String> {
+        view.tab
+            .transfers
+            .iter()
+            .map(|transfer| transfer.label.clone())
+            .collect()
+    }
+
+    /// The name and policy a transfer's recipe lands with.
+    fn landing(view: &SftpView, at: usize) -> (Option<String>, Conflict) {
+        use crate::sftp_view::Recipe;
+        match &view.tab.transfers[at].recipe {
+            Recipe::Upload { name, conflict, .. }
+            | Recipe::UploadTree { name, conflict, .. }
+            | Recipe::Download { name, conflict, .. }
+            | Recipe::DownloadTree { name, conflict, .. } => (name.clone(), *conflict),
+        }
+    }
+
+    #[test]
+    fn a_name_taken_where_a_file_goes_asks_to_skip_replace_or_rename_it() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("clash"));
+        // The host has README.md already; so does this computer have deploy.sh.
+        std::fs::write(view.tab.local.dir.join("README.md"), "mine").unwrap();
+        std::fs::write(view.tab.local.dir.join("deploy.sh"), "mine").unwrap();
+        let mut state = UiState::default();
+        drag(&mut view, &mut state, "README.md", "app.log", 0.0);
+        assert!(
+            view.tab.transfers.is_empty(),
+            "nothing goes before the answer"
+        );
+        let zones = frame(&mut view, &mut state, &[], 1.0);
+        for button in ["Skip", "Replace", "Rename"] {
+            assert!(zones.iter().any(|zone| zone.label == button), "{button}");
+        }
+        // Rename keeps both, under a free name to start with.
+        assert_eq!(view.clashes[0].rename, "README (1).md");
+        frame(&mut view, &mut state, &click(&zones, "Rename"), 2.0);
+        assert_eq!(labels(&view), ["\u{2191} README (1).md"]);
+        assert_eq!(
+            landing(&view, 0),
+            (Some("README (1).md".into()), Conflict::KeepBoth)
+        );
+        // Replace sends it under its own name, over what is there.
+        drag(&mut view, &mut state, "README.md", "app.log", 3.0);
+        let zones = frame(&mut view, &mut state, &[], 4.0);
+        frame(&mut view, &mut state, &click(&zones, "Replace"), 5.0);
+        assert_eq!(landing(&view, 1), (None, Conflict::Overwrite));
+        // Skip sends nothing.
+        drag(&mut view, &mut state, "README.md", "app.log", 6.0);
+        let zones = frame(&mut view, &mut state, &[], 7.0);
+        frame(&mut view, &mut state, &click(&zones, "Skip"), 8.0);
+        assert_eq!(view.tab.transfers.len(), 2);
+        assert!(view.clashes.is_empty());
+        // A download onto a name taken on this computer asks the same (deploy.sh is in both
+        // panes now, so it is sent as its Download item would).
+        let host_copy = view
+            .tab
+            .entries
+            .iter()
+            .find(|e| e.name == "deploy.sh")
+            .cloned();
+        view.send_down(host_copy.unwrap());
+        assert!(view.clashes.len() == 1 && view.tab.transfers.len() == 2);
+        // A name typed for Rename that is taken too is refused.
+        view.clashes[0].rename = "todo.txt".into();
+        let zones = frame(&mut view, &mut state, &[], 10.0);
+        frame(&mut view, &mut state, &click(&zones, "Rename"), 11.0);
+        assert_eq!(view.clashes.len(), 1, "still asking");
+        // Without asking, the tab's policy decides as before.
+        view.clashes.clear();
+        view.tab.ask_on_clash = false;
+        drag(&mut view, &mut state, "README.md", "app.log", 12.0);
+        assert_eq!(view.tab.transfers.len(), 3);
+        assert_eq!(landing(&view, 2), (None, Conflict::KeepBoth));
+    }
+
+    #[test]
+    fn one_answer_can_go_for_every_clash_waiting() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("clash-all"));
+        let dir = view.tab.local.dir.clone();
+        for name in ["README.md", "app.log"] {
+            std::fs::write(dir.join(name), "mine").unwrap();
+        }
+        let mut state = UiState::default();
+        frame(&mut view, &mut state, &[], 0.0);
+        let dropped = annulus_ui::kit::Event::FilesDropped(
+            vec![
+                dir.join("README.md"),
+                dir.join("app.log"),
+                dir.join("todo.txt"),
+            ],
+            None,
+        );
+        frame(&mut view, &mut state, &[dropped], 1.0);
+        assert_eq!(labels(&view), ["\u{2191} todo.txt"], "no clash: it goes");
+        let zones = frame(&mut view, &mut state, &[], 2.0);
+        let all = "Do the same for the 1 other waiting";
+        let zones = frame(&mut view, &mut state, &click(&zones, all), 3.0);
+        frame(&mut view, &mut state, &click(&zones, "Rename"), 4.0);
+        assert_eq!(
+            labels(&view),
+            [
+                "\u{2191} todo.txt",
+                "\u{2191} README (1).md",
+                "\u{2191} app (1).log"
+            ],
+            "each takes a free name of its own"
+        );
+        assert!(view.clashes.is_empty());
+    }
+
+    #[test]
+    fn files_from_the_os_let_go_over_this_computer_are_copied_into_its_folder() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("copy-in"));
+        let source = crate::native::demo::scratch("sftp", "copy-in-source");
+        let _ = std::fs::remove_dir_all(&source);
+        std::fs::create_dir_all(source.join("photos")).unwrap();
+        std::fs::write(source.join("photos/cat.jpg"), "meow").unwrap();
+        std::fs::write(source.join("todo.txt"), "theirs").unwrap();
+        let mut state = UiState::default();
+        let zones = frame(&mut view, &mut state, &[], 0.0);
+        let here = zones
+            .iter()
+            .find(|zone| zone.label == "backup.tar.gz")
+            .unwrap()
+            .rect
+            .center();
+        let dropped = annulus_ui::kit::Event::FilesDropped(
+            vec![source.join("photos"), source.join("todo.txt")],
+            Some(here),
+        );
+        frame(&mut view, &mut state, &[dropped], 1.0);
+        assert!(view.tab.transfers.is_empty(), "nothing goes to the host");
+        // todo.txt is here already: it asks; the folder is copied meanwhile.
+        assert_eq!(view.clashes.len(), 1);
+        let zones = frame(&mut view, &mut state, &[], 2.0);
+        frame(&mut view, &mut state, &click(&zones, "Replace"), 3.0);
+        let dir = view.tab.local.dir.clone();
+        let started = std::time::Instant::now();
+        while std::fs::read_to_string(dir.join("todo.txt")).unwrap() != "theirs"
+            || !dir.join("photos/cat.jpg").exists()
+        {
+            assert!(started.elapsed().as_secs() < 10, "the copies never landed");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("photos/cat.jpg")).unwrap(),
+            "meow"
+        );
+        assert!(
+            !local_names(&dir)
+                .iter()
+                .any(|name| name.ends_with(".annulus-part")),
+            "no part file is left"
+        );
+    }
+
+    #[test]
+    fn a_drag_offers_the_panes_that_take_it() {
+        let row = |dragged| Some((dragged, Point::new(1.0, 1.0)));
+        let local = Dragged::Local(PathBuf::from("a.txt"));
+        let remote = Dragged::Remote(Entry {
+            name: "b.txt".into(),
+            kind: annulus_sftp::Kind::File,
+            size: 1,
+            modified: None,
+            permissions: None,
+            uid: None,
+            gid: None,
+            accessed: None,
+        });
+        assert_eq!(
+            drop_targets(row(local).as_ref(), FromOs::No),
+            [Side::Remote]
+        );
+        assert_eq!(
+            drop_targets(row(remote).as_ref(), FromOs::No),
+            [Side::Local]
+        );
+        // From the OS: either pane where the OS says where it is; else the host's.
+        let at = FromOs::At(Point::new(5.0, 5.0));
+        assert_eq!(drop_targets(None, at), [Side::Local, Side::Remote]);
+        assert_eq!(drop_targets(None, FromOs::Somewhere), [Side::Remote]);
+        assert_eq!(drop_targets(None, FromOs::No), Vec::<Side>::new());
+    }
+
+    #[test]
+    fn the_listings_show_permissions_and_a_right_click_on_the_headers_picks_columns() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("columns"));
+        let mut state = UiState::default();
+        let zones = frame(&mut view, &mut state, &[], 0.0);
+        let has = |zones: &[annulus_ui::kit::Zone], name: &str| {
+            zones.iter().filter(|zone| zone.label == name).count()
+        };
+        assert_eq!(has(&zones, "Sort by permissions"), 2, "in both panes");
+        let header = zones
+            .iter()
+            .rev()
+            .find(|zone| zone.label == "Sort by modified")
+            .unwrap()
+            .rect
+            .center();
+        let right = [
+            annulus_ui::kit::Event::PointerMoved(header),
+            annulus_ui::kit::Event::PointerDown(annulus_ui::kit::Button::Secondary),
+            annulus_ui::kit::Event::PointerUp(annulus_ui::kit::Button::Secondary),
+        ];
+        let zones = frame(&mut view, &mut state, &right, 1.0);
+        let menu: Vec<&str> = zones
+            .iter()
+            .filter(|zone| zone.role == Role::MenuItem)
+            .map(|zone| zone.label.as_str())
+            .collect();
+        assert!(
+            menu.contains(&"Hide Permissions") && menu.contains(&"Show Group"),
+            "{menu:?}"
+        );
+        assert!(
+            menu.contains(&"Hide Owner (no room for it now)"),
+            "shown, but this window is too narrow: {menu:?}"
+        );
+        assert!(
+            !menu.contains(&"Show Created"),
+            "the host keeps no creation time"
+        );
+        frame(
+            &mut view,
+            &mut state,
+            &click(&zones, "Hide Permissions"),
+            2.0,
+        );
+        let zones = frame(&mut view, &mut state, &[], 3.0);
+        assert_eq!(
+            has(&zones, "Sort by permissions"),
+            1,
+            "gone from the host's pane only"
+        );
+        let (local, remote) = view.take_columns().unwrap();
+        assert!(local.contains(&"permissions".to_owned()));
+        assert!(!remote.contains(&"permissions".to_owned()));
+        assert_eq!(view.take_columns(), None, "told once");
+        // A column asked for comes first when room runs short, so it shows.
+        let header = zones
+            .iter()
+            .rev()
+            .find(|zone| zone.label == "Sort by modified")
+            .unwrap()
+            .rect
+            .center();
+        let right = [
+            annulus_ui::kit::Event::PointerMoved(header),
+            annulus_ui::kit::Event::PointerDown(annulus_ui::kit::Button::Secondary),
+            annulus_ui::kit::Event::PointerUp(annulus_ui::kit::Button::Secondary),
+        ];
+        let zones = frame(&mut view, &mut state, &right, 4.0);
+        frame(&mut view, &mut state, &click(&zones, "Show Group"), 5.0);
+        let zones = frame(&mut view, &mut state, &[], 6.0);
+        assert_eq!(has(&zones, "Sort by group"), 1);
+        // The host's permissions read as a file manager shows them.
+        let row = Row::remote(&view.tab.entries[4], &Owners::default());
+        assert_eq!(row.cell(Column::Permissions), "rw-r-----");
+    }
+
+    #[test]
+    fn this_computers_files_are_made_renamed_and_deleted_after_a_yes() {
+        let mut view = SftpView::new(crate::native::demo::sftp_tab("local-ops"));
+        let dir = view.tab.local.dir.clone();
+        let mut state = UiState::default();
+        let zones = frame(&mut view, &mut state, &[], 0.0);
+        // New folder from the empty space's menu.
+        let blank = zones
+            .iter()
+            .find(|zone| zone.id == Id::new(("sftp.blank", true)))
+            .unwrap()
+            .rect;
+        let below = Point::new(blank.center().x, blank.b() - 10.0);
+        let right = [
+            annulus_ui::kit::Event::PointerMoved(below),
+            annulus_ui::kit::Event::PointerDown(annulus_ui::kit::Button::Secondary),
+            annulus_ui::kit::Event::PointerUp(annulus_ui::kit::Button::Secondary),
+        ];
+        let zones = frame(&mut view, &mut state, &right, 1.0);
+        frame(&mut view, &mut state, &click(&zones, "New folder"), 2.0);
+        let zones = frame(&mut view, &mut state, &[], 3.0);
+        let mut typing = click(&zones, "Folder name");
+        typing.push(annulus_ui::kit::Event::Text("drafts".into()));
+        frame(&mut view, &mut state, &typing, 4.0);
+        let enter = [annulus_ui::kit::Event::Key(Key::Enter, Modifiers::NONE)];
+        frame(&mut view, &mut state, &enter, 5.0);
+        assert!(dir.join("drafts").is_dir());
+        // F2 on a selected file renames it.
+        let zones = frame(&mut view, &mut state, &[], 6.0);
+        frame(&mut view, &mut state, &click(&zones, "todo.txt"), 7.0);
+        let f2 = [annulus_ui::kit::Event::Key(Key::F(2), Modifiers::NONE)];
+        frame(&mut view, &mut state, &f2, 8.0);
+        if let Some((Side::Local, Edit::Rename { to, .. })) = &mut view.edit {
+            *to = "done.txt".into();
+        } else {
+            panic!("F2 did not start a rename here");
+        }
+        let zones = frame(&mut view, &mut state, &[], 9.0);
+        frame(&mut view, &mut state, &click(&zones, "Save"), 10.0);
+        assert!(dir.join("done.txt").exists() && !dir.join("todo.txt").exists());
+        // Delete asks first; only the card's Delete removes it.
+        let zones = frame(&mut view, &mut state, &[], 11.0);
+        frame(&mut view, &mut state, &click(&zones, "done.txt"), 12.0);
+        let delete = [annulus_ui::kit::Event::Key(Key::Delete, Modifiers::NONE)];
+        let zones = frame(&mut view, &mut state, &delete, 13.0);
+        let zones = if zones.iter().any(|zone| zone.label == "Delete") {
+            zones
+        } else {
+            frame(&mut view, &mut state, &[], 14.0)
+        };
+        assert!(
+            dir.join("done.txt").exists(),
+            "nothing is deleted before the yes"
+        );
+        frame(&mut view, &mut state, &click(&zones, "Delete"), 15.0);
+        assert!(!dir.join("done.txt").exists());
     }
 
     #[test]
@@ -1529,7 +3029,7 @@ mod tests {
         frame(
             &mut view,
             &mut state,
-            &[annulus_ui::kit::Event::FilesDropped(vec![file])],
+            &[annulus_ui::kit::Event::FilesDropped(vec![file], None)],
             1.0,
         );
         assert_eq!(view.tab.transfers.len(), 1);
@@ -1542,10 +3042,13 @@ mod tests {
         tab.cwd = Some("/home/a".into());
         tab.failed = None;
         let mut view = SftpView::new(tab);
-        view.edit = Some(Edit::Rename {
-            from: "notes.txt".into(),
-            to: "notes.txt".into(),
-        });
+        view.edit = Some((
+            Side::Remote,
+            Edit::Rename {
+                from: "notes.txt".into(),
+                to: "notes.txt".into(),
+            },
+        ));
         view.edit_dir = "/home/a".into();
         let mut state = UiState::default();
         frame(&mut view, &mut state, &[], 0.0);

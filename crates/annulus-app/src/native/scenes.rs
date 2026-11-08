@@ -398,6 +398,14 @@ fn connecting(app: &mut NativeApp) {
     );
 }
 
+/// An SFTP tab asking what to do with README.md, already on the host, and one more waiting.
+fn sftp_clash(app: &mut NativeApp) {
+    sftp(app);
+    if let Some(view) = app.tabs.last_mut().and_then(|tab| tab.sftp.as_mut()) {
+        view.demo_clash();
+    }
+}
+
 /// An SFTP tab with transfers in every state: under way, done, skipped, failed.
 fn sftp_transfers(app: &mut NativeApp) {
     sftp(app);
@@ -1107,6 +1115,51 @@ const SCENES: &[Scene] = &[
         populated: true,
         setup: sftp,
         acts: &[Act::Click("deploy.sh"), Act::Click("More actions")],
+    },
+    Scene {
+        name: "sftp-wide",
+        width: 1680,
+        height: 820,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::Hover("app.log")],
+    },
+    Scene {
+        name: "sftp-drag-down",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::Hold("deploy.sh"), Act::Hover("todo.txt")],
+    },
+    Scene {
+        name: "sftp-clash",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp_clash,
+        acts: &[],
+    },
+    Scene {
+        name: "sftp-columns-menu",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::RightClick("Sort by modified")],
+    },
+    Scene {
+        name: "sftp-local-menu",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: sftp,
+        acts: &[Act::RightClick("todo.txt")],
     },
     Scene {
         name: "sftp-delete",

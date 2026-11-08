@@ -22,6 +22,8 @@ pub(crate) enum Command {
         id: u64,
         remote: String,
         to: PathBuf,
+        /// Another name to land under (the user renamed it); else its own.
+        name: Option<String>,
         conflict: Conflict,
         cancel: Arc<AtomicBool>,
     },
@@ -29,6 +31,7 @@ pub(crate) enum Command {
         id: u64,
         local: PathBuf,
         dir: String,
+        name: Option<String>,
         conflict: Conflict,
         cancel: Arc<AtomicBool>,
     },
@@ -37,6 +40,7 @@ pub(crate) enum Command {
         id: u64,
         remote: String,
         to: PathBuf,
+        name: Option<String>,
         conflict: Conflict,
         cancel: Arc<AtomicBool>,
     },
@@ -45,6 +49,7 @@ pub(crate) enum Command {
         id: u64,
         local: PathBuf,
         dir: String,
+        name: Option<String>,
         conflict: Conflict,
         cancel: Arc<AtomicBool>,
     },
@@ -61,6 +66,8 @@ enum Reply {
     Session(SessionEvent),
     Ready {
         home: String,
+        /// The host's user and group names, for the Owner and Group columns.
+        owners: annulus_sftp::Owners,
     },
     Listed {
         dir: String,
@@ -131,7 +138,8 @@ impl Worker {
                         }
                     };
                     let home = session.1.home().await.unwrap_or_else(|_| "/".to_owned());
-                    send(Reply::Ready { home });
+                    let owners = session.1.owner_names().await;
+                    send(Reply::Ready { home, owners });
                     let suspect = Arc::new(AtomicBool::new(false));
                     let slots = Arc::new(tokio::sync::Semaphore::new(TRANSFER_SLOTS));
                     // Each command runs as its own task, so a long transfer does not hold up
@@ -301,49 +309,78 @@ async fn copy(sftp: &Sftp, command: Command, send: &Send) {
             id,
             remote,
             to,
+            name,
             conflict,
             cancel,
         } => {
             let mut progress = progress(id, cancel, send.clone());
-            (
-                id,
-                sftp.download(&remote, &to, conflict, &mut progress).await,
-            )
+            let result = match name {
+                Some(name) => {
+                    sftp.download_as(&remote, &to, &name, conflict, &mut progress)
+                        .await
+                }
+                None => sftp.download(&remote, &to, conflict, &mut progress).await,
+            };
+            (id, result)
         }
         Command::DownloadTree {
             id,
             remote,
             to,
+            name,
             conflict,
             cancel,
         } => {
             let mut progress = progress(id, cancel, send.clone());
-            let result = sftp
-                .download_tree(&remote, &to, conflict, &mut progress)
-                .await;
+            let result = match name {
+                Some(name) => {
+                    sftp.download_tree_as(&remote, &to, &name, conflict, &mut progress)
+                        .await
+                }
+                None => {
+                    sftp.download_tree(&remote, &to, conflict, &mut progress)
+                        .await
+                }
+            };
             (id, result)
         }
         Command::Upload {
             id,
             local,
             dir,
+            name,
             conflict,
             cancel,
         } => {
             let mut progress = progress(id, cancel, send.clone());
-            (id, sftp.upload(&local, &dir, conflict, &mut progress).await)
+            let result = match name {
+                Some(name) => {
+                    sftp.upload_as(&local, &dir, &name, conflict, &mut progress)
+                        .await
+                }
+                None => sftp.upload(&local, &dir, conflict, &mut progress).await,
+            };
+            (id, result)
         }
         Command::UploadTree {
             id,
             local,
             dir,
+            name,
             conflict,
             cancel,
         } => {
             let mut progress = progress(id, cancel, send.clone());
-            let result = sftp
-                .upload_tree(&local, &dir, conflict, &mut progress)
-                .await;
+            let result = match name {
+                Some(name) => {
+                    sftp.upload_tree_as(&local, &dir, &name, conflict, &mut progress)
+                        .await
+                }
+                None => {
+                    sftp.upload_tree(&local, &dir, conflict, &mut progress)
+                        .await
+                }
+            };
             (id, result)
         }
         _ => return,
@@ -381,27 +418,32 @@ pub(crate) struct Transfer {
     pub(crate) since: Option<(std::time::Instant, u64)>,
 }
 
-/// What a transfer copies, so Retry can send it again.
+/// What a transfer copies, so Retry can send it again. `name` is the name it lands under
+/// when the user renamed it; `None` keeps its own.
 #[derive(Clone)]
 pub(crate) enum Recipe {
     Download {
         remote: String,
         to: PathBuf,
+        name: Option<String>,
         conflict: Conflict,
     },
     Upload {
         local: PathBuf,
         dir: String,
+        name: Option<String>,
         conflict: Conflict,
     },
     UploadTree {
         local: PathBuf,
         dir: String,
+        name: Option<String>,
         conflict: Conflict,
     },
     DownloadTree {
         remote: String,
         to: PathBuf,
+        name: Option<String>,
         conflict: Conflict,
     },
 }
@@ -413,44 +455,52 @@ impl Recipe {
             Recipe::Download {
                 remote,
                 to,
+                name,
                 conflict,
             } => Command::Download {
                 id,
                 remote,
                 to,
+                name,
                 conflict,
                 cancel,
             },
             Recipe::Upload {
                 local,
                 dir,
+                name,
                 conflict,
             } => Command::Upload {
                 id,
                 local,
                 dir,
+                name,
                 conflict,
                 cancel,
             },
             Recipe::UploadTree {
                 local,
                 dir,
+                name,
                 conflict,
             } => Command::UploadTree {
                 id,
                 local,
                 dir,
+                name,
                 conflict,
                 cancel,
             },
             Recipe::DownloadTree {
                 remote,
                 to,
+                name,
                 conflict,
             } => Command::DownloadTree {
                 id,
                 remote,
                 to,
+                name,
                 conflict,
                 cancel,
             },
@@ -473,6 +523,10 @@ pub(crate) enum Dialog {
     Permissions { name: String, mode: String },
     /// What is known about an entry.
     Properties(Entry),
+    /// Delete this file or folder on this computer? It cannot be undone.
+    DeleteLocal { path: PathBuf, folder: bool },
+    /// What is known about a file or folder on this computer, line by line.
+    LocalProperties(Vec<(&'static str, String)>),
 }
 
 impl Dialog {
@@ -514,8 +568,12 @@ pub struct SftpTab {
     pub(crate) show_hidden: bool,
     pub(crate) filter: String,
     /// The column the listing is sorted by, and whether ascending.
-    pub(crate) sort: (SortBy, bool),
+    pub(crate) sort: (Column, bool),
+    /// Whether a transfer onto a taken name asks first (the default); else `conflict` decides.
+    pub(crate) ask_on_clash: bool,
     pub(crate) conflict: Conflict,
+    /// The host's user and group names by id.
+    pub(crate) owners: annulus_sftp::Owners,
     pub(crate) transfers: Vec<Transfer>,
     pub(crate) next_id: u64,
     pub(crate) dialog: Option<Dialog>,
@@ -547,8 +605,10 @@ impl SftpTab {
             notice: None,
             show_hidden: false,
             filter: String::new(),
-            sort: (SortBy::Name, true),
+            sort: (Column::Name, true),
+            ask_on_clash: true,
             conflict: Conflict::KeepBoth,
+            owners: annulus_sftp::Owners::default(),
             transfers: Vec::new(),
             next_id: 0,
             dialog: None,
@@ -612,7 +672,8 @@ impl SftpTab {
             match reply {
                 Reply::Session(SessionEvent::Failed(message)) => self.failed = Some(message),
                 Reply::Session(event) => self.questions.push(event),
-                Reply::Ready { home } => {
+                Reply::Ready { home, owners } => {
+                    self.owners = owners;
                     // Shown even if listing it fails, so the error has somewhere to appear.
                     self.cwd = Some(home.clone());
                     self.path_field.clone_from(&home);
@@ -726,12 +787,14 @@ impl SftpTab {
                 Recipe::Upload {
                     local: downloads.join(label),
                     dir: "/var/www/html/releases/current".into(),
+                    name: None,
                     conflict: Conflict::KeepBoth,
                 }
             } else {
                 Recipe::Download {
                     remote: format!("/srv/backups/{label}"),
                     to: downloads.clone(),
+                    name: None,
                     conflict: Conflict::KeepBoth,
                 }
             };
@@ -764,46 +827,80 @@ impl SftpTab {
         self.send(command);
     }
 
+    /// Downloads `entry` into the local folder shown, as the tab's policy says.
     pub(crate) fn download(&mut self, entry: &Entry) {
-        let Some(cwd) = self.cwd.clone() else { return };
-        if entry.is_dir() {
-            let recipe = Recipe::DownloadTree {
-                remote: join(&cwd, &entry.name),
-                to: self.local.dir.clone(),
-                conflict: self.conflict,
-            };
-            self.start_transfer(format!("\u{2193} {}/", entry.name), recipe);
-            return;
-        }
-        let recipe = Recipe::Download {
-            remote: join(&cwd, &entry.name),
-            to: self.local.dir.clone(),
-            conflict: self.conflict,
-        };
-        self.start_transfer(format!("\u{2193} {}", entry.name), recipe);
+        self.download_named(entry, None, self.conflict);
     }
 
+    /// Downloads `entry` into the local folder shown, under `name` when the user renamed it,
+    /// with `conflict` deciding should the name be taken by then.
+    pub(crate) fn download_named(
+        &mut self,
+        entry: &Entry,
+        name: Option<String>,
+        conflict: Conflict,
+    ) {
+        let Some(cwd) = self.cwd.clone() else { return };
+        let shown = name.clone().unwrap_or_else(|| entry.name.clone());
+        let remote = join(&cwd, &entry.name);
+        let to = self.local.dir.clone();
+        if entry.is_dir() {
+            let recipe = Recipe::DownloadTree {
+                remote,
+                to,
+                name,
+                conflict,
+            };
+            self.start_transfer(format!("\u{2193} {shown}/"), recipe);
+        } else {
+            let recipe = Recipe::Download {
+                remote,
+                to,
+                name,
+                conflict,
+            };
+            self.start_transfer(format!("\u{2193} {shown}"), recipe);
+        }
+    }
+
+    /// Uploads `local` (a file, or a folder with everything in it) into the host's folder
+    /// shown, as the tab's policy says.
     pub(crate) fn upload(&mut self, local: PathBuf) {
+        self.upload_named(local, None, self.conflict);
+    }
+
+    /// Uploads `local` into the host's folder shown, under `name` when the user renamed it,
+    /// with `conflict` deciding should the name be taken by then.
+    pub(crate) fn upload_named(
+        &mut self,
+        local: PathBuf,
+        name: Option<String>,
+        conflict: Conflict,
+    ) {
         let Some(dir) = self.cwd.clone() else { return };
-        let name = local.file_name().map_or_else(
-            || local.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let shown = name.clone().unwrap_or_else(|| {
+            local.file_name().map_or_else(
+                || local.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        });
         if local.is_dir() {
             let recipe = Recipe::UploadTree {
                 local,
                 dir,
-                conflict: self.conflict,
+                name,
+                conflict,
             };
-            self.start_transfer(format!("\u{2191} {name}/"), recipe);
-            return;
+            self.start_transfer(format!("\u{2191} {shown}/"), recipe);
+        } else {
+            let recipe = Recipe::Upload {
+                local,
+                dir,
+                name,
+                conflict,
+            };
+            self.start_transfer(format!("\u{2191} {shown}"), recipe);
         }
-        let recipe = Recipe::Upload {
-            local,
-            dir,
-            conflict: self.conflict,
-        };
-        self.start_transfer(format!("\u{2191} {name}"), recipe);
     }
 
     /// Starts the connection if it has not started; `wake` repaints the window.
@@ -839,6 +936,9 @@ impl SftpTab {
         self.worker.as_ref().map(|worker| &worker.answers)
     }
 }
+
+/// What the Existing files menu says of asking first.
+pub(crate) const ASK_NAME: &str = "Existing files: ask";
 
 pub(crate) fn conflict_name(conflict: Conflict) -> &'static str {
     match conflict {
@@ -889,21 +989,162 @@ pub(crate) fn pace(moved: u64, left: u64, seconds: f64) -> String {
     format!("{}/s \u{b7} {eta} left", human_size(rate))
 }
 
-/// What the SFTP listing can be sorted by (F-SFTP-001).
+/// A column of the SFTP tab's listings (UI-SPEC §4), in the order they stand left to right.
+/// Name is always shown; the others as the user chooses, where the pane knows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SortBy {
+pub(crate) enum Column {
     Name,
     Size,
+    Type,
     Modified,
+    Permissions,
+    Owner,
+    Group,
+    Accessed,
+    Created,
 }
 
-/// Sorts `entries` by `by`, folders always first; names break ties.
-pub(crate) fn sort_entries(entries: &mut [Entry], by: SortBy, ascending: bool) {
-    entries.sort_by(|a, b| {
+impl Column {
+    /// The columns besides Name, left to right.
+    pub(crate) const OPTIONAL: [Column; 8] = [
+        Column::Size,
+        Column::Type,
+        Column::Modified,
+        Column::Permissions,
+        Column::Owner,
+        Column::Group,
+        Column::Accessed,
+        Column::Created,
+    ];
+
+    /// The title over it.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Column::Name => "Name",
+            Column::Size => "Size",
+            Column::Type => "Type",
+            Column::Modified => "Modified",
+            Column::Permissions => "Permissions",
+            Column::Owner => "Owner",
+            Column::Group => "Group",
+            Column::Accessed => "Accessed",
+            Column::Created => "Created",
+        }
+    }
+
+    /// Its name in the settings file.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Column::Name => "name",
+            Column::Size => "size",
+            Column::Type => "type",
+            Column::Modified => "modified",
+            Column::Permissions => "permissions",
+            Column::Owner => "owner",
+            Column::Group => "group",
+            Column::Accessed => "accessed",
+            Column::Created => "created",
+        }
+    }
+
+    /// The column named `key` in the settings file.
+    pub(crate) fn from_key(key: &str) -> Option<Column> {
+        Column::OPTIONAL
+            .into_iter()
+            .chain([Column::Name])
+            .find(|column| column.key() == key)
+    }
+}
+
+/// One row of a listing, from the host or from this computer, as the columns show it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Row {
+    pub(crate) name: String,
+    pub(crate) kind: Kind,
+    /// Bytes; 0 for folders.
+    pub(crate) size: u64,
+    /// Seconds since the Unix epoch.
+    pub(crate) modified: Option<u32>,
+    pub(crate) accessed: Option<u32>,
+    pub(crate) created: Option<u32>,
+    /// `rwxr-xr-x` on a host or a Unix computer; on Windows, Read-only or Read/write and
+    /// whether hidden.
+    pub(crate) permissions: Option<String>,
+    pub(crate) owner: Option<String>,
+    pub(crate) group: Option<String>,
+}
+
+impl Row {
+    /// A folder, or a link to one: opening it shows what is inside.
+    pub(crate) fn is_dir(&self) -> bool {
+        matches!(self.kind, Kind::Dir | Kind::Link { to_dir: true })
+    }
+
+    /// `entry` on a host whose names are `owners`.
+    pub(crate) fn remote(entry: &Entry, owners: &annulus_sftp::Owners) -> Row {
+        let named = |id: Option<u32>, names: &std::collections::HashMap<u32, String>| {
+            id.map(|id| names.get(&id).cloned().unwrap_or_else(|| id.to_string()))
+        };
+        Row {
+            name: entry.name.clone(),
+            kind: entry.kind,
+            size: if entry.is_dir() { 0 } else { entry.size },
+            modified: entry.modified,
+            accessed: entry.accessed,
+            created: None,
+            permissions: entry.permissions.map(mode_text),
+            owner: named(entry.uid, &owners.users),
+            group: named(entry.gid, &owners.groups),
+        }
+    }
+
+    /// What `column` shows for this row.
+    pub(crate) fn cell(&self, column: Column) -> String {
+        let time = |at: Option<u32>| at.map(format_time).unwrap_or_default();
+        match column {
+            Column::Name => self.name.clone(),
+            Column::Size if self.is_dir() => String::new(),
+            Column::Size => human_size(self.size),
+            Column::Type => type_name(&self.name, self.kind),
+            Column::Modified => time(self.modified),
+            Column::Accessed => time(self.accessed),
+            Column::Created => time(self.created),
+            Column::Permissions => self.permissions.clone().unwrap_or_default(),
+            Column::Owner => self.owner.clone().unwrap_or_default(),
+            Column::Group => self.group.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// What a file manager calls an entry: Folder, a link, or its extension's file ("TXT file").
+pub(crate) fn type_name(name: &str, kind: Kind) -> String {
+    match kind {
+        Kind::Dir => "Folder".into(),
+        Kind::Link { to_dir: true } => "Link to a folder".into(),
+        Kind::Link { to_dir: false } => "Link".into(),
+        Kind::Other => "Special file".into(),
+        Kind::File => match name.rsplit_once('.') {
+            Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+                format!("{} file", extension.to_uppercase())
+            }
+            _ => "File".into(),
+        },
+    }
+}
+
+/// Sorts `rows` by `by`, folders always first; names break ties.
+pub(crate) fn sort_rows(rows: &mut [Row], by: Column, ascending: bool) {
+    rows.sort_by(|a, b| {
         let order = match by {
-            SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            SortBy::Size => a.size.cmp(&b.size),
-            SortBy::Modified => a.modified.cmp(&b.modified),
+            Column::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            Column::Size => a.size.cmp(&b.size),
+            Column::Modified => a.modified.cmp(&b.modified),
+            Column::Accessed => a.accessed.cmp(&b.accessed),
+            Column::Created => a.created.cmp(&b.created),
+            Column::Type => type_name(&a.name, a.kind).cmp(&type_name(&b.name, b.kind)),
+            Column::Permissions => a.permissions.cmp(&b.permissions),
+            Column::Owner => a.owner.cmp(&b.owner),
+            Column::Group => a.group.cmp(&b.group),
         }
         .then_with(|| a.name.cmp(&b.name));
         let order = if ascending { order } else { order.reverse() };
@@ -912,7 +1153,11 @@ pub(crate) fn sort_entries(entries: &mut [Entry], by: SortBy, ascending: bool) {
 }
 
 /// The Properties dialog's lines for `entry` in folder `cwd`.
-pub(crate) fn properties(cwd: &str, entry: &Entry) -> Vec<(&'static str, String)> {
+pub(crate) fn properties(
+    cwd: &str,
+    entry: &Entry,
+    owners: &annulus_sftp::Owners,
+) -> Vec<(&'static str, String)> {
     let kind = match entry.kind {
         Kind::Dir => "Folder".to_owned(),
         Kind::File => "File".to_owned(),
@@ -934,17 +1179,28 @@ pub(crate) fn properties(cwd: &str, entry: &Entry) -> Vec<(&'static str, String)
     if let Some(modified) = entry.modified {
         lines.push(("Modified", format_time(modified)));
     }
+    if let Some(accessed) = entry.accessed {
+        lines.push(("Accessed", format_time(accessed)));
+    }
     if let Some(bits) = entry.permissions {
         lines.push((
             "Permissions",
             format!("{:o} ({})", bits & 0o7777, mode_text(bits)),
         ));
     }
+    let row = Row::remote(entry, owners);
+    if let Some(owner) = row.owner {
+        let group = row
+            .group
+            .map(|group| format!(", group {group}"))
+            .unwrap_or_default();
+        lines.push(("Owner", format!("{owner}{group}")));
+    }
     lines
 }
 
 /// `0o754` as `rwxr-xr--`.
-fn mode_text(bits: u32) -> String {
+pub(crate) fn mode_text(bits: u32) -> String {
     (0..9)
         .map(|i| {
             let on = bits & (0o400 >> i) != 0;
@@ -1045,7 +1301,7 @@ mod tests {
                 .unwrap()
             {
                 Reply::Session(SessionEvent::HostKey(_)) => worker.answers.host_key(true),
-                Reply::Ready { home } => return (worker, home),
+                Reply::Ready { home, .. } => return (worker, home),
                 Reply::Session(SessionEvent::Failed(why)) => panic!("{why}"),
                 _ => {}
             }
@@ -1091,6 +1347,7 @@ mod tests {
         let recipe = Recipe::Download {
             remote: join(&home, "annulus-slots.bin"),
             to: dir.clone(),
+            name: None,
             conflict: Conflict::KeepBoth,
         };
         for id in 1..=5 {
@@ -1160,6 +1417,7 @@ mod tests {
         let recipe = Recipe::Download {
             remote: join(&home, "annulus-retry.bin"),
             to: dir.clone(),
+            name: None,
             conflict: Conflict::KeepBoth,
         };
         let send = |id| {
@@ -1221,28 +1479,88 @@ mod tests {
         assert_eq!(parse_mode("rw-"), None);
     }
 
-    #[test]
-    fn listings_sort_by_name_size_or_date_with_folders_first() {
-        let entry = |name: &str, dir: bool, size: u64, modified: u32| Entry {
+    /// A row of the host's listing, owned by `uid`.
+    fn entry(name: &str, dir: bool, size: u64, modified: u32, uid: u32) -> Entry {
+        Entry {
             name: name.into(),
             kind: if dir { Kind::Dir } else { Kind::File },
             size,
             modified: Some(modified),
-            permissions: None,
+            permissions: Some(if dir { 0o755 } else { 0o644 }),
+            uid: Some(uid),
+            gid: Some(uid),
+            accessed: Some(modified),
+        }
+    }
+
+    #[test]
+    fn listings_sort_by_any_column_with_folders_first() {
+        let owners = annulus_sftp::Owners {
+            users: [(0, "root".to_owned()), (1000, "ana".to_owned())].into(),
+            groups: std::collections::HashMap::new(),
         };
-        let mut entries = vec![
-            entry("b.txt", false, 10, 3),
-            entry("A.txt", false, 30, 1),
-            entry("zdir", true, 0, 9),
-            entry("c.txt", false, 20, 2),
-        ];
-        let names = |entries: &[Entry]| entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
-        sort_entries(&mut entries, SortBy::Name, true);
-        assert_eq!(names(&entries), ["zdir", "A.txt", "b.txt", "c.txt"]);
-        sort_entries(&mut entries, SortBy::Size, false);
-        assert_eq!(names(&entries), ["zdir", "A.txt", "c.txt", "b.txt"]);
-        sort_entries(&mut entries, SortBy::Modified, true);
-        assert_eq!(names(&entries), ["zdir", "A.txt", "c.txt", "b.txt"]);
+        let mut rows: Vec<Row> = [
+            entry("b.txt", false, 10, 3, 1000),
+            entry("A.txt", false, 30, 1, 0),
+            entry("zdir", true, 0, 9, 0),
+            entry("c.sh", false, 20, 2, 1000),
+        ]
+        .iter()
+        .map(|entry| Row::remote(entry, &owners))
+        .collect();
+        let names = |rows: &[Row]| rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+        sort_rows(&mut rows, Column::Name, true);
+        assert_eq!(names(&rows), ["zdir", "A.txt", "b.txt", "c.sh"]);
+        sort_rows(&mut rows, Column::Size, false);
+        assert_eq!(names(&rows), ["zdir", "A.txt", "c.sh", "b.txt"]);
+        sort_rows(&mut rows, Column::Modified, true);
+        assert_eq!(names(&rows), ["zdir", "A.txt", "c.sh", "b.txt"]);
+        sort_rows(&mut rows, Column::Type, true);
+        assert_eq!(
+            names(&rows),
+            ["zdir", "c.sh", "A.txt", "b.txt"],
+            "SH file, TXT file"
+        );
+        sort_rows(&mut rows, Column::Owner, true);
+        assert_eq!(
+            names(&rows),
+            ["zdir", "b.txt", "c.sh", "A.txt"],
+            "ana before root"
+        );
+        // An id the host does not name shows as the number.
+        let stranger = Row::remote(&entry("x", false, 1, 1, 4242), &owners);
+        assert_eq!(stranger.cell(Column::Owner), "4242");
+        assert_eq!(stranger.cell(Column::Permissions), "rw-r--r--");
+    }
+
+    #[test]
+    fn types_read_like_a_file_manager() {
+        assert_eq!(type_name("notes.TXT", Kind::File), "TXT file");
+        assert_eq!(type_name("backup.tar.gz", Kind::File), "GZ file");
+        assert_eq!(type_name("Makefile", Kind::File), "File");
+        assert_eq!(
+            type_name(".env", Kind::File),
+            "File",
+            "a dot file has no extension"
+        );
+        assert_eq!(
+            type_name("www", Kind::Link { to_dir: true }),
+            "Link to a folder"
+        );
+        assert_eq!(type_name("logs", Kind::Dir), "Folder");
+    }
+
+    #[test]
+    fn columns_are_named_in_the_settings_by_their_keys() {
+        for column in Column::OPTIONAL {
+            assert_eq!(Column::from_key(column.key()), Some(column));
+        }
+        assert_eq!(Column::from_key("colour"), None);
+        let defaults: Vec<Column> = annulus_config::settings::default_sftp_columns()
+            .iter()
+            .filter_map(|key| Column::from_key(key))
+            .collect();
+        assert_eq!(defaults.len(), 5, "every default is a column");
     }
 
     #[test]
@@ -1253,8 +1571,15 @@ mod tests {
             size: 2048,
             modified: Some(0),
             permissions: Some(0o754),
+            uid: Some(1000),
+            gid: Some(33),
+            accessed: None,
         };
-        let lines = properties("/home/me", &entry);
+        let owners = annulus_sftp::Owners {
+            users: [(1000, "me".to_owned())].into(),
+            groups: [(33, "www-data".to_owned())].into(),
+        };
+        let lines = properties("/home/me", &entry, &owners);
         let get = |name: &str| {
             lines
                 .iter()
@@ -1264,6 +1589,7 @@ mod tests {
         assert_eq!(get("Path").as_deref(), Some("/home/me/notes.txt"));
         assert_eq!(get("Size").as_deref(), Some("2.0 KiB (2048 bytes)"));
         assert_eq!(get("Permissions").as_deref(), Some("754 (rwxr-xr--)"));
+        assert_eq!(get("Owner").as_deref(), Some("me, group www-data"));
         assert_eq!(mode_text(0o640), "rw-r-----");
     }
 
