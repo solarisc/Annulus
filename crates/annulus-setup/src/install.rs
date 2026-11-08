@@ -6,6 +6,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// The key of our entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`.
+#[cfg(windows)]
 pub const UNINSTALL_KEY: &str = "Annulus";
 /// The uninstaller's name in the install folder: a copy of the installer.
 pub const UNINSTALLER: &str = "uninstall.exe";
