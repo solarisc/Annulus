@@ -176,7 +176,7 @@ fn write_zip(to: &Path, entries: &[(String, Source, bool)]) -> Result<()> {
     }
     for (name, path, program) in files {
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        zip.file(&name, &bytes, mode_of(&path, program), modified(&path));
+        zip.file(&name, &bytes, mode_of(program), modified(&path));
     }
     let bytes = zip.finish();
     std::fs::write(to, bytes).with_context(|| format!("writing {}", to.display()))
@@ -196,25 +196,32 @@ fn walk(
             folders.insert(inner.clone());
             walk(&entry.path(), &inner, files, folders)?;
         } else {
-            files.push((inner, entry.path(), false));
+            let program = executable(&entry.path());
+            files.push((inner, entry.path(), program));
         }
     }
     Ok(())
 }
 
-/// The Unix mode `path` has, or 755 for a program and 644 for the rest where the file system
-/// keeps none (Windows).
-fn mode_of(path: &Path, program: bool) -> u32 {
+/// 755 for a program and 644 for the rest, whatever the file system says: a checkout on a
+/// mounted Windows folder (CI's Linux container) reports 777 for every file.
+fn mode_of(program: bool) -> u32 {
+    if program { 0o755 } else { 0o644 }
+}
+
+/// Whether `path`, inside a folder taken whole (a macOS bundle), is a program: executable
+/// for its owner where the file system keeps modes, never on Windows.
+fn executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let _ = program;
-            return meta.permissions().mode() & 0o7777;
-        }
+        std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o100 != 0)
     }
-    let _ = path;
-    if program { 0o755 } else { 0o644 }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// Seconds since the Unix epoch `path` was last changed.
@@ -434,6 +441,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Annulus.app/Contents/MacOS")).unwrap();
         std::fs::write(dir.join("Annulus.app/Contents/MacOS/Annulus"), "app").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let binary = dir.join("Annulus.app/Contents/MacOS/Annulus");
+            std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         std::fs::write(dir.join("agent"), "agent").unwrap();
         let zip = dir.join("client.zip");
         write_zip(
@@ -463,6 +476,14 @@ mod tests {
             assert!(names.contains(&folder), "{folder} in {names:?}");
         }
         assert!(names.contains(&"Annulus/Annulus.app/Contents/MacOS/Annulus"));
+        let mode = |name: &str| entries.iter().find(|(n, ..)| n == name).unwrap().2;
+        assert_eq!(mode("Annulus/annulus-agent"), 0o100_755, "a program");
+        assert_eq!(
+            mode("Annulus/Annulus.app/Contents/MacOS/Annulus") & 0o111,
+            if cfg!(unix) { 0o111 } else { 0 },
+            "a bundle's program as the file system says, here {}",
+            std::env::consts::OS
+        );
         assert!(!names.iter().any(|name| name.contains("server")));
         let _ = std::fs::remove_dir_all(&dir);
     }
