@@ -235,11 +235,7 @@ impl Film {
         )
         .unwrap();
         self.state.begin_frame(events, time);
-        let theme = super::colors::previewed_theme(
-            &self.app.settings,
-            self.app.settings_view.previewing,
-            Theme::new(Appearance::Dark),
-        );
+        let theme = super::colors::app_theme(&self.app.settings, Theme::new(Appearance::Dark));
         let mut ui = Ui::new(&mut canvas, theme, &mut self.state, viewport);
         self.app.frame(&mut ui);
         Self::draw_pointer(&mut ui, self.pointer, self.dot, self.ripple, time);

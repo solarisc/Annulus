@@ -495,6 +495,7 @@ fn installed_names() -> Vec<&'static str> {
             "annulus-agent.exe",
             "LICENSE-MIT",
             "LICENSE-APACHE",
+            "LICENSE-THEMES",
         ]
     } else {
         payload::FILES.iter().map(|(name, _, _)| *name).collect()

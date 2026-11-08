@@ -6,10 +6,12 @@
 //! fall short of the contrast our own themes meet (WCAG AA, tested over every scheme) is
 //! nudged towards white on a dark scheme or black on a light one, just far enough.
 
+mod builtins;
 mod catalog;
 
 use std::sync::OnceLock;
 
+pub use builtins::BUILT_INS;
 pub use catalog::SCHEMES;
 
 use crate::tokens::{Palette, Rgb};
@@ -54,7 +56,10 @@ impl Scheme {
     /// The scheme called `name`.
     #[must_use]
     pub fn find(name: &str) -> Option<&'static Scheme> {
-        SCHEMES.iter().find(|scheme| scheme.name == name)
+        SCHEMES
+            .iter()
+            .chain(BUILT_INS)
+            .find(|scheme| scheme.name == name)
     }
 
     fn color(&self, index: usize) -> Rgb {
@@ -72,8 +77,18 @@ impl Scheme {
     #[must_use]
     pub fn palette(&'static self) -> Palette {
         static CACHE: OnceLock<Vec<OnceLock<Palette>>> = OnceLock::new();
-        let cache = CACHE.get_or_init(|| SCHEMES.iter().map(|_| OnceLock::new()).collect());
-        match SCHEMES.iter().position(|scheme| std::ptr::eq(scheme, self)) {
+        let cache = CACHE.get_or_init(|| {
+            SCHEMES
+                .iter()
+                .chain(BUILT_INS)
+                .map(|_| OnceLock::new())
+                .collect()
+        });
+        match SCHEMES
+            .iter()
+            .chain(BUILT_INS)
+            .position(|scheme| std::ptr::eq(scheme, self))
+        {
             Some(index) => *cache[index].get_or_init(|| self.derive_palette()),
             None => self.derive_palette(),
         }
@@ -252,6 +267,29 @@ mod tests {
             Some("clach04 (https://github.com/clach04)")
         );
         assert!(Scheme::find("No Such Scheme").is_none());
+    }
+
+    #[test]
+    fn the_six_built_in_palettes_resolve_and_have_readable_palettes() {
+        assert_eq!(BUILT_INS.len(), 6);
+        for scheme in BUILT_INS {
+            assert!(std::ptr::eq(Scheme::find(scheme.name).unwrap(), scheme));
+            let palette = scheme.palette();
+            for background in palette.backgrounds() {
+                assert!(
+                    palette.text_primary.contrast(background) >= 4.5,
+                    "{}",
+                    scheme.name
+                );
+                assert!(
+                    palette.text_secondary.contrast(background) >= 4.5,
+                    "{}",
+                    scheme.name
+                );
+            }
+        }
+        assert!(Scheme::find("rbit Dark Colorblind").unwrap().dark());
+        assert!(!Scheme::find("rbit Light Colorblind").unwrap().dark());
     }
 
     #[test]

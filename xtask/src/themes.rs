@@ -72,7 +72,13 @@ pub fn run(source: Option<&str>) -> Result<bool> {
     let root = repo::root()?;
     let out = root.join("crates/annulus-config/src/schemes");
     std::fs::write(out.join("catalog.rs"), catalog(&schemes, &commit))?;
-    std::fs::write(out.join("LICENSE.txt"), license(source, &schemes, &commit)?)?;
+    let license = license(source, &schemes, &commit)?;
+    std::fs::write(out.join("LICENSE.txt"), &license)?;
+    let rbit_license = std::fs::read_to_string(out.join("RBIT-LICENSE.txt"))?;
+    std::fs::write(
+        root.join("LICENSE-THEMES"),
+        format!("{license}\n\nBuilt-in rbit palettes:\n\n{rbit_license}"),
+    )?;
     println!(
         "{} schemes from tinted-theming/schemes@{commit}",
         schemes.len()
@@ -253,6 +259,25 @@ fn clean(value: &str, max: usize) -> String {
     }
 }
 
+/// `author` as the app shows it: email addresses stay in `LICENSE.txt`, out of the app.
+fn without_emails(author: &str) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for word in author.split(' ') {
+        let bare = word.trim_matches(|c| matches!(c, '(' | ')' | '<' | '>' | ','));
+        let is_email = bare.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && domain.contains('.') && !domain.starts_with('.')
+        });
+        if !is_email {
+            kept.push(word.to_owned());
+        } else if word.ends_with(',')
+            && let Some(last) = kept.last_mut()
+        {
+            last.push(',');
+        }
+    }
+    kept.join(" ")
+}
+
 fn name_key(name: &str) -> String {
     name.chars()
         .filter(char::is_ascii_alphanumeric)
@@ -311,7 +336,8 @@ fn catalog(schemes: &[Imported], commit: &str) -> String {
         let _ = writeln!(
             out,
             "    Scheme {{ name: {:?}, author: {:?}, base: [{base}] }},",
-            scheme.name, scheme.author
+            scheme.name,
+            without_emails(&scheme.author)
         );
     }
     out.push_str("];\n");
@@ -387,6 +413,32 @@ mod tests {
         assert_eq!(
             name_key("Gruvbox dark, hard"),
             name_key("gruvbox-dark-hard")
+        );
+    }
+
+    #[test]
+    fn authors_in_the_catalog_lose_their_email_addresses_but_not_their_handles() {
+        assert_eq!(
+            without_emails(
+                "Dawid Kurek (dawikur@example.com), morhetz (https://github.com/morhetz)"
+            ),
+            "Dawid Kurek, morhetz (https://github.com/morhetz)"
+        );
+        assert_eq!(
+            without_emails("Wendell, Ryan <ryan@example.com>"),
+            "Wendell, Ryan"
+        );
+        assert_eq!(
+            without_emails("Thomas Leon thomas@example.org"),
+            "Thomas Leon"
+        );
+        assert_eq!(
+            without_emails("Josh W Lewis (@joshwlewis)"),
+            "Josh W Lewis (@joshwlewis)"
+        );
+        assert_eq!(
+            without_emails("@Schnouki, based on X"),
+            "@Schnouki, based on X"
         );
     }
 }

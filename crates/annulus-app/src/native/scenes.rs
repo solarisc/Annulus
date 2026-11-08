@@ -481,6 +481,14 @@ pub(super) fn split_panes(with_news: bool) -> super::panes::Panes {
     panes
 }
 
+fn theme_browser(app: &mut NativeApp) {
+    scheme_light(app);
+    app.section = super::Section::Hosts;
+    app.settings.app_scheme = None;
+    app.settings.theme = ThemeMode::System;
+    app.settings_view.picker = Some(super::theme_picker::ThemePicker::new(&app.settings));
+}
+
 const SCENES: &[Scene] = &[
     Scene {
         name: "hosts-empty",
@@ -1218,8 +1226,7 @@ const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
-        // The scheme menu searched, its swatches, and the window previewing the one the
-        // pointer rested on (the second hover is a second later).
+        // Theme browser search, family grouping and a live preview.
         name: "scheme-menu-search",
         width: 1100,
         height: 720,
@@ -1228,10 +1235,47 @@ const SCENES: &[Scene] = &[
         setup: scheme_light,
         acts: &[
             Act::Click("Solarized Light"),
+            Act::Click("All"),
             Act::Type("gruvbox"),
             Act::Hover("Gruvbox dark, hard"),
             Act::Hover("Gruvbox dark, hard"),
         ],
+    },
+    Scene {
+        name: "theme-picker-families",
+        width: 1200,
+        height: 800,
+        scale: 1.0,
+        populated: true,
+        setup: theme_browser,
+        acts: &[],
+    },
+    Scene {
+        name: "theme-picker-hidpi",
+        width: 1000,
+        height: 700,
+        scale: 2.0,
+        populated: true,
+        setup: theme_browser,
+        acts: &[],
+    },
+    Scene {
+        name: "theme-picker-empty",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: scheme_light,
+        acts: &[Act::Click("Solarized Light"), Act::Type("no-such-theme")],
+    },
+    Scene {
+        name: "theme-picker-compact",
+        width: 800,
+        height: 600,
+        scale: 1.0,
+        populated: true,
+        setup: theme_browser,
+        acts: &[],
     },
     Scene {
         name: "scheme-dark-terminal",
@@ -1717,8 +1761,8 @@ fn render(
         let mut output = FrameOutput::default();
         let png = renderer.frame(size, keep, &mut |canvas| {
             state.begin_frame(events, time);
-            let theme =
-                super::colors::previewed_theme(&app.settings, app.settings_view.previewing, system);
+            app.system_theme = system;
+            let theme = super::colors::app_theme(&app.settings, system);
             let mut ui = Ui::new(canvas, theme, &mut state, viewport);
             app.frame(&mut ui);
             output = state.end_frame();
@@ -3394,20 +3438,20 @@ fn the_theme_tabs_offer_schemes_of_their_kind_and_drop_one_of_the_other() {
         let menu = output
             .zones
             .iter()
-            .find(|zone| zone.role == Role::ComboBox && zone.label == "Annulus")
+            .find(|zone| zone.role == Role::Button && zone.label == "Annulus")
             .map(|zone| zone.rect.center())
             .unwrap();
         let events = [
             Event::PointerMoved(menu),
             Event::PointerDown(Button::Primary),
             Event::PointerUp(Button::Primary),
-            Event::Text("solarized".into()),
         ];
-        let output = step(app, state, &events, at);
+        step(app, state, &events, at);
+        let output = step(app, state, &[Event::Text("solarized".into())], at + 0.5);
         let names: Vec<String> = output
             .zones
             .iter()
-            .filter(|zone| zone.role == Role::MenuItem)
+            .filter(|zone| zone.role == Role::ListItem)
             .map(|zone| zone.label.clone())
             .collect();
         step(
@@ -3416,6 +3460,7 @@ fn the_theme_tabs_offer_schemes_of_their_kind_and_drop_one_of_the_other() {
             &[Event::Key(Key::Escape, Modifiers::NONE)],
             at + 1.0,
         );
+        step(app, state, &[], at + 1.5);
         names
     };
     // Whether each scheme found is dark.
@@ -6282,4 +6327,101 @@ fn connecting_or_unlocking_brings_the_accounts_latest_at_once() {
         app.sync.last_round.is_infinite(),
         "and the first frame after an unlock"
     );
+}
+
+#[test]
+fn the_theme_browser_previews_cancels_and_applies_without_touching_background_controls() {
+    let mut app = NativeApp::new(Some(fixture_vault("theme-browser", true)));
+    settings(&mut app);
+    app.settings.app_scheme = Some("Solarized Light".into());
+    app.settings.theme = ThemeMode::Light;
+    app.settings.reduce_motion = true;
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let output = step(&mut app, &mut state, &click_on(&output, "Appearance"), 1.0);
+    let output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Solarized Light"),
+        2.0,
+    );
+    assert!(app.settings_view.picker.is_some());
+    assert!(
+        !output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Reduce motion")
+    );
+    let output = step(&mut app, &mut state, &click_on(&output, "All"), 3.0);
+    // Return focus to search after using the filter, as a pointer user would.
+    let search = output
+        .zones
+        .iter()
+        .find(|zone| zone.id == super::Id::new("theme.search"))
+        .unwrap()
+        .rect
+        .center();
+    step(
+        &mut app,
+        &mut state,
+        &[
+            Event::PointerMoved(search),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ],
+        4.0,
+    );
+    let output = step(&mut app, &mut state, &[Event::Text("Dracula".into())], 5.0);
+    assert!(
+        output
+            .zones
+            .iter()
+            .any(|zone| zone.label == "Dracula" && zone.role == Role::ListItem)
+    );
+    assert_eq!(app.settings.app_scheme.as_deref(), Some("Solarized Light"));
+    assert_eq!(app.settings.recent_themes, Vec::<String>::new());
+    let output = step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Escape, Modifiers::NONE)],
+        6.0,
+    );
+    assert!(app.settings_view.picker.is_none());
+    assert_eq!(app.settings.app_scheme.as_deref(), Some("Solarized Light"));
+    assert_eq!(state.focus(), Some(super::Id::new("settings.scheme")));
+    let output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Solarized Light"),
+        7.0,
+    );
+    let output = step(&mut app, &mut state, &click_on(&output, "All"), 8.0);
+    let search = output
+        .zones
+        .iter()
+        .find(|zone| zone.id == super::Id::new("theme.search"))
+        .unwrap()
+        .rect
+        .center();
+    step(
+        &mut app,
+        &mut state,
+        &[
+            Event::PointerMoved(search),
+            Event::PointerDown(Button::Primary),
+            Event::PointerUp(Button::Primary),
+        ],
+        9.0,
+    );
+    step(&mut app, &mut state, &[Event::Text("Dracula".into())], 10.0);
+    step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Enter, Modifiers::NONE)],
+        11.0,
+    );
+    assert!(app.settings_view.picker.is_none());
+    assert_eq!(app.settings.app_scheme.as_deref(), Some("Dracula"));
+    assert_eq!(app.settings.theme, ThemeMode::Dark);
+    assert_eq!(app.settings.recent_themes, ["Dracula"]);
 }

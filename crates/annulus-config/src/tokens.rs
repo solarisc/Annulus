@@ -357,6 +357,7 @@ mod tests {
     fn every_scheme_meets_wcag_aa() {
         let failed: Vec<String> = crate::schemes::SCHEMES
             .iter()
+            .chain(crate::schemes::BUILT_INS)
             .flat_map(|scheme| {
                 failures(&scheme.palette())
                     .into_iter()

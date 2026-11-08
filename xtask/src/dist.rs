@@ -66,6 +66,11 @@ pub fn run() -> Result<bool> {
             Source::File(root.join("LICENSE-APACHE")),
             false,
         ),
+        (
+            "Annulus/LICENSE-THEMES".to_owned(),
+            Source::File(root.join("LICENSE-THEMES")),
+            false,
+        ),
     ];
     if cfg!(target_os = "macos") {
         if !crate::mac_app::run()? {

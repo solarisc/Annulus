@@ -2208,12 +2208,15 @@ mod tests {
     fn both_themes_keep_text_readable_on_every_surface() {
         let ours = [Appearance::Dark, Appearance::Light]
             .map(|appearance| (format!("{appearance:?}"), Theme::new(appearance)));
-        let schemes = annulus_config::schemes::SCHEMES.iter().map(|scheme| {
-            (
-                scheme.name.to_owned(),
-                Theme::from_palette(&scheme.palette(), scheme.dark()),
-            )
-        });
+        let schemes = annulus_config::schemes::SCHEMES
+            .iter()
+            .chain(annulus_config::schemes::BUILT_INS)
+            .map(|scheme| {
+                (
+                    scheme.name.to_owned(),
+                    Theme::from_palette(&scheme.palette(), scheme.dark()),
+                )
+            });
         for (appearance, theme) in ours.into_iter().chain(schemes) {
             let rgb = |c: Color| annulus_config::tokens::Rgb::new(c.r, c.g, c.b);
             for surface in [

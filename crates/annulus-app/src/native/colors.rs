@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-use annulus_config::schemes::{SCHEMES, Scheme};
+use annulus_config::schemes::{BUILT_INS, SCHEMES, Scheme};
 use annulus_config::settings::Settings;
 use annulus_config::tokens::{Rgb, ThemeMode};
 use annulus_term::Palette;
@@ -14,6 +14,10 @@ use annulus_ui::motion::Motion;
 
 /// The first entry of the window's scheme menu: no scheme, our own theme.
 pub const OWN_COLORS: &str = "Annulus";
+/// Our own fixed light and dark choices, alongside the system-following default.
+pub const OWN_LIGHT: &str = "Annulus Light";
+/// Our own fixed dark choice.
+pub const OWN_DARK: &str = "Annulus Dark";
 
 /// The window's colors on their way to new ones: a scheme previewed or chosen, or the OS
 /// turning dark, blends in over [`Motion::BASE`] instead of flashing.
@@ -27,6 +31,10 @@ impl ThemeFade {
     /// The colors to draw with at `now` on the way to `target`, and whether they are still
     /// moving. With `instant` (reduced motion) a change shows at once.
     pub fn step(&mut self, target: Theme, now: f64, instant: bool) -> (Theme, bool) {
+        if instant {
+            self.way = Some((target, target, now));
+            return (target, false);
+        }
         let shown = self.at(now);
         if self.way.is_none_or(|(_, to, _)| to != target) {
             let from = match shown {
@@ -68,6 +76,12 @@ pub fn previewed_theme(settings: &Settings, hovered: Option<usize>, system: Them
 }
 
 fn scheme_theme(scheme: Option<&str>, settings: &Settings, system: Theme) -> Theme {
+    match scheme {
+        Some(OWN_COLORS) => return system,
+        Some(OWN_LIGHT) => return Theme::new(annulus_config::tokens::Appearance::Light),
+        Some(OWN_DARK) => return Theme::new(annulus_config::tokens::Appearance::Dark),
+        _ => {}
+    }
     if let Some(scheme) = scheme.and_then(Scheme::find) {
         return Theme::from_palette(&scheme.palette(), scheme.dark());
     }
@@ -83,71 +97,49 @@ pub fn app_schemes() -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
     NAMES.get_or_init(|| {
         std::iter::once(OWN_COLORS.to_owned())
-            .chain(SCHEMES.iter().map(|scheme| scheme.name.to_owned()))
+            .chain(
+                SCHEMES
+                    .iter()
+                    .chain(BUILT_INS)
+                    .map(|scheme| scheme.name.to_owned()),
+            )
+            .chain([OWN_LIGHT.to_owned(), OWN_DARK.to_owned()])
             .collect()
     })
 }
 
-/// The window's scheme menu under one theme mode (ADR-0026): our own colors, then the schemes
-/// of the mode's kind, or every scheme under System.
-pub struct SchemeMenu {
-    /// What the menu lists.
-    pub names: Vec<String>,
-    /// What each looks like in small, as [`app_swatches`].
-    pub swatches: Vec<Vec<Color>>,
-    /// Where each sits in [`app_schemes`].
-    pub at: Vec<usize>,
-}
-
-impl SchemeMenu {
-    /// The menu's entry for the scheme named `chosen`; `None` (our own colors) is the first.
-    #[must_use]
-    pub fn entry(&self, chosen: Option<&str>) -> Option<usize> {
-        let name = chosen.unwrap_or(OWN_COLORS);
-        self.names.iter().position(|known| known == name)
-    }
-}
-
-/// The scheme menu for `mode`: under Light only light schemes, under Dark only dark ones, and
-/// under System every scheme. Our own colors come first, in the mode's look.
-pub fn scheme_menu(mode: ThemeMode) -> &'static SchemeMenu {
-    static MENUS: OnceLock<[SchemeMenu; 3]> = OnceLock::new();
-    let menus = MENUS.get_or_init(|| {
-        [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark].map(|mode| {
-            let fits = |index: usize| {
-                let dark = SCHEMES[index - 1].dark();
-                match mode {
-                    ThemeMode::System => true,
-                    ThemeMode::Light => !dark,
-                    ThemeMode::Dark => dark,
-                }
-            };
-            let at: Vec<usize> = std::iter::once(0)
-                .chain((1..app_schemes().len()).filter(|&index| fits(index)))
-                .collect();
-            let mut swatches: Vec<Vec<Color>> = at
-                .iter()
-                .map(|&index| app_swatches()[index].clone())
-                .collect();
-            if mode == ThemeMode::Light {
-                let own = Theme::new(annulus_config::tokens::Appearance::Light);
-                swatches[0] = vec![own.chrome, own.text, own.accent, own.ok, own.error];
+/// Applies a browser choice and remembers only applied themes.
+pub fn apply(settings: &mut Settings, index: usize) {
+    let Some(name) = app_schemes().get(index) else {
+        return;
+    };
+    match name.as_str() {
+        OWN_COLORS => {
+            settings.app_scheme = None;
+            settings.theme = ThemeMode::System;
+        }
+        OWN_LIGHT => {
+            settings.app_scheme = None;
+            settings.theme = ThemeMode::Light;
+        }
+        OWN_DARK => {
+            settings.app_scheme = None;
+            settings.theme = ThemeMode::Dark;
+        }
+        _ => {
+            settings.app_scheme = Some(name.clone());
+            if let Some(scheme) = Scheme::find(name) {
+                settings.theme = if scheme.dark() {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                };
             }
-            SchemeMenu {
-                names: at
-                    .iter()
-                    .map(|&index| app_schemes()[index].clone())
-                    .collect(),
-                swatches,
-                at,
-            }
-        })
-    });
-    match mode {
-        ThemeMode::System => &menus[0],
-        ThemeMode::Light => &menus[1],
-        ThemeMode::Dark => &menus[2],
+        }
     }
+    settings.recent_themes.retain(|known| known != name);
+    settings.recent_themes.insert(0, name.clone());
+    settings.recent_themes.truncate(6);
 }
 
 /// The window's scheme once the mode becomes `mode` (ADR-0026): a scheme of the other kind
@@ -170,13 +162,17 @@ pub fn app_swatches() -> &'static [Vec<Color>] {
         std::iter::once(vec![own.chrome, own.text, own.accent, own.ok, own.error])
             // The scheme's own colors, as the window takes them (`Scheme::palette`), without
             // deriving every palette just to open the menu.
-            .chain(SCHEMES.iter().map(|scheme| {
+            .chain(SCHEMES.iter().chain(BUILT_INS).map(|scheme| {
                 [0x00, 0x05, 0x0D, 0x0B, 0x08]
                     .map(|slot: usize| {
                         let [r, g, b] = scheme.base[slot];
                         Color::from(Rgb::new(r, g, b))
                     })
                     .to_vec()
+            }))
+            .chain([annulus_config::tokens::Appearance::Light, annulus_config::tokens::Appearance::Dark].map(|appearance| {
+                let own = Theme::new(appearance);
+                vec![own.chrome, own.text, own.accent, own.ok, own.error]
             }))
             .collect()
     })
@@ -215,6 +211,7 @@ pub fn terminal_themes() -> &'static [String] {
             .chain(
                 SCHEMES
                     .iter()
+                    .chain(BUILT_INS)
                     .filter(|scheme| !builtins.contains(&scheme.name))
                     .map(|scheme| scheme.name.to_owned()),
             )
@@ -300,11 +297,8 @@ mod tests {
                 system
             )
         );
-        // Our own colors under the pointer show our own theme, in the chosen mode.
-        assert_eq!(
-            previewed_theme(&settings, Some(0), system),
-            Theme::new(Appearance::Dark)
-        );
+        // The system-following default previews the system, independently of the saved mode.
+        assert_eq!(previewed_theme(&settings, Some(0), system), system);
         assert_eq!(
             previewed_theme(&settings, None, system),
             app_theme(&settings, system)
@@ -337,6 +331,12 @@ mod tests {
         let (between, moving) = fade.step(light, 1.1, false);
         assert!(moving && between != dark && between != light);
         assert_eq!(fade.step(light, 1.3, false), (light, false));
+        fade.step(dark, 1.5, false);
+        assert_eq!(
+            fade.step(dark, 1.51, true),
+            (dark, false),
+            "turning reduced motion on ends an in-progress fade"
+        );
         // Turned back halfway, it goes back from where it is, not from the far end.
         fade.step(dark, 2.0, false);
         let (turned, _) = fade.step(dark, 2.1, false);
@@ -357,32 +357,41 @@ mod tests {
         assert_eq!(sorted.len(), names.len(), "a name appears twice");
         assert!(names.len() > 450);
         assert_eq!(app_schemes()[0], OWN_COLORS);
-        assert_eq!(app_schemes().len(), SCHEMES.len() + 1);
+        assert_eq!(app_schemes().len(), SCHEMES.len() + BUILT_INS.len() + 3);
     }
 
     #[test]
-    fn the_theme_mode_lists_only_schemes_of_its_kind_and_system_lists_all() {
-        let light = scheme_menu(ThemeMode::Light);
-        let dark = scheme_menu(ThemeMode::Dark);
-        let all = scheme_menu(ThemeMode::System);
-        for menu in [light, dark, all] {
-            assert_eq!(menu.names[0], OWN_COLORS, "our own colors come first");
-            assert_eq!(menu.entry(None), Some(0));
-            assert_eq!(menu.names.len(), menu.swatches.len());
-            for (name, &index) in menu.names.iter().zip(&menu.at) {
-                assert_eq!(&app_schemes()[index], name);
-            }
+    fn applying_default_variants_keeps_them_distinct_and_recent_is_bounded() {
+        let mut settings = Settings::default();
+        let pick = |name: &str| {
+            app_schemes()
+                .iter()
+                .position(|known| known == name)
+                .unwrap()
+        };
+        for (name, mode) in [
+            (OWN_LIGHT, ThemeMode::Light),
+            (OWN_DARK, ThemeMode::Dark),
+            (OWN_COLORS, ThemeMode::System),
+        ] {
+            apply(&mut settings, pick(name));
+            assert_eq!(settings.theme, mode);
+            assert!(settings.app_scheme.is_none());
         }
-        assert!(light.entry(Some("Solarized Light")).is_some());
-        assert!(light.entry(Some("Dracula")).is_none());
-        assert!(dark.entry(Some("Dracula")).is_some());
-        assert!(dark.entry(Some("Solarized Light")).is_none());
-        assert_eq!(light.names.len() + dark.names.len() - 1, all.names.len());
-        assert_eq!(all.names, app_schemes());
-        let own_light = Theme::new(Appearance::Light);
+        for name in app_schemes().iter().skip(1).take(10) {
+            apply(&mut settings, pick(name));
+        }
+        assert_eq!(settings.recent_themes.len(), 6);
+        let name = settings.recent_themes[2].clone();
+        apply(&mut settings, pick(&name));
+        assert_eq!(settings.recent_themes[0], name);
         assert_eq!(
-            light.swatches[0][0], own_light.chrome,
-            "ours, in its light look"
+            settings
+                .recent_themes
+                .iter()
+                .filter(|known| **known == name)
+                .count(),
+            1
         );
     }
 

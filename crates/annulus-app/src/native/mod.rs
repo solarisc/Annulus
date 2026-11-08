@@ -26,6 +26,7 @@ mod sftp;
 mod shortcuts;
 mod start;
 mod terminal;
+mod theme_picker;
 mod titlebar;
 
 use annulus_config::settings::{OpenTab, Settings};
@@ -233,6 +234,8 @@ pub enum WindowButtons {
 
 /// The whole window's state.
 pub struct NativeApp {
+    /// The operating system appearance before any saved scheme is applied.
+    system_theme: Theme,
     /// The tab that was in front last frame and its place, to tell when another comes in front.
     front: (Option<u64>, usize),
     /// A tab just came in front: when, and from which side.
@@ -353,6 +356,7 @@ impl NativeApp {
             vault,
             hosts: hosts::HostsView::default(),
             maximized: false,
+            system_theme: Theme::new(Appearance::Dark),
             window_buttons: if annulus_platform::window::OS_WINDOW_BUTTONS {
                 WindowButtons::Os
             } else {
@@ -1234,8 +1238,6 @@ impl NativeApp {
         if fading {
             ui.request_repaint();
         }
-        // Settings → Appearance sets it again while its scheme menu is open and drawn.
-        self.settings_view.previewing = None;
         let t = ui.theme;
         let mut area = ui.viewport;
         ui.gfx.fill_rect(area, 0.0, t.chrome);
@@ -1258,6 +1260,13 @@ impl NativeApp {
         let in_settings = !locked
             && self.section == Section::Settings
             && self.tabs.get(self.active).map(|tab| tab.kind) == Some(TabKind::Vault);
+        let theme_modal = self.settings_view.picker.is_some();
+        if !theme_modal && let Some(focus) = self.settings_view.theme_focus.take() {
+            ui.state.set_focus(Some(focus), true);
+        }
+        if theme_modal {
+            ui.push_inert();
+        }
         self.settings_view.catch_keys(ui, in_settings);
         if !locked && shortcuts::PALETTE.pressed(ui) {
             self.palette = match self.palette.take() {
@@ -1479,6 +1488,22 @@ impl NativeApp {
         }
         if let Some(typed) = for_palette {
             ui.give_back_typed(typed);
+        }
+        if theme_modal {
+            ui.pop_inert();
+        }
+        if let Some(picker) = self.settings_view.picker.as_mut()
+            && let Some(outcome) = picker.draw(ui, &self.settings, self.system_theme)
+        {
+            if let theme_picker::Outcome::Apply(index) = outcome {
+                colors::apply(&mut self.settings, index);
+                if let Some(path) = &self.settings_path {
+                    let _ = self.settings.save(path);
+                }
+            }
+            self.settings_view.theme_focus = picker.return_focus();
+            self.settings_view.picker = None;
+            ui.request_repaint();
         }
         self.palette_frame(ui);
         self.flight(ui);
@@ -1906,6 +1931,7 @@ impl WindowApp for Preview {
 
     fn frame(&mut self, ui: &mut Ui<'_>, maximized: bool) -> Option<WindowRequest> {
         self.app.maximized = maximized;
+        self.app.system_theme = self.theme;
         self.app.frame(ui).map(|action| match action {
             WindowAction::Minimize => WindowRequest::Minimize,
             WindowAction::ToggleMaximize => WindowRequest::ToggleMaximize,
@@ -1922,11 +1948,7 @@ impl WindowApp for Preview {
     }
 
     fn theme(&self) -> Theme {
-        colors::previewed_theme(
-            &self.app.settings,
-            self.app.settings_view.previewing,
-            self.theme,
-        )
+        colors::app_theme(&self.app.settings, self.theme)
     }
 
     fn menu(&mut self, item: MenuItem) {

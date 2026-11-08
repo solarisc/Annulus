@@ -25,6 +25,8 @@ pub struct Settings {
     /// A color scheme for the whole window, by name ([`crate::schemes`]); `None` draws our
     /// own light or dark theme as `theme` says. A scheme is light or dark by itself.
     pub app_scheme: Option<String>,
+    /// Last six applied window themes, newest first; previews never change this list.
+    pub recent_themes: Vec<String>,
     /// Terminal font size in points.
     pub font_size: f32,
     /// Lock the vault after this many idle minutes; 0 never locks.
@@ -124,6 +126,7 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::System,
             app_scheme: None,
+            recent_themes: Vec::new(),
             font_size: DEFAULT_FONT_SIZE,
             auto_lock_minutes: 15,
             default_profile: None,
@@ -233,6 +236,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeMode::Dark,
             app_scheme: Some("Gruvbox Dark".into()),
+            recent_themes: vec!["Gruvbox Dark".into(), "Dracula".into()],
             font_size: 16.0,
             auto_lock_minutes: 5,
             default_profile: Some("PowerShell 7".into()),
