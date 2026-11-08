@@ -129,34 +129,34 @@ impl Palette {
     }
 }
 
-/// The dark theme: warm graphite, so the teal is the only color that speaks.
+/// The dark theme: the mark's charcoal tile, silver lettering and luminous teal.
 pub const DARK: Palette = Palette {
-    bg_app: Rgb::new(0x14, 0x13, 0x12),
-    bg_surface: Rgb::new(0x1C, 0x1B, 0x19),
-    bg_raised: Rgb::new(0x30, 0x2F, 0x2C),
-    bg_hover: Rgb::new(0x29, 0x28, 0x26),
-    bg_selected: Rgb::new(0x31, 0x30, 0x2E),
-    border_subtle: Rgb::new(0x2E, 0x2D, 0x2A),
-    text_primary: Rgb::new(0xEE, 0xEC, 0xE8),
-    text_secondary: Rgb::new(0xAB, 0xA8, 0xA1),
-    accent: Rgb::new(0x2E, 0xB5, 0xA5),
+    bg_app: Rgb::new(0x0D, 0x0D, 0x0F),
+    bg_surface: Rgb::new(0x17, 0x18, 0x1B),
+    bg_raised: Rgb::new(0x27, 0x29, 0x2D),
+    bg_hover: Rgb::new(0x25, 0x27, 0x2B),
+    bg_selected: Rgb::new(0x2D, 0x30, 0x34),
+    border_subtle: Rgb::new(0x34, 0x36, 0x3A),
+    text_primary: Rgb::new(0xDC, 0xDB, 0xDC),
+    text_secondary: Rgb::new(0xAC, 0xAF, 0xB5),
+    accent: Rgb::new(0x64, 0xE7, 0xD5),
     status_warn: Rgb::new(0xE0, 0xA4, 0x3A),
     status_error: Rgb::new(0xEF, 0x74, 0x6D),
     status_ok: Rgb::new(0x4C, 0xC2, 0x7A),
 };
 
-/// The light theme: a white sheet on warm paper. Raised surfaces are white and set apart by a
+/// The light theme: a white sheet on cool silver. Raised surfaces are white and set apart by a
 /// shadow.
 pub const LIGHT: Palette = Palette {
-    bg_app: Rgb::new(0xF4, 0xF3, 0xEF),
+    bg_app: Rgb::new(0xF2, 0xF4, 0xF6),
     bg_surface: Rgb::new(0xFF, 0xFF, 0xFF),
     bg_raised: Rgb::new(0xFF, 0xFF, 0xFF),
     bg_hover: Rgb::new(0xF3, 0xF3, 0xF3),
-    bg_selected: Rgb::new(0xEC, 0xEC, 0xEB),
-    border_subtle: Rgb::new(0xE7, 0xE5, 0xE0),
-    text_primary: Rgb::new(0x1A, 0x19, 0x17),
-    text_secondary: Rgb::new(0x56, 0x53, 0x4D),
-    accent: Rgb::new(0x11, 0x7C, 0x70),
+    bg_selected: Rgb::new(0xEA, 0xED, 0xF0),
+    border_subtle: Rgb::new(0xDE, 0xE2, 0xE6),
+    text_primary: Rgb::new(0x1B, 0x1D, 0x21),
+    text_secondary: Rgb::new(0x50, 0x55, 0x5D),
+    accent: Rgb::new(0x08, 0x75, 0x69),
     status_warn: Rgb::new(0xB9, 0x7B, 0x10),
     status_error: Rgb::new(0xC9, 0x3A, 0x33),
     status_ok: Rgb::new(0x24, 0x93, 0x4F),
@@ -172,7 +172,7 @@ pub struct MarkColors {
     pub ring: Rgb,
     /// The letter.
     pub letter: Rgb,
-    /// The chevrons and the spark: a teal brighter than the accent, used only in the mark.
+    /// The chevrons and the spark: the same teal as the dark theme's accent.
     pub light: Rgb,
 }
 
@@ -337,6 +337,14 @@ mod tests {
             require(name, color, &all, NON_TEXT_AA);
         }
         failures
+    }
+
+    #[test]
+    fn the_default_dark_theme_uses_the_marks_tile_letter_ring_and_teal() {
+        assert_eq!(DARK.bg_app, MARK.tile);
+        assert_eq!(DARK.text_primary, MARK.letter);
+        assert_eq!(DARK.border_subtle, MARK.ring);
+        assert_eq!(DARK.accent, MARK.light);
     }
 
     #[test]
