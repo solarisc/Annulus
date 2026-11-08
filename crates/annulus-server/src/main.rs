@@ -1,9 +1,9 @@
 //! `annulus-server`: the self-hosted sync server (ADR-0008).
 //!
 //! ```text
-//! annulus-server [serve] [--listen 127.0.0.1:8443] [--data annulus-server.db]
-//!                [--signups open|closed] [--tls-cert cert.pem --tls-key key.pem]
-//!                [--behind-proxy]
+//! annulus-server [serve] [--listen 127.0.0.1:8443 | --host 127.0.0.1 --port 8443]
+//!                [--data annulus-server.db] [--signups open|closed]
+//!                [--tls-cert cert.pem --tls-key key.pem] [--behind-proxy]
 //! annulus-server accounts [--data …]               list accounts and storage use
 //! annulus-server delete-account <name> [--data …]  delete an account and its data
 //! annulus-server backup <file> [--data …]          consistent copy while running
@@ -11,6 +11,7 @@
 //! annulus-server tls-init --name 10.1.1.20[,sync.lan] [--out .]
 //!                                                  a self-signed certificate for a LAN server
 //! annulus-server fingerprint [--tls-cert cert.pem] the fingerprint the app asks to compare
+//! annulus-server --help                            this list
 //! ```
 //!
 //! Plain HTTP is allowed on loopback only; elsewhere the server needs a certificate, or
@@ -35,8 +36,39 @@ struct Serve {
     behind_proxy: bool,
 }
 
+/// What `--help` prints.
+const USAGE: &str = "\
+annulus-server: the Annulus sync server
+
+Usage:
+  annulus-server [serve] [options]                 serve the app's sync
+  annulus-server accounts [--data FILE]            list accounts and storage use
+  annulus-server delete-account NAME [--data FILE] delete an account and its data
+  annulus-server backup FILE [--data FILE]         consistent copy while running
+  annulus-server invite [--expires 24h] [--data FILE]
+                                                   single-use invite code for one account
+  annulus-server tls-init --name 10.1.1.20[,sync.lan] [--out DIR]
+                                                   a self-signed certificate for a LAN server
+  annulus-server fingerprint [--tls-cert FILE]     the fingerprint the app asks to compare
+
+Options of serve:
+  --host ADDRESS        the address to listen on: 0.0.0.0 for every network, 127.0.0.1 (the
+                        default) for this machine only, or one of its addresses
+  --port NUMBER         the port to listen on (8443 by default)
+  --listen ADDRESS:PORT both at once, such as 0.0.0.0:8443
+  --data FILE           the database (annulus-server.db by default)
+  --signups open|closed whether anyone may make an account (closed by default: invites)
+  --tls-cert FILE --tls-key FILE
+                        serve HTTPS with this certificate (tls-init makes one)
+  --behind-proxy        a TLS proxy (Caddy, nginx) sits in front
+
+Plain HTTP is allowed on 127.0.0.1 only; on any other address the server needs a certificate,
+or --behind-proxy.
+";
+
 /// What to do.
 enum Command {
+    Help,
     Serve(Serve),
     Accounts { data: PathBuf },
     DeleteAccount { data: PathBuf, name: String },
@@ -53,6 +85,16 @@ const DEFAULT_INVITE: Duration = Duration::from_hours(24);
 
 /// The longest an invite may be valid.
 const MAX_INVITE: Duration = Duration::from_hours(30 * 24);
+
+/// The address `--host` names: an IPv4 or IPv6 address, or `localhost`.
+fn host_address(text: &str) -> Result<std::net::IpAddr, String> {
+    if text.eq_ignore_ascii_case("localhost") {
+        return Ok(std::net::IpAddr::from([127, 0, 0, 1]));
+    }
+    text.trim_matches(['[', ']'])
+        .parse()
+        .map_err(|_| format!("--host takes an address like 0.0.0.0, 127.0.0.1 or ::1, not {text}"))
+}
 
 /// `90m`, `24h` or `7d`: at least a minute, at most 30 days.
 fn invite_duration(text: &str) -> Result<Duration, String> {
@@ -73,6 +115,7 @@ fn invite_duration(text: &str) -> Result<Duration, String> {
     Ok(Duration::from_mins(minutes))
 }
 
+#[allow(clippy::too_many_lines)] // One option after another.
 fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = args.peekable();
     let command = match args.peek().map(String::as_str) {
@@ -90,9 +133,22 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let (mut cert, mut key) = (None, None);
     let mut expires = None;
     let (mut names, mut out) = (Vec::new(), PathBuf::from("."));
+    let (mut host, mut port) = (None, None);
+    let mut help = false;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
+            "--help" | "-h" => help = true,
+            "--host" => host = Some(host_address(&value()?)?),
+            "--port" => {
+                port = Some(
+                    value()?
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|port| *port != 0)
+                        .ok_or_else(|| "--port takes a number from 1 to 65535".to_owned())?,
+                );
+            }
             "--expires" => expires = Some(invite_duration(&value()?)?),
             "--listen" => {
                 serve.listen = value()?
@@ -121,6 +177,16 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             other if !other.starts_with("--") => positional.push(other.to_owned()),
             other => return Err(format!("unknown option {other}")),
         }
+    }
+    if help || matches!(command.as_deref(), Some("help" | "-h")) {
+        return Ok(Command::Help);
+    }
+    // On top of --listen, whichever order they came in.
+    if let Some(host) = host {
+        serve.listen.set_ip(host);
+    }
+    if let Some(port) = port {
+        serve.listen.set_port(port);
     }
     let fingerprint_of = cert.clone();
     serve.tls = match (cert, key) {
@@ -225,6 +291,10 @@ fn serve(options: Serve) -> Result<(), String> {
 fn run(command: Command) -> Result<(), String> {
     let open = |data: &PathBuf| Server::open(data, Signups::Closed).map_err(|e| e.to_string());
     match command {
+        Command::Help => {
+            say(USAGE.trim_end());
+            Ok(())
+        }
         Command::Serve(options) => serve(options),
         Command::Accounts { data } => {
             let accounts = open(&data)?.accounts().map_err(|e| e.to_string())?;
@@ -327,6 +397,40 @@ mod tests {
         assert_eq!(defaults.signups, Signups::Closed);
         assert!(defaults.listen.ip().is_loopback());
         assert!(parsed(&["--signups", "maybe"]).is_err());
+    }
+
+    #[test]
+    fn host_and_port_set_where_it_listens_in_any_order() {
+        let listen = |list: &[&str]| match parsed(list) {
+            Ok(Command::Serve(serve)) => serve.listen.to_string(),
+            Ok(_) => panic!("not serve"),
+            Err(why) => panic!("{why}"),
+        };
+        assert_eq!(listen(&["--port", "9000"]), "127.0.0.1:9000");
+        assert_eq!(listen(&["--host", "localhost"]), "127.0.0.1:8443");
+        assert_eq!(listen(&["--host", "::1", "--port", "443"]), "[::1]:443");
+        assert_eq!(
+            listen(&["--port", "9443", "--host", "0.0.0.0", "--behind-proxy"]),
+            "0.0.0.0:9443"
+        );
+        assert_eq!(
+            listen(&["--listen", "127.0.0.1:1", "--port", "2"]),
+            "127.0.0.1:2",
+            "on top of --listen"
+        );
+        // An address beyond this machine still needs TLS or a proxy.
+        assert!(parsed(&["--host", "0.0.0.0"]).is_err());
+        for wrong in [
+            &["--port", "0"][..],
+            &["--port", "70000"],
+            &["--host", "web"],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+        assert!(matches!(parsed(&["--help"]), Ok(Command::Help)));
+        assert!(matches!(parsed(&["serve", "-h"]), Ok(Command::Help)));
+        assert!(matches!(parsed(&["-h"]), Ok(Command::Help)));
+        assert!(USAGE.contains("--host") && USAGE.contains("--port"));
     }
 
     #[test]
