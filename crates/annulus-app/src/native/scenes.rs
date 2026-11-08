@@ -3889,6 +3889,55 @@ fn escape_with_the_palette_open_closes_only_the_palette() {
 }
 
 #[test]
+fn a_named_palette_action_opens_the_saved_host_editor_from_the_keyboard() {
+    let mut app = NativeApp::new(Some(fixture_vault("palette-edit-host", true)));
+    let host = app.vault.as_ref().unwrap().hosts()[0].clone();
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    step(&mut app, &mut state, &[chord(shortcuts::PALETTE)], 1.0);
+    step(
+        &mut app,
+        &mut state,
+        &[Event::Text(format!("Edit ({})", host.label))],
+        2.0,
+    );
+    step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Enter, Modifiers::NONE)],
+        3.0,
+    );
+    step(&mut app, &mut state, &[], 4.0);
+    assert!(app.palette.is_none());
+    assert_eq!(app.section, super::Section::Hosts);
+    assert!(app.hosts.editing(host.id));
+}
+
+#[test]
+fn cancelling_the_palette_returns_keyboard_focus() {
+    let mut app = NativeApp::new(Some(fixture_vault("palette-focus", true)));
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Search hosts, or type user@host:port to connect"),
+        1.0,
+    );
+    let before = state.focus();
+    assert!(before.is_some());
+    step(&mut app, &mut state, &[chord(shortcuts::PALETTE)], 2.0);
+    step(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Escape, Modifiers::NONE)],
+        3.0,
+    );
+    step(&mut app, &mut state, &[], 4.0);
+    assert_eq!(state.focus(), before);
+}
+
+#[test]
 fn enter_in_an_empty_host_search_connects_nowhere() {
     let mut app = NativeApp::new(Some(fixture_vault("empty-search", true)));
     let mut state = UiState::default();
@@ -5222,13 +5271,64 @@ fn the_palette_lists_tabs_and_commands_and_runs_them() {
         "locked: no hosts, the tabs come first"
     );
     assert!(kinds.contains(&("Settings", "Command")));
-    assert!(kinds.contains(&("SFTP", "Command")));
+    assert!(kinds.contains(&("SFTP", "Page")));
     app.run_action(Action::Tab(2));
     assert_eq!(app.active, 2);
-    app.run_action(Action::Settings);
+    app.run_action(Action::Settings(super::settings::Page::Appearance));
     assert_eq!((app.active, app.section), (0, super::Section::Settings));
     app.run_action(Action::NewLocal);
     assert_eq!(app.opens.len(), 1, "a local shell opens after this frame");
+}
+
+#[test]
+fn the_palette_lists_every_page_and_opens_host_and_key_editors() {
+    use crate::command_palette::Action;
+    let mut app = NativeApp::new(Some(fixture_vault("palette-routes", true)));
+    app.vault_path = Some(std::path::PathBuf::from("palette-routes.anv"));
+    let host = app.vault.as_ref().unwrap().hosts()[0].id;
+    let key = app.vault.as_ref().unwrap().ssh_keys()[0].id;
+    let group = app.vault.as_ref().unwrap().groups()[0].uid.clone();
+    let snippet = app.vault.as_ref().unwrap().snippets()[0].id;
+    let rule = app.vault.as_ref().unwrap().forwards()[0].id;
+    let items = app.palette_items();
+    for section in super::Section::MAIN {
+        assert!(
+            items.iter().any(|item| item.label == section.title()),
+            "{}",
+            section.title()
+        );
+    }
+    for page in super::settings::Page::ALL {
+        assert!(
+            items.iter().any(|item| item.label == page.title()),
+            "{}",
+            page.title()
+        );
+    }
+
+    app.run_action(Action::EditHost(host));
+    assert_eq!((app.active, app.section), (0, super::Section::Hosts));
+    assert!(app.hosts.editing(host));
+
+    app.run_action(Action::EditKey(key));
+    assert_eq!((app.active, app.section), (0, super::Section::Keychain));
+    assert!(app.keychain.editing(key));
+
+    app.run_action(Action::EditGroup(group));
+    assert_eq!(app.section, super::Section::Hosts);
+    assert!(app.hosts.group_editor.is_some());
+
+    app.run_action(Action::EditSnippet(snippet));
+    assert_eq!(app.section, super::Section::Snippets);
+    assert!(app.snippets.editing(snippet));
+
+    app.run_action(Action::EditForward(rule));
+    assert_eq!(app.section, super::Section::PortForwarding);
+    assert!(app.forwards.editing(rule));
+
+    app.run_action(Action::Settings(super::settings::Page::Shortcuts));
+    assert_eq!(app.section, super::Section::Settings);
+    assert_eq!(app.settings_view.page, super::settings::Page::Shortcuts);
 }
 
 #[test]

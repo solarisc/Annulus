@@ -680,8 +680,8 @@ pub const PALETTE: Shortcut = Shortcut::chord(
     "App",
     "Command palette",
     "PALETTE",
-    (Key::Char('k'), CTRL_SHIFT),
-    (Key::Char('k'), CMD),
+    (Key::Char('p'), CTRL_SHIFT),
+    (Key::Char('p'), CMD_SHIFT),
 );
 /// Settings.
 pub const SETTINGS: Shortcut = Shortcut::chord(
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn keys_that_would_take_typing_or_belong_to_another_are_refused() {
         let refused = |key, modifiers| Keyboard::Pc.check("NEW_TAB", key, modifiers).unwrap_err();
-        assert!(refused(Key::Char('k'), CTRL_SHIFT).contains("Command palette"));
+        assert!(refused(Key::Char('p'), CTRL_SHIFT).contains("Command palette"));
         assert!(refused(Key::Char('n'), Modifiers::SHIFT).contains("typing"));
         assert!(refused(Key::Char('r'), CTRL).contains("add Shift"));
         assert!(refused(Key::Char('3'), ALT).contains("Go to tab"));
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn on_a_mac_keys_must_hold_cmd_and_leave_ctrl_letters_to_the_shell() {
         let refused = |key, modifiers| Keyboard::Mac.check("NEW_TAB", key, modifiers).unwrap_err();
-        assert!(refused(Key::Char('k'), CMD).contains("Command palette"));
+        assert!(refused(Key::Char('p'), CMD_SHIFT).contains("Command palette"));
         // Option with a key types a character on a Mac.
         assert!(refused(Key::Char('n'), ALT).contains("Hold Cmd"));
         assert!(refused(Key::Char('r'), CTRL).contains("use Cmd"));
@@ -924,8 +924,11 @@ mod tests {
         assert_eq!(mac(Key::Char('n'), CMD_OPTION), Ok(()));
         assert_eq!(mac(Key::Char('t'), CMD), Ok(()), "its own");
         // A PC's chords are free there, and the other way round.
-        assert_eq!(mac(Key::Char('k'), CTRL_SHIFT), Ok(()));
-        assert_eq!(Keyboard::Pc.check("NEW_TAB", Key::Char('k'), CMD), Ok(()));
+        assert_eq!(mac(Key::Char('p'), CTRL_SHIFT), Ok(()));
+        assert_eq!(
+            Keyboard::Pc.check("NEW_TAB", Key::Char('p'), CMD_SHIFT),
+            Ok(())
+        );
     }
 
     #[test]
@@ -944,6 +947,7 @@ mod tests {
             (PANE_FOCUS, "Alt+Arrows", "Cmd+Option+Arrows"),
             (OPEN_LINK, "Ctrl+click", "Cmd+click"),
             (PASTE, "Ctrl+Shift+V", "Cmd+V"),
+            (PALETTE, "Ctrl+Shift+P", "Cmd+Shift+P"),
         ] {
             assert_eq!(written(Keyboard::Pc, shortcut), pc);
             assert_eq!(written(Keyboard::Mac, shortcut), mac);

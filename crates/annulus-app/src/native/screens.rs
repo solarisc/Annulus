@@ -459,6 +459,20 @@ pub struct KeychainView {
 }
 
 impl KeychainView {
+    /// Opens saved key `id` in the edit card.
+    pub fn edit_key(&mut self, vault: &Vault, id: u64) {
+        if let Some(key) = vault.ssh_key(id) {
+            self.form.open(KeyForm::edit(key));
+            self.message.close();
+        }
+    }
+
+    /// Whether saved key `id` is open in the edit card.
+    #[cfg(test)]
+    pub fn editing(&self, id: u64) -> bool {
+        matches!(self.form.get(), Some(KeyForm::Edit { id: open, .. }) if *open == id)
+    }
+
     /// Draws the screen.
     #[allow(clippy::too_many_lines)] // Header, cards and list, top to bottom.
     pub fn draw(
@@ -1438,6 +1452,25 @@ pub struct SnippetsView {
 }
 
 impl SnippetsView {
+    /// Opens saved snippet `id` in the edit card.
+    pub fn edit_snippet(&mut self, vault: &Vault, id: u64) {
+        if let Some(snippet) = vault.snippets().iter().find(|snippet| snippet.id == id) {
+            self.draft.open((
+                snippet.clone(),
+                snippet.label.clone(),
+                snippet.script.clone(),
+            ));
+        }
+    }
+
+    /// Whether saved snippet `id` is open in the edit card.
+    #[cfg(test)]
+    pub fn editing(&self, id: u64) -> bool {
+        self.draft
+            .get()
+            .is_some_and(|(snippet, _, _)| snippet.id == id)
+    }
+
     /// The hosts to run a snippet on (F-SNIP-004): tick up to [`snippets_screen::MAX_TARGETS`],
     /// then each gets a terminal that runs it after the host's own startup command. Returns
     /// whether the card closes, and what to run.
@@ -1600,12 +1633,13 @@ impl SnippetsView {
             &mut area,
             |ui, area, draft| {
                 let (snippet, label, script) = draft;
-                let mut card = pages::card(
-                    ui,
-                    area,
-                    "New snippet",
-                    2.0 * CONTROL + SCRIPT_H + 4.0 * space::M,
-                );
+                let title = if vault.snippets().iter().any(|saved| saved.id == snippet.id) {
+                    "Edit snippet"
+                } else {
+                    "New snippet"
+                };
+                let mut card =
+                    pages::card(ui, area, title, 2.0 * CONTROL + SCRIPT_H + 4.0 * space::M);
                 card.take_top(space::S);
                 ui.text_field(
                     Id::new("snippet.label"),
@@ -2106,6 +2140,19 @@ fn describe(rule: &PortForward, host: &str) -> String {
 }
 
 impl ForwardsView {
+    /// Opens saved forwarding rule `id` in the edit card.
+    pub fn edit_rule(&mut self, vault: &Vault, id: u64) {
+        if let Some(rule) = vault.forwards().iter().find(|rule| rule.id == id) {
+            self.draft.open(Draft::new(rule.clone(), false));
+        }
+    }
+
+    /// Whether saved rule `id` is open in the edit card.
+    #[cfg(test)]
+    pub fn editing(&self, id: u64) -> bool {
+        self.draft.get().is_some_and(|draft| draft.rule.id == id)
+    }
+
     /// Starts rule `id` through its host.
     fn start_rule(&mut self, id: u64, vault: &Vault, files: &SshFiles, waker: Option<&Waker>) {
         let Some(rule) = vault.forwards().iter().find(|rule| rule.id == id).cloned() else {

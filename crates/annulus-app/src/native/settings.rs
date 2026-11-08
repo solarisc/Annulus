@@ -46,7 +46,8 @@ pub enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 8] = [
+    /// Every settings page, in navigation order.
+    pub const ALL: [Page; 8] = [
         Page::Account,
         Page::Appearance,
         Page::Terminal,
@@ -57,7 +58,8 @@ impl Page {
         Page::About,
     ];
 
-    fn title(self) -> &'static str {
+    /// The page name shown in navigation and search.
+    pub fn title(self) -> &'static str {
         match self {
             Page::Account => "Account & sync",
             Page::Appearance => "Appearance",

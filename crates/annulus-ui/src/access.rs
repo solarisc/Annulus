@@ -56,6 +56,7 @@ fn role(zone: &Zone) -> AxRole {
         Role::ListItem => AxRole::ListItem,
         Role::MenuItem => AxRole::MenuItem,
         Role::ScrollView => AxRole::ScrollView,
+        Role::Dialog => AxRole::Dialog,
         Role::Splitter => AxRole::Splitter,
         Role::Terminal => AxRole::Terminal,
         Role::Backdrop => AxRole::GenericContainer,
@@ -65,7 +66,10 @@ fn role(zone: &Zone) -> AxRole {
 /// Zones that hold the zones drawn inside them: a card's buttons, a list's rows, a tab's
 /// close button.
 fn holds_others(role: Role) -> bool {
-    matches!(role, Role::ListItem | Role::ScrollView | Role::Tab)
+    matches!(
+        role,
+        Role::ListItem | Role::ScrollView | Role::Tab | Role::Dialog
+    )
 }
 
 fn inside(inner: Rect, outer: Rect) -> bool {
@@ -95,7 +99,7 @@ fn node(zone: &Zone, scale: f32) -> Node {
         Role::TextInput | Role::Terminal => node.add_action(Action::Focus),
         // Clickable, but never in the Tab order.
         Role::WindowButton | Role::MenuItem => node.add_action(Action::Click),
-        Role::ScrollView | Role::Splitter | Role::Backdrop => {}
+        Role::ScrollView | Role::Dialog | Role::Splitter | Role::Backdrop => {}
         Role::Button | Role::Tab | Role::CheckBox | Role::ComboBox | Role::ListItem => {
             node.add_action(Action::Click);
             node.add_action(Action::Focus);
@@ -130,6 +134,15 @@ pub fn tree(zones: &[Zone], focus: Option<Id>, scale: f32, title: &str) -> TreeU
         if zone.role == Role::Backdrop {
             holders.clear();
             continue;
+        }
+        if zone.role == Role::Dialog {
+            // A modal dialog is the only part of the window a screen reader can reach.
+            nodes.truncate(1);
+            children.truncate(1);
+            children[0].clear();
+            seen.clear();
+            seen.insert(ROOT);
+            holders.clear();
         }
         let id = NodeId(zone.id.0);
         if !seen.insert(id) {
@@ -276,6 +289,37 @@ mod tests {
         assert_eq!(update.focus, search);
         // Bounds are in device pixels.
         assert_eq!(laptop.bounds().map(|rect| rect.x1), Some(800.0));
+    }
+
+    #[test]
+    fn a_modal_dialog_hides_the_window_behind_it_from_the_tree() {
+        let zones = [
+            zone("Hosts", Role::Button, Rect::new(0.0, 0.0, 80.0, 32.0)),
+            zone("", Role::Backdrop, Rect::new(0.0, 0.0, 800.0, 600.0)),
+            zone(
+                "Command palette",
+                Role::Dialog,
+                Rect::new(200.0, 60.0, 400.0, 300.0),
+            ),
+            zone(
+                "Search commands",
+                Role::TextInput,
+                Rect::new(220.0, 80.0, 360.0, 40.0),
+            ),
+        ];
+        let update = tree(&zones, Some(Id::new("Search commands")), 1.0, "Annulus");
+        assert!(
+            update
+                .nodes
+                .iter()
+                .all(|(_, node)| node.label() != Some("Hosts"))
+        );
+        let (dialog, node) = by_label(&update, "Command palette");
+        let (search, _) = by_label(&update, "Search commands");
+        assert_eq!(node.role(), AxRole::Dialog);
+        assert_eq!(node.children(), [search]);
+        assert_eq!(update.focus, search);
+        assert_ne!(dialog, search);
     }
 
     #[test]

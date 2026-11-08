@@ -406,6 +406,22 @@ impl HostsView {
         }
     }
 
+    /// Opens the editor on saved group `uid`.
+    pub fn edit_group(&mut self, vault: &Vault, uid: &str) {
+        if let Some(group) = vault.groups().iter().find(|group| group.uid == uid) {
+            self.editor = None;
+            self.group_editor = Some(GroupEditor::new(group.clone(), false));
+        }
+    }
+
+    /// Whether saved host `id` is open in the editor.
+    #[cfg(test)]
+    pub fn editing(&self, id: u64) -> bool {
+        self.editor
+            .as_ref()
+            .is_some_and(|editor| editor.host.id == id)
+    }
+
     /// Draws the screen into `rect`.
     pub fn draw(
         &mut self,

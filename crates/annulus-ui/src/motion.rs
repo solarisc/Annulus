@@ -579,6 +579,23 @@ impl Canvas for Layers<'_> {
         self.inner.pop_clip();
     }
 
+    fn blur_backdrop(&mut self, rect: Rect, radius: f32) {
+        if !self.invisible() {
+            self.inner
+                .blur_backdrop(self.now.rect(rect), radius * self.now.scale);
+        }
+    }
+
+    fn begin_backdrop_capture(&mut self, bounds: Rect, radius: f32) {
+        self.inner
+            .begin_backdrop_capture(self.now.rect(bounds), radius * self.now.scale);
+    }
+
+    fn end_backdrop_capture(&mut self, bounds: Rect, radius: f32) {
+        self.inner
+            .end_backdrop_capture(self.now.rect(bounds), radius * self.now.scale);
+    }
+
     fn fill_gradient(&mut self, rect: Rect, radius: f32, from: Color, to: Color, across: bool) {
         if self.invisible() {
             return;

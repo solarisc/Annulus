@@ -58,6 +58,8 @@ pub enum Role {
     MenuItem,
     /// A region that scrolls.
     ScrollView,
+    /// A modal surface that holds its fields and actions.
+    Dialog,
     /// A draggable divider.
     Splitter,
     /// Takes the pointer but is not interactive (the title bar's drag area, a backdrop).
@@ -73,7 +75,7 @@ impl Role {
     pub fn focusable(self) -> bool {
         !matches!(
             self,
-            Role::ScrollView | Role::Backdrop | Role::Splitter | Role::WindowButton
+            Role::ScrollView | Role::Dialog | Role::Backdrop | Role::Splitter | Role::WindowButton
         )
     }
 }
@@ -880,6 +882,7 @@ fn activates(role: Role, key: Key) -> bool {
         Role::CheckBox => key == Key::Space,
         Role::TextInput
         | Role::ScrollView
+        | Role::Dialog
         | Role::Splitter
         | Role::Backdrop
         | Role::WindowButton

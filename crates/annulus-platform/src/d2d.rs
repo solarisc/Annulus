@@ -16,19 +16,21 @@ use std::collections::HashMap;
 
 use annulus_ui::gfx::{Canvas, Color, Family, Font, Point, Rect, TextSize, Weight};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING,
-    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BRUSH_PROPERTIES, D2D1_CAP_STYLE_ROUND,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BRUSH_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
     D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_LAYER_OPTIONS_INITIALIZE_FOR_CLEARTYPE, D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory,
-    ID2D1Factory, ID2D1Factory1, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Factory1, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -239,6 +241,15 @@ pub struct D2dCanvas<'a> {
     layouts: HashMap<(String, Family, u32, Weight), IDWriteTextLayout>,
     ui_override: Option<String>,
     mono_override: Option<String>,
+    backdrop: Option<BackdropCapture>,
+}
+
+/// The normal target and brush while the window behind a modal is drawn offscreen.
+struct BackdropCapture {
+    bitmap: ID2D1BitmapRenderTarget,
+    target: ID2D1RenderTarget,
+    brush: ID2D1SolidColorBrush,
+    bounds: Rect,
 }
 
 /// A clip or a group open on the target.
@@ -284,6 +295,7 @@ impl<'a> D2dCanvas<'a> {
             layouts: HashMap::new(),
             ui_override: None,
             mono_override: None,
+            backdrop: None,
         })
     }
 
@@ -614,6 +626,111 @@ impl Canvas for D2dCanvas<'_> {
         }
     }
 
+    fn begin_backdrop_capture(&mut self, bounds: Rect, radius: f32) {
+        if self.backdrop.is_some() || !self.open.is_empty() || bounds.w <= 0.0 || bounds.h <= 0.0 {
+            return;
+        }
+        let size = D2D_SIZE_F {
+            width: bounds.w,
+            height: bounds.h,
+        };
+        // Render one pixel for a small block of window pixels, then let linear sampling
+        // spread that pixel when the bitmap returns to the window target.
+        let device_pixel = 1.0 / self.scale.max(1.0);
+        let sample = if radius <= 0.0 {
+            device_pixel
+        } else {
+            (radius / 2.0).clamp(device_pixel, 8.0)
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let pixels = D2D_SIZE_U {
+            width: (bounds.w / sample).ceil().max(1.0) as u32,
+            height: (bounds.h / sample).ceil().max(1.0) as u32,
+        };
+        // SAFETY: the compatible target and its brush stay on this target's drawing thread.
+        let Ok(bitmap) = (unsafe {
+            self.target.CreateCompatibleRenderTarget(
+                Some(&raw const size),
+                Some(&raw const pixels),
+                None,
+                D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+            )
+        }) else {
+            return;
+        };
+        let Ok(capture): Result<ID2D1RenderTarget, _> = bitmap.cast() else {
+            return;
+        };
+        // A bitmap with alpha cannot use ClearType.
+        // SAFETY: the compatible target stays on this drawing thread, and BeginDraw is
+        // paired with EndDraw below.
+        unsafe {
+            capture.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            capture.BeginDraw();
+        }
+        // SAFETY: the color and target stay valid for the call, and the returned brush
+        // stays on this drawing thread.
+        let Ok(brush) = (unsafe { capture.CreateSolidColorBrush(&color(Color::BLACK), None) })
+        else {
+            // SAFETY: BeginDraw succeeded above and this target stays on the same thread.
+            unsafe {
+                let _ = capture.EndDraw(None, None);
+            }
+            return;
+        };
+        let target = std::mem::replace(&mut self.target, capture);
+        let brush = std::mem::replace(&mut self.brush, brush);
+        self.backdrop = Some(BackdropCapture {
+            bitmap,
+            target,
+            brush,
+            bounds,
+        });
+    }
+
+    fn end_backdrop_capture(&mut self, bounds: Rect, _radius: f32) {
+        let Some(capture) = self.backdrop.take() else {
+            return;
+        };
+        while let Some(open) = self.open.pop() {
+            self.close(open);
+        }
+        // SAFETY: this ends the compatible target begun above, on the same thread.
+        let ended = unsafe { self.target.EndDraw(None, None) }.is_ok();
+        self.target = capture.target;
+        self.brush = capture.brush;
+        if !ended {
+            return;
+        }
+        // SAFETY: the bitmap belongs to the compatible target and is used on its parent target.
+        let Ok(bitmap) = (unsafe { capture.bitmap.GetBitmap() }) else {
+            return;
+        };
+        let bounds = if bounds.w > 0.0 && bounds.h > 0.0 {
+            bounds
+        } else {
+            capture.bounds
+        };
+        let source = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: capture.bounds.w,
+            bottom: capture.bounds.h,
+        };
+        let destination = rect(bounds);
+        // SAFETY: the bitmap, source and destination live through the call and belong to
+        // targets on this drawing thread.
+        unsafe {
+            self.target.DrawBitmap(
+                &bitmap,
+                Some(&raw const destination),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                Some(&raw const source),
+            );
+        }
+    }
+
     fn fill_gradient(&mut self, r: Rect, radius: f32, from: Color, to: Color, across: bool) {
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
@@ -846,6 +963,22 @@ mod tests {
             unreachable!("inside the frame")
         };
         assert!(top.red() < 60 && bottom.red() > 200, "{top:?} {bottom:?}");
+    }
+
+    #[test]
+    fn backdrop_capture_softens_an_edge() {
+        let frame = render(|canvas| {
+            let bounds = Rect::new(0.0, 0.0, 40.0, 40.0);
+            canvas.begin_backdrop_capture(bounds, 10.0);
+            canvas.fill_rect(bounds, 0.0, Color::BLACK);
+            canvas.fill_rect(Rect::new(0.0, 0.0, 20.0, 40.0), 0.0, Color::WHITE);
+            canvas.end_backdrop_capture(bounds, 10.0);
+        });
+        let (Some(near), Some(over)) = (frame.pixel(19, 20), frame.pixel(21, 20)) else {
+            unreachable!("inside the frame")
+        };
+        assert!((20..235).contains(&near.red()), "{near:?}");
+        assert!((20..235).contains(&over.red()), "{over:?}");
     }
 
     #[test]

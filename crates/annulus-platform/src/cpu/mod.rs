@@ -282,6 +282,28 @@ impl Canvas for CpuCanvas {
         self.clips.pop();
     }
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Pixel bounds.
+    fn blur_backdrop(&mut self, rect: Rect, radius: f32) {
+        let frame_w = self.frame.width() as usize;
+        let frame_h = self.frame.height() as usize;
+        let x0 = (rect.x * self.scale).floor().max(0.0) as usize;
+        let y0 = (rect.y * self.scale).floor().max(0.0) as usize;
+        let x1 = (rect.r() * self.scale).ceil().max(0.0) as usize;
+        let y1 = (rect.b() * self.scale).ceil().max(0.0) as usize;
+        let x1 = x1.min(frame_w);
+        let y1 = y1.min(frame_h);
+        let radius = (radius * self.scale).round().max(0.0) as usize;
+        if radius == 0 || x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        box_blur(
+            self.frame.data_mut(),
+            frame_w,
+            (x0, y0, x1 - x0, y1 - y0),
+            radius,
+        );
+    }
+
     fn fill_gradient(&mut self, rect: Rect, radius: f32, from: Color, to: Color, across: bool) {
         let Some(path) = rounded_rect(rect, radius) else {
             return;
@@ -374,6 +396,91 @@ fn paint(color: Color) -> Paint<'static> {
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
     paint.anti_alias = true;
     paint
+}
+
+/// A two-pass box blur over one part of a premultiplied RGBA frame.
+fn box_blur(
+    pixels: &mut [u8],
+    frame_w: usize,
+    (x0, y0, width, height): (usize, usize, usize, usize),
+    radius: usize,
+) {
+    // One row and one column are enough: finish a whole line before replacing its source.
+    // At 4K this stays in kilobytes instead of making another frame-sized buffer.
+    let mut line = vec![0_u8; width.max(height) * 4];
+    for y in 0..height {
+        let mut sum = [0_u32; 4];
+        let first_end = radius.min(width - 1);
+        for x in 0..=first_end {
+            let at = ((y0 + y) * frame_w + x0 + x) * 4;
+            for channel in 0..4 {
+                sum[channel] += u32::from(pixels[at + channel]);
+            }
+        }
+        let mut count = first_end + 1;
+        for x in 0..width {
+            let out = x * 4;
+            for channel in 0..4 {
+                line[out + channel] =
+                    u8::try_from(sum[channel] / u32::try_from(count).unwrap_or(1))
+                        .unwrap_or(u8::MAX);
+            }
+            if x >= radius {
+                let remove = ((y0 + y) * frame_w + x0 + x - radius) * 4;
+                for channel in 0..4 {
+                    sum[channel] -= u32::from(pixels[remove + channel]);
+                }
+                count -= 1;
+            }
+            if x + radius + 1 < width {
+                let add = ((y0 + y) * frame_w + x0 + x + radius + 1) * 4;
+                for channel in 0..4 {
+                    sum[channel] += u32::from(pixels[add + channel]);
+                }
+                count += 1;
+            }
+        }
+        let at = ((y0 + y) * frame_w + x0) * 4;
+        pixels[at..at + width * 4].copy_from_slice(&line[..width * 4]);
+    }
+    for x in 0..width {
+        let mut sum = [0_u32; 4];
+        let first_end = radius.min(height - 1);
+        for y in 0..=first_end {
+            let at = ((y0 + y) * frame_w + x0 + x) * 4;
+            for channel in 0..4 {
+                sum[channel] += u32::from(pixels[at + channel]);
+            }
+        }
+        let mut count = first_end + 1;
+        for y in 0..height {
+            let out = y * 4;
+            for channel in 0..4 {
+                line[out + channel] =
+                    u8::try_from(sum[channel] / u32::try_from(count).unwrap_or(1))
+                        .unwrap_or(u8::MAX);
+            }
+            if y >= radius {
+                let remove = ((y0 + y - radius) * frame_w + x0 + x) * 4;
+                for channel in 0..4 {
+                    sum[channel] -= u32::from(pixels[remove + channel]);
+                }
+                count -= 1;
+            }
+            if y + radius + 1 < height {
+                let add = ((y0 + y + radius + 1) * frame_w + x0 + x) * 4;
+                for channel in 0..4 {
+                    sum[channel] += u32::from(pixels[add + channel]);
+                }
+                count += 1;
+            }
+        }
+        for y in 0..height {
+            let at = ((y0 + y) * frame_w + x0 + x) * 4;
+            let from = y * 4;
+            pixels[at..at + 4].copy_from_slice(&line[from..from + 4]);
+        }
+    }
 }
 
 /// A rectangle path with circular corners, or `None` for an empty or invalid rectangle.
@@ -511,6 +618,20 @@ mod tests {
             assert!(near[0] < 40, "{near:?}");
             assert!(far[0] > 215, "{far:?}");
         }
+    }
+
+    #[test]
+    fn backdrop_blur_softens_an_edge_and_stays_inside_its_bounds() {
+        let mut canvas = canvas(1.0);
+        canvas.clear(Color::BLACK);
+        canvas.fill_rect(Rect::new(0.0, 0.0, 20.0, 40.0), 0.0, Color::WHITE);
+        let untouched = pixel(&canvas, 2, 20);
+        canvas.blur_backdrop(Rect::new(5.0, 0.0, 30.0, 40.0), 4.0);
+        let near = pixel(&canvas, 19, 20)[0];
+        let over = pixel(&canvas, 21, 20)[0];
+        assert!((20..235).contains(&near), "{near}");
+        assert!((20..235).contains(&over), "{over}");
+        assert_eq!(pixel(&canvas, 2, 20), untouched, "outside the blur");
     }
 
     #[test]

@@ -420,6 +420,22 @@ pub trait Canvas {
     /// Ends the innermost clip.
     fn pop_clip(&mut self);
 
+    /// Blurs pixels already drawn inside `rect` by `radius` DIPs. Renderers that cannot blur
+    /// leave them as they are; the caller still draws its tint over the result.
+    fn blur_backdrop(&mut self, rect: Rect, radius: f32) {
+        let _ = (rect, radius);
+    }
+
+    /// Starts an offscreen copy of the frame when this renderer needs one for backdrop blur.
+    fn begin_backdrop_capture(&mut self, bounds: Rect, radius: f32) {
+        let _ = (bounds, radius);
+    }
+
+    /// Ends the offscreen copy and draws it blurred. The default blurs the frame in place.
+    fn end_backdrop_capture(&mut self, bounds: Rect, radius: f32) {
+        self.blur_backdrop(bounds, radius);
+    }
+
     /// Fills `rect` with a blend from `from` to `to`: top to bottom, or left to right when
     /// `across`. A renderer without gradients fills it with the color halfway.
     fn fill_gradient(&mut self, rect: Rect, radius: f32, from: Color, to: Color, across: bool) {

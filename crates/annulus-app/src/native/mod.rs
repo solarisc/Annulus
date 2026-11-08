@@ -22,7 +22,7 @@ mod panes;
 #[cfg(test)]
 mod scenes;
 mod screens;
-mod settings;
+pub(crate) mod settings;
 mod sftp;
 mod shortcuts;
 mod start;
@@ -301,8 +301,10 @@ pub struct NativeApp {
     forwards: screens::ForwardsView,
     known: screens::KnownView,
     logs: screens::LogsView,
-    /// The command palette, while open (Ctrl+Shift+K).
+    /// The command palette, while open (Ctrl+Shift+P).
     palette: Option<palette::PaletteView>,
+    /// Focus to put back on the first frame after the palette closes without a choice.
+    palette_focus: Option<Id>,
     /// Account sync, while the vault is unlocked.
     sync: crate::sync_screen::SyncScreen,
     account: account::AccountView,
@@ -386,6 +388,7 @@ impl NativeApp {
             known: screens::KnownView::default(),
             logs: screens::LogsView::default(),
             palette: None,
+            palette_focus: None,
             sync: crate::sync_screen::SyncScreen::default(),
             account: account::AccountView::default(),
             account_h: 0.0,
@@ -808,42 +811,103 @@ impl NativeApp {
     fn palette_items(&self) -> Vec<crate::command_palette::Item> {
         use crate::command_palette::{Action, Item};
         let mut items: Vec<Item> = Vec::new();
-        // The sessions; the SFTP tab comes as a command below.
-        for (index, tab) in self.tabs.iter().enumerate().skip(FIXED_TABS) {
-            items.push(Item {
-                label: tab.title.clone(),
-                kind: "Tab",
-                action: Action::Tab(index),
-            });
-        }
         if let Some(vault) = &self.vault {
             for host in vault.hosts() {
-                items.push(Item {
-                    label: host.label.clone(),
-                    kind: "Host",
-                    action: Action::Connect(host.id),
-                });
+                items.push(
+                    Item::new(host.label.clone(), "Host", Action::Connect(host.id))
+                        .with_keywords(format!("{} {}", host.address, host.tags.join(" ")))
+                        .editable(Action::EditHost(host.id))
+                        .with_sftp(Action::HostSftp(host.id)),
+                );
+            }
+        }
+        // Open sessions follow saved hosts; the fixed SFTP tab comes as a page below.
+        for (index, tab) in self.tabs.iter().enumerate().skip(FIXED_TABS) {
+            items.push(Item::new(tab.title.clone(), "Tab", Action::Tab(index)));
+        }
+        if let Some(vault) = &self.vault {
+            for group in vault.groups() {
+                items.push(
+                    Item::new(
+                        group.name.clone(),
+                        "Group",
+                        Action::Navigate(Section::Hosts),
+                    )
+                    .with_keywords("host group folder")
+                    .editable(Action::EditGroup(group.uid.clone())),
+                );
+            }
+            for key in vault.ssh_keys() {
+                items.push(
+                    Item::new(
+                        key.label.clone(),
+                        "Key",
+                        Action::Navigate(Section::Keychain),
+                    )
+                    .with_keywords(format!("ssh credential {}", key.fingerprint))
+                    .editable(Action::EditKey(key.id)),
+                );
             }
             for snippet in vault.snippets() {
-                items.push(Item {
-                    label: snippet.label.clone(),
-                    kind: "Snippet",
-                    action: Action::Snippet(snippet.id),
-                });
+                items.push(
+                    Item::new(
+                        snippet.label.clone(),
+                        "Snippet",
+                        Action::Snippet(snippet.id),
+                    )
+                    .with_keywords(format!("{} {}", snippet.package, snippet.script))
+                    .editable(Action::EditSnippet(snippet.id)),
+                );
+            }
+            for rule in vault.forwards() {
+                items.push(
+                    Item::new(
+                        rule.label.clone(),
+                        "Forwarding rule",
+                        Action::Navigate(Section::PortForwarding),
+                    )
+                    .with_keywords("port forward tunnel rule")
+                    .editable(Action::EditForward(rule.id)),
+                );
             }
         }
-        for (label, action) in [
-            ("New local terminal", Action::NewLocal),
-            ("SFTP", Action::Tab(1)),
-            ("Settings", Action::Settings),
-            ("Lock the vault", Action::Lock),
-        ] {
-            items.push(Item {
-                label: label.into(),
-                kind: "Command",
-                action,
-            });
+        for section in Section::MAIN {
+            let words = match section {
+                Section::Hosts => "vault servers connections",
+                Section::Keychain => "keys credentials certificates",
+                Section::PortForwarding => "tunnels rules ports",
+                Section::Snippets => "saved commands scripts",
+                Section::KnownHosts => "trusted fingerprints ssh",
+                Section::Logs => "history recordings sessions",
+                Section::Settings => "preferences options",
+            };
+            items.push(
+                Item::new(section.title(), "Page", Action::Navigate(section)).with_keywords(words),
+            );
         }
+        items.push(
+            Item::new("SFTP", "Page", Action::Tab(1))
+                .with_keywords("files transfer remote")
+                .with_sftp(Action::Tab(1)),
+        );
+        for page in settings::Page::ALL {
+            if page != settings::Page::Account || self.vault_path.is_some() {
+                items.push(
+                    Item::new(page.title(), "Settings", Action::Settings(page))
+                        .with_keywords(format!("settings preferences {}", page.title())),
+                );
+            }
+        }
+        items.push(
+            Item::new(
+                "Settings",
+                "Command",
+                Action::Settings(settings::Page::Appearance),
+            )
+            .with_keywords("preferences options"),
+        );
+        items.push(Item::new("New local terminal", "Command", Action::NewLocal));
+        items.push(Item::new("Lock the vault", "Command", Action::Lock));
         items
     }
 
@@ -851,15 +915,17 @@ impl NativeApp {
         if self.palette.is_none() {
             return;
         }
-        let items = self.palette_items();
-        let Some(outcome) = self.palette.as_mut().and_then(|view| view.draw(ui, &items)) else {
+        let Some(outcome) = self.palette.as_mut().and_then(|view| view.draw(ui)) else {
             return;
         };
         self.palette = None;
-        let palette::Outcome::Run(action) = outcome else {
-            return;
-        };
-        self.run_action(action);
+        match outcome {
+            palette::Outcome::Run(action) => self.run_action(action),
+            palette::Outcome::Close(focus) => {
+                self.palette_focus = focus;
+                ui.request_repaint();
+            }
+        }
     }
 
     /// Does what the palette's chosen line says.
@@ -868,6 +934,42 @@ impl NativeApp {
         match action {
             Action::QuickConnect(target) => self.act(hosts::HostsAction::QuickConnect(target)),
             Action::Connect(id) => self.act(hosts::HostsAction::Connect(id)),
+            Action::HostSftp(id) => self.act(hosts::HostsAction::Sftp(id)),
+            Action::EditHost(id) => {
+                self.active = 0;
+                self.section = Section::Hosts;
+                if let Some(vault) = &self.vault {
+                    self.hosts.edit_host(vault, id);
+                }
+            }
+            Action::EditKey(id) => {
+                self.active = 0;
+                self.section = Section::Keychain;
+                if let Some(vault) = &self.vault {
+                    self.keychain.edit_key(vault, id);
+                }
+            }
+            Action::EditGroup(uid) => {
+                self.active = 0;
+                self.section = Section::Hosts;
+                if let Some(vault) = &self.vault {
+                    self.hosts.edit_group(vault, &uid);
+                }
+            }
+            Action::EditSnippet(id) => {
+                self.active = 0;
+                self.section = Section::Snippets;
+                if let Some(vault) = &self.vault {
+                    self.snippets.edit_snippet(vault, id);
+                }
+            }
+            Action::EditForward(id) => {
+                self.active = 0;
+                self.section = Section::PortForwarding;
+                if let Some(vault) = &self.vault {
+                    self.forwards.edit_rule(vault, id);
+                }
+            }
             Action::Tab(index) => self.active = index.min(self.tabs.len().saturating_sub(1)),
             Action::Snippet(id) => {
                 if let Some(snippet) = self
@@ -883,7 +985,14 @@ impl NativeApp {
             }
             Action::NewLocal => self.open_local(),
             Action::Lock => self.lock_vault(),
-            Action::Settings => self.show_settings(),
+            Action::Navigate(section) => {
+                self.active = 0;
+                self.section = section;
+            }
+            Action::Settings(page) => {
+                self.settings_view.page = page;
+                self.show_settings();
+            }
         }
     }
 
@@ -1213,6 +1322,7 @@ impl NativeApp {
             }
         }
         self.palette = None;
+        self.palette_focus = None;
         self.vault = None;
         // Nothing drives the app while it is locked: the door closes now, not next frame, and
         // no waiting command is typed later.
@@ -1253,11 +1363,20 @@ impl NativeApp {
             self.settings.terminal_font.as_deref(),
         );
         ui.state.reduce_motion = self.settings.reduce_motion || self.os_reduces_motion;
+        if self.palette.is_none()
+            && let Some(focus) = self.palette_focus.take()
+        {
+            ui.state.set_focus(Some(focus), true);
+        }
         // New colors (a scheme previewed or chosen, the OS turning dark) blend in, never flash.
         let (theme, fading) = self.fade.step(ui.theme, ui.time(), ui.state.reduce_motion);
         ui.theme = theme;
         if fading {
             ui.request_repaint();
+        }
+        let palette_backdrop = self.palette.is_some();
+        if palette_backdrop {
+            ui.gfx.begin_backdrop_capture(ui.viewport, 12.0);
         }
         let t = ui.theme;
         let mut area = ui.viewport;
@@ -1289,13 +1408,19 @@ impl NativeApp {
             ui.push_inert();
         }
         self.settings_view.catch_keys(ui, in_settings);
-        if !locked && shortcuts::PALETTE.pressed(ui) {
-            self.palette = match self.palette.take() {
-                Some(_) => None,
-                None => Some(palette::PaletteView::default()),
-            };
+        if !locked && !theme_modal && shortcuts::PALETTE.pressed(ui) {
+            if let Some(view) = self.palette.as_mut() {
+                view.close(ui.time());
+            } else {
+                let items = self.palette_items();
+                self.palette = Some(palette::PaletteView::new(items));
+            }
         }
         // The open palette has the keyboard: Escape closes it, not the editor under it.
+        let palette_modal = self.palette.is_some();
+        if palette_modal {
+            ui.push_inert();
+        }
         let for_palette = self.palette.as_ref().map(|_| ui.take_typed());
         let action = titlebar::draw(self, ui, bar);
         if !locked {
@@ -1510,6 +1635,9 @@ impl NativeApp {
         if let Some(typed) = for_palette {
             ui.give_back_typed(typed);
         }
+        if palette_modal {
+            ui.pop_inert();
+        }
         if theme_modal {
             ui.pop_inert();
         }
@@ -1525,6 +1653,9 @@ impl NativeApp {
             self.settings_view.theme_focus = picker.return_focus();
             self.settings_view.picker = None;
             ui.request_repaint();
+        }
+        if palette_backdrop {
+            ui.gfx.end_backdrop_capture(ui.viewport, 12.0);
         }
         self.palette_frame(ui);
         self.flight(ui);
