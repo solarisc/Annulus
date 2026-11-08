@@ -238,9 +238,14 @@ pub enum Event {
     Paste(String),
     /// The modifier keys held changed (so clicks know about Ctrl, Shift).
     Modifiers(Modifiers),
-    /// Files dropped on the window from the OS (Explorer, Finder, a file manager), at the
-    /// pointer's place.
-    FilesDropped(Vec<std::path::PathBuf>),
+    /// Files dropped on the window from the OS (Explorer, Finder, a file manager), and where,
+    /// when the OS says (Windows does; winit's platforms do not).
+    FilesDropped(Vec<std::path::PathBuf>, Option<Point>),
+    /// Files dragged from the OS are over the window, at a point when the OS says. Sent again
+    /// as they move.
+    FilesHovered(Vec<std::path::PathBuf>, Option<Point>),
+    /// The files dragged from the OS left the window without being dropped.
+    FilesHoverLeft,
 }
 
 /// A key press or typed text, in arrival order.
@@ -510,6 +515,10 @@ pub struct UiState {
     drag_end: Option<(Id, Point)>,
     /// Files dropped from the OS this frame.
     dropped: Vec<std::path::PathBuf>,
+    /// Where they were dropped, when the OS said.
+    dropped_at: Option<Point>,
+    /// Files dragged from the OS over the window now, and where when the OS says.
+    hovered_files: Option<(Vec<std::path::PathBuf>, Option<Point>)>,
     clicks: Vec<(Id, Button)>,
     double_clicks: Vec<Id>,
     last_click: Option<(Id, f64)>,
@@ -573,6 +582,7 @@ impl UiState {
         self.double_clicks.clear();
         self.drag_end = None;
         self.dropped.clear();
+        self.dropped_at = None;
         self.activated = None;
         for request in std::mem::take(&mut self.requests) {
             match request {
@@ -654,7 +664,13 @@ impl UiState {
                 Event::Text(text) => self.typed.push(Typed::Text(text.clone())),
                 Event::Paste(text) => self.typed.push(Typed::Paste(text.clone())),
                 Event::Modifiers(modifiers) => self.modifiers = *modifiers,
-                Event::FilesDropped(paths) => self.dropped.extend(paths.iter().cloned()),
+                Event::FilesDropped(paths, at) => {
+                    self.dropped.extend(paths.iter().cloned());
+                    self.dropped_at = *at;
+                    self.hovered_files = None;
+                }
+                Event::FilesHovered(paths, at) => self.hovered_files = Some((paths.clone(), *at)),
+                Event::FilesHoverLeft => self.hovered_files = None,
             }
         }
         // What is drawn first (the page under the menu) would take it otherwise.
@@ -1146,6 +1162,21 @@ impl<'a> Ui<'a> {
         std::mem::take(&mut self.state.dropped)
     }
 
+    /// Where this frame's files from the OS were dropped, when the OS said.
+    #[must_use]
+    pub fn dropped_at(&self) -> Option<Point> {
+        self.state.dropped_at
+    }
+
+    /// The files being dragged over the window from the OS, and where when the OS says.
+    #[must_use]
+    pub fn files_hovering(&self) -> Option<(&[std::path::PathBuf], Option<Point>)> {
+        self.state
+            .hovered_files
+            .as_ref()
+            .map(|(paths, at)| (paths.as_slice(), *at))
+    }
+
     /// Whether the pointer is on `rect` or on a zone inside it: a card stays hovered while
     /// the pointer is on one of its buttons, which are zones of their own.
     #[must_use]
@@ -1528,12 +1559,46 @@ mod tests {
         let mut taken = (Vec::new(), Vec::new());
         frame(
             &mut state,
-            &[Event::FilesDropped(vec![file.clone()])],
+            &[Event::FilesDropped(vec![file.clone()], None)],
             0.0,
             |ui| taken = (ui.take_dropped_files(), ui.take_dropped_files()),
         );
         assert_eq!(taken.0, [file]);
         assert_eq!(taken.1, Vec::<std::path::PathBuf>::new());
+    }
+
+    #[test]
+    fn files_dragged_from_the_os_hover_until_they_leave_or_drop_where_said() {
+        let mut state = UiState::default();
+        let file = std::path::PathBuf::from("report.pdf");
+        let at = Point::new(40.0, 50.0);
+        let mut seen = None;
+        let hover = [Event::FilesHovered(vec![file.clone()], Some(at))];
+        frame(&mut state, &hover, 0.0, |ui| {
+            seen = ui.files_hovering().map(|(paths, at)| (paths.to_vec(), at));
+        });
+        assert_eq!(seen, Some((vec![file.clone()], Some(at))));
+        // It stays over the window through frames with no news.
+        frame(&mut state, &[], 0.1, |ui| {
+            seen = ui.files_hovering().map(|(paths, at)| (paths.to_vec(), at));
+        });
+        assert!(seen.is_some());
+        frame(&mut state, &[Event::FilesHoverLeft], 0.2, |ui| {
+            seen = ui.files_hovering().map(|(paths, at)| (paths.to_vec(), at));
+        });
+        assert_eq!(seen, None, "gone once it left");
+        // A drop ends the hover and says where it landed, for that frame only.
+        let mut landed = (None, None);
+        let drop = [
+            Event::FilesHovered(vec![file.clone()], Some(at)),
+            Event::FilesDropped(vec![file], Some(at)),
+        ];
+        frame(&mut state, &drop, 0.3, |ui| {
+            landed = (ui.files_hovering().map(|_| ()), ui.dropped_at());
+        });
+        assert_eq!(landed, (None, Some(at)));
+        frame(&mut state, &[], 0.4, |ui| landed.1 = ui.dropped_at());
+        assert_eq!(landed.1, None);
     }
 
     #[test]

@@ -144,6 +144,67 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Opens the local file or folder `path` as the OS's file manager would on a double-click: a
+/// folder in Explorer, Finder or the file manager, a file in the app it belongs to.
+///
+/// # Errors
+/// The file manager could not be started.
+pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut command = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(path).spawn().map(drop)
+}
+
+/// Shows the local file or folder `path` in Explorer or Finder, selected, or opens the folder
+/// it is in with the file manager (Linux has no common way to select it).
+///
+/// # Errors
+/// The file manager could not be started.
+pub fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // Explorer reads `/select,"path"` itself; the usual quoting of the whole argument
+        // would not reach it.
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+            .map(drop)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(drop)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let folder = path.parent().unwrap_or(path);
+        std::process::Command::new("xdg-open")
+            .arg(folder)
+            .spawn()
+            .map(drop)
+    }
+}
+
+/// What a file manager is called here, for "Show in …".
+#[must_use]
+pub fn file_manager_name() -> &'static str {
+    if cfg!(windows) {
+        "Explorer"
+    } else if cfg!(target_os = "macos") {
+        "Finder"
+    } else {
+        "the file manager"
+    }
+}
+
 /// Reads the clipboard's text, if any.
 pub(crate) fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
@@ -354,6 +415,7 @@ mod portable {
             modifiers: Modifiers::NONE,
             buttons: Buttons::default(),
             pointer: None,
+            hovered_files: Vec::new(),
             started: Instant::now(),
             wake_at: None,
         };
@@ -381,6 +443,8 @@ mod portable {
         modifiers: Modifiers,
         buttons: Buttons,
         pointer: Option<Point>,
+        /// Files dragged over the window from the OS, one event each.
+        hovered_files: Vec<std::path::PathBuf>,
         started: Instant,
         /// When the app asked for its next frame without input.
         wake_at: Option<Instant>,
@@ -679,9 +743,20 @@ mod portable {
                     self.events.push(Event::PointerLeft);
                 }
                 // Files from Finder or a file manager (macOS and X11; winit has no file drops on
-                // Wayland yet), one event per file.
+                // Wayland yet), one event per file. winit does not say where they are, so the
+                // app is told nothing of the place.
+                WindowEvent::HoveredFile(path) => {
+                    self.hovered_files.push(path);
+                    self.events
+                        .push(Event::FilesHovered(self.hovered_files.clone(), None));
+                }
+                WindowEvent::HoveredFileCancelled => {
+                    self.hovered_files.clear();
+                    self.events.push(Event::FilesHoverLeft);
+                }
                 WindowEvent::DroppedFile(path) => {
-                    self.events.push(Event::FilesDropped(vec![path]));
+                    self.hovered_files.clear();
+                    self.events.push(Event::FilesDropped(vec![path], None));
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
                     let Some(button) = self.buttons.button(button, state, self.modifiers) else {

@@ -16,6 +16,8 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
+mod drop_target;
+
 use accesskit_windows::Adapter;
 use annulus_ui::access::accesskit::{ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
 use annulus_ui::access::{self, Request};
@@ -38,6 +40,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, ScreenToClient,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Ole::{OleInitialize, RegisterDragDrop, RevokeDragDrop};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, GetSystemMetricsForDpi,
     SetProcessDpiAwarenessContext,
@@ -49,9 +52,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT,
     VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
-};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryPoint, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HTCAPTION,
@@ -134,13 +135,20 @@ pub fn animations_off() -> bool {
 ///
 /// # Errors
 /// When the window or Direct2D cannot be created.
+#[allow(clippy::too_many_lines)] // The window's setup, step by step.
 pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(), WindowError> {
+    // SAFETY: once, on the window's thread, before anything else starts COM on it: OLE needs a
+    // single-threaded apartment for drag and drop. Should it fail, Explorer's drops still
+    // come as WM_DROPFILES, only without where they hover.
+    let ole = unsafe { OleInitialize(None) }.is_ok();
     let d2d = D2d::new().map_err(|e| WindowError::Platform(e.to_string()))?;
     let (sender, requests) = channel();
+    let (dropped, drops) = channel();
     let mut host = Box::new(Host {
         title: title.to_owned(),
         access: None,
         requests,
+        drops,
         hwnd: HWND::default(),
         app,
         d2d,
@@ -230,8 +238,12 @@ pub fn run(title: &str, size: (f32, f32), app: Box<dyn WindowApp>) -> Result<(),
         let value = i32::from(dark);
         // DWMWA_USE_IMMERSIVE_DARK_MODE: dark borders and system menu.
         let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), (&raw const value).cast(), 4);
-        // Files dropped from Explorer arrive as WM_DROPFILES.
+        // Files dragged from Explorer: where they hover and land through OLE, and from a
+        // source that only knows the old way, as WM_DROPFILES.
         DragAcceptFiles(hwnd, true);
+        if ole {
+            let _ = RegisterDragDrop(hwnd, &drop_target::DropTarget::target(hwnd, dropped));
+        }
         // DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND: rounded corners on Windows 11 (Windows
         // 10 has no such attribute and ignores it).
         let round = 2_i32;
@@ -253,6 +265,8 @@ struct Host {
     access: Option<Adapter>,
     /// Screen-reader requests from `Requests`.
     requests: Receiver<ActionRequest>,
+    /// Files dragged in from Explorer, from the drop target.
+    drops: Receiver<Event>,
     hwnd: HWND,
     app: Box<dyn WindowApp>,
     d2d: D2d,
@@ -643,22 +657,12 @@ impl Host {
                     let drop = HDROP(wparam.0 as *mut core::ffi::c_void);
                     let mut at = POINT::default();
                     let _ = DragQueryPoint(drop, &raw mut at);
-                    let mut paths = Vec::new();
-                    for index in 0..DragQueryFileW(drop, u32::MAX, None) {
-                        let length = DragQueryFileW(drop, index, None) as usize;
-                        let mut name = vec![0_u16; length + 1];
-                        let written = DragQueryFileW(drop, index, Some(&mut name)) as usize;
-                        paths.push(std::path::PathBuf::from(
-                            <std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(
-                                &name[..written.min(length)],
-                            ),
-                        ));
-                    }
+                    let paths = drop_target::paths_of(drop);
                     DragFinish(drop);
                     #[allow(clippy::cast_precision_loss)] // Window coordinates are small.
                     let point = Point::new(at.x as f32 / self.scale, at.y as f32 / self.scale);
                     self.push(Event::PointerMoved(point));
-                    self.push(Event::FilesDropped(paths));
+                    self.push(Event::FilesDropped(paths, Some(point)));
                     LRESULT(0)
                 }
                 WM_SIZE => {
@@ -718,6 +722,7 @@ impl Host {
                     LRESULT(0)
                 }
                 WM_DESTROY => {
+                    let _ = RevokeDragDrop(hwnd);
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
@@ -785,7 +790,8 @@ impl Host {
             (client.bottom - client.top) as f32 / self.scale,
         );
         self.size = size;
-        let events = std::mem::take(&mut self.events);
+        let mut events = std::mem::take(&mut self.events);
+        events.extend(self.drops.try_iter());
         for request in self.requests.try_iter() {
             if let Some(request) = Request::from_action(&request) {
                 self.state.request(request);

@@ -37,6 +37,7 @@ harness = false
 
 [target.'cfg(windows)'.dependencies]
 accesskit_windows.workspace = true
+windows-core.workspace = true
 windows-numerics.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
@@ -60,7 +61,11 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
