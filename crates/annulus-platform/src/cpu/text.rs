@@ -7,9 +7,10 @@
 use std::collections::HashMap;
 
 use annulus_ui::gfx::{Color, Family, Font, Point, Rect, TextSize};
-use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
+use parley::fontique::{Collection, CollectionOptions, SourceCache};
 use parley::{
-    FontContext, FontFamily, FontWeight, Layout, LayoutContext, PositionedLayoutItem, StyleProperty,
+    FontContext, FontFamily, FontFamilyName, FontWeight, Layout, LayoutContext,
+    PositionedLayoutItem, StyleProperty,
 };
 use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source};
@@ -24,7 +25,7 @@ pub const UI_BOLD: &[u8] = include_bytes!("../../fonts/FiraSans-Bold.ttf");
 pub const MONO: &[u8] = include_bytes!("../../fonts/FiraMono-Medium.ttf");
 
 const UI_FAMILY: &str = "Fira Sans";
-const MONO_FAMILY: &str = "Fira Mono";
+const MONO_FAMILY: &str = crate::fonts::DEFAULT_MONO;
 
 /// A rasterized glyph: its coverage and where it sits relative to the pen.
 struct Glyph {
@@ -51,6 +52,9 @@ pub struct TextEngine {
     layouts: LayoutContext<()>,
     scaler: ScaleContext,
     glyphs: HashMap<GlyphKey, Option<Glyph>>,
+    ui_family: Option<String>,
+    mono_family: Option<String>,
+    revision: u64,
 }
 
 impl Default for TextEngine {
@@ -67,8 +71,9 @@ impl TextEngine {
             shared: false,
             system_fonts: false,
         });
-        for font in [UI_REGULAR, UI_BOLD, MONO] {
-            collection.register_fonts(Blob::new(std::sync::Arc::new(font)), None);
+        let (revision, data) = crate::fonts::snapshot();
+        for font in data {
+            collection.register_fonts(font, None);
         }
         Self {
             fonts: FontContext {
@@ -78,6 +83,35 @@ impl TextEngine {
             layouts: LayoutContext::new(),
             scaler: ScaleContext::new(),
             glyphs: HashMap::new(),
+            ui_family: None,
+            mono_family: None,
+            revision,
+        }
+    }
+
+    /// Applies family preferences and any font registry changes without reading the disk.
+    pub fn set_families(&mut self, ui: Option<&str>, mono: Option<&str>) {
+        let revision = crate::fonts::revision();
+        if self.ui_family.as_deref() == ui
+            && self.mono_family.as_deref() == mono
+            && revision == self.revision
+        {
+            return;
+        }
+        self.ui_family = ui.map(str::to_owned);
+        self.mono_family = mono.map(str::to_owned);
+        if revision != self.revision {
+            let (_, data) = crate::fonts::snapshot();
+            let mut collection = Collection::new(CollectionOptions {
+                shared: false,
+                system_fonts: false,
+            });
+            for font in data {
+                collection.register_fonts(font, None);
+            }
+            self.fonts.collection = collection;
+            self.glyphs.clear();
+            self.revision = revision;
         }
     }
 
@@ -159,10 +193,22 @@ impl TextEngine {
             .ranged_builder(&mut self.fonts, text, 1.0, true);
         builder.push_default(StyleProperty::FontSize(size));
         let family = match font.family {
-            Family::Ui | Family::Display => UI_FAMILY,
-            Family::Mono => MONO_FAMILY,
+            Family::Ui | Family::Display => self.ui_family.as_deref().unwrap_or(UI_FAMILY),
+            Family::Mono => self.mono_family.as_deref().unwrap_or(MONO_FAMILY),
         };
-        builder.push_default(StyleProperty::FontFamily(FontFamily::from(family)));
+        let fallback = if font.family == Family::Mono {
+            MONO_FAMILY
+        } else {
+            UI_FAMILY
+        };
+        let families = [
+            FontFamilyName::named(family),
+            FontFamilyName::named(fallback),
+            FontFamilyName::named(crate::fonts::SYMBOL_FAMILY),
+        ];
+        builder.push_default(StyleProperty::FontFamily(FontFamily::List(
+            std::borrow::Cow::Borrowed(&families),
+        )));
         builder.push_default(StyleProperty::FontWeight(FontWeight::new(
             font.weight.value(),
         )));
@@ -257,6 +303,41 @@ mod tests {
         assert!(bold.width > long.width);
         let empty = engine.measure("", font);
         assert!(empty.width.abs() < f32::EPSILON && empty.height > 10.0);
+    }
+
+    #[test]
+    fn nerd_symbols_shape_to_real_glyphs_with_both_bundled_terminal_families() {
+        for family in ["JetBrains Mono", "Fira Mono"] {
+            let mut engine = TextEngine::new();
+            engine.set_families(None, Some(family));
+            for symbol in ["\u{e0b0}", "\u{f120}", "\u{f0001}"] {
+                let layout = engine.layout(symbol, Font::mono(14.0), 14.0);
+                let mut ids = Vec::new();
+                for line in layout.lines() {
+                    for item in line.items() {
+                        if let PositionedLayoutItem::GlyphRun(run) = item {
+                            ids.extend(run.positioned_glyphs().map(|glyph| glyph.id));
+                        }
+                    }
+                }
+                assert!(
+                    !ids.is_empty() && ids.iter().all(|id| *id != 0),
+                    "{family}: {symbol:?} = {ids:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn changing_the_selected_family_changes_measurement_and_missing_fonts_fall_back() {
+        let mut engine = TextEngine::new();
+        let text = "The quick brown fox";
+        let ui = engine.measure(text, Font::ui(14.0)).width;
+        engine.set_families(Some("JetBrains Mono"), None);
+        let mono = engine.measure(text, Font::ui(14.0)).width;
+        assert!((ui - mono).abs() > 1.0);
+        engine.set_families(Some("No Such Font"), None);
+        assert!((ui - engine.measure(text, Font::ui(14.0)).width).abs() < 0.01);
     }
 
     #[test]

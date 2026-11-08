@@ -496,6 +496,7 @@ fn installed_names() -> Vec<&'static str> {
             "LICENSE-MIT",
             "LICENSE-APACHE",
             "LICENSE-THEMES",
+            "LICENSE-FONTS",
         ]
     } else {
         payload::FILES.iter().map(|(name, _, _)| *name).collect()

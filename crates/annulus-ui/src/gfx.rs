@@ -376,6 +376,10 @@ pub struct TextSize {
 /// What a renderer draws with. Coordinates are DIPs; the renderer scales them to device
 /// pixels. Every call is clipped to the innermost clip pushed.
 pub trait Canvas {
+    /// Selects the app and monospace families. Missing families use bundled defaults.
+    /// Renderers load registered bytes only; file I/O belongs to the font worker.
+    fn set_font_families(&mut self, _ui: Option<&str>, _mono: Option<&str>) {}
+
     /// Device pixels per DIP.
     fn scale(&self) -> f32;
 

@@ -11,7 +11,12 @@ use std::path::{Path, PathBuf};
 
 /// The programs, by their names in the payload folder, then the licenses from the repository.
 const PROGRAMS: [&str; 2] = ["annulus-app.exe", "annulus-agent.exe"];
-const LICENSES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "LICENSE-THEMES"];
+const LICENSES: [&str; 4] = [
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "LICENSE-THEMES",
+    "LICENSE-FONTS",
+];
 
 fn main() -> Result<(), String> {
     println!("cargo:rerun-if-env-changed=ANNULUS_SETUP_PAYLOAD");

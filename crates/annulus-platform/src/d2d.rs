@@ -9,6 +9,9 @@
 // The bindings take raw pointers to locals that outlive each call.
 #![allow(clippy::borrow_as_ptr)]
 
+mod font_collection;
+
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use annulus_ui::gfx::{Canvas, Color, Family, Font, Point, Rect, TextSize, Weight};
@@ -30,7 +33,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
-    IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    IDWriteFactory, IDWriteTextFormat, IDWriteTextFormat1, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{
@@ -40,7 +43,7 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
-use windows::core::{BOOL, HSTRING, PCWSTR, w};
+use windows::core::{BOOL, HSTRING, Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 /// The Direct2D and DirectWrite factories and the fonts they found; make once and keep.
@@ -50,6 +53,7 @@ pub struct D2d {
     ui_family: HSTRING,
     display_family: HSTRING,
     mono_family: HSTRING,
+    fonts: RefCell<font_collection::FontCollection>,
 }
 
 impl D2d {
@@ -76,12 +80,14 @@ impl D2d {
         let ui_family = pick(&["Segoe UI Variable Text", "Segoe UI"]);
         let display_family = pick(&["Segoe UI Variable Display", "Segoe UI"]);
         let mono_family = pick(&["Cascadia Mono", "Consolas"]);
+        let fonts = RefCell::new(font_collection::FontCollection::new(&write)?);
         Ok(Self {
             factory,
             write,
             ui_family,
             display_family,
             mono_family,
+            fonts,
         })
     }
 
@@ -231,6 +237,8 @@ pub struct D2dCanvas<'a> {
     closed_early: u32,
     formats: HashMap<(Family, u32, Weight), IDWriteTextFormat>,
     layouts: HashMap<(String, Family, u32, Weight), IDWriteTextLayout>,
+    ui_override: Option<String>,
+    mono_override: Option<String>,
 }
 
 /// A clip or a group open on the target.
@@ -274,6 +282,8 @@ impl<'a> D2dCanvas<'a> {
             closed_early: 0,
             formats: HashMap::new(),
             layouts: HashMap::new(),
+            ui_override: None,
+            mono_override: None,
         })
     }
 
@@ -305,11 +315,30 @@ impl<'a> D2dCanvas<'a> {
         if let Some(format) = self.formats.get(&key) {
             return Some(format.clone());
         }
-        let family = match font.family {
+        let fonts = self.d2d.fonts.borrow();
+        let requested = match font.family {
+            Family::Ui | Family::Display => self.ui_override.as_deref(),
+            Family::Mono => Some(
+                self.mono_override
+                    .as_deref()
+                    .unwrap_or(crate::fonts::DEFAULT_MONO),
+            ),
+        };
+        let default = match font.family {
             Family::Ui => &self.d2d.ui_family,
             Family::Display => &self.d2d.display_family,
             Family::Mono => &self.d2d.mono_family,
         };
+        let mut family = requested.map_or_else(|| default.clone(), HSTRING::from);
+        let mut custom = fonts.contains(&family);
+        if !custom && !has_family(&self.d2d.write, &family.to_string_lossy()) {
+            family = if font.family == Family::Mono {
+                HSTRING::from(crate::fonts::DEFAULT_MONO)
+            } else {
+                default.clone()
+            };
+            custom = fonts.contains(&family);
+        }
         #[allow(clippy::cast_possible_truncation)] // Weights are 400 to 700.
         let weight = DWRITE_FONT_WEIGHT(font.weight.value() as i32);
         // SAFETY: the family string lives in `D2d`; the format is a COM object.
@@ -319,7 +348,11 @@ impl<'a> D2dCanvas<'a> {
                 .write
                 .CreateTextFormat(
                     PCWSTR(family.as_ptr()),
-                    None,
+                    if custom {
+                        Some(&fonts.collection)
+                    } else {
+                        None
+                    },
                     weight,
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
@@ -328,6 +361,9 @@ impl<'a> D2dCanvas<'a> {
                 )
                 .ok()?;
             let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            if let Ok(format1) = format.cast::<IDWriteTextFormat1>() {
+                let _ = format1.SetFontFallback(&fonts.fallback);
+            }
             format
         };
         self.formats.insert(key, format.clone());
@@ -381,6 +417,22 @@ fn point(p: Point) -> Vector2 {
 }
 
 impl Canvas for D2dCanvas<'_> {
+    fn set_font_families(&mut self, ui: Option<&str>, mono: Option<&str>) {
+        let changed = self.ui_override.as_deref() != ui || self.mono_override.as_deref() != mono;
+        let revision = crate::fonts::revision();
+        if changed || self.d2d.fonts.borrow().revision != revision {
+            self.formats.clear();
+            self.layouts.clear();
+            self.ui_override = ui.map(str::to_owned);
+            self.mono_override = mono.map(str::to_owned);
+            if self.d2d.fonts.borrow().revision != revision
+                && let Ok(fonts) = font_collection::FontCollection::new(&self.d2d.write)
+            {
+                *self.d2d.fonts.borrow_mut() = fonts;
+            }
+        }
+    }
+
     fn scale(&self) -> f32 {
         self.scale
     }
@@ -816,5 +868,24 @@ mod tests {
             unreachable!("inside the frame")
         };
         assert_eq!(corner.red(), 255);
+    }
+}
+
+#[cfg(test)]
+mod font_preference_tests {
+    use super::*;
+
+    #[test]
+    fn directwrite_font_changes_invalidate_format_and_layout_caches() {
+        let renderer = D2d::new().unwrap();
+        renderer
+            .render(200, 80, 1.0, |canvas| {
+                canvas.set_font_families(Some("Fira Sans"), None);
+                let a = canvas.measure("iiiiWW", Font::ui(14.0)).width;
+                canvas.set_font_families(Some("Fira Mono"), None);
+                let b = canvas.measure("iiiiWW", Font::ui(14.0)).width;
+                assert!((a - b).abs() > 1.0);
+            })
+            .unwrap();
     }
 }

@@ -481,6 +481,18 @@ pub(super) fn split_panes(with_news: bool) -> super::panes::Panes {
     panes
 }
 
+fn terminal_fonts(app: &mut NativeApp) {
+    settings(app);
+    app.settings_view.page = super::settings::Page::Terminal;
+    app.settings.terminal_font = Some("Fira Mono".into());
+}
+
+fn app_fonts(app: &mut NativeApp) {
+    settings(app);
+    app.settings_view.page = super::settings::Page::Appearance;
+    app.settings.ui_font = Some("Fira Sans".into());
+}
+
 fn theme_browser(app: &mut NativeApp) {
     scheme_light(app);
     app.section = super::Section::Hosts;
@@ -1240,6 +1252,24 @@ const SCENES: &[Scene] = &[
             Act::Hover("Gruvbox dark, hard"),
             Act::Hover("Gruvbox dark, hard"),
         ],
+    },
+    Scene {
+        name: "font-settings-terminal",
+        width: 1100,
+        height: 980,
+        scale: 1.0,
+        populated: true,
+        setup: terminal_fonts,
+        acts: &[],
+    },
+    Scene {
+        name: "font-settings-app",
+        width: 1100,
+        height: 800,
+        scale: 1.0,
+        populated: true,
+        setup: app_fonts,
+        acts: &[],
     },
     Scene {
         name: "theme-picker-families",
@@ -6424,4 +6454,33 @@ fn the_theme_browser_previews_cancels_and_applies_without_touching_background_co
     assert_eq!(app.settings.app_scheme.as_deref(), Some("Dracula"));
     assert_eq!(app.settings.theme, ThemeMode::Dark);
     assert_eq!(app.settings.recent_themes, ["Dracula"]);
+}
+
+#[test]
+fn app_and_terminal_font_choices_are_independent_and_remembered() {
+    let mut app = NativeApp::new(Some(fixture_vault("font-families", true)));
+    settings(&mut app);
+    app.settings.reduce_motion = true;
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let output = step(&mut app, &mut state, &click_on(&output, "Appearance"), 1.0);
+    let output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "System default"),
+        2.0,
+    );
+    let output = step(&mut app, &mut state, &click_on(&output, "Fira Mono"), 3.0);
+    assert_eq!(app.settings.ui_font.as_deref(), Some("Fira Mono"));
+    assert_eq!(app.settings.terminal_font, None);
+    let output = step(&mut app, &mut state, &click_on(&output, "Terminal"), 4.0);
+    let output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "JetBrains Mono (default)"),
+        5.0,
+    );
+    step(&mut app, &mut state, &click_on(&output, "Fira Mono"), 6.0);
+    assert_eq!(app.settings.terminal_font.as_deref(), Some("Fira Mono"));
+    assert_eq!(app.settings.ui_font.as_deref(), Some("Fira Mono"));
 }

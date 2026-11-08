@@ -10,6 +10,7 @@ pub mod control;
 pub mod demo;
 #[cfg(test)]
 mod film;
+mod font_settings;
 mod forward_wizard;
 pub mod hosts;
 mod live;
@@ -1231,6 +1232,26 @@ impl NativeApp {
     /// Draws one frame. Returns what the window itself must do.
     #[allow(clippy::too_many_lines)] // The window top to bottom: title bar, then the tab in front.
     pub fn frame(&mut self, ui: &mut Ui<'_>) -> Option<WindowAction> {
+        let font_directory = self
+            .settings_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map_or_else(
+                || std::env::temp_dir().join("annulus-preview-fonts"),
+                |parent| parent.join("fonts"),
+            );
+        if self
+            .settings_view
+            .fonts
+            .frame(ui, &mut self.settings, font_directory)
+            && let Some(path) = &self.settings_path
+        {
+            let _ = self.settings.save(path);
+        }
+        ui.gfx.set_font_families(
+            self.settings.ui_font.as_deref(),
+            self.settings.terminal_font.as_deref(),
+        );
         ui.state.reduce_motion = self.settings.reduce_motion || self.os_reduces_motion;
         // New colors (a scheme previewed or chosen, the OS turning dark) blend in, never flash.
         let (theme, fading) = self.fade.step(ui.theme, ui.time(), ui.state.reduce_motion);

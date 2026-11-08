@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-mod text;
+pub(crate) mod text;
 
 pub use text::TextEngine;
 
@@ -161,6 +161,10 @@ impl CpuCanvas {
 }
 
 impl Canvas for CpuCanvas {
+    fn set_font_families(&mut self, ui: Option<&str>, mono: Option<&str>) {
+        self.text.set_families(ui, mono);
+    }
+
     fn scale(&self) -> f32 {
         self.scale
     }

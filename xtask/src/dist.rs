@@ -67,6 +67,11 @@ pub fn run() -> Result<bool> {
             false,
         ),
         (
+            "Annulus/LICENSE-FONTS".to_owned(),
+            Source::File(root.join("LICENSE-FONTS")),
+            false,
+        ),
+        (
             "Annulus/LICENSE-THEMES".to_owned(),
             Source::File(root.join("LICENSE-THEMES")),
             false,

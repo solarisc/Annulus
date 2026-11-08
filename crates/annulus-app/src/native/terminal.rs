@@ -48,6 +48,8 @@ pub fn draw(ui: &mut Ui<'_>, rect: Rect, screen: &Screen, font: Font, focused: b
     ]);
     ui.gfx.fill_rect(rect, 0.0, background);
     let (cell_w, cell_h) = cell_size(ui, font);
+    let fixed =
+        (ui.gfx.measure("iiii", font).width - ui.gfx.measure("WWWW", font).width).abs() < 0.01;
     ui.push_clip(rect);
     #[allow(clippy::cast_precision_loss)] // Column and row counts are small.
     let at = |row: usize, column: usize| {
@@ -85,6 +87,9 @@ pub fn draw(ui: &mut Ui<'_>, rect: Rect, screen: &Screen, font: Font, focused: b
             let mut text = String::new();
             while column < cells.len() {
                 let next = cells[column];
+                if !text.is_empty() && (!fixed || nerd_symbol(cell.ch) || nerd_symbol(next.ch)) {
+                    break;
+                }
                 if next.spacer {
                     column += 1;
                     continue;
@@ -104,22 +109,73 @@ pub fn draw(ui: &mut Ui<'_>, rect: Rect, screen: &Screen, font: Font, focused: b
             }
             let text = text.trim_end();
             let weight = if cell.bold { Weight::Bold } else { font.weight };
-            ui.gfx
-                .draw_text(at(row, start), text, font.weight(weight), fg(&cell));
-            if cell.underline {
+            if !fixed || nerd_symbol(cell.ch) {
+                // A fallback icon (or a proportional custom face) must not push the next
+                // character off its terminal column. Shape it alone and fit its cell.
+                let width = cell_w
+                    * if cells.get(start + 1).is_some_and(|next| next.spacer) {
+                        2.0
+                    } else {
+                        1.0
+                    };
                 let origin = at(row, start);
-                #[allow(clippy::cast_precision_loss)] // Short runs.
-                let width = text.chars().count() as f32 * cell_w;
-                ui.gfx.fill_rect(
-                    Rect::new(origin.x, origin.y + cell_h - 2.0, width, 1.0),
-                    0.0,
+                draw_cell(
+                    ui,
+                    Rect::new(origin.x, origin.y, width, cell_h),
+                    text,
+                    font.weight(weight),
                     fg(&cell),
                 );
+            } else {
+                ui.gfx
+                    .draw_text(at(row, start), text, font.weight(weight), fg(&cell));
+            }
+            if cell.underline {
+                underline(ui, at(row, start), text, (cell_w, cell_h), fg(&cell));
             }
         }
     }
+    draw_cursor(
+        ui,
+        screen,
+        font,
+        focused,
+        screen.cursor.map(|(row, column)| at(row, column)),
+        (cell_w, cell_h, fixed),
+        background,
+    );
+    ui.pop_clip();
+}
+
+fn underline(
+    ui: &mut Ui<'_>,
+    origin: Point,
+    text: &str,
+    (cell_w, cell_h): (f32, f32),
+    color: Color,
+) {
+    #[allow(clippy::cast_precision_loss)] // A short terminal run.
+    let width = text.chars().count() as f32 * cell_w;
+    ui.gfx.fill_rect(
+        Rect::new(origin.x, origin.y + cell_h - 2.0, width, 1.0),
+        0.0,
+        color,
+    );
+}
+
+fn draw_cursor(
+    ui: &mut Ui<'_>,
+    screen: &Screen,
+    font: Font,
+    focused: bool,
+    origin: Option<Point>,
+    (cell_w, cell_h, fixed): (f32, f32, bool),
+    background: Color,
+) {
     if let Some((row, column)) = screen.cursor {
-        let origin = at(row, column);
+        let Some(origin) = origin else {
+            return;
+        };
         let block = Rect::new(origin.x, origin.y, cell_w, cell_h);
         let cursor = color([
             screen.cursor_color.r,
@@ -131,14 +187,45 @@ pub fn draw(ui: &mut Ui<'_>, rect: Rect, screen: &Screen, font: Font, focused: b
             if let Some(cell) = screen.rows.get(row).and_then(|cells| cells.get(column))
                 && cell.ch != ' '
             {
-                ui.gfx
-                    .draw_text(origin, &cell.ch.to_string(), font, background);
+                if !fixed || nerd_symbol(cell.ch) {
+                    draw_cell(ui, block, &cell.ch.to_string(), font, background);
+                } else {
+                    ui.gfx
+                        .draw_text(origin, &cell.ch.to_string(), font, background);
+                }
             }
         } else {
             ui.gfx.stroke_rect(block, 1.0, 1.0, cursor);
         }
     }
+}
+
+/// Fits a fallback symbol or proportional glyph into its terminal cell without moving
+/// subsequent text. Wide characters receive a two-cell rectangle from the caller.
+fn draw_cell(ui: &mut Ui<'_>, rect: Rect, text: &str, font: Font, color: Color) {
+    let measured = ui.gfx.measure(text, font).width;
+    let scale = (rect.w / measured.max(0.01)).min(1.0);
+    let font = Font {
+        size: font.size * scale,
+        ..font
+    };
+    let shown = ui.gfx.measure(text, font);
+    ui.push_clip(rect);
+    ui.gfx.draw_text(
+        Point::new(
+            rect.x + (rect.w - shown.width).max(0.0) / 2.0,
+            rect.y + (rect.h - shown.height).max(0.0) / 2.0,
+        ),
+        text,
+        font,
+        color,
+    );
     ui.pop_clip();
+}
+
+/// Nerd Font symbols occupy private-use code points, including supplementary-plane icons.
+fn nerd_symbol(ch: char) -> bool {
+    matches!(u32::from(ch), 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x0010_0000..=0x0010_FFFD)
 }
 
 /// Whether the blanks starting at `from` are followed by text in `style`'s color and weight

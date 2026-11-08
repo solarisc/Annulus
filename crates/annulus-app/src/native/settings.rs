@@ -118,6 +118,8 @@ pub struct SettingsView {
     pub picker: Option<super::theme_picker::ThemePicker>,
     /// Focus restored on the first frame in which the background is interactive again.
     pub theme_focus: Option<Id>,
+    /// Font discovery, private imports and preferences.
+    pub fonts: super::font_settings::FontSettings,
 }
 
 /// The scrollback choices (F-TERM-004), each with what a full tab 120 columns wide costs.
@@ -270,8 +272,12 @@ impl SettingsView {
             }
             Page::Appearance => {
                 changed = appearance(ui, &mut page, settings, &mut self.picker);
+                changed |= self.fonts.draw(ui, &mut page, settings, true);
             }
-            Page::Terminal => changed = terminal(ui, &mut page, settings),
+            Page::Terminal => {
+                changed = terminal(ui, &mut page, settings, &mut self.fonts);
+                changed |= self.fonts.draw(ui, &mut page, settings, false);
+            }
             Page::Security => changed = security(ui, &mut page, settings),
             Page::Sessions => changed = sessions(ui, &mut page, settings),
             Page::Shells => changed = shells(ui, &mut page, settings, profiles),
@@ -512,9 +518,14 @@ fn appearance(
     changed
 }
 
-fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
+fn terminal(
+    ui: &mut Ui<'_>,
+    page: &mut Rect,
+    settings: &mut Settings,
+    fonts: &mut super::font_settings::FontSettings,
+) -> bool {
     let mut changed = false;
-    let mut card = card(ui, page, "Text", 2);
+    let mut card = card(ui, page, "Text", 3);
     let control = row(
         ui,
         &mut card,
@@ -541,6 +552,14 @@ fn terminal(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         settings.terminal_theme.clone_from(&themes[chosen]);
         changed = true;
     }
+    let control = row(
+        ui,
+        &mut card,
+        false,
+        ("Font family", "Bundled defaults include Nerd symbols."),
+        280.0,
+    );
+    changed |= fonts.family(ui, control, settings, false);
     let how = format!(
         "{} and {} change it; {} resets it.",
         shortcuts::ZOOM_IN.keys(),

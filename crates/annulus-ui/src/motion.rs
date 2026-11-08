@@ -467,6 +467,10 @@ impl<'a> Layers<'a> {
 }
 
 impl Canvas for Layers<'_> {
+    fn set_font_families(&mut self, ui: Option<&str>, mono: Option<&str>) {
+        self.inner.set_font_families(ui, mono);
+    }
+
     fn scale(&self) -> f32 {
         self.inner.scale()
     }

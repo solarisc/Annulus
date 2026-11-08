@@ -27,6 +27,12 @@ pub struct Settings {
     pub app_scheme: Option<String>,
     /// Last six applied window themes, newest first; previews never change this list.
     pub recent_themes: Vec<String>,
+    /// App font family; `None` preserves the platform default.
+    pub ui_font: Option<String>,
+    /// Terminal/monospace family; `None` uses bundled `JetBrains Mono`.
+    pub terminal_font: Option<String>,
+    /// Private imported font files, loaded on a worker at startup.
+    pub font_files: Vec<std::path::PathBuf>,
     /// Terminal font size in points.
     pub font_size: f32,
     /// Lock the vault after this many idle minutes; 0 never locks.
@@ -127,6 +133,9 @@ impl Default for Settings {
             theme: ThemeMode::System,
             app_scheme: None,
             recent_themes: Vec::new(),
+            ui_font: None,
+            terminal_font: None,
+            font_files: Vec::new(),
             font_size: DEFAULT_FONT_SIZE,
             auto_lock_minutes: 15,
             default_profile: None,
@@ -237,6 +246,9 @@ mod tests {
             theme: ThemeMode::Dark,
             app_scheme: Some("Gruvbox Dark".into()),
             recent_themes: vec!["Gruvbox Dark".into(), "Dracula".into()],
+            ui_font: Some("Fira Sans".into()),
+            terminal_font: Some("Fira Mono".into()),
+            font_files: Vec::new(),
             font_size: 16.0,
             auto_lock_minutes: 5,
             default_profile: Some("PowerShell 7".into()),

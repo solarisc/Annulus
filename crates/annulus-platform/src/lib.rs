@@ -7,6 +7,7 @@
 pub mod cpu;
 #[cfg(windows)]
 pub mod d2d;
+pub mod fonts;
 #[cfg(windows)]
 pub mod install;
 #[cfg(target_os = "macos")]
