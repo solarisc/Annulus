@@ -153,8 +153,8 @@ impl Setup {
         // The mark and the name.
         let mut head = column.take_top(56.0);
         let mark = head.take_left(56.0);
-        let colors = annulus_ui::mark::Colors::for_theme(&ui.theme);
-        annulus_ui::mark::paint(&mut ui.gfx, mark, &colors);
+        // The mark brings its own tile and colors, the same in every theme.
+        annulus_ui::mark::paint(&mut ui.gfx, mark);
         head.take_left(space::M);
         let (title, line) = match (&self.mode, &self.stage) {
             (Mode::Install, Stage::Done) => ("Annulus is installed", self.dir.clone()),
