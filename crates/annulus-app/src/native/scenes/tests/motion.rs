@@ -48,6 +48,63 @@ fn nothing_big_appears_at_once() {
     assert!(thrown.is_empty(), "these appear at once: {thrown:#?}");
 }
 
+/// Motion on the Mac reference machine. This stays ignored because wall-clock speed is not a
+/// stable CI check; run it on the Retina Mac before a release or after renderer work.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "manual Retina Mac speed check"]
+#[allow(clippy::cast_precision_loss)] // These fixed screen sizes fit exactly in f32.
+fn retina_cpu_motion_draws_at_sixty_frames_per_second() {
+    use std::time::{Duration, Instant};
+
+    const WIDTH: u32 = 2_200;
+    const HEIGHT: u32 = 1_440;
+    const SCALE: f32 = 2.0;
+    const FRAMES: u32 = 12;
+
+    let mut app = NativeApp::new(Some(fixture_vault("retina-motion", true)));
+    let mut state = UiState::default();
+    let mut text = Some(TextEngine::new());
+    let viewport = Rect::new(
+        0.0,
+        0.0,
+        WIDTH as f32 / SCALE,
+        HEIGHT as f32 / SCALE,
+    );
+    let mut draw = |app: &mut NativeApp, events: &[Event], time: f64| {
+        let mut canvas = CpuCanvas::new(WIDTH, HEIGHT, SCALE, text.take().unwrap()).unwrap();
+        state.begin_frame(events, time);
+        let mut ui = Ui::new(
+            &mut canvas,
+            Theme::new(Appearance::Dark),
+            &mut state,
+            viewport,
+        );
+        app.frame(&mut ui);
+        let output = state.end_frame();
+        text = Some(canvas.into_text_engine());
+        output
+    };
+
+    draw(&mut app, &[], 0.0);
+    app.active = 1;
+    draw(&mut app, &[], 1.0);
+    let began = Instant::now();
+    for frame in 0..FRAMES {
+        draw(
+            &mut app,
+            &[],
+            1.0 + f64::from(frame + 1) / 60.0,
+        );
+    }
+    let elapsed = began.elapsed();
+    let frame = elapsed / FRAMES;
+    assert!(
+        frame <= Duration::from_micros(16_667),
+        "Retina motion took {frame:?} per frame ({elapsed:?} for {FRAMES})"
+    );
+}
+
 #[test]
 fn a_key_card_unfolds_over_the_list_and_folds_away_taking_nothing_as_it_goes() {
     let mut app = NativeApp::new(Some(fixture_vault("key-fold", true)));

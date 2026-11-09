@@ -335,7 +335,7 @@ pub(crate) fn is_paste(
 #[cfg(any(not(windows), test))]
 fn pressed_text(key: Option<Key>, text: Option<&str>, modifiers: Modifiers) -> Option<String> {
     let text = text?;
-    (key.is_none_or(|key| matches!(key, Key::Char(_) | Key::Space))
+    (key.is_some_and(|key| matches!(key, Key::Char(_) | Key::Space))
         && !modifiers.ctrl
         && !modifiers.logo
         && text.chars().all(|character| !character.is_control()))
@@ -382,7 +382,7 @@ mod portable {
     use winit::dpi::LogicalSize;
     use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-    use winit::keyboard::{Key as WinitKey, NamedKey};
+    use winit::keyboard::{Key as WinitKey, KeyCode, NamedKey, PhysicalKey};
     use winit::platform::modifier_supplement::KeyEventExtModifierSupplement as _;
     use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
@@ -822,7 +822,8 @@ mod portable {
                 {
                     let insert = event.logical_key == WinitKey::Named(NamedKey::Insert);
                     let bare = event.key_without_modifiers();
-                    let mapped = pressed_key(&event.logical_key, &bare, self.modifiers);
+                    let mapped = pressed_key(&event.logical_key, &bare, self.modifiers)
+                        .or_else(|| physical_named_key(event.physical_key));
                     let paste_key = mapped.unwrap_or(kit::Key::Space);
                     if is_paste(self.state.focused_role(), paste_key, self.modifiers, insert) {
                         if let Some(paste) = paste_event() {
@@ -892,6 +893,40 @@ mod portable {
         })
     }
 
+    /// A named key from its hardware place. macOS can leave the logical key unidentified for
+    /// Delete even though its physical key still says Backspace.
+    fn physical_named_key(key: PhysicalKey) -> Option<kit::Key> {
+        Some(match key {
+            PhysicalKey::Code(KeyCode::Tab) => kit::Key::Tab,
+            PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => kit::Key::Enter,
+            PhysicalKey::Code(KeyCode::Escape) => kit::Key::Escape,
+            PhysicalKey::Code(KeyCode::Space) => kit::Key::Space,
+            PhysicalKey::Code(KeyCode::Backspace) => kit::Key::Backspace,
+            PhysicalKey::Code(KeyCode::Delete) => kit::Key::Delete,
+            PhysicalKey::Code(KeyCode::ArrowLeft) => kit::Key::Left,
+            PhysicalKey::Code(KeyCode::ArrowRight) => kit::Key::Right,
+            PhysicalKey::Code(KeyCode::ArrowUp) => kit::Key::Up,
+            PhysicalKey::Code(KeyCode::ArrowDown) => kit::Key::Down,
+            PhysicalKey::Code(KeyCode::Home) => kit::Key::Home,
+            PhysicalKey::Code(KeyCode::End) => kit::Key::End,
+            PhysicalKey::Code(KeyCode::PageUp) => kit::Key::PageUp,
+            PhysicalKey::Code(KeyCode::PageDown) => kit::Key::PageDown,
+            PhysicalKey::Code(KeyCode::F1) => kit::Key::F(1),
+            PhysicalKey::Code(KeyCode::F2) => kit::Key::F(2),
+            PhysicalKey::Code(KeyCode::F3) => kit::Key::F(3),
+            PhysicalKey::Code(KeyCode::F4) => kit::Key::F(4),
+            PhysicalKey::Code(KeyCode::F5) => kit::Key::F(5),
+            PhysicalKey::Code(KeyCode::F6) => kit::Key::F(6),
+            PhysicalKey::Code(KeyCode::F7) => kit::Key::F(7),
+            PhysicalKey::Code(KeyCode::F8) => kit::Key::F(8),
+            PhysicalKey::Code(KeyCode::F9) => kit::Key::F(9),
+            PhysicalKey::Code(KeyCode::F10) => kit::Key::F(10),
+            PhysicalKey::Code(KeyCode::F11) => kit::Key::F(11),
+            PhysicalKey::Code(KeyCode::F12) => kit::Key::F(12),
+            _ => return None,
+        })
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -924,6 +959,14 @@ mod portable {
             assert_eq!(
                 pressed_key(&enter, &enter, cmd_shift),
                 Some(kit::Key::Enter)
+            );
+        }
+
+        #[test]
+        fn an_unidentified_mac_delete_uses_its_physical_backspace_key() {
+            assert_eq!(
+                physical_named_key(PhysicalKey::Code(KeyCode::Backspace)),
+                Some(kit::Key::Backspace)
             );
         }
 
@@ -1002,6 +1045,11 @@ mod tests {
 
     #[test]
     fn named_editing_keys_never_type_attached_text() {
+        assert_eq!(
+            pressed_text(None, Some(" "), Modifiers::NONE),
+            None,
+            "an unidentified Mac Delete event must not become text"
+        );
         assert_eq!(
             pressed_text(Some(Key::Backspace), Some(" "), Modifiers::NONE),
             None

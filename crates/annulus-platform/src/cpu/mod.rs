@@ -12,8 +12,8 @@ pub use text::TextEngine;
 
 use annulus_ui::gfx::{Canvas, Color, Font, Point, Rect, TextSize};
 use tiny_skia::{
-    FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path,
-    PathBuilder, Pattern, Pixmap, SpreadMode, Stroke, Transform,
+    FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path, PathBuilder,
+    Pixmap, SpreadMode, Stroke, Transform,
 };
 
 /// Why a frame could not be made or saved.
@@ -367,27 +367,80 @@ impl Canvas for CpuCanvas {
             return;
         };
         let drawn = std::mem::replace(&mut self.frame, group.under);
-        let Some(bounds) = tiny_skia::Rect::from_xywh(
-            group.bounds.x,
-            group.bounds.y,
-            group.bounds.w,
-            group.bounds.h,
-        ) else {
-            return;
-        };
-        let paint = Paint {
-            shader: Pattern::new(
-                drawn.as_ref(),
-                SpreadMode::Pad,
-                FilterQuality::Nearest,
-                group.alpha,
-                Transform::identity(),
-            ),
-            ..Paint::default()
-        };
-        let mask = self.clips.last().map(|(_, mask)| mask);
-        self.frame
-            .fill_rect(bounds, &paint, Transform::identity(), mask);
+        let bounds = group.bounds.intersect(&self.clip_rect());
+        blend_group(&mut self.frame, &drawn, bounds, group.alpha);
+    }
+}
+
+/// Lands one premultiplied RGBA layer on another. A group already has the same size and pixel
+/// places as its frame, so a direct source-over pass is much faster than a vector pattern fill.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)] // Clamped pixel bounds; frame sizes fit exactly enough in f32.
+fn blend_group(under: &mut Pixmap, drawn: &Pixmap, bounds: Rect, alpha: f32) {
+    let width = under.width() as usize;
+    let x0 = bounds.x.floor().max(0.0) as usize;
+    let y0 = bounds.y.floor().max(0.0) as usize;
+    let x1 = bounds.r().ceil().min(under.width() as f32).max(0.0) as usize;
+    let y1 = bounds.b().ceil().min(under.height() as f32).max(0.0) as usize;
+    let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let source = drawn.data();
+    let target = under.data_mut();
+    let stride = width * 4;
+    let rows = y1.saturating_sub(y0);
+    let pixels = rows * x1.saturating_sub(x0);
+    let workers = if pixels >= 256 * 1024 {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(6)
+            .min(rows)
+    } else {
+        1
+    };
+    let target = &mut target[y0 * stride..y1 * stride];
+    let source = &source[y0 * stride..y1 * stride];
+    std::thread::scope(|scope| {
+        let mut target = target;
+        let mut source = source;
+        for worker in 0..workers {
+            let left = workers - worker;
+            let take = target.len() / stride / left * stride;
+            let (target_band, rest) = target.split_at_mut(take);
+            let (source_band, source_rest) = source.split_at(take);
+            target = rest;
+            source = source_rest;
+            scope.spawn(move || {
+                blend_group_rows(target_band, source_band, stride, x0, x1, alpha);
+            });
+        }
+    });
+}
+
+fn blend_group_rows(
+    target: &mut [u8],
+    source: &[u8],
+    stride: usize,
+    x0: usize,
+    x1: usize,
+    alpha: u32,
+) {
+    for (target, source) in target
+        .chunks_exact_mut(stride)
+        .zip(source.chunks_exact(stride))
+    {
+        let target = target[x0 * 4..x1 * 4].as_chunks_mut::<4>().0;
+        let source = source[x0 * 4..x1 * 4].as_chunks::<4>().0;
+        for (target, source) in target.iter_mut().zip(source) {
+            let source_alpha = (u32::from(source[3]) * alpha + 127) / 255;
+            let keep = 255 - source_alpha;
+            for channel in 0..4 {
+                let over = (u32::from(source[channel]) * alpha + 127) / 255;
+                let below = (u32::from(target[channel]) * keep + 127) / 255;
+                target[channel] = u8::try_from((over + below).min(255)).unwrap_or(255);
+            }
+        }
     }
 }
 
