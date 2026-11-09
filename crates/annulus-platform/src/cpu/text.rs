@@ -310,20 +310,53 @@ mod tests {
         for family in ["JetBrains Mono", "Fira Mono"] {
             let mut engine = TextEngine::new();
             engine.set_families(None, Some(family));
-            for symbol in ["\u{e0b0}", "\u{f120}", "\u{f0001}"] {
-                let layout = engine.layout(symbol, Font::mono(14.0), 14.0);
-                let mut ids = Vec::new();
-                for line in layout.lines() {
-                    for item in line.items() {
-                        if let PositionedLayoutItem::GlyphRun(run) = item {
-                            ids.extend(run.positioned_glyphs().map(|glyph| glyph.id));
+            for weight in [Weight::Regular, Weight::Bold] {
+                for symbol in [
+                    "\u{e0a0}",
+                    "\u{e0b0}",
+                    "\u{e725}",
+                    "\u{f07c}",
+                    "\u{f115}",
+                    "\u{f120}",
+                    "\u{f17c}",
+                    "\u{f179}",
+                    "\u{f489}",
+                    "\u{f0001}",
+                ] {
+                    let font = Font::mono(20.0).weight(weight);
+                    let layout = engine.layout(symbol, font, 20.0);
+                    let mut ids = Vec::new();
+                    for line in layout.lines() {
+                        for item in line.items() {
+                            if let PositionedLayoutItem::GlyphRun(run) = item {
+                                ids.extend(run.positioned_glyphs().map(|glyph| glyph.id));
+                            }
                         }
                     }
+                    assert!(
+                        !ids.is_empty() && ids.iter().all(|id| *id != 0),
+                        "{family} {weight:?}: {symbol:?} = {ids:?}"
+                    );
+
+                    let mut pixels = Pixmap::new(40, 40).unwrap();
+                    engine.draw(
+                        &mut pixels,
+                        Point::new(4.0, 4.0),
+                        symbol,
+                        font,
+                        20.0,
+                        Color::WHITE,
+                        Rect::new(0.0, 0.0, 40.0, 40.0),
+                    );
+                    let ink = pixels
+                        .data()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .filter(|pixel| pixel[3] != 0)
+                        .count();
+                    assert!(ink > 8, "{family} {weight:?}: {symbol:?} drew {ink} pixels");
                 }
-                assert!(
-                    !ids.is_empty() && ids.iter().all(|id| *id != 0),
-                    "{family}: {symbol:?} = {ids:?}"
-                );
             }
         }
     }

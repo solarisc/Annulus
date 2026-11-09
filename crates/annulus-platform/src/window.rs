@@ -330,6 +330,18 @@ pub(crate) fn is_paste(
         || command_v
 }
 
+/// The text a key press typed. Named editing keys never type text, even if the windowing layer
+/// attaches stray printable text to their event.
+#[cfg(any(not(windows), test))]
+fn pressed_text(key: Option<Key>, text: Option<&str>, modifiers: Modifiers) -> Option<String> {
+    let text = text?;
+    (key.is_none_or(|key| matches!(key, Key::Char(_) | Key::Space))
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && text.chars().all(|character| !character.is_control()))
+    .then(|| text.to_owned())
+}
+
 /// The paste event for the clipboard's text.
 pub(crate) fn paste_event() -> Option<Event> {
     clipboard_text().map(Event::Paste)
@@ -819,12 +831,9 @@ mod portable {
                     if let Some(key) = mapped {
                         self.events.push(Event::Key(key, self.modifiers));
                     }
-                    if let Some(text) = event.text.as_ref()
-                        && !self.modifiers.ctrl
-                        && !self.modifiers.logo
-                        && text.chars().all(|c| !c.is_control())
+                    if let Some(text) = pressed_text(mapped, event.text.as_deref(), self.modifiers)
                     {
-                        self.events.push(Event::Text(text.to_string()));
+                        self.events.push(Event::Text(text));
                     }
                 }
                 _ => return,
@@ -986,5 +995,25 @@ mod tests {
             false
         ));
         assert!(!is_paste(field, Key::Char('c'), Modifiers::COMMAND, false));
+    }
+
+    #[test]
+    fn named_editing_keys_never_type_attached_text() {
+        assert_eq!(
+            pressed_text(Some(Key::Backspace), Some(" "), Modifiers::NONE),
+            None
+        );
+        assert_eq!(
+            pressed_text(Some(Key::Delete), Some("x"), Modifiers::NONE),
+            None
+        );
+        assert_eq!(
+            pressed_text(Some(Key::Space), Some(" "), Modifiers::NONE).as_deref(),
+            Some(" ")
+        );
+        assert_eq!(
+            pressed_text(Some(Key::Char('a')), Some("a"), Modifiers::NONE).as_deref(),
+            Some("a")
+        );
     }
 }
