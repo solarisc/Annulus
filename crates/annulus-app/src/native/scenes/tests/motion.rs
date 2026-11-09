@@ -103,6 +103,22 @@ fn retina_cpu_motion_draws_at_sixty_frames_per_second() {
         frame <= Duration::from_micros(16_667),
         "Retina motion took {frame:?} per frame ({elapsed:?} for {FRAMES})"
     );
+
+    draw(&mut app, &[chord(shortcuts::PALETTE)], 2.0);
+    let began = Instant::now();
+    for frame in 0..FRAMES {
+        draw(
+            &mut app,
+            &[],
+            2.0 + f64::from(frame + 1) / 60.0,
+        );
+    }
+    let elapsed = began.elapsed();
+    let frame = elapsed / FRAMES;
+    assert!(
+        frame <= Duration::from_micros(16_667),
+        "Retina palette motion took {frame:?} per frame ({elapsed:?} for {FRAMES})"
+    );
 }
 
 #[test]

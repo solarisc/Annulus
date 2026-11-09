@@ -35,12 +35,17 @@ pub enum CpuError {
 /// A frame in memory that implements [`Canvas`].
 pub struct CpuCanvas {
     frame: Pixmap,
+    /// Device pixels per DIP reported to layout and terminal sizing.
     scale: f32,
+    /// Device pixels per DIP in the frame being painted, smaller during backdrop capture.
+    paint_scale: f32,
     /// Clip rectangles in device pixels with their masks; the last is active.
     clips: Vec<(Rect, Mask)>,
     text: TextEngine,
     /// The groups open, innermost last: the frame under each, and where and how it lands.
     groups: Vec<Group>,
+    /// The full-size frame held while a backdrop is drawn at blur resolution.
+    backdrop: Option<Backdrop>,
 }
 
 /// A group being drawn: `frame` holds it meanwhile, and this holds what is under it.
@@ -49,6 +54,12 @@ struct Group {
     /// Where it lands, in device pixels.
     bounds: Rect,
     alpha: f32,
+}
+
+struct Backdrop {
+    under: Pixmap,
+    paint_scale: f32,
+    bounds: Rect,
 }
 
 impl CpuCanvas {
@@ -67,9 +78,11 @@ impl CpuCanvas {
         Ok(Self {
             frame,
             scale,
+            paint_scale: scale,
             clips: Vec::new(),
             text,
             groups: Vec::new(),
+            backdrop: None,
         })
     }
 
@@ -115,7 +128,7 @@ impl CpuCanvas {
     }
 
     fn transform(&self) -> Transform {
-        Transform::from_scale(self.scale, self.scale)
+        Transform::from_scale(self.paint_scale, self.paint_scale)
     }
 
     fn fill_path(&mut self, path: &Path, color: Color) {
@@ -246,7 +259,7 @@ impl Canvas for CpuCanvas {
     }
 
     fn draw_text(&mut self, origin: Point, text: &str, font: Font, color: Color) {
-        let scale = self.scale;
+        let scale = self.paint_scale;
         let clip = self.clip_rect();
         let origin = Point::new(origin.x * scale, origin.y * scale);
         let Self {
@@ -259,10 +272,10 @@ impl Canvas for CpuCanvas {
 
     fn push_clip(&mut self, rect: Rect) {
         let device = Rect::new(
-            rect.x * self.scale,
-            rect.y * self.scale,
-            rect.w * self.scale,
-            rect.h * self.scale,
+            rect.x * self.paint_scale,
+            rect.y * self.paint_scale,
+            rect.w * self.paint_scale,
+            rect.h * self.paint_scale,
         );
         let device = device.intersect(&self.clip_rect());
         let mut mask = Mask::new(self.frame.width(), self.frame.height());
@@ -282,17 +295,66 @@ impl Canvas for CpuCanvas {
         self.clips.pop();
     }
 
+    fn begin_backdrop_capture(&mut self, bounds: Rect, radius: f32) {
+        if self.backdrop.is_some()
+            || !self.groups.is_empty()
+            || !self.clips.is_empty()
+            || bounds.x != 0.0
+            || bounds.y != 0.0
+            || bounds.w <= 0.0
+            || bounds.h <= 0.0
+        {
+            return;
+        }
+        let device_pixel = 1.0 / self.scale.max(1.0);
+        let sample = if radius <= 0.0 {
+            device_pixel
+        } else {
+            (radius / 2.0).clamp(device_pixel, 8.0)
+        };
+        let capture_scale = 1.0 / sample;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Window pixels.
+        let width = (bounds.w * capture_scale).ceil().max(1.0) as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Window pixels.
+        let height = (bounds.h * capture_scale).ceil().max(1.0) as u32;
+        let Some(frame) = Pixmap::new(width, height) else {
+            return;
+        };
+        let under = std::mem::replace(&mut self.frame, frame);
+        let paint_scale = std::mem::replace(&mut self.paint_scale, capture_scale);
+        self.backdrop = Some(Backdrop {
+            under,
+            paint_scale,
+            bounds,
+        });
+    }
+
+    fn end_backdrop_capture(&mut self, bounds: Rect, radius: f32) {
+        let Some(capture) = self.backdrop.take() else {
+            self.blur_backdrop(bounds, radius);
+            return;
+        };
+        let drawn = std::mem::replace(&mut self.frame, capture.under);
+        self.paint_scale = capture.paint_scale;
+        let bounds = if bounds.w > 0.0 && bounds.h > 0.0 {
+            bounds
+        } else {
+            capture.bounds
+        };
+        scale_backdrop(&drawn, &mut self.frame, bounds, self.scale);
+    }
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Pixel bounds.
     fn blur_backdrop(&mut self, rect: Rect, radius: f32) {
         let frame_w = self.frame.width() as usize;
         let frame_h = self.frame.height() as usize;
-        let x0 = (rect.x * self.scale).floor().max(0.0) as usize;
-        let y0 = (rect.y * self.scale).floor().max(0.0) as usize;
-        let x1 = (rect.r() * self.scale).ceil().max(0.0) as usize;
-        let y1 = (rect.b() * self.scale).ceil().max(0.0) as usize;
+        let x0 = (rect.x * self.paint_scale).floor().max(0.0) as usize;
+        let y0 = (rect.y * self.paint_scale).floor().max(0.0) as usize;
+        let x1 = (rect.r() * self.paint_scale).ceil().max(0.0) as usize;
+        let y1 = (rect.b() * self.paint_scale).ceil().max(0.0) as usize;
         let x1 = x1.min(frame_w);
         let y1 = y1.min(frame_h);
-        let radius = (radius * self.scale).round().max(0.0) as usize;
+        let radius = (radius * self.paint_scale).round().max(0.0) as usize;
         if radius == 0 || x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -349,7 +411,7 @@ impl Canvas for CpuCanvas {
         let (width, height) = (self.frame.width(), self.frame.height());
         let fresh = Pixmap::new(width, height).unwrap_or_else(|| self.frame.clone());
         let under = std::mem::replace(&mut self.frame, fresh);
-        let scale = self.scale;
+        let scale = self.paint_scale;
         self.groups.push(Group {
             under,
             bounds: Rect::new(
@@ -370,6 +432,115 @@ impl Canvas for CpuCanvas {
         let bounds = group.bounds.intersect(&self.clip_rect());
         blend_group(&mut self.frame, &drawn, bounds, group.alpha);
     }
+}
+
+/// Scales a small blurred backdrop into its full-size bounds. The generic vector sampler costs
+/// more than a Retina frame for this large bitmap, while this fixed bilinear pass has no paths,
+/// masks or blend modes to check and can split its rows safely.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)] // Clamped pixel bounds; window sizes fit in f32 exactly enough.
+fn scale_backdrop(source: &Pixmap, target: &mut Pixmap, bounds: Rect, scale: f32) {
+    let target_w = target.width() as usize;
+    let target_h = target.height() as usize;
+    let x0 = (bounds.x * scale).floor().max(0.0) as usize;
+    let y0 = (bounds.y * scale).floor().max(0.0) as usize;
+    let x1 = (bounds.r() * scale).ceil().min(target_w as f32).max(0.0) as usize;
+    let y1 = (bounds.b() * scale).ceil().min(target_h as f32).max(0.0) as usize;
+    let width = x1.saturating_sub(x0);
+    let height = y1.saturating_sub(y0);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let source_w = source.width() as usize;
+    let source_h = source.height() as usize;
+    let axis = |at: usize, from: usize, to: usize| {
+        let point = ((at as f32 + 0.5) * from as f32 / to as f32 - 0.5)
+            .clamp(0.0, from.saturating_sub(1) as f32);
+        let low = point.floor() as usize;
+        let high = (low + 1).min(from - 1);
+        let share = ((point - low as f32) * 256.0).round() as u32;
+        (low, high, share)
+    };
+    let x_map: Vec<_> = (0..width)
+        .map(|x| {
+            let (low, high, share) = axis(x, source_w, width);
+            (low, high, share)
+        })
+        .collect();
+    let source = source.data().as_chunks::<4>().0;
+    let wide_stride = width * 4;
+    let mut wide = vec![0_u8; wide_stride * source_h];
+    let workers = blur_workers(width * source_h, source_h);
+    std::thread::scope(|scope| {
+        let mut first = 0;
+        let mut rest = wide.as_mut_slice();
+        for worker in 0..workers {
+            let left = workers - worker;
+            let take_rows = (source_h - first) / left;
+            let (band, tail) = rest.split_at_mut(take_rows * wide_stride);
+            rest = tail;
+            let start = first;
+            first += take_rows;
+            let x_map = &x_map;
+            scope.spawn(move || {
+                for (local_y, row) in band.chunks_exact_mut(wide_stride).enumerate() {
+                    let source_row = (start + local_y) * source_w;
+                    for (pixel, &(left, right, across)) in
+                        row.as_chunks_mut::<4>().0.iter_mut().zip(x_map)
+                    {
+                        *pixel = lerp_rgba(
+                            source[source_row + left],
+                            source[source_row + right],
+                            across,
+                        );
+                    }
+                }
+            });
+        }
+    });
+    let wide = wide.as_chunks::<4>().0;
+    let target_stride = target_w * 4;
+    let target = &mut target.data_mut()[y0 * target_stride..y1 * target_stride];
+    let workers = blur_workers(width * height, height);
+    std::thread::scope(|scope| {
+        let mut first = 0;
+        let mut rest = target;
+        for worker in 0..workers {
+            let left = workers - worker;
+            let take_rows = (height - first) / left;
+            let (band, tail) = rest.split_at_mut(take_rows * target_stride);
+            rest = tail;
+            let start = first;
+            first += take_rows;
+            scope.spawn(move || {
+                for (local_y, row) in band.chunks_exact_mut(target_stride).enumerate() {
+                    let y = start + local_y;
+                    let (top, bottom, down) = axis(y, source_h, height);
+                    let top = top * width;
+                    let bottom = bottom * width;
+                    let row = &mut row[x0 * 4..x1 * 4];
+                    for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        *pixel = lerp_rgba(wide[top + x], wide[bottom + x], down);
+                    }
+                }
+            });
+        }
+    });
+}
+
+fn lerp_rgba(from: [u8; 4], to: [u8; 4], share: u32) -> [u8; 4] {
+    const PAIRS: u32 = 0x00ff_00ff;
+    const ROUND: u32 = 0x0080_0080;
+    let from = u32::from_le_bytes(from);
+    let to = u32::from_le_bytes(to);
+    let keep = 256 - share;
+    let rb = (((from & PAIRS) * keep + (to & PAIRS) * share + ROUND) >> 8) & PAIRS;
+    let ga = (((((from >> 8) & PAIRS) * keep + ((to >> 8) & PAIRS) * share + ROUND) >> 8) << 8)
+        & 0xff00_ff00;
+    (rb | ga).to_le_bytes()
 }
 
 /// Lands one premultiplied RGBA layer on another. A group already has the same size and pixel
@@ -536,6 +707,16 @@ fn box_blur(
     }
 }
 
+fn blur_workers(pixels: usize, rows: usize) -> usize {
+    if pixels < 256 * 1024 {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(6)
+        .min(rows)
+}
+
 /// A rectangle path with circular corners, or `None` for an empty or invalid rectangle.
 #[allow(clippy::many_single_char_names)] // x, y, w, h, r read like the geometry they are.
 fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
@@ -685,6 +866,29 @@ mod tests {
         assert!((20..235).contains(&near), "{near}");
         assert!((20..235).contains(&over), "{over}");
         assert_eq!(pixel(&canvas, 2, 20), untouched, "outside the blur");
+    }
+
+    #[test]
+    fn backdrop_capture_draws_small_then_fills_the_retina_frame() {
+        let mut canvas = CpuCanvas::new(400, 240, 2.0, TextEngine::new()).unwrap();
+        let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
+        canvas.begin_backdrop_capture(bounds, 12.0);
+        assert!(canvas.width() < 100, "the backdrop stayed Retina-sized");
+        assert_eq!(canvas.scale(), 2.0, "layout still sees the display scale");
+        canvas.fill_rect(bounds, 0.0, Color::WHITE);
+        canvas.end_backdrop_capture(bounds, 12.0);
+        assert_eq!((canvas.width(), canvas.height()), (400, 240));
+        assert_eq!(pixel(&canvas, 200, 120), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn backdrop_scaling_blends_all_four_channels_together() {
+        assert_eq!(
+            lerp_rgba([0, 64, 128, 255], [255, 128, 0, 0], 128),
+            [128, 96, 64, 128]
+        );
+        assert_eq!(lerp_rgba([1, 2, 3, 4], [9, 8, 7, 6], 0), [1, 2, 3, 4]);
+        assert_eq!(lerp_rgba([1, 2, 3, 4], [9, 8, 7, 6], 256), [9, 8, 7, 6]);
     }
 
     #[test]
