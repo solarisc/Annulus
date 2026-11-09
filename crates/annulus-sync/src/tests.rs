@@ -591,7 +591,7 @@ fn http_server_with(server: std::sync::Arc<Server>) -> String {
         runtime.block_on(async move {
             listener.set_nonblocking(true).unwrap();
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, annulus_server::service(server, false))
+            axum::serve(listener, annulus_server::service(server, false, Vec::new()))
                 .await
                 .unwrap();
         });
@@ -617,7 +617,7 @@ fn https_server() -> (String, Vec<u8>) {
             )
             .await
             .unwrap();
-            let service = annulus_server::service(std::sync::Arc::new(server()), false);
+            let service = annulus_server::service(std::sync::Arc::new(server()), false, Vec::new());
             axum_server::from_tcp_rustls(listener, config)
                 .unwrap()
                 .serve(service)

@@ -18,6 +18,8 @@ services:
       - --data
       - /data/annulus-server.db
       - --behind-proxy
+      - --trusted-proxy
+      - 172.31.250.2
       - --signups
       - ${ANNULUS_SIGNUPS:-closed}
     volumes:
@@ -31,6 +33,8 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    networks:
+      - annulus-net
   caddy:
     image: caddy:2
     ports:
@@ -40,6 +44,14 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
     restart: unless-stopped
+    networks:
+      annulus-net:
+        ipv4_address: 172.31.250.2
 volumes:
   annulus-data:
   caddy-data:
+networks:
+  annulus-net:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24

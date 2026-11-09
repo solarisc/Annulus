@@ -261,7 +261,7 @@ pub fn sftp_tab(name: &str) -> crate::sftp_view::SftpTab {
     std::fs::create_dir_all(local.join("notes")).expect("a temporary folder");
     std::fs::write(local.join("backup.tar.gz"), vec![0; 4096]).expect("a temporary file");
     std::fs::write(local.join("todo.txt"), "ship it\n").expect("a temporary file");
-    tab.local.dir = local;
+    tab.local = crate::local_pane::LocalPane::new_loaded(local);
     tab
 }
 

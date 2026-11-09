@@ -2,7 +2,12 @@
 //! remote one. Downloads land in the folder shown; the selected file uploads to the remote
 //! folder shown.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender},
+};
+
+use annulus_platform::window::Waker;
 
 /// One entry of a local folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,25 +187,80 @@ pub struct LocalPane {
     pub(crate) entries: Vec<LocalEntry>,
     pub(crate) error: Option<String>,
     pub(crate) path_field: String,
+    worker: Option<Sender<LocalRequest>>,
+    replies: Receiver<LocalReply>,
+    next_request: u64,
+    latest_list: u64,
+    dirty: bool,
+    pub(crate) loading: bool,
+}
+
+/// A local file change that finished on the pane's worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LocalChange {
+    Created(String),
+    Renamed(String),
+    Deleted(String),
+}
+
+enum LocalWork {
+    List,
+    CreateDir(String),
+    Rename { from: String, to: String },
+    Delete { path: PathBuf, folder: bool },
+}
+
+struct LocalRequest {
+    id: u64,
+    dir: PathBuf,
+    hidden: bool,
+    work: LocalWork,
+    waker: Option<Waker>,
+}
+
+struct LocalReply {
+    id: u64,
+    dir: PathBuf,
+    entries: std::io::Result<Vec<LocalEntry>>,
+    change: Option<Result<LocalChange, String>>,
 }
 
 impl LocalPane {
     /// A pane showing `dir`.
     #[must_use]
     pub fn new(dir: PathBuf) -> Self {
-        let mut pane = Self {
+        let (requests, work) = mpsc::channel();
+        let (news, replies) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("annulus-local-files".to_owned())
+            .spawn(move || local_worker(&work, &news))
+            .map(|_| requests)
+            .ok();
+        Self {
             path_field: dir.display().to_string(),
             dir,
             entries: Vec::new(),
             error: None,
-        };
-        pane.refresh(false);
+            worker,
+            replies,
+            next_request: 0,
+            latest_list: 0,
+            dirty: true,
+            loading: false,
+        }
+    }
+
+    /// A ready pane for the built-in preview, which must render the same first frame each time.
+    pub(crate) fn new_loaded(dir: PathBuf) -> Self {
+        let mut pane = Self::new(dir);
+        pane.apply_list(read_dir(&pane.dir, false));
+        pane.dirty = false;
         pane
     }
 
-    /// Reads the folder again (after a download, or on Refresh).
-    pub fn refresh(&mut self, hidden: bool) {
-        match read_dir(&self.dir, hidden) {
+    fn apply_list(&mut self, result: std::io::Result<Vec<LocalEntry>>) {
+        self.loading = false;
+        match result {
             Ok(entries) => {
                 self.entries = entries;
                 self.error = None;
@@ -208,6 +268,145 @@ impl LocalPane {
             Err(error) => self.error = Some(format!("Cannot read {}: {error}", self.dir.display())),
         }
         self.path_field = self.dir.display().to_string();
+    }
+
+    fn request(&mut self, work: LocalWork, hidden: bool, waker: Option<&Waker>) {
+        self.next_request = self.next_request.wrapping_add(1).max(1);
+        self.latest_list = self.next_request;
+        self.dirty = false;
+        self.loading = true;
+        let request = LocalRequest {
+            id: self.next_request,
+            dir: self.dir.clone(),
+            hidden,
+            work,
+            waker: waker.cloned(),
+        };
+        let sent = self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.send(request).is_ok());
+        if !sent {
+            self.loading = false;
+            self.error = Some("The local file worker stopped".to_owned());
+        }
+    }
+
+    /// Reads the shown folder on the local file worker.
+    pub fn refresh(&mut self, hidden: bool, waker: Option<&Waker>) {
+        self.request(LocalWork::List, hidden, waker);
+    }
+
+    /// Shows `dir` and reads it on the local file worker.
+    pub(crate) fn navigate(&mut self, dir: PathBuf, hidden: bool, waker: Option<&Waker>) {
+        self.dir = dir;
+        self.path_field = self.dir.display().to_string();
+        self.entries.clear();
+        self.error = None;
+        self.refresh(hidden, waker);
+    }
+
+    /// Marks the shown folder for a read on the next frame, when a waker is at hand.
+    pub(crate) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Starts a read that a background transfer requested.
+    pub(crate) fn refresh_if_dirty(&mut self, hidden: bool, waker: Option<&Waker>) {
+        if self.dirty {
+            self.refresh(hidden, waker);
+        }
+    }
+
+    pub(crate) fn create_dir(&mut self, name: String, hidden: bool, waker: Option<&Waker>) {
+        self.request(LocalWork::CreateDir(name), hidden, waker);
+    }
+
+    pub(crate) fn rename(&mut self, from: String, to: String, hidden: bool, waker: Option<&Waker>) {
+        self.request(LocalWork::Rename { from, to }, hidden, waker);
+    }
+
+    pub(crate) fn delete(
+        &mut self,
+        path: PathBuf,
+        folder: bool,
+        hidden: bool,
+        waker: Option<&Waker>,
+    ) {
+        self.request(LocalWork::Delete { path, folder }, hidden, waker);
+    }
+
+    /// Applies finished reads and returns finished file changes.
+    pub(crate) fn drain(&mut self) -> Vec<Result<LocalChange, String>> {
+        let replies: Vec<_> = self.replies.try_iter().collect();
+        let mut changes = Vec::new();
+        for reply in replies {
+            if reply.id == self.latest_list && reply.dir == self.dir {
+                self.apply_list(reply.entries);
+            }
+            if let Some(change) = reply.change {
+                changes.push(change);
+            }
+        }
+        changes
+    }
+}
+
+fn local_worker(requests: &Receiver<LocalRequest>, replies: &Sender<LocalReply>) {
+    while let Ok(request) = requests.recv() {
+        let change = match request.work {
+            LocalWork::List => None,
+            LocalWork::CreateDir(name) => Some(
+                std::fs::create_dir(request.dir.join(&name))
+                    .map(|()| LocalChange::Created(name))
+                    .map_err(|error| format!("Could not create the folder: {error}")),
+            ),
+            LocalWork::Rename { from, to } => {
+                let target = request.dir.join(&to);
+                let result = if target.symlink_metadata().is_ok() && from != to {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "that name is taken",
+                    ))
+                } else {
+                    std::fs::rename(request.dir.join(from), target)
+                };
+                Some(
+                    result
+                        .map(|()| LocalChange::Renamed(to))
+                        .map_err(|error| format!("Could not rename the item: {error}")),
+                )
+            }
+            LocalWork::Delete { path, folder } => {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into(),
+                );
+                let result = if folder {
+                    std::fs::remove_dir_all(path)
+                } else {
+                    std::fs::remove_file(path)
+                };
+                Some(
+                    result
+                        .map(|()| LocalChange::Deleted(name))
+                        .map_err(|error| format!("Could not delete the item: {error}")),
+                )
+            }
+        };
+        let entries = read_dir(&request.dir, request.hidden);
+        let reply = LocalReply {
+            id: request.id,
+            dir: request.dir,
+            entries,
+            change,
+        };
+        if replies.send(reply).is_err() {
+            break;
+        }
+        if let Some(waker) = request.waker {
+            waker();
+        }
     }
 }
 
@@ -281,5 +480,68 @@ mod tests {
         assert_eq!(windows_access(0x20), "Read/write");
         assert_eq!(windows_access(0x1 | 0x2), "Read-only, hidden");
         assert_eq!(windows_access(0x2 | 0x4), "Read/write, hidden, system");
+    }
+
+    #[test]
+    fn changes_run_on_the_worker_and_refresh_the_cached_list() {
+        let dir = std::env::temp_dir().join(format!(
+            "annulus-local-worker-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pane = LocalPane::new(dir.clone());
+        let wait = |pane: &mut LocalPane| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(change) = pane.drain().into_iter().next() {
+                    break change.unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < until,
+                    "the worker did not reply"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        pane.create_dir("first".to_owned(), false, None);
+        assert_eq!(wait(&mut pane), LocalChange::Created("first".to_owned()));
+        assert_eq!(pane.entries[0].name, "first");
+
+        pane.rename("first".to_owned(), "second".to_owned(), false, None);
+        assert_eq!(wait(&mut pane), LocalChange::Renamed("second".to_owned()));
+        assert_eq!(pane.entries[0].name, "second");
+
+        pane.delete(dir.join("second"), true, false, None);
+        assert_eq!(wait(&mut pane), LocalChange::Deleted("second".to_owned()));
+        assert_eq!(pane.entries, Vec::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pending_folder_read_has_a_loading_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "annulus-local-loading-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pane = LocalPane::new(dir.clone());
+        pane.refresh(false, None);
+        assert!(pane.loading);
+
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pane.loading {
+            pane.drain();
+            assert!(
+                std::time::Instant::now() < until,
+                "the worker did not reply"
+            );
+            std::thread::yield_now();
+        }
+        assert!(pane.error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

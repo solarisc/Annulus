@@ -3,7 +3,8 @@
 //! ```text
 //! annulus-server [serve] [--listen 127.0.0.1:8443 | --host 127.0.0.1 --port 8443]
 //!                [--data annulus-server.db] [--signups open|closed]
-//!                [--tls-cert cert.pem --tls-key key.pem] [--behind-proxy]
+//!                [--tls-cert cert.pem --tls-key key.pem]
+//!                [--behind-proxy [--trusted-proxy ADDRESS]...]
 //! annulus-server accounts [--data …]               list accounts and storage use
 //! annulus-server delete-account <name> [--data …]  delete an account and its data
 //! annulus-server backup <file> [--data …]          consistent copy while running
@@ -20,7 +21,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::Write as _;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +35,7 @@ struct Serve {
     signups: Signups,
     tls: Option<(PathBuf, PathBuf)>,
     behind_proxy: bool,
+    trusted_proxies: Vec<IpAddr>,
 }
 
 /// What `--help` prints.
@@ -60,7 +62,8 @@ Options of serve:
   --signups open|closed whether anyone may make an account (closed by default: invites)
   --tls-cert FILE --tls-key FILE
                         serve HTTPS with this certificate (tls-init makes one)
-  --behind-proxy        a TLS proxy (Caddy, nginx) sits in front
+  --behind-proxy        a TLS proxy (Caddy, nginx) sits in front; loopback is trusted
+  --trusted-proxy ADDR  also trust this proxy address to set X-Forwarded-For; may repeat
 
 Plain HTTP is allowed on 127.0.0.1 only; on any other address the server needs a certificate,
 or --behind-proxy.
@@ -88,12 +91,16 @@ const MAX_INVITE: Duration = Duration::from_hours(30 * 24);
 
 /// The address `--host` names: an IPv4 or IPv6 address, or `localhost`.
 fn host_address(text: &str) -> Result<std::net::IpAddr, String> {
+    ip_address(text, "--host")
+}
+
+fn ip_address(text: &str, option: &str) -> Result<std::net::IpAddr, String> {
     if text.eq_ignore_ascii_case("localhost") {
         return Ok(std::net::IpAddr::from([127, 0, 0, 1]));
     }
-    text.trim_matches(['[', ']'])
-        .parse()
-        .map_err(|_| format!("--host takes an address like 0.0.0.0, 127.0.0.1 or ::1, not {text}"))
+    text.trim_matches(['[', ']']).parse().map_err(|_| {
+        format!("{option} takes an address like 0.0.0.0, 127.0.0.1 or ::1, not {text}")
+    })
 }
 
 /// `90m`, `24h` or `7d`: at least a minute, at most 30 days.
@@ -129,6 +136,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
         signups: Signups::Closed,
         tls: None,
         behind_proxy: false,
+        trusted_proxies: Vec::new(),
     };
     let (mut cert, mut key) = (None, None);
     let mut expires = None;
@@ -166,6 +174,9 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             "--tls-cert" => cert = Some(PathBuf::from(value()?)),
             "--tls-key" => key = Some(PathBuf::from(value()?)),
             "--behind-proxy" => serve.behind_proxy = true,
+            "--trusted-proxy" => serve
+                .trusted_proxies
+                .push(ip_address(&value()?, "--trusted-proxy")?),
             "--name" => names.extend(
                 value()?
                     .split(',')
@@ -201,6 +212,9 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     };
     match command.as_deref() {
         None | Some("serve") => {
+            if !serve.trusted_proxies.is_empty() && !serve.behind_proxy {
+                return Err("--trusted-proxy needs --behind-proxy".into());
+            }
             if !serve.listen.ip().is_loopback() && serve.tls.is_none() && !serve.behind_proxy {
                 return Err(
                     "refusing plain HTTP on a non-loopback address: pass --tls-cert and \
@@ -247,7 +261,11 @@ fn serve(options: Serve) -> Result<(), String> {
     let server = Arc::new(Server::open(&options.data, options.signups).map_err(|e| e.to_string())?);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async move {
-        let app = service(server, options.behind_proxy);
+        let app = service(
+            server,
+            options.behind_proxy,
+            options.trusted_proxies.clone(),
+        );
         let _ = writeln!(
             std::io::stderr(),
             "annulus-server listening on {} ({})",
@@ -431,6 +449,28 @@ mod tests {
         assert!(matches!(parsed(&["serve", "-h"]), Ok(Command::Help)));
         assert!(matches!(parsed(&["-h"]), Ok(Command::Help)));
         assert!(USAGE.contains("--host") && USAGE.contains("--port"));
+    }
+
+    #[test]
+    fn trusted_proxy_addresses_need_proxy_mode() {
+        let Ok(Command::Serve(proxy)) = parsed(&[
+            "--behind-proxy",
+            "--trusted-proxy",
+            "172.31.250.2",
+            "--trusted-proxy",
+            "::1",
+        ]) else {
+            panic!("proxy options serve");
+        };
+        assert_eq!(
+            proxy.trusted_proxies,
+            [
+                IpAddr::from([172, 31, 250, 2]),
+                IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1])
+            ]
+        );
+        assert!(parsed(&["--trusted-proxy", "127.0.0.2"]).is_err());
+        assert!(parsed(&["--behind-proxy", "--trusted-proxy", "caddy"]).is_err());
     }
 
     #[test]

@@ -332,6 +332,8 @@ pub struct NativeApp {
     runs: Vec<control::Running>,
     /// What agents changed, to show as toasts this frame (a host's notes).
     agent_news: Vec<String>,
+    /// Settings writes that failed, to show as errors instead of implying that a change stuck.
+    settings_errors: Vec<String>,
 }
 
 impl NativeApp {
@@ -403,6 +405,7 @@ impl NativeApp {
             door_failed: false,
             runs: Vec::new(),
             agent_news: Vec::new(),
+            settings_errors: Vec::new(),
         }
     }
 
@@ -594,8 +597,33 @@ impl NativeApp {
             .collect();
         if open != self.settings.open_tabs {
             self.settings.open_tabs = open;
-            if let Some(path) = &self.settings_path {
-                let _ = self.settings.save(path);
+            self.save_settings();
+        }
+    }
+
+    /// Saves device settings, or queues a visible error for this frame. Settings include the
+    /// control-door switch, so a failed write must never look as though it will survive a restart.
+    fn save_settings(&mut self) -> bool {
+        Self::persist_settings(
+            &self.settings,
+            self.settings_path.as_deref(),
+            &mut self.settings_errors,
+        )
+    }
+
+    fn persist_settings(
+        settings: &Settings,
+        path: Option<&std::path::Path>,
+        news: &mut Vec<String>,
+    ) -> bool {
+        let Some(path) = path else {
+            return true;
+        };
+        match settings.save(path) {
+            Ok(()) => true,
+            Err(error) => {
+                news.push(format!("Settings were not saved: {error}"));
+                false
             }
         }
     }
@@ -650,9 +678,7 @@ impl NativeApp {
             }
             start::Choice::TogglePin(id) => {
                 self.settings.toggle_pin(id);
-                if let Some(path) = &self.settings_path {
-                    let _ = self.settings.save(path);
-                }
+                self.save_settings();
             }
         }
     }
@@ -750,9 +776,7 @@ impl NativeApp {
         };
         if (zoomed - size).abs() > f32::EPSILON {
             self.settings.font_size = zoomed;
-            if let Some(path) = &self.settings_path {
-                let _ = self.settings.save(path);
-            }
+            self.save_settings();
         }
     }
 
@@ -1079,9 +1103,7 @@ impl NativeApp {
                 self.sync.sync_soon();
                 // For the New Tab page's recent connections.
                 self.settings.connected(id, crate::sync_screen::now_secs());
-                if let Some(path) = &self.settings_path {
-                    let _ = self.settings.save(path);
-                }
+                self.save_settings();
             }
             hosts::HostsAction::ConnectAll(uid) => {
                 // The hosts directly in the group, not those of its subgroups.
@@ -1359,13 +1381,12 @@ impl NativeApp {
                 || std::env::temp_dir().join("annulus-preview-fonts"),
                 |parent| parent.join("fonts"),
             );
-        if self
+        let fonts_changed = self
             .settings_view
             .fonts
-            .frame(ui, &mut self.settings, font_directory)
-            && let Some(path) = &self.settings_path
-        {
-            let _ = self.settings.save(path);
+            .frame(ui, &mut self.settings, font_directory);
+        if fonts_changed {
+            self.save_settings();
         }
         ui.gfx.set_font_families(
             self.settings.ui_font.as_deref(),
@@ -1400,9 +1421,6 @@ impl NativeApp {
         if self.control() {
             // A command's output is settling: look again soon.
             ui.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        for news in std::mem::take(&mut self.agent_news) {
-            ui.toast(news, Tone::Info);
         }
         shortcuts::choose(&self.settings.keys);
         // Keys being recorded in Settings reach no shortcut.
@@ -1531,9 +1549,7 @@ impl NativeApp {
                 if let Some((local, remote)) = view.take_columns() {
                     self.settings.sftp_local_columns = local;
                     self.settings.sftp_remote_columns = remote;
-                    if let Some(path) = &self.settings_path {
-                        let _ = self.settings.save(path);
-                    }
+                    self.save_settings();
                 }
             }
         } else if let Some(tab) = self.tabs.get_mut(self.active)
@@ -1592,13 +1608,16 @@ impl NativeApp {
                 if !on {
                     self.door = None;
                 }
-                if let Some(path) = &self.settings_path {
-                    let _ = self.settings.save(path);
-                }
-                let said = if on {
-                    "Agents can use Annulus again"
-                } else {
-                    "Agents stopped: every agent is cut off"
+                let saved = Self::persist_settings(
+                    &self.settings,
+                    self.settings_path.as_deref(),
+                    &mut self.settings_errors,
+                );
+                let said = match (on, saved) {
+                    (true, true) => "Agents can use Annulus again",
+                    (false, true) => "Agents stopped: every agent is cut off",
+                    (true, false) => "Agents can use Annulus for this run only",
+                    (false, false) => "Agents stopped for this run only",
                 };
                 ui.toast(said, Tone::Info);
             }
@@ -1655,9 +1674,11 @@ impl NativeApp {
         {
             if let theme_picker::Outcome::Apply(index) = outcome {
                 colors::apply(&mut self.settings, index);
-                if let Some(path) = &self.settings_path {
-                    let _ = self.settings.save(path);
-                }
+                Self::persist_settings(
+                    &self.settings,
+                    self.settings_path.as_deref(),
+                    &mut self.settings_errors,
+                );
             }
             self.settings_view.theme_focus = picker.return_focus();
             self.settings_view.picker = None;
@@ -1668,6 +1689,12 @@ impl NativeApp {
         }
         self.palette_frame(ui);
         self.flight(ui);
+        for news in std::mem::take(&mut self.agent_news) {
+            ui.toast(news, Tone::Info);
+        }
+        for news in std::mem::take(&mut self.settings_errors) {
+            ui.toast(news, Tone::Problem);
+        }
         ui.overlays();
         for tab in &mut self.tabs {
             if let Some(TermView::Live(panes)) = &tab.terminal {
@@ -1903,8 +1930,8 @@ impl NativeApp {
                 );
                 self.account_h = height;
                 pace.apply(ui);
-                if changed && let Some(path) = &self.settings_path {
-                    let _ = self.settings.save(path);
+                if changed {
+                    self.save_settings();
                 }
                 None
             }
@@ -2199,4 +2226,27 @@ pub fn run_preview(light: bool) -> Result<(), WindowError> {
             theme: Theme::new(appearance),
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_settings_write_failure_is_shown_instead_of_silently_losing_the_change() {
+        let dir =
+            std::env::temp_dir().join(format!("annulus-settings-failure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let not_a_folder = dir.join("not-a-folder");
+        std::fs::write(&not_a_folder, "blocks the settings folder").unwrap();
+
+        let mut app = NativeApp::new(None);
+        app.settings_path = Some(not_a_folder.join("settings.json"));
+        assert!(!app.save_settings());
+        assert_eq!(app.settings_errors.len(), 1);
+        assert!(app.settings_errors[0].starts_with("Settings were not saved:"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

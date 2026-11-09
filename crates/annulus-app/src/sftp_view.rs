@@ -723,7 +723,7 @@ impl SftpTab {
                     // A finished transfer shows up in the listing on its receiving side.
                     match upload {
                         Some(true) if done => self.reload(),
-                        Some(false) if done => self.local.refresh(self.show_hidden),
+                        Some(false) if done => self.local.invalidate(),
                         _ => {}
                     }
                 }
