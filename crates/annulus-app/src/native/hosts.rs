@@ -4,7 +4,7 @@
 use annulus_config::tokens::{metrics, motion, radius, space};
 use annulus_session::Target;
 use annulus_ui::gfx::Canvas as _;
-use annulus_ui::gfx::{Align, Font, Rect, Weight};
+use annulus_ui::gfx::{Align, Font, Point, Rect, Weight};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, FOCUS_REACH, Id, Key, Modifiers, Role, Ui};
 use annulus_ui::motion::{Curve, Feel, Layer, Motion};
@@ -537,11 +537,11 @@ impl HostsView {
     /// many there are changed by something done here. In the same columns they glide. Into
     /// other columns their paths would cross, so the old grid fades out and the new one fills
     /// in. A window being resized moves them at once, with the pointer.
-    fn reflow(&mut self, ui: &mut Ui<'_>, listed: usize, columns: usize) {
+    fn reflow(&mut self, ui: &mut Ui<'_>, listed: usize, columns: usize, reordered: bool) {
         /// Longer than any card takes to arrive.
         const GLIDES: f64 = 0.7;
         let open = self.editor.is_some() || self.group_editor.is_some();
-        let changed = open != self.was_open || listed != self.places.len();
+        let changed = open != self.was_open || listed != self.places.len() || reordered;
         let new_columns = columns != self.was_columns;
         self.was_open = open;
         self.was_columns = columns;
@@ -1202,7 +1202,7 @@ impl HostsView {
         rect: Rect,
         cards: &[Card],
         groups: &[GroupCard],
-        vault: &Vault,
+        vault: &mut Vault,
         menu: &[String],
     ) -> Option<HostsAction> {
         let columns = grid_columns(rect.w);
@@ -1240,7 +1240,13 @@ impl HostsView {
         let top = rect.y - offset;
         let mut y = top;
         let mut action = None;
-        self.reflow(ui, cards.len() + groups.len(), columns);
+        let reordered = self
+            .listed
+            .0
+            .iter()
+            .map(|card| card.id)
+            .ne(cards.iter().map(|card| card.id));
+        self.reflow(ui, cards.len() + groups.len(), columns, reordered);
         self.listed = (cards.to_vec(), groups.to_vec());
         let old = self.old_grid(ui);
         if let Some(fade) = old {
@@ -1307,10 +1313,28 @@ impl HostsView {
         }
         match self.mode {
             Mode::Grid => {
+                let homes: Vec<(u64, Rect)> = cards
+                    .iter()
+                    .enumerate()
+                    .map(|(index, card)| {
+                        (card.id, grid_cell(rect.x, y, width, columns, index, CARD_H))
+                    })
+                    .collect();
+                let dragging = cards.iter().find_map(|card| {
+                    ui.drag_moved(Id::new(("host", card.id)))
+                        .map(|point| (card.id, point))
+                });
+                let released = cards.iter().find_map(|card| {
+                    ui.drag_released(Id::new(("host", card.id)))
+                        .map(|point| (card.id, point))
+                });
                 for (index, card) in cards.iter().enumerate() {
                     let id = Id::new(("host", card.id));
-                    let home = grid_cell(rect.x, y, width, columns, index, CARD_H);
+                    let home = homes[index].1;
                     let cell = self.place(ui, id, home, top);
+                    if dragging.is_some_and(|(moving, _)| moving == card.id) {
+                        continue;
+                    }
                     let selected = self.selected == Some(card.id);
                     // Cards fill in one after another as the screen appears.
                     let shown = ui.entrance(
@@ -1332,16 +1356,59 @@ impl HostsView {
                         action = Some(found);
                     }
                 }
+                if let Some((id, pointer)) = dragging
+                    && let Some((index, card)) =
+                        cards.iter().enumerate().find(|(_, card)| card.id == id)
+                {
+                    let before = host_drop_before(cards, &homes, id, pointer, Mode::Grid);
+                    host_drop_mark(ui, &homes, before, Mode::Grid);
+                    let home = homes[index].1;
+                    let held = dragged_rect(ui, home, pointer);
+                    ui.push_layer(Layer::NONE.shifted(0.0, -2.0));
+                    let _ = host_card(ui, held, card, self.selected == Some(id), menu);
+                    ui.pop_layer();
+                    ui.set_cursor(Cursor::Pointer);
+                }
+                if let Some((id, pointer)) = released {
+                    let before = host_drop_before(cards, &homes, id, pointer, Mode::Grid);
+                    match vault.move_host_before(id, before) {
+                        Ok(changed) => ui.request_repaint_if(changed),
+                        Err(error) => ui.toast(
+                            format!("Could not reorder the host: {error}"),
+                            Tone::Problem,
+                        ),
+                    }
+                }
             }
             Mode::List => {
                 list_header(ui, Rect::new(rect.x, y, width, ROW_H - 12.0));
                 y += ROW_H - 12.0;
+                let mut row_y = y;
+                let homes: Vec<(u64, Rect)> = cards
+                    .iter()
+                    .map(|card| {
+                        let home = Rect::new(rect.x, row_y, width, ROW_H);
+                        row_y += ROW_H + GAP;
+                        (card.id, home)
+                    })
+                    .collect();
+                let dragging = cards.iter().find_map(|card| {
+                    ui.drag_moved(Id::new(("host", card.id)))
+                        .map(|point| (card.id, point))
+                });
+                let released = cards.iter().find_map(|card| {
+                    ui.drag_released(Id::new(("host", card.id)))
+                        .map(|point| (card.id, point))
+                });
                 for (index, card) in cards.iter().enumerate() {
-                    let row = Rect::new(rect.x, y, width, ROW_H);
-                    let shown = ui.entrance(
-                        Id::new(("host", card.id)).with(("row", refill)),
-                        Motion::BASE.staggered(index),
-                    );
+                    let id = Id::new(("host", card.id));
+                    let home = homes[index].1;
+                    let row = self.place(ui, id, home, top);
+                    if dragging.is_some_and(|(moving, _)| moving == card.id) {
+                        continue;
+                    }
+                    let shown =
+                        ui.entrance(id.with(("row", refill)), Motion::BASE.staggered(index));
                     ui.push_layer(Layer::fade(shown).shifted(0.0, 8.0 * (1.0 - shown)));
                     let event = self.clicks(host_row(
                         ui,
@@ -1357,7 +1424,26 @@ impl HostsView {
                     if let Some(found) = self.card_event(vault, card.id, event) {
                         action = Some(found);
                     }
-                    y += ROW_H + GAP;
+                }
+                if let Some((id, pointer)) = dragging
+                    && let Some((index, card)) =
+                        cards.iter().enumerate().find(|(_, card)| card.id == id)
+                {
+                    let before = host_drop_before(cards, &homes, id, pointer, Mode::List);
+                    host_drop_mark(ui, &homes, before, Mode::List);
+                    let held = dragged_rect(ui, homes[index].1, pointer);
+                    let _ = host_row(ui, held, card, self.selected == Some(id), menu);
+                    ui.set_cursor(Cursor::Pointer);
+                }
+                if let Some((id, pointer)) = released {
+                    let before = host_drop_before(cards, &homes, id, pointer, Mode::List);
+                    match vault.move_host_before(id, before) {
+                        Ok(changed) => ui.request_repaint_if(changed),
+                        Err(error) => ui.toast(
+                            format!("Could not reorder the host: {error}"),
+                            Tone::Problem,
+                        ),
+                    }
                 }
             }
         }
@@ -2505,6 +2591,67 @@ fn grid_cell(x: f32, y: f32, width: f32, columns: usize, index: usize, height: f
     )
 }
 
+/// Keeps the same point of a host under the pointer while it is dragged.
+fn dragged_rect(ui: &Ui<'_>, home: Rect, pointer: Point) -> Rect {
+    let pressed = ui.pressed_at().unwrap_or_else(|| home.center());
+    let grab_x = (pressed.x - home.x).clamp(0.0, home.w);
+    let grab_y = (pressed.y - home.y).clamp(0.0, home.h);
+    Rect::new(pointer.x - grab_x, pointer.y - grab_y, home.w, home.h)
+}
+
+/// The host that a dragged host goes before. `None` is the end of this group.
+fn host_drop_before(
+    cards: &[Card],
+    homes: &[(u64, Rect)],
+    moving: u64,
+    pointer: Point,
+    mode: Mode,
+) -> Option<u64> {
+    let remaining: Vec<(u64, Rect)> = homes
+        .iter()
+        .copied()
+        .filter(|(id, _)| *id != moving)
+        .collect();
+    let (target, (_, rect)) = remaining
+        .iter()
+        .enumerate()
+        .min_by(|(_, (_, a)), (_, (_, b))| {
+            let distance = |rect: &Rect| {
+                let center = rect.center();
+                (center.x - pointer.x).powi(2) + (center.y - pointer.y).powi(2)
+            };
+            distance(a).total_cmp(&distance(b))
+        })?;
+    let after = match mode {
+        Mode::Grid if (pointer.y - rect.center().y).abs() < rect.h / 2.0 + GAP => {
+            pointer.x > rect.center().x
+        }
+        Mode::Grid | Mode::List => pointer.y > rect.center().y,
+    };
+    let before = remaining
+        .get(target + usize::from(after))
+        .map(|(id, _)| *id);
+    before.filter(|id| cards.iter().any(|card| card.id == *id))
+}
+
+/// The clear insertion line under a dragged host.
+fn host_drop_mark(ui: &mut Ui<'_>, homes: &[(u64, Rect)], before: Option<u64>, mode: Mode) {
+    let Some((_, edge)) = before
+        .and_then(|id| homes.iter().find(|(host, _)| *host == id))
+        .or_else(|| homes.last())
+    else {
+        return;
+    };
+    let color = ui.theme.accent;
+    let mark = match (mode, before.is_some()) {
+        (Mode::List, true) => Rect::new(edge.x, edge.y - 2.0, edge.w, 3.0),
+        (Mode::List, false) => Rect::new(edge.x, edge.b() + 2.0, edge.w, 3.0),
+        (Mode::Grid, true) => Rect::new(edge.x - 3.0, edge.y + 4.0, 3.0, edge.h - 8.0),
+        (Mode::Grid, false) => Rect::new(edge.r() + 1.0, edge.y + 4.0, 3.0, edge.h - 8.0),
+    };
+    ui.gfx.fill_rect(mark, 1.5, color);
+}
+
 #[derive(Clone, Copy)]
 enum CardEvent {
     None,
@@ -3265,6 +3412,38 @@ mod tests {
     }
 
     #[test]
+    fn a_list_drop_chooses_before_or_after_the_host_under_the_pointer() {
+        let cards: Vec<Card> = (1..=3)
+            .map(|id| Card {
+                id,
+                label: format!("host-{id}"),
+                detail: String::new(),
+                tags: Vec::new(),
+                os: None,
+            })
+            .collect();
+        let homes = [
+            (1, Rect::new(0.0, 0.0, 300.0, 44.0)),
+            (2, Rect::new(0.0, 52.0, 300.0, 44.0)),
+            (3, Rect::new(0.0, 104.0, 300.0, 44.0)),
+        ];
+        assert_eq!(
+            host_drop_before(&cards, &homes, 3, homes[0].1.center(), Mode::List),
+            Some(1)
+        );
+        assert_eq!(
+            host_drop_before(
+                &cards,
+                &homes,
+                1,
+                Point::new(150.0, homes[2].1.b() + 20.0),
+                Mode::List,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn the_editor_builds_a_host_and_refuses_a_bad_port_or_no_address() {
         let vault = super::super::demo::fixture_vault("editor-build", false);
         let mut editor = Editor::new(vault.draft_host(), true);
@@ -3321,7 +3500,7 @@ mod tests {
         };
         let (cards, groups) = view.gather(&vault);
         let labels: Vec<&str> = cards.iter().map(|card| card.label.as_str()).collect();
-        assert_eq!(labels, ["grouped", "tagged"]);
+        assert_eq!(labels, ["tagged", "grouped"]);
         assert!(groups.is_empty());
     }
 

@@ -250,7 +250,6 @@ impl Vault {
                 }
             }
         }
-        hosts.sort_by_key(|host| host.label.to_lowercase());
         forwards.sort_by_key(|rule| rule.label.to_lowercase());
         let mut sync = match sync {
             Some(sync) => sync,
@@ -324,7 +323,7 @@ impl Vault {
         Ok(())
     }
 
-    /// All hosts, sorted by label.
+    /// All hosts, in the order saved by the user.
     #[must_use]
     pub fn hosts(&self) -> &[Host] {
         &self.hosts
@@ -413,7 +412,6 @@ impl Vault {
             Some(existing) => *existing = host,
             None => next.push(host),
         }
-        next.sort_by_key(|host| host.label.to_lowercase());
         let mut sync = self.sync.clone();
         sync.touch(kind::HOST, id, false)?;
         self.save_all(&Parts {
@@ -425,6 +423,55 @@ impl Vault {
         self.sync = sync;
         self.generation += 1;
         Ok(())
+    }
+
+    /// Moves `id` before `before`, or to the end of its group for `None`, then saves. Returns
+    /// whether the order changed. Host order is presentation state: it does not mark host data
+    /// for sync, but it stays in this encrypted vault and survives edits and restarts.
+    ///
+    /// # Errors
+    /// Writing the file; nothing changes then.
+    pub fn move_host_before(&mut self, id: u64, before: Option<u64>) -> Result<bool, VaultError> {
+        if before == Some(id) {
+            return Ok(false);
+        }
+        let Some(from) = self.hosts.iter().position(|host| host.id == id) else {
+            return Ok(false);
+        };
+        let group = self.hosts[from].group.clone();
+        if let Some(target) = before
+            && !self
+                .hosts
+                .iter()
+                .any(|host| host.id == target && host.group == group)
+        {
+            return Ok(false);
+        }
+        let before_ids: Vec<u64> = self.hosts.iter().map(|host| host.id).collect();
+        let mut next = self.hosts.clone();
+        let moving = next.remove(from);
+        let at = before
+            .and_then(|target| next.iter().position(|host| host.id == target))
+            .unwrap_or_else(|| {
+                next.iter()
+                    .rposition(|host| host.group == group)
+                    .map_or(next.len(), |last| last + 1)
+            });
+        next.insert(at, moving);
+        if next
+            .iter()
+            .map(|host| host.id)
+            .eq(before_ids.iter().copied())
+        {
+            return Ok(false);
+        }
+        self.save_all(&Parts {
+            hosts: &next,
+            ..self.parts()
+        })?;
+        self.hosts = next;
+        self.generation += 1;
+        Ok(true)
     }
 
     /// Takes `tag` off every host that has it, in one save; returns how many changed
@@ -536,7 +583,6 @@ impl Vault {
             sync.touch(kind::HOST, id, false)?;
             next.push(host);
         }
-        next.sort_by_key(|host| host.label.to_lowercase());
         self.save_all(&Parts {
             hosts: &next,
             sync: &sync,
@@ -811,7 +857,6 @@ impl Vault {
                 ..rule.clone()
             });
         }
-        next_hosts.sort_by_key(|host| host.label.to_lowercase());
         next_forwards.sort_by_key(|rule| rule.label.to_lowercase());
         next_keys.sort_by_key(|key| key.label.to_lowercase());
         next_snippets.sort_by_key(|snippet| snippet.label.to_lowercase());
@@ -1389,7 +1434,7 @@ mod tests {
         (first.label, first.address) = ("first".into(), "a".into());
         vault.upsert_host(first).unwrap();
         let labels: Vec<&str> = vault.hosts().iter().map(|h| h.label.as_str()).collect();
-        assert_eq!(labels, ["first", "second"]);
+        assert_eq!(labels, ["second", "first"]);
         // Saving an existing host again is an edit, not a new one.
         let mut edited = vault.hosts()[0].clone();
         edited.address = "a2".into();
@@ -1670,6 +1715,35 @@ mod tests {
             Vault::unlock(&path, "nope"),
             Err(VaultError::WrongPassword)
         ));
+    }
+
+    #[test]
+    fn a_dragged_host_keeps_its_new_place_after_unlock() {
+        let path = temp("host-order");
+        let (mut vault, _) = Vault::create(&path, "pw", KdfParams::TEST).unwrap();
+        for label in ["alpha", "bravo", "charlie"] {
+            vault.upsert_host(host(&vault, label)).unwrap();
+        }
+        let ids: Vec<u64> = vault.hosts().iter().map(|host| host.id).collect();
+        vault.move_host_before(ids[2], Some(ids[0])).unwrap();
+        assert_eq!(
+            vault
+                .hosts()
+                .iter()
+                .map(|host| host.label.as_str())
+                .collect::<Vec<_>>(),
+            ["charlie", "alpha", "bravo"]
+        );
+        drop(vault);
+        assert_eq!(
+            Vault::unlock(&path, "pw")
+                .unwrap()
+                .hosts()
+                .iter()
+                .map(|host| host.label.as_str())
+                .collect::<Vec<_>>(),
+            ["charlie", "alpha", "bravo"]
+        );
     }
 
     #[test]

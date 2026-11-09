@@ -3799,7 +3799,7 @@ fn a_snippet_runs_on_the_hosts_ticked_in_one_tab_of_panes() {
         &click_on(&output, "Run on hosts"),
         1.0,
     );
-    output = step(&mut app, &mut state, &click_on(&output, "api-1"), 2.0);
+    output = step(&mut app, &mut state, &click_on(&output, "prod-db"), 2.0);
     output = step(&mut app, &mut state, &click_on(&output, "bastion"), 3.0);
     assert!(
         output
@@ -6481,6 +6481,49 @@ fn settings_is_last_so_it_sits_at_the_bottom() {
     );
 }
 
+#[test]
+fn dragging_a_host_reorders_the_page_and_saves_its_place() {
+    let mut app = NativeApp::new(Some(fixture_vault("host-drag", true)));
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    let from = zone_center(&output.zones, "web-1");
+    let to = zone_center(&output.zones, "prod-db");
+    let drag = [
+        Event::PointerMoved(from),
+        Event::PointerDown(Button::Primary),
+        Event::PointerMoved(to),
+    ];
+    let moving = drive(&mut app, &mut state, &drag, 1.0);
+    assert!(moving.repaint, "the held card keeps drawing");
+    drive(
+        &mut app,
+        &mut state,
+        &[Event::PointerUp(Button::Primary)],
+        1.1,
+    );
+    let labels = || {
+        app.vault
+            .as_ref()
+            .unwrap()
+            .hosts()
+            .iter()
+            .filter(|host| host.group.is_none())
+            .map(|host| host.label.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(&labels()[..2], ["web-1", "prod-db"]);
+    let path = app.vault.as_ref().unwrap().path().to_path_buf();
+    drop(app);
+    let reopened = annulus_vault::vault::Vault::unlock(&path, "pw").unwrap();
+    let saved: Vec<&str> = reopened
+        .hosts()
+        .iter()
+        .filter(|host| host.group.is_none())
+        .map(|host| host.label.as_str())
+        .collect();
+    assert_eq!(&saved[..2], ["web-1", "prod-db"]);
+}
+
 /// The panes of the terminal tab in front.
 fn front_panes(app: &NativeApp) -> &super::panes::Panes {
     match app
@@ -6491,6 +6534,56 @@ fn front_panes(app: &NativeApp) -> &super::panes::Panes {
         Some(TermView::Live(panes)) => panes,
         _ => panic!("no live terminal tab in front"),
     }
+}
+
+#[test]
+fn a_new_split_glides_in_with_its_bar_and_settles() {
+    use super::panes::{Panes, Replay};
+
+    let mut app = NativeApp::new(Some(fixture_vault("split-motion", false)));
+    let pane = Replay {
+        title: "shell".into(),
+        emulator: super::demo::terminal(),
+        status: None,
+    };
+    app.push_terminal("shell", TermView::Live(Box::new(Panes::replay(pane))));
+    let uid = app.tabs[app.active].uid;
+    let terminal = |pane: u64| annulus_ui::kit::Id::new(("terminal", uid, pane));
+    let rect =
+        |output: &FrameOutput, id| output.zones.iter().find(|zone| zone.id == id).unwrap().rect;
+    let named = |output: &FrameOutput, name: &str| {
+        output
+            .zones
+            .iter()
+            .find(|zone| zone.label == name)
+            .unwrap()
+            .rect
+    };
+
+    let mut state = UiState::default();
+    let before = drive(&mut app, &mut state, &[], 0.0);
+    let whole = rect(&before, terminal(1));
+    drive(&mut app, &mut state, &[chord(shortcuts::SPLIT_RIGHT)], 1.0);
+    let moving = drive(&mut app, &mut state, &[], 1.05);
+    let settled = drive(&mut app, &mut state, &[], 2.0);
+    let old_moving = rect(&moving, terminal(1));
+    let old_settled = rect(&settled, terminal(1));
+    let new_moving = rect(&moving, terminal(2));
+    let new_settled = rect(&settled, terminal(2));
+    assert!(
+        old_moving.w > old_settled.w && old_moving.w < whole.w,
+        "the old pane glides from its old width: {whole:?}, {old_moving:?}, {old_settled:?}"
+    );
+    assert!(
+        new_moving.x > new_settled.x,
+        "the new pane slides in from the right: {new_moving:?}, {new_settled:?}"
+    );
+    assert!(
+        named(&moving, "Focus mode").y < named(&settled, "Focus mode").y,
+        "the new bar slides down"
+    );
+    assert!(moving.repaint, "motion asks for its next frame");
+    assert!(!settled.repaint, "the split rests once it arrives");
 }
 
 #[test]

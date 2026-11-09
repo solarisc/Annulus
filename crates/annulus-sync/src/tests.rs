@@ -883,7 +883,7 @@ mod vaults {
         }
     }
 
-    /// Adds host "web" (sorted after "bastion"), reached through host `jump`.
+    /// Adds host "web", reached through host `jump`.
     fn add_web_behind(vault: &mut Vault, jump: u64) {
         let mut web = vault.draft_host();
         web.label = "web".into();
@@ -976,33 +976,42 @@ mod vaults {
         .unwrap();
         let desktop_caller = server.authenticate(&second.token).unwrap();
         round(&server, desktop_caller, &mut desktop);
-        assert_eq!(desktop.hosts()[0].label, "bastion");
+        let bastion = desktop
+            .hosts()
+            .iter()
+            .find(|host| host.label == "bastion")
+            .unwrap();
+        let web = desktop
+            .hosts()
+            .iter()
+            .find(|host| host.label == "web")
+            .unwrap();
         let synced_rule = &desktop.forwards()[0];
-        assert_eq!(
-            synced_rule.host_id,
-            desktop.hosts()[0].id,
-            "the rule finds its host"
-        );
+        assert_eq!(synced_rule.host_id, bastion.id, "the rule finds its host");
         assert_eq!(desktop.ssh_keys()[0].label, "work key");
         assert_eq!(desktop.snippets()[0].script, "df -h");
+        assert_eq!(web.jump_id, Some(bastion.id), "jump link");
         assert_eq!(
-            desktop.hosts()[1].jump_id,
-            Some(desktop.hosts()[0].id),
-            "jump link"
-        );
-        assert_eq!(
-            desktop.hosts()[0].key_id,
+            bastion.key_id,
             Some(desktop.ssh_keys()[0].id),
             "the host finds its key"
         );
 
         // An edit on the desktop reaches the laptop; a deletion on the laptop reaches back.
-        let mut edited = desktop.hosts()[0].clone();
+        let mut edited = bastion.clone();
         edited.address = "10.0.0.2".into();
         desktop.upsert_host(edited).unwrap();
         round(&server, desktop_caller, &mut desktop);
         round(&server, laptop_caller, &mut laptop);
-        assert_eq!(laptop.hosts()[0].address, "10.0.0.2");
+        assert_eq!(
+            laptop
+                .hosts()
+                .iter()
+                .find(|host| host.label == "bastion")
+                .unwrap()
+                .address,
+            "10.0.0.2"
+        );
         let rule_id = laptop.forwards()[0].id;
         laptop.remove_forward(rule_id).unwrap();
         round(&server, laptop_caller, &mut laptop);
@@ -1169,14 +1178,14 @@ mod vaults {
         laptop.upsert_host(draft).unwrap();
 
         let labels: Vec<&str> = laptop.hosts().iter().map(|h| h.label.as_str()).collect();
-        assert_eq!(labels, ["mine", "theirs"], "both kept");
+        assert_eq!(labels, ["theirs", "mine"], "both kept in save order");
         assert_ne!(laptop.hosts()[0].id, laptop.hosts()[1].id);
         round(&server, a_id, &mut laptop);
         round(&server, b_id, &mut desktop);
         let there: Vec<&str> = desktop.hosts().iter().map(|h| h.label.as_str()).collect();
         assert_eq!(
             there,
-            ["mine", "theirs"],
+            ["theirs", "mine"],
             "nothing overwritten on the other device"
         );
     }

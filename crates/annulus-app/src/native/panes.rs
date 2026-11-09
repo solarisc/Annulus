@@ -10,7 +10,7 @@ use annulus_ui::gfx::Canvas as _;
 use annulus_ui::gfx::{Align, Color, Font, Point, Rect};
 use annulus_ui::icons;
 use annulus_ui::kit::{Cursor, Id, Role, Theme, Ui};
-use annulus_ui::motion::{Layer, Motion};
+use annulus_ui::motion::{Feel, Layer, Motion};
 use annulus_ui::widgets::{BODY, BODY_MEDIUM, SMALL};
 
 use super::live::LiveTerminal;
@@ -296,6 +296,9 @@ pub struct Panes {
     refocus: bool,
     /// Where each pane was drawn last, for moving focus with the keyboard.
     rects: Vec<(u64, Rect)>,
+    /// Panes made by a split that are still making their first entrance, and which way they
+    /// enter. More than one may be moving when shortcuts are pressed in quick succession.
+    arrivals: Vec<(u64, bool)>,
 }
 
 impl Panes {
@@ -311,6 +314,7 @@ impl Panes {
             focus_mode: false,
             refocus: false,
             rects: Vec::new(),
+            arrivals: Vec::new(),
         }
     }
 
@@ -335,6 +339,7 @@ impl Panes {
             focus_mode: false,
             refocus: false,
             rects: Vec::new(),
+            arrivals: Vec::new(),
         })
     }
 
@@ -446,6 +451,7 @@ impl Panes {
         }
         self.next += 1;
         self.all.push(Pane::new(id, LiveTerminal::new(program)));
+        self.arrivals.push((id, across));
         self.focused = id;
         true
     }
@@ -724,6 +730,26 @@ impl Panes {
         layout
     }
 
+    /// Lets panes and dividers follow a changed split without changing their text size. The
+    /// terminal redraws in each new rectangle; no layer scales its cells or glyphs.
+    fn glide_layout(ui: &mut Ui<'_>, base: Id, layout: &mut Layout) {
+        let glide = |ui: &mut Ui<'_>, id: Id, target: Rect| {
+            Rect::new(
+                ui.spring_with(id.with("x"), target.x, Feel::Soft),
+                ui.spring_with(id.with("y"), target.y, Feel::Soft),
+                ui.spring_with(id.with("w"), target.w, Feel::Soft),
+                ui.spring_with(id.with("h"), target.h, Feel::Soft),
+            )
+        };
+        for (id, rect) in &mut layout.panes {
+            *rect = glide(ui, base.with(("pane.place", *id)), *rect);
+        }
+        for (path, handle, whole, _) in &mut layout.dividers {
+            *handle = glide(ui, base.with(("divider.handle", *path)), *handle);
+            *whole = glide(ui, base.with(("divider.whole", *path)), *whole);
+        }
+    }
+
     /// Draws every pane into `rect`; `pane_id` names a pane's zone. Pane 0 never exists, so
     /// its id is the base of the tab's own controls.
     pub fn draw(
@@ -734,11 +760,9 @@ impl Panes {
         waker: Option<&Waker>,
         pane_id: impl Fn(u64) -> Id,
     ) {
+        let base = pane_id(0);
         let mut area = rect;
-        if self.all.len() > 1 {
-            let bar = area.take_top(BAR_H);
-            self.bar(ui, bar, pane_id(0));
-        }
+        let bar = (self.all.len() > 1).then(|| area.take_top(BAR_H));
         let mut layout = self.arrange(area);
         // A row of focus mode's list brings its pane in front before anything is drawn.
         if layout.list.is_some()
@@ -751,6 +775,7 @@ impl Panes {
             self.refocus = true;
             layout = self.arrange(area);
         }
+        Self::glide_layout(ui, base, &mut layout);
         if let Some((id, _)) = layout
             .panes
             .iter()
@@ -762,7 +787,6 @@ impl Panes {
             ui.state.set_focus(Some(pane_id(self.focused)), false);
         }
         // Into focus mode, out of it or to another pane in it: the panes settle in place.
-        let base = pane_id(0);
         let change = ui.entrance(
             base.with((
                 "arranged",
@@ -776,6 +800,18 @@ impl Panes {
             Motion::BASE,
         );
         let settling = self.all.len() > 1 && change < 1.0;
+        // Draw the bar's controls before the panes so keyboard focus still follows the
+        // screen from top to bottom while the whole bar enters as one layer.
+        if let Some(bar) = bar {
+            let shown = ui.entrance(base.with("bar.in"), Motion::SLOW);
+            ui.push_layer(
+                Layer::fade(shown)
+                    .shifted(0.0, -18.0 * (1.0 - shown))
+                    .grouped(bar),
+            );
+            self.bar(ui, bar, base);
+            ui.pop_layer();
+        }
         if settling {
             ui.push_layer(Layer::fade(0.2 + 0.8 * change).grouped(area));
         }
@@ -841,7 +877,10 @@ impl Panes {
         inner.take_left(space::XS);
         let icon = inner.take_left(16.0).centered(16.0, 16.0);
         inner.take_left(space::S);
-        let said = ui.entrance(base.with(("said", broadcasting)), Motion::BASE);
+        let said = ui.entrance(
+            base.with(("said", broadcasting, self.all.len())),
+            Motion::BASE,
+        );
         ui.push_layer(Layer::fade(said));
         if broadcasting {
             ui.gfx.icon(icons::WARNING, icon, t.warn);
@@ -888,6 +927,16 @@ impl Panes {
             let id = Id::new(("divider", *path, std::ptr::from_ref(self) as usize));
             let response = ui.zone(id, *handle, Role::Splitter, "Resize panes");
             let hot = response.hovered || ui.dragging(id);
+            let shown = ui.entrance(id.with("in"), Motion::SLOW);
+            let travel = if *across {
+                (whole.r() - handle.center().x) * (1.0 - shown)
+            } else {
+                (whole.b() - handle.center().y) * (1.0 - shown)
+            };
+            ui.push_layer(Layer::fade(0.25 + 0.75 * shown).shifted(
+                if *across { travel } else { 0.0 },
+                if *across { 0.0 } else { travel },
+            ));
             ui.gfx.fill_rect(
                 handle.centered(
                     if *across { 1.0 } else { handle.w },
@@ -896,6 +945,7 @@ impl Panes {
                 0.0,
                 if hot { t.accent } else { t.line },
             );
+            ui.pop_layer();
             if hot {
                 ui.set_cursor(if *across {
                     Cursor::ResizeHorizontal
@@ -932,9 +982,35 @@ impl Panes {
         let several = self.all.len() > 1;
         let broadcasting = self.broadcasting();
         let mut refocus = false;
+        let mut arrived = Vec::new();
         for (id, area) in &layout.panes {
             let zone = pane_id(*id);
+            let arrival = self
+                .arrivals
+                .iter()
+                .find(|(arriving, _)| arriving == id)
+                .copied();
+            if let Some((_, across)) = arrival {
+                let shown = ui.entrance(zone.with("split.in"), Motion::SLOW);
+                let travel = if across { area.w } else { area.h }.min(48.0);
+                ui.push_clip(*area);
+                ui.push_layer(
+                    Layer::fade(shown)
+                        .shifted(
+                            if across { travel * (1.0 - shown) } else { 0.0 },
+                            if across { 0.0 } else { travel * (1.0 - shown) },
+                        )
+                        .grouped(*area),
+                );
+                if shown >= 1.0 {
+                    arrived.push(*id);
+                }
+            }
             let Some(pane) = self.all.iter_mut().find(|pane| pane.id == *id) else {
+                if arrival.is_some() {
+                    ui.pop_layer();
+                    ui.pop_clip();
+                }
                 continue;
             };
             pane.draw(ui, *area, style, waker, zone);
@@ -979,7 +1055,12 @@ impl Panes {
                     dot_color(&t, status),
                 );
             }
+            if arrival.is_some() {
+                ui.pop_layer();
+                ui.pop_clip();
+            }
         }
+        self.arrivals.retain(|(id, _)| !arrived.contains(id));
         // The toggle took the keyboard with the click: it goes back to the typing pane.
         if refocus {
             ui.state.set_focus(Some(pane_id(self.focused)), false);
@@ -1241,6 +1322,7 @@ mod tests {
                 (2, Rect::new(106.0, 0.0, 100.0, 97.0)),
                 (3, Rect::new(106.0, 103.0, 100.0, 97.0)),
             ],
+            arrivals: Vec::new(),
         };
         panes.move_focus(1.0, 0.0);
         assert!(matches!(panes.focused, 2 | 3));

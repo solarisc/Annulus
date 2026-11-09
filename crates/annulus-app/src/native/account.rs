@@ -19,6 +19,16 @@ use crate::job::{Job, Pace, Poll};
 use crate::password_screen;
 use crate::sync_screen::{Attempt, SyncScreen, ago, now_secs, pill};
 
+const STATUS_LINE_H: f32 = space::S + 18.0;
+const CERTIFICATE_H: f32 = 20.0 + 18.0 * 4.0 + space::S * 3.0 + CONTROL + space::M * 2.0;
+
+#[derive(Clone, Copy)]
+enum ServerTrust {
+    None,
+    Untrusted,
+    Trusted,
+}
+
 /// The forms' typed text, wiped when dropped.
 #[derive(Default)]
 pub struct AccountView {
@@ -31,10 +41,50 @@ pub struct AccountView {
     changing: bool,
     change: Option<Job<Result<Vec<u8>, String>>>,
     change_message: Option<(bool, String)>,
-    /// How tall the account card was last frame.
-    card_h: f32,
     /// How tall the master password card was last frame.
     password_h: f32,
+}
+
+fn status_height(busy: bool, message: bool) -> f32 {
+    f32::from(u8::from(busy) + u8::from(message)) * STATUS_LINE_H
+}
+
+fn signed_in_card_height(devices: usize, deleted: usize, busy: bool, message: bool) -> f32 {
+    #[allow(clippy::cast_precision_loss)] // The two lists are small UI lists.
+    let rows = (devices + deleted) as f32;
+    space::M
+        + 20.0
+        + 18.0
+        + space::M
+        + CONTROL
+        + rows * (space::S + 28.0)
+        + status_height(busy, message)
+        + space::M
+}
+
+fn signed_out_card_height(trust: ServerTrust, busy: bool, message: bool) -> f32 {
+    let field_row = 16.0 + 5.0 + CONTROL;
+    let certificate = match trust {
+        ServerTrust::Untrusted => space::M + CERTIFICATE_H,
+        ServerTrust::Trusted => space::S + 18.0,
+        ServerTrust::None => 0.0,
+    };
+    space::M
+        + 20.0
+        + 18.0
+        + space::M
+        + field_row
+        + space::M
+        + field_row
+        + space::M
+        + field_row
+        + certificate
+        + space::M
+        + CONTROL
+        + space::S
+        + 18.0
+        + status_height(busy, message)
+        + space::M
 }
 
 /// A small primary-or-secondary button at the left of `row`, which shrinks.
@@ -78,16 +128,38 @@ impl AccountView {
         let top = rect.y;
         let column = rect;
         let card_top = column.y;
-        // Its height is known once its content is drawn: last frame's serves.
-        ui.card_surface(Rect::new(column.x, card_top, column.w, self.card_h), 12.0);
+        // Take one snapshot before buttons can start work or set a message. The surface and
+        // the words then use the same state in this frame, including the frame a short status
+        // line appears or clears.
+        let busy = sync.work.as_ref().map(|(label, _)| label.clone());
+        let message = sync.message.clone();
+        let untrusted = sync.untrusted.clone();
+        let pin_trusted = sync.pin.is_some();
+        let trust = if untrusted.is_some() {
+            ServerTrust::Untrusted
+        } else if pin_trusted {
+            ServerTrust::Trusted
+        } else {
+            ServerTrust::None
+        };
+        let account = vault.sync_state().account.clone();
+        let card_h = if account.is_some() {
+            signed_in_card_height(
+                sync.devices.len(),
+                sync.trash.len(),
+                busy.is_some(),
+                message.is_some(),
+            )
+        } else {
+            signed_out_card_height(trust, busy.is_some(), message.is_some())
+        };
+        ui.card_surface(Rect::new(column.x, card_top, column.w, card_h), 12.0);
         let mut inner = Rect::new(
             column.x + space::L,
             column.y + space::M,
             column.w - 2.0 * space::L,
             2000.0,
         );
-        let busy = sync.work.as_ref().map(|(label, _)| label.clone());
-        let account = vault.sync_state().account.clone();
         // The card's fill goes under its content: drawn after, from the height used.
         let mut body = Vec::new();
         match &account {
@@ -166,10 +238,10 @@ impl AccountView {
                     },
                 );
                 ui.set_name(Id::new("account.invite"), "Invite code");
-                if let Some((certificate, attempt)) = sync.untrusted.clone() {
+                if let Some((certificate, attempt)) = untrusted.clone() {
                     inner.take_top(space::M);
                     certificate_box(ui, &mut inner, sync, &certificate, attempt);
-                } else if sync.pin.is_some() {
+                } else if pin_trusted {
                     inner.take_top(space::S);
                     ui.gfx.text(
                         inner.take_top(18.0),
@@ -341,7 +413,7 @@ impl AccountView {
                 Align::Start,
             );
         }
-        if let Some((error, message)) = &sync.message {
+        if let Some((error, message)) = &message {
             inner.take_top(space::S);
             ui.gfx.text(
                 inner.take_top(18.0),
@@ -355,7 +427,16 @@ impl AccountView {
             ui.gfx.text(line, &text, BODY, t.text, Align::Start);
         }
         let card = Rect::new(column.x, card_top, column.w, inner.y - card_top + space::M);
-        self.card_h = card.h;
+        debug_assert!(
+            (card.h - card_h).abs() < 0.1,
+            "account card height drifted: content {}, surface {card_h}, signed in {}, busy {}, message {}, devices {}, deleted {}",
+            card.h,
+            account.is_some(),
+            busy.is_some(),
+            message.is_some(),
+            sync.devices.len(),
+            sync.trash.len()
+        );
         // Room to lay out in; its height becomes what the password card took.
         let mut after = Rect::new(column.x, card.b() + space::XL, column.w, 1000.0);
         after.h = self.password_card(ui, after, vault, pace);
@@ -547,8 +628,7 @@ fn certificate_box(
         "Trust it only if this SHA-256 fingerprint matches what",
         "\u{201c}annulus-server fingerprint\u{201d} prints on the server:",
     ];
-    let height = 20.0 + 18.0 * 4.0 + space::S * 3.0 + CONTROL + space::M * 2.0;
-    let card = inner.take_top(height);
+    let card = inner.take_top(CERTIFICATE_H);
     ui.gfx.fill_rect(card, 10.0, t.warn.alpha(0.08));
     ui.gfx.stroke_rect(card, 10.0, 1.0, t.warn.alpha(0.5));
     let mut column = card.inset(space::M, space::M);
@@ -602,5 +682,22 @@ fn certificate_box(
     ) {
         sync.untrusted = None;
         sync.message = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_account_card_sizes_its_surface_for_the_status_drawn_this_frame() {
+        let plain = signed_in_card_height(0, 0, false, false);
+        let working = signed_in_card_height(0, 0, true, false);
+        let result = signed_in_card_height(0, 0, false, true);
+        let both = signed_in_card_height(0, 0, true, true);
+        let status = space::S + 18.0;
+        assert_eq!(working, plain + status);
+        assert_eq!(result, plain + status);
+        assert_eq!(both, plain + 2.0 * status);
     }
 }

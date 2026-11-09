@@ -613,7 +613,7 @@ impl SyncCopy {
                     .map(|entry| entry.local);
                 awaits_jump = synced.jump.filter(|_| host.jump_id.is_none());
                 let local = host.id;
-                upsert(&mut self.hosts, host, |h| h.id, |h| h.label.to_lowercase());
+                upsert_in_place(&mut self.hosts, host, |host| host.id);
                 local
             }
             kind::FORWARD => {
@@ -833,6 +833,16 @@ fn upsert<T, K: Ord>(list: &mut Vec<T>, item: T, id: impl Fn(&T) -> u64, sort: i
         None => list.push(item),
     }
     list.sort_by_key(sort);
+}
+
+/// Replaces an entity without moving it; a new one goes last. Hosts keep the order chosen on
+/// this device while their synced fields change.
+fn upsert_in_place<T>(list: &mut Vec<T>, item: T, id: impl Fn(&T) -> u64) {
+    let key = id(&item);
+    match list.iter_mut().find(|existing| id(existing) == key) {
+        Some(existing) => *existing = item,
+        None => list.push(item),
+    }
 }
 
 #[cfg(test)]
