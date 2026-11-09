@@ -8,6 +8,7 @@
 pub mod profiles;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -573,17 +574,7 @@ impl Session {
                 answers.clone(),
             )?),
             Program::DefaultShell | Program::Command { .. } => {
-                let shell = match program {
-                    Program::Command { program, args } => {
-                        Some(tty::Shell::new(program.clone(), args.clone()))
-                    }
-                    _ => None,
-                };
-                let options = tty::Options {
-                    shell,
-                    drain_on_exit: true,
-                    ..tty::Options::default()
-                };
+                let options = local_options(program);
                 let pty = tty::new(&options, window_size(size, cell_width, cell_height), 0)?;
                 let event_loop = EventLoop::new(term.clone(), listener.clone(), pty, true, false)?;
                 let sender = event_loop.channel();
@@ -955,6 +946,27 @@ fn window_size(size: Size, cell_width: u16, cell_height: u16) -> WindowSize {
     }
 }
 
+fn local_options(program: &Program) -> tty::Options {
+    let shell = match program {
+        Program::Command { program, args } => Some(tty::Shell::new(program.clone(), args.clone())),
+        _ => None,
+    };
+    let env = HashMap::from([
+        ("TERM".to_owned(), "xterm-256color".to_owned()),
+        ("COLORTERM".to_owned(), "truecolor".to_owned()),
+    ]);
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let working_directory = std::env::var_os(home_variable)
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from);
+    tty::Options {
+        shell,
+        working_directory,
+        drain_on_exit: true,
+        env,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,6 +1159,27 @@ mod tests {
             session.output() > 0
         });
         assert!(counted, "and was counted as it came in");
+    }
+
+    #[test]
+    fn local_programs_get_a_full_terminal_environment() {
+        let options = local_options(&Program::DefaultShell);
+        assert_eq!(
+            options.env.get("TERM").map(String::as_str),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            options.env.get("COLORTERM").map(String::as_str),
+            Some("truecolor")
+        );
+    }
+
+    #[test]
+    fn local_programs_start_in_the_users_home_folder() {
+        let options = local_options(&Program::DefaultShell);
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let expected = std::env::var_os(home_variable).map(PathBuf::from);
+        assert_eq!(options.working_directory, expected);
     }
 
     #[test]
