@@ -197,8 +197,23 @@ impl Canvas for CpuCanvas {
     }
 
     fn shadow(&mut self, rect: Rect, radius: f32, blur: f32, offset_y: f32, color: Color) {
-        // Stacked rings, each a little larger and fainter: deterministic and cheap.
         const RINGS: u8 = 10;
+        let clip = self.clip_rect();
+        let mask = self.clips.last().map(|(_, mask)| mask.data());
+        if draw_shadow(
+            &mut self.frame,
+            clip,
+            mask,
+            rect,
+            radius,
+            blur,
+            offset_y,
+            color,
+            self.paint_scale,
+        ) {
+            return;
+        }
+        // Very small shapes can collapse inside a wide blur. Keep the path version for those.
         let blur = if blur.is_finite() { blur.max(0.0) } else { 0.0 };
         let base = rect.offset(0.0, offset_y);
         for ring in (1..=RINGS).rev() {
@@ -432,6 +447,144 @@ impl Canvas for CpuCanvas {
         let bounds = group.bounds.intersect(&self.clip_rect());
         blend_group(&mut self.frame, &drawn, bounds, group.alpha);
     }
+}
+
+/// Draws the same nested shadow rings in one bounded pixel pass. Each ring is an outset of the
+/// same rounded core, so one signed distance says which rings cover a pixel.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)] // Clamped pixel bounds and the Canvas shadow contract.
+fn draw_shadow(
+    frame: &mut Pixmap,
+    clip: Rect,
+    mask: Option<&[u8]>,
+    rect: Rect,
+    radius: f32,
+    blur: f32,
+    offset_y: f32,
+    color: Color,
+    scale: f32,
+) -> bool {
+    const RINGS: usize = 10;
+    if color.a == 0
+        || !rect.x.is_finite()
+        || !rect.y.is_finite()
+        || rect.w <= 0.0
+        || rect.h <= 0.0
+        || !radius.is_finite()
+        || !blur.is_finite()
+        || !offset_y.is_finite()
+    {
+        return true;
+    }
+    let blur = blur.max(0.0) * scale;
+    let radius = radius.max(0.0) * scale;
+    let base = Rect::new(
+        rect.x * scale,
+        (rect.y + offset_y) * scale,
+        rect.w * scale,
+        rect.h * scale,
+    );
+    let core = Rect::new(
+        base.x + blur / 2.0,
+        base.y + blur / 2.0,
+        base.w - blur,
+        base.h - blur,
+    );
+    // The shared-core shortcut holds only while none of the rounded paths clamp its radius.
+    if core.w <= 0.0
+        || core.h <= 0.0
+        || radius > core.w.min(core.h) / 2.0
+        || radius + blur > (core.w + 2.0 * blur).min(core.h + 2.0 * blur) / 2.0
+    {
+        return false;
+    }
+
+    let frame_w = frame.width() as usize;
+    let frame_h = frame.height() as usize;
+    let outer = core.outset(blur).intersect(&clip);
+    let x0 = outer.x.floor().max(0.0) as usize;
+    let y0 = outer.y.floor().max(0.0) as usize;
+    let x1 = outer.r().ceil().min(frame_w as f32).max(0.0) as usize;
+    let y1 = outer.b().ceil().min(frame_h as f32).max(0.0) as usize;
+    let width = x1.saturating_sub(x0);
+    let height = y1.saturating_sub(y0);
+    if width == 0 || height == 0 {
+        return true;
+    }
+
+    let ring_alpha: [f32; RINGS] = std::array::from_fn(|index| {
+        let ring = (index + 1) as f32;
+        let alpha = 1.0 / RINGS as f32 * (1.0 - (ring - 1.0) / RINGS as f32) * 1.6;
+        f32::from(color.alpha(alpha).a) / 255.0
+    });
+    let center = core.center();
+    let half_w = core.w / 2.0;
+    let half_h = core.h / 2.0;
+    let flat_w = half_w - radius;
+    let flat_h = half_h - radius;
+    let stride = frame_w * 4;
+    let pixels = &mut frame.data_mut()[y0 * stride..y1 * stride];
+    let workers = blur_workers(width * height, height);
+    std::thread::scope(|scope| {
+        let mut first = 0;
+        let mut unclaimed_rows = pixels;
+        for worker in 0..workers {
+            let left = workers - worker;
+            let take_rows = (height - first) / left;
+            let (band, tail) = unclaimed_rows.split_at_mut(take_rows * stride);
+            unclaimed_rows = tail;
+            let start = first;
+            first += take_rows;
+            let ring_alpha = &ring_alpha;
+            scope.spawn(move || {
+                for (local_y, row) in band.chunks_exact_mut(stride).enumerate() {
+                    let y = y0 + start + local_y;
+                    let py = y as f32 + 0.5;
+                    for (local_x, pixel) in row[x0 * 4..x1 * 4]
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        let x = x0 + local_x;
+                        let px = x as f32 + 0.5;
+                        let qx = (px - center.x).abs() - flat_w;
+                        let qy = (py - center.y).abs() - flat_h;
+                        let outside = qx.max(0.0).hypot(qy.max(0.0));
+                        let distance = outside + qx.max(qy).min(0.0) - radius;
+                        let mut transparent = 1.0_f32;
+                        for (index, alpha) in ring_alpha.iter().enumerate() {
+                            let spread = blur * (index + 1) as f32 / RINGS as f32;
+                            let coverage = (spread + 0.5 - distance).clamp(0.0, 1.0);
+                            transparent *= 1.0 - alpha * coverage;
+                        }
+                        let mut alpha = ((1.0 - transparent) * 255.0).round() as u32;
+                        if let Some(mask) = mask {
+                            alpha = (alpha * u32::from(mask[y * frame_w + x]) + 127) / 255;
+                        }
+                        if alpha == 0 {
+                            continue;
+                        }
+                        let keep = 255 - alpha;
+                        let source = |channel: u8| (u32::from(channel) * alpha + 127) / 255;
+                        for (out, channel) in pixel[..3].iter_mut().zip([color.r, color.g, color.b])
+                        {
+                            *out = (source(channel) + (u32::from(*out) * keep + 127) / 255).min(255)
+                                as u8;
+                        }
+                        pixel[3] =
+                            (alpha + (u32::from(pixel[3]) * keep + 127) / 255).min(255) as u8;
+                    }
+                }
+            });
+        }
+    });
+    true
 }
 
 /// Scales a small blurred backdrop into its full-size bounds. The generic vector sampler costs
@@ -889,6 +1042,39 @@ mod tests {
         );
         assert_eq!(lerp_rgba([1, 2, 3, 4], [9, 8, 7, 6], 0), [1, 2, 3, 4]);
         assert_eq!(lerp_rgba([1, 2, 3, 4], [9, 8, 7, 6], 256), [9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn a_shadow_fades_outward_and_stays_inside_its_clip() {
+        let mut canvas = canvas(1.0);
+        let card = Rect::new(12.0, 12.0, 16.0, 16.0);
+        canvas.push_clip(Rect::new(0.0, 0.0, 20.0, 40.0));
+        canvas.shadow(card, 4.0, 4.0, 0.0, Color::BLACK.alpha(0.8));
+        canvas.pop_clip();
+        let middle = pixel(&canvas, 16, 16)[3];
+        let edge = pixel(&canvas, 10, 16)[3];
+        assert!(middle > edge && edge > 0, "shadow alpha: {middle} {edge}");
+        assert_eq!(pixel(&canvas, 22, 16), [0, 0, 0, 0], "outside the clip");
+        assert_eq!(pixel(&canvas, 3, 16), [0, 0, 0, 0], "past the blur");
+    }
+
+    /// Wall-clock checks vary across machines; run this on the Retina Mac after shadow work.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual Retina Mac speed check"]
+    fn retina_palette_shadows_draw_within_one_frame() {
+        use std::time::{Duration, Instant};
+
+        let mut canvas = CpuCanvas::new(2_200, 1_440, 2.0, TextEngine::new()).unwrap();
+        let card = Rect::new(274.0, 72.0, 552.0, 424.0);
+        let began = Instant::now();
+        canvas.shadow(card, 18.0, 34.0, 14.0, Color::BLACK.alpha(0.75));
+        canvas.shadow(card, 18.0, 7.0, 2.0, Color::BLACK.alpha(0.55));
+        let elapsed = began.elapsed();
+        assert!(
+            elapsed <= Duration::from_micros(16_667),
+            "Retina palette shadows took {elapsed:?}"
+        );
     }
 
     #[test]
