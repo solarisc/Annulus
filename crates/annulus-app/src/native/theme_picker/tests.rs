@@ -3,6 +3,63 @@
 use super::*;
 
 #[test]
+fn hovering_a_theme_previews_it_on_the_first_frame() {
+    use annulus_config::tokens::Appearance;
+    use annulus_platform::cpu::{CpuCanvas, TextEngine};
+    use annulus_ui::kit::{Event, Theme, UiState};
+
+    let settings = Settings {
+        theme: ThemeMode::System,
+        recent_themes: vec!["Solarized Light".into(), "Dracula".into()],
+        ..Settings::default()
+    };
+    let mut picker = ThemePicker::new(&settings);
+    let mut canvas = CpuCanvas::new(1040, 700, 1.0, TextEngine::new()).unwrap();
+    let mut state = UiState::default();
+    state.reduce_motion = true;
+    let rect = Rect::new(0.0, 0.0, 1040.0, 700.0);
+    let system = Theme::new(Appearance::Dark);
+    let mut draw = |picker: &mut ThemePicker, state: &mut UiState, events: &[Event], time| {
+        state.begin_frame(events, time);
+        picker.draw(
+            &mut Ui::new(&mut canvas, system, state, rect),
+            &settings,
+            system,
+        );
+        state.end_frame();
+    };
+    draw(&mut picker, &mut state, &[], 0.0);
+    let row = state
+        .zones()
+        .iter()
+        .find(|zone| zone.label == "Dracula")
+        .unwrap()
+        .rect;
+    draw(
+        &mut picker,
+        &mut state,
+        &[Event::PointerMoved(row.center())],
+        0.01,
+    );
+    assert_eq!(
+        picker.terminal.as_ref().unwrap().screen().background,
+        colors::terminal_palette("Dracula").background
+    );
+
+    draw(
+        &mut picker,
+        &mut state,
+        &[Event::Key(Key::Up, Modifiers::NONE)],
+        0.02,
+    );
+    draw(&mut picker, &mut state, &[], 0.03);
+    assert_eq!(
+        picker.terminal.as_ref().unwrap().screen().background,
+        colors::terminal_palette("Solarized Light").background
+    );
+}
+
+#[test]
 fn the_browser_contains_every_scheme_once_and_keeps_families_together() {
     let entries = catalog();
     let mut indices: Vec<_> = entries.iter().map(|entry| entry.index).collect();

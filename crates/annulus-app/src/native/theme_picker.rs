@@ -29,7 +29,6 @@ pub struct ThemePicker {
     reveal: bool,
     pointer: Option<annulus_ui::gfx::Point>,
     focus: Option<Id>,
-    hovered: Option<(usize, f64)>,
     recent: Vec<String>,
     closing: Option<(Outcome, f64)>,
 }
@@ -249,7 +248,6 @@ impl ThemePicker {
         };
         if let Some(entry) = next.and_then(|next| results.get(next)) {
             self.selected = entry.index;
-            self.hovered = None;
             moved = true;
         }
         let mut list = area;
@@ -392,19 +390,12 @@ impl ThemePicker {
         let name = &colors::app_schemes()[entry.index];
         let id = Id::new(("theme.option", entry.index));
         let response = ui.zone(id, row, Role::ListItem, name);
-        ui.set_toggled(id, entry.index == self.selected);
         if response.hovered {
             ui.set_cursor(Cursor::Pointer);
-            if self.pointer != ui.pointer() {
-                self.hovered = Some((entry.index, ui.time()));
-            }
-            if let Some((index, since)) = self.hovered.filter(|(index, _)| *index == entry.index) {
-                let left = 0.18 - (ui.time() - since);
-                if left <= 0.0 {
-                    self.selected = index;
-                } else {
-                    ui.request_repaint_after(std::time::Duration::from_secs_f64(left));
-                }
+            if self.pointer != ui.pointer() && self.selected != entry.index {
+                self.selected = entry.index;
+                // A row drawn earlier may still show the old highlight.
+                ui.request_repaint();
             }
         }
         if response.focused && self.focus != Some(id) {
@@ -413,6 +404,7 @@ impl ThemePicker {
         if response.clicked {
             self.selected = entry.index;
         }
+        ui.set_toggled(id, entry.index == self.selected);
         if self.selected == entry.index {
             ui.gfx.fill_rect(row, 7.0, t.selected);
         }
