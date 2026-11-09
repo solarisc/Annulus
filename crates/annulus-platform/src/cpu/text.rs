@@ -312,6 +312,7 @@ mod tests {
             engine.set_families(None, Some(family));
             for weight in [Weight::Regular, Weight::Bold] {
                 for symbol in [
+                    "\u{279c}",
                     "\u{e0a0}",
                     "\u{e0b0}",
                     "\u{e725}",
@@ -336,6 +337,11 @@ mod tests {
                     assert!(
                         !ids.is_empty() && ids.iter().all(|id| *id != 0),
                         "{family} {weight:?}: {symbol:?} = {ids:?}"
+                    );
+                    assert_eq!(
+                        ids.len(),
+                        1,
+                        "{family} {weight:?}: {symbol:?} shaped as {ids:?}"
                     );
 
                     let mut pixels = Pixmap::new(40, 40).unwrap();

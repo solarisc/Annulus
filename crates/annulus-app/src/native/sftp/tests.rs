@@ -40,6 +40,19 @@ fn click(zones: &[annulus_ui::kit::Zone], name: &str) -> Vec<annulus_ui::kit::Ev
     ]
 }
 
+/// Draws until a local file request has finished, or fails instead of racing its worker.
+fn wait_for_local(view: &mut SftpView, state: &mut UiState, time: f64) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while view.tab.local.loading {
+        frame(view, state, &[], time);
+        assert!(
+            std::time::Instant::now() < until,
+            "the local file worker did not finish"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// Drags the row named `from` and lets it go over the row named `onto`.
 fn drag(view: &mut SftpView, state: &mut UiState, from: &str, onto: &str, time: f64) {
     use annulus_ui::kit::{Button, Event};
@@ -546,6 +559,7 @@ fn this_computers_files_are_made_renamed_and_deleted_after_a_yes() {
     frame(&mut view, &mut state, &typing, 4.0);
     let enter = [annulus_ui::kit::Event::Key(Key::Enter, Modifiers::NONE)];
     frame(&mut view, &mut state, &enter, 5.0);
+    wait_for_local(&mut view, &mut state, 5.1);
     assert!(dir.join("drafts").is_dir());
     // F2 on a selected file renames it.
     let zones = frame(&mut view, &mut state, &[], 6.0);
@@ -559,6 +573,7 @@ fn this_computers_files_are_made_renamed_and_deleted_after_a_yes() {
     }
     let zones = frame(&mut view, &mut state, &[], 9.0);
     frame(&mut view, &mut state, &click(&zones, "Save"), 10.0);
+    wait_for_local(&mut view, &mut state, 10.1);
     assert!(dir.join("done.txt").exists() && !dir.join("todo.txt").exists());
     // Delete asks first; only the card's Delete removes it.
     let zones = frame(&mut view, &mut state, &[], 11.0);
@@ -575,6 +590,7 @@ fn this_computers_files_are_made_renamed_and_deleted_after_a_yes() {
         "nothing is deleted before the yes"
     );
     frame(&mut view, &mut state, &click(&zones, "Delete"), 15.0);
+    wait_for_local(&mut view, &mut state, 15.1);
     assert!(!dir.join("done.txt").exists());
 }
 

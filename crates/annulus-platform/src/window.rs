@@ -390,7 +390,10 @@ mod portable {
 
     use crate::cpu::{CpuCanvas, TextEngine};
 
-    use super::{WindowApp, WindowError, WindowRequest, is_paste, paste_event, publish_clipboard};
+    use super::{
+        WindowApp, WindowError, WindowRequest, is_paste, paste_event, pressed_text,
+        publish_clipboard,
+    };
 
     /// What other threads send the event loop.
     pub(super) enum UserEvent {
