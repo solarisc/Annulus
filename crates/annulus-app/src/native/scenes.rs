@@ -3914,6 +3914,35 @@ fn a_named_palette_action_opens_the_saved_host_editor_from_the_keyboard() {
 }
 
 #[test]
+fn choosing_a_palette_result_repaints_without_the_blurred_backdrop() {
+    let mut app = NativeApp::new(Some(fixture_vault("palette-final-frame", true)));
+    let mut state = UiState::default();
+    drive(&mut app, &mut state, &[], 0.0);
+    step(&mut app, &mut state, &[chord(shortcuts::PALETTE)], 1.0);
+    drive(
+        &mut app,
+        &mut state,
+        &[Event::Text("Known Hosts".into())],
+        2.0,
+    );
+    drive(&mut app, &mut state, &[], 2.0);
+    let closing = drive(
+        &mut app,
+        &mut state,
+        &[Event::Key(Key::Enter, Modifiers::NONE)],
+        2.1,
+    );
+    assert!(closing.repaint, "the close motion needs another frame");
+    let closed = drive(&mut app, &mut state, &[], 2.3);
+    assert!(app.palette.is_none(), "the chosen page closed the palette");
+    assert_eq!(app.section, super::Section::KnownHosts);
+    assert!(
+        closed.repaint,
+        "the blurred closing frame must be followed by one clean frame"
+    );
+}
+
+#[test]
 fn cancelling_the_palette_returns_keyboard_focus() {
     let mut app = NativeApp::new(Some(fixture_vault("palette-focus", true)));
     let mut state = UiState::default();
@@ -5344,6 +5373,25 @@ fn the_fixed_tabs_cannot_be_closed_and_closing_moves_focus_left() {
     // The last session gone, the vault is in front, not the SFTP picker.
     app.close_tab(2);
     assert_eq!((titles(&app), app.active), (vec!["Vault", "SFTP"], 0));
+}
+
+#[test]
+fn the_tabs_x_stops_its_live_session_before_removing_the_tab() {
+    let mut app = NativeApp::new(Some(fixture_vault("tab-x-closes-session", true)));
+    let mut terminal = super::live::LiveTerminal::held_at(Program::DefaultShell, 0, &[]);
+    let closed = terminal.watch_close();
+    app.push_terminal(
+        "live",
+        TermView::Live(Box::new(super::panes::Panes::new(terminal))),
+    );
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    step(&mut app, &mut state, &click_on(&output, "Close tab"), 1.0);
+    assert!(
+        closed.load(std::sync::atomic::Ordering::SeqCst),
+        "the X must stop the live backend before it drops the tab"
+    );
+    assert_eq!(app.tabs.len(), super::FIXED_TABS);
 }
 
 #[test]

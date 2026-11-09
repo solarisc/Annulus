@@ -364,6 +364,13 @@ impl Panes {
         }
     }
 
+    /// Stops every live backend in this tab before the panes are discarded.
+    pub fn close(&mut self) {
+        for pane in &mut self.all {
+            pane.terminal.close();
+        }
+    }
+
     /// Gives every pane `program` from its next start on (a host tab after an unlock).
     pub fn set_program(&mut self, program: &Program) {
         for pane in &mut self.all {
@@ -580,10 +587,11 @@ impl Panes {
         if self.all.len() < 2 || !self.tree.remove(self.focused) {
             return false;
         }
-        if let Some(pane) = self.pane(self.focused)
-            && let Some(text) = pane.terminal.transcript()
-        {
-            closed.push((pane.terminal.title.clone().unwrap_or_default(), text));
+        if let Some(pane) = self.all.iter_mut().find(|pane| pane.id == self.focused) {
+            if let Some(text) = pane.terminal.transcript() {
+                closed.push((pane.terminal.title.clone().unwrap_or_default(), text));
+            }
+            pane.terminal.close();
         }
         let at = order.iter().position(|id| *id == self.focused).unwrap_or(0);
         self.all.retain(|pane| pane.id != self.focused);

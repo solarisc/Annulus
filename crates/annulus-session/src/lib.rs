@@ -513,6 +513,8 @@ pub struct Session {
     output: Arc<AtomicU64>,
     /// Lines of scrollback its terminal keeps.
     scrollback: usize,
+    /// The backend has been told to stop. Closing twice is harmless and sends one message.
+    closed: bool,
 }
 
 impl Session {
@@ -603,7 +605,24 @@ impl Session {
             palette: Palette::annulus_dark(),
             output,
             scrollback: annulus_term::SCROLLBACK_LINES,
+            closed: false,
         })
+    }
+
+    /// Stops the PTY or SSH task now. [`Drop`] calls this too, but tab-close paths call it
+    /// directly so the connection starts closing before the tab data is discarded.
+    pub fn close(&mut self) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        match &self.backend {
+            Backend::Pty(pty) => {
+                let _ = pty.send(Msg::Shutdown);
+            }
+            Backend::Ssh(input) => {
+                let _ = input.send(SshInput::Close);
+            }
+        }
     }
 
     /// Keeps `lines` of scrollback from now on (Settings, F-TERM-004); fewer than it holds
@@ -778,14 +797,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Both need a word: the terminal's reply hook holds a sender of the SSH input too, so
         // the channel never closes by itself and the connection would outlive its tab.
-        match &self.backend {
-            Backend::Pty(pty) => {
-                let _ = pty.send(Msg::Shutdown);
-            }
-            Backend::Ssh(input) => {
-                let _ = input.send(SshInput::Close);
-            }
-        }
+        self.close();
     }
 }
 
@@ -1010,9 +1022,10 @@ mod tests {
             startup: None,
             term: String::new(),
         };
-        let session = Session::spawn(&program, Size::new(80, 24), 8, 16, || {}).unwrap();
+        let mut session = Session::spawn(&program, Size::new(80, 24), 8, 16, || {}).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
-        drop(session);
+        session.close();
+        session.close();
         assert!(
             closing
                 .recv_timeout(std::time::Duration::from_secs(5))

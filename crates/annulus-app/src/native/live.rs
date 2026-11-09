@@ -78,6 +78,9 @@ pub struct LiveTerminal {
     /// Held connecting, never started (the scenes).
     #[cfg(test)]
     held: bool,
+    /// Lets a UI test prove that its tab-close button reached the live session.
+    #[cfg(test)]
+    close_probe: Option<Arc<AtomicBool>>,
 }
 
 /// Where an agent typed into a terminal (F-AUTO-004): the row each of its commands went in
@@ -265,7 +268,29 @@ impl LiveTerminal {
             bar_grab: None,
             #[cfg(test)]
             held: false,
+            #[cfg(test)]
+            close_probe: None,
         }
+    }
+
+    /// Stops this terminal's live backend and cancels any waiting reconnect.
+    pub fn close(&mut self) {
+        self.reconnect.at = None;
+        if let Some(mut session) = self.session.take() {
+            session.close();
+        }
+        #[cfg(test)]
+        if let Some(probe) = &self.close_probe {
+            probe.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A flag set when [`Self::close`] runs, for the tab-close UI test.
+    #[cfg(test)]
+    pub fn watch_close(&mut self) -> Arc<AtomicBool> {
+        let probe = Arc::new(AtomicBool::new(false));
+        self.close_probe = Some(Arc::clone(&probe));
+        probe
     }
 
     /// Whether the tab still says it is connecting.

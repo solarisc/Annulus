@@ -523,10 +523,15 @@ impl NativeApp {
         if self.tabs.get(index).is_none_or(Tab::fixed) {
             return;
         }
-        let tab = self.tabs.remove(index);
-        if let Some(TermView::Live(panes)) = &tab.terminal {
-            self.save_logs(panes.transcripts());
-        }
+        let mut tab = self.tabs.remove(index);
+        let logs = if let Some(TermView::Live(panes)) = &mut tab.terminal {
+            let logs = panes.transcripts();
+            panes.close();
+            logs
+        } else {
+            Vec::new()
+        };
+        self.save_logs(logs);
         let was_front = self.active == index;
         if self.active >= index {
             self.active = self.active.saturating_sub(1);
@@ -919,11 +924,13 @@ impl NativeApp {
             return;
         };
         self.palette = None;
+        // This frame began with backdrop capture because the palette still existed. Draw one
+        // clean frame after the closing frame, even when the chosen action starts no motion.
+        ui.request_repaint();
         match outcome {
             palette::Outcome::Run(action) => self.run_action(action),
             palette::Outcome::Close(focus) => {
                 self.palette_focus = focus;
-                ui.request_repaint();
             }
         }
     }

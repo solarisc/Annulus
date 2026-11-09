@@ -19,6 +19,8 @@ const SHOWN: usize = 8;
 const ROW: f32 = 40.0;
 /// Height of the line at the palette's foot that says what the keys do.
 const HINTS_H: f32 = 28.0;
+/// The shape below owns the easing. A linear clock avoids applying the fast start twice.
+const DROP: Motion = Motion::new(560, Curve::Linear);
 
 /// What the palette ended with.
 #[derive(Clone)]
@@ -60,7 +62,7 @@ impl PaletteView {
     #[allow(clippy::too_many_lines)] // Field, keys and results, top to bottom.
     pub fn draw(&mut self, ui: &mut Ui<'_>) -> Option<Outcome> {
         let window = ui.viewport;
-        let mut shown = ui.entrance(Id::new("palette.drop.open"), Motion::SLOW);
+        let mut shown = ui.entrance(Id::new("palette.drop.open"), DROP);
         if let Some((_, since)) = self.closing.as_ref() {
             let share =
                 ((ui.time() - *since) / (f64::from(Motion::EXIT.ms) / 1000.0)).clamp(0.0, 1.0);
@@ -146,7 +148,7 @@ impl PaletteView {
         fluid_surface(ui, window, shape, shown);
         ui.zone(
             Id::new("palette.card"),
-            shape,
+            shape.intersect(&window),
             Role::Dialog,
             "Command palette",
         );
@@ -289,7 +291,8 @@ impl PaletteView {
 /// pass beyond its final size.
 fn fluid_rect(window: Rect, target: Rect, shown: f32) -> Rect {
     let shown = shown.clamp(0.0, 1.0);
-    let fall = Curve::Emphasized.at(shown);
+    // A drop starts slowly at the edge, gains speed, then settles into the card.
+    let fall = Curve::Emphasized.at(shown * shown);
     let spread = Curve::Overshoot.at(((shown - 0.12) / 0.88).clamp(0.0, 1.0));
     let high = Curve::Emphasized.at(((shown - 0.04) / 0.96).clamp(0.0, 1.0));
     let width = 22.0 + (target.w - 22.0) * spread;
@@ -323,10 +326,16 @@ mod tests {
 
     #[test]
     fn the_drop_starts_small_above_the_window_and_finishes_at_the_card() {
+        assert_eq!(DROP, Motion::new(560, Curve::Linear));
         let window = Rect::new(0.0, 0.0, 1_100.0, 720.0);
         let card = Rect::new(250.0, 72.0, 600.0, 420.0);
         let start = fluid_rect(window, card, 0.0);
         assert_eq!(start, Rect::new(539.0, -18.0, 22.0, 30.0));
+        let quarter = fluid_rect(window, card, 0.25);
+        assert!(
+            quarter.y < window.y + 8.0,
+            "the drop should still be near the top after a quarter of its time: {quarter:?}"
+        );
         let middle = fluid_rect(window, card, 0.45);
         assert!(middle.y > start.y && middle.y < card.y);
         assert!(middle.w > start.w && middle.w < card.w * 1.05);
