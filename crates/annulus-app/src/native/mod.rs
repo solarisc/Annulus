@@ -330,6 +330,8 @@ pub struct NativeApp {
     door_failed: bool,
     /// Agents' commands waiting to be typed or for their output to settle.
     runs: Vec<control::Running>,
+    /// The next in-memory id for a command approval prompt.
+    next_approval: u64,
     /// What agents changed, to show as toasts this frame (a host's notes).
     agent_news: Vec<String>,
     /// Settings writes that failed, to show as errors instead of implying that a change stuck.
@@ -404,6 +406,7 @@ impl NativeApp {
             door: None,
             door_failed: false,
             runs: Vec::new(),
+            next_approval: 1,
             agent_news: Vec::new(),
             settings_errors: Vec::new(),
         }
@@ -1455,6 +1458,11 @@ impl NativeApp {
             self.pane_shortcuts(ui);
         }
         let kind = self.tabs.get(self.active).map(|tab| tab.kind);
+        let active_approval = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| self.pending_approval(tab.uid));
+        let mut approval_choice = None;
         let picking = self
             .tabs
             .get(self.active)
@@ -1584,9 +1592,13 @@ impl NativeApp {
             let content = panel_filled(ui, area, background);
             let allowed = self.settings.automation;
             let agent_action = match (strip, tab.agent.as_deref_mut()) {
-                (Some(rect), Some(log)) => {
-                    control::agent_panel(ui, rect, log, (&tab.title, tab.status, allowed))
-                }
+                (Some(rect), Some(log)) => control::agent_panel(
+                    ui,
+                    rect,
+                    log,
+                    (&tab.title, tab.status, allowed),
+                    active_approval.as_ref(),
+                ),
                 _ => None,
             };
             if let (Some(log), TermView::Live(panes)) = (tab.agent.as_deref(), &mut *view) {
@@ -1601,6 +1613,11 @@ impl NativeApp {
             let switch = match agent_action {
                 Some(control::PanelAction::Stop) => Some(false),
                 Some(control::PanelAction::Allow) => Some(true),
+                _ => None,
+            };
+            approval_choice = match agent_action {
+                Some(control::PanelAction::Approve(id)) => Some((id, true)),
+                Some(control::PanelAction::Deny(id)) => Some((id, false)),
                 _ => None,
             };
             if let Some(on) = switch {
@@ -1655,6 +1672,18 @@ impl NativeApp {
         } else {
             // A terminal tab always holds a terminal; an empty panel is never more than a frame.
             panel(ui, area);
+        }
+        if let Some((id, approved)) = approval_choice {
+            self.decide_approval(id, approved);
+            ui.toast(
+                if approved {
+                    "Command approved"
+                } else {
+                    "Command denied"
+                },
+                if approved { Tone::Done } else { Tone::Info },
+            );
+            ui.request_repaint();
         }
         if switching.is_some() {
             ui.pop_layer();

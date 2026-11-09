@@ -14,7 +14,7 @@ use annulus_ui::kit::{Cursor, Id, Key, Modifiers, Role, Typed, Ui};
 use annulus_ui::motion::{Feel, Layer, Motion};
 use annulus_ui::widgets::{
     BODY, BODY_MEDIUM, BODY_STRONG, CONTROL, FieldStyle, HEADING, KEYCAP_H, Kind, SCROLL_GUTTER,
-    SMALL, TITLE, Tone, keys_width,
+    SMALL, TITLE, Tone, button_width, keys_width,
 };
 
 use super::pages;
@@ -35,6 +35,8 @@ pub enum Page {
     Terminal,
     /// Auto-lock.
     Security,
+    /// Local agent access, command approval and skill setup.
+    Agents,
     /// Reopening tabs, session logs and one-click connecting.
     Sessions,
     /// The shell new terminals run.
@@ -47,11 +49,12 @@ pub enum Page {
 
 impl Page {
     /// Every settings page, in navigation order.
-    pub const ALL: [Page; 8] = [
+    pub const ALL: [Page; 9] = [
         Page::Account,
         Page::Appearance,
         Page::Terminal,
         Page::Security,
+        Page::Agents,
         Page::Sessions,
         Page::Shells,
         Page::Shortcuts,
@@ -65,6 +68,7 @@ impl Page {
             Page::Appearance => "Appearance",
             Page::Terminal => "Terminal",
             Page::Security => "Security",
+            Page::Agents => "Agents",
             Page::Sessions => "Sessions",
             Page::Shells => "Local shells",
             Page::Shortcuts => "Shortcuts",
@@ -78,6 +82,7 @@ impl Page {
             Page::Appearance => "How Annulus looks and moves on this device.",
             Page::Terminal => "The colors programs draw with and the size of their text.",
             Page::Security => "When the vault locks itself, and what else may use Annulus.",
+            Page::Agents => "How local agents enter Annulus and run commands.",
             Page::Sessions => "How hosts connect, and what Annulus keeps of your sessions.",
             Page::Shells => "What a new local terminal runs.",
             Page::Shortcuts => "Every shortcut. Click one's keys to give it others.",
@@ -91,6 +96,7 @@ impl Page {
             Page::Appearance => icons::SUN,
             Page::Terminal => icons::TERMINAL,
             Page::Security => icons::LOCK,
+            Page::Agents => icons::CODE,
             Page::Sessions => icons::CLOCK,
             Page::Shells => icons::DEVICE,
             Page::Shortcuts => icons::KEYBOARD,
@@ -122,6 +128,8 @@ pub struct SettingsView {
     pub theme_focus: Option<Id>,
     /// Font discovery, private imports and preferences.
     pub fonts: super::font_settings::FontSettings,
+    /// The skill installer worker, while it writes the user-level skill folders.
+    skill_install: Option<std::sync::mpsc::Receiver<std::io::Result<Vec<std::path::PathBuf>>>>,
 }
 
 /// The scrollback choices (F-TERM-004), each with what a full tab 120 columns wide costs.
@@ -281,6 +289,7 @@ impl SettingsView {
                 changed |= self.fonts.draw(ui, &mut page, settings, false);
             }
             Page::Security => changed = security(ui, &mut page, settings),
+            Page::Agents => changed = self.agents(ui, &mut page, settings),
             Page::Sessions => changed = sessions(ui, &mut page, settings),
             Page::Shells => changed = shells(ui, &mut page, settings, profiles),
             Page::Shortcuts => changed = self.shortcuts_page(ui, &mut page, settings),
@@ -682,14 +691,22 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         settings.auto_lock_minutes = LOCK_MINUTES[chosen].0;
         changed = true;
     }
-    // Whether a tab closes when its shell ends is asked only once agents may close tabs:
-    // until then nothing closes an agent's tab, not even `exit`.
-    let closing = !settings.stop_agents_closing_tabs;
-    let rows = if closing { 6 } else { 5 };
-    let mut automation = self::card(ui, page, "Automation", rows);
+    let mut agents = self::card(ui, page, "Agents", 1);
+    let agent_changed =
+        automation_switch(ui, &mut agents, settings, "settings.security.automation");
+    changed || agent_changed
+}
+
+/// The shared agent-access switch. Security and Agents both edit the same stored value.
+fn automation_switch(
+    ui: &mut Ui<'_>,
+    card: &mut Rect,
+    settings: &mut Settings,
+    id: &'static str,
+) -> bool {
     let control = row(
         ui,
-        &mut automation,
+        card,
         true,
         (
             "Allow the command line and AI agents",
@@ -697,54 +714,168 @@ fn security(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
         ),
         SWITCH_W,
     );
-    changed |= ui
-        .switch(
-            Id::new("settings.automation"),
-            control,
-            &mut settings.automation,
-            "Allow the command line and AI agents",
-        )
-        .clicked;
-    // How agents' tabs behave (F-AUTO-006).
-    let mut switches = vec![
-        (
-            "settings.agent.front",
-            "Agents' tabs open in front",
-            "Off, they open behind the tab you are in, with their AI mark.",
-            &mut settings.agent_tabs_in_front,
-        ),
-        (
-            "settings.agent.read",
-            "Agents may read my tabs",
-            "Off, agents read only the tabs they opened.",
-            &mut settings.agents_read_my_tabs,
-        ),
-        (
-            "settings.agent.keep",
-            "Stop agents closing their tabs",
-            "Their tabs stay for you to read, even after exit. Off, agents may close them.",
-            &mut settings.stop_agents_closing_tabs,
-        ),
-    ];
-    if closing {
+    ui.switch(
+        Id::new(id),
+        control,
+        &mut settings.automation,
+        "Allow the command line and AI agents",
+    )
+    .clicked
+}
+
+impl SettingsView {
+    /// Agent access, command review, tab behavior and the portable Annulus skill.
+    fn agents(&mut self, ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {
+        let mut changed = false;
+        let mut access = self::card(ui, page, "Access", 2);
+        changed |= automation_switch(ui, &mut access, settings, "settings.agents.automation");
+        let control = row(
+            ui,
+            &mut access,
+            false,
+            (
+                "Approve commands",
+                "Show each command in its agent tab and wait for your choice.",
+            ),
+            SWITCH_W,
+        );
+        changed |= ui
+            .switch(
+                Id::new("settings.agent.approve"),
+                control,
+                &mut settings.approve_commands,
+                "Approve commands",
+            )
+            .clicked;
+
+        // Whether a tab closes when its shell ends is asked only once agents may close tabs:
+        // until then nothing closes an agent's tab, not even `exit`.
+        let closing = !settings.stop_agents_closing_tabs;
+        let rows = if closing { 5 } else { 4 };
+        let mut behavior = self::card(ui, page, "Tab behavior", rows);
+        // How agents' tabs behave (F-AUTO-006).
+        let mut switches = vec![
+            (
+                "settings.agent.front",
+                "Agents' tabs open in front",
+                "Off, they open behind the tab you are in, with their AI mark.",
+                &mut settings.agent_tabs_in_front,
+            ),
+            (
+                "settings.agent.read",
+                "Agents may read my tabs",
+                "Off, agents read only the tabs they opened.",
+                &mut settings.agents_read_my_tabs,
+            ),
+            (
+                "settings.agent.keep",
+                "Stop agents closing their tabs",
+                "Their tabs stay for you to read, even after exit. Off, agents may close them.",
+                &mut settings.stop_agents_closing_tabs,
+            ),
+        ];
+        if closing {
+            switches.push((
+                "settings.agent.close",
+                "Also close an agent's tab when its shell ends",
+                "After exit or a lost connection. Off, it stays open with Start again.",
+                &mut settings.close_ended_agent_tabs,
+            ));
+        }
         switches.push((
-            "settings.agent.close",
-            "Also close an agent's tab when its shell ends",
-            "After exit or a lost connection. Off, it stays open with Start again.",
-            &mut settings.close_ended_agent_tabs,
+            "settings.agent.folded",
+            "Agent panel starts folded",
+            "New agent tabs show the slim rail, not the list.",
+            &mut settings.agent_panel_folded,
         ));
+        for (id, name, about, value) in switches {
+            let control = row(ui, &mut behavior, false, (name, about), SWITCH_W);
+            changed |= ui.switch(Id::new(id), control, value, name).clicked;
+        }
+
+        self.skill_installer(ui, page);
+        changed
     }
-    switches.push((
-        "settings.agent.folded",
-        "Agent panel starts folded",
-        "New agent tabs show the slim rail, not the list.",
-        &mut settings.agent_panel_folded,
-    ));
-    for (id, name, about, value) in switches {
-        let control = row(ui, &mut automation, false, (name, about), SWITCH_W);
-        changed |= ui.switch(Id::new(id), control, value, name).clicked;
+
+    /// Installs the same small skill into the named harness folders and the shared Agent
+    /// Skills folder. File work stays off the UI thread.
+    fn skill_installer(&mut self, ui: &mut Ui<'_>, page: &mut Rect) {
+        use std::sync::mpsc::TryRecvError;
+
+        let outcome = self
+            .skill_install
+            .as_ref()
+            .and_then(|worker| match worker.try_recv() {
+                Ok(result) => Some(result.map_err(|error| error.to_string())),
+                Err(TryRecvError::Disconnected) => Some(Err("the installer stopped".to_owned())),
+                Err(TryRecvError::Empty) => None,
+            });
+        if let Some(outcome) = outcome {
+            self.skill_install = None;
+            match outcome {
+                Ok(paths) => ui.toast(
+                    format!(
+                        "Installed the Annulus skill in {} agent folders",
+                        paths.len()
+                    ),
+                    Tone::Done,
+                ),
+                Err(error) => ui.toast(
+                    format!("Could not install the skill: {error}"),
+                    Tone::Problem,
+                ),
+            }
+        }
+
+        let busy = self.skill_install.is_some();
+        if busy {
+            ui.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        let mut installer = self::card(ui, page, "Skill installer", 1);
+        let label = if busy {
+            "Installing…"
+        } else {
+            "Install skill"
+        };
+        let width = button_width(&mut ui.gfx, "Installing…", None);
+        let control = row(
+            ui,
+            &mut installer,
+            true,
+            (
+                "Annulus agent skill",
+                "Claude Code, Codex, Pi, Hermes, Gemini CLI, Cursor, OpenCode and Copilot.",
+            ),
+            width,
+        );
+        if ui
+            .button(
+                Id::new("settings.agent.skill.install"),
+                control,
+                label,
+                None,
+                Kind::Primary,
+            )
+            .clicked
+            && !busy
+        {
+            let (send, receive) = std::sync::mpsc::channel();
+            match std::thread::Builder::new()
+                .name("annulus-skill-install".into())
+                .spawn(move || {
+                    let _ = send.send(crate::agent_skill::install());
+                }) {
+                Ok(_) => {
+                    self.skill_install = Some(receive);
+                    ui.request_repaint_after(std::time::Duration::from_millis(50));
+                }
+                Err(error) => ui.toast(
+                    format!("Could not start the skill installer: {error}"),
+                    Tone::Problem,
+                ),
+            }
+        }
     }
-    changed
 }
 
 fn sessions(ui: &mut Ui<'_>, page: &mut Rect, settings: &mut Settings) -> bool {

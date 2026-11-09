@@ -63,6 +63,9 @@ pub struct Settings {
     /// Let the `annulus` command and AI agents drive the app while the vault is unlocked
     /// (F-AUTO-001). Off by default.
     pub automation: bool,
+    /// Hold each agent command until the owner approves or denies it in the agent panel.
+    /// Off by default.
+    pub approve_commands: bool,
     /// Lines of scrollback each terminal keeps (F-TERM-004).
     pub scrollback: usize,
     /// A tab an agent opens comes to the front; off, it opens behind the one in use
@@ -148,6 +151,7 @@ impl Default for Settings {
             pinned: Vec::new(),
             keys: Vec::new(),
             automation: false,
+            approve_commands: false,
             scrollback: DEFAULT_SCROLLBACK,
             agent_tabs_in_front: true,
             agents_read_my_tabs: true,
@@ -267,6 +271,7 @@ mod tests {
                 keys: "Ctrl+Alt+N".into(),
             }],
             automation: true,
+            approve_commands: true,
             scrollback: 50_000,
             agent_tabs_in_front: false,
             agents_read_my_tabs: false,
@@ -288,6 +293,7 @@ mod tests {
         // one from before the close guard gets it switched on.
         assert_eq!(
             (
+                loaded.approve_commands,
                 loaded.scrollback,
                 loaded.agent_tabs_in_front,
                 loaded.agents_read_my_tabs,
@@ -296,7 +302,16 @@ mod tests {
                 loaded.stop_agents_closing_tabs,
                 loaded.connect_on_click
             ),
-            (DEFAULT_SCROLLBACK, true, true, false, false, true, false)
+            (
+                false,
+                DEFAULT_SCROLLBACK,
+                true,
+                true,
+                false,
+                false,
+                true,
+                false
+            )
         );
         assert_eq!(loaded.sftp_remote_columns, default_sftp_columns());
         // A file from before color schemes keeps its theme and draws our own colors.

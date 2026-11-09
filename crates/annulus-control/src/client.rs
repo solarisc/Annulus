@@ -31,7 +31,7 @@ impl std::fmt::Display for ClientError {
             Self::Closed => write!(
                 f,
                 "Annulus's door is closed: start Annulus, unlock the vault and switch on \
-                 Settings > Automation"
+                 Settings > Agents"
             ),
             Self::Io(error) => write!(f, "talking to Annulus failed: {error}"),
             Self::Refused(why) => write!(f, "{why}"),

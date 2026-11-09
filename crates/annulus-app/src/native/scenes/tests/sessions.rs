@@ -92,6 +92,103 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
 }
 
 #[test]
+fn command_approval_holds_the_agent_exe_until_the_owner_approves_or_denies() {
+    use annulus_control::client::Client;
+    let _timed = timing_a_shell();
+    let mut app = NativeApp::new(Some(fixture_vault("agent-approval", false)));
+    app.vault_path = app.vault.as_ref().map(|vault| vault.path().to_path_buf());
+    let dir = app
+        .vault_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_path_buf)
+        .unwrap();
+    app.waker = Some(std::sync::Arc::new(|| {}));
+    app.settings.automation = true;
+    app.settings.approve_commands = true;
+    let mut state = UiState::default();
+    step(&mut app, &mut state, &[], 0.0);
+    let agent = std::thread::spawn(move || {
+        let mut client = Client::connect(&dir).map_err(|error| error.to_string())?;
+        let tab = client.open(None).map_err(|error| error.to_string())?;
+        let approved = client
+            .run(tab.id, "echo owner-approved", Some(30))
+            .map_err(|error| error.to_string())?;
+        let denied = client
+            .run(tab.id, "echo must-not-run", Some(30))
+            .map_err(|error| error.to_string())
+            .unwrap_err();
+        Ok::<_, String>((tab.id, approved, denied))
+    });
+
+    let started = std::time::Instant::now();
+    let mut time = 1.0;
+    let mut output = step(&mut app, &mut state, &[], time);
+    loop {
+        let waiting = app.tabs.get(app.active).and_then(|tab| {
+            app.pending_approval(tab.uid)
+                .map(|approval| approval.command)
+        });
+        if waiting.as_deref() == Some("echo owner-approved") {
+            break;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(90));
+        assert!(!agent.is_finished(), "the call waits for approval");
+        time += 0.05;
+        output = step(&mut app, &mut state, &[], time);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    assert!(!agent.is_finished(), "annulus-agent still waits");
+    time += 0.1;
+    output = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Approve"),
+        time,
+    );
+
+    loop {
+        let waiting = app.tabs.get(app.active).and_then(|tab| {
+            app.pending_approval(tab.uid)
+                .map(|approval| approval.command)
+        });
+        if waiting.as_deref() == Some("echo must-not-run") {
+            break;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(90));
+        time += 0.05;
+        output = step(&mut app, &mut state, &[], time);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    time += 0.1;
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Deny"),
+        time,
+    );
+    while !agent.is_finished() && started.elapsed() < std::time::Duration::from_secs(90) {
+        time += 0.05;
+        step(&mut app, &mut state, &[], time);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let (tab, approved, denied) = agent.join().unwrap().unwrap();
+    assert!(approved.output.contains("owner-approved"), "{approved:?}");
+    assert!(denied.contains("denied"), "{denied}");
+    let text = app
+        .tabs
+        .iter_mut()
+        .find(|open| open.uid == tab)
+        .and_then(|open| open.terminal.as_mut())
+        .and_then(|terminal| match terminal {
+            TermView::Live(panes) => panes.focused_transcript(),
+            TermView::Replay(_) => None,
+        })
+        .unwrap_or_default();
+    assert!(!text.contains("must-not-run"), "a denied command was typed: {text}");
+}
+
+#[test]
 fn an_agent_hears_why_its_tab_could_not_connect_and_its_command_is_refused_at_once() {
     use annulus_control::client::Client;
     let _timed = timing_a_shell();

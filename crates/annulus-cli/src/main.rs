@@ -1,5 +1,5 @@
 //! The `annulus-agent` command (ADR-0020, ADR-0027, F-AUTO-002/005): drives a running Annulus through its
-//! control door, while its vault is unlocked and Settings → Automation allows it. `annulus-agent mcp`
+//! control door, while its vault is unlocked and Settings → Agents allows it. `annulus-agent mcp`
 //! offers the same as tools to AI agents.
 //!
 //! Responsibilities and allowed dependencies: `docs/DESIGN.md` §4.
@@ -17,7 +17,7 @@ use annulus_control::client::{Client, ClientError};
 use annulus_control::protocol::{HostInfo, RunOutput, TabInfo};
 
 const USAGE: &str = "\
-Drives a running Annulus while its vault is unlocked and Settings > Security > Automation
+Drives a running Annulus while its vault is unlocked and Settings > Agents
 allows it.
 
 Usage: annulus-agent [--json] <command>
@@ -38,7 +38,7 @@ Commands:
                                 your tab <tab> to finish, and print as run does
   interrupt <tab>               press Ctrl+C in your tab <tab> (a command that hangs stops)
   close <tab>                   close your tab <tab>, once the owner lets agents close tabs
-                                (Settings > Security > Automation; not by default)
+                                (Settings > Agents; not by default)
   mcp                           serve these as MCP tools over stdin and stdout
 
 You can type only into tabs you opened; the owner's tabs are read-only. run and wait exit

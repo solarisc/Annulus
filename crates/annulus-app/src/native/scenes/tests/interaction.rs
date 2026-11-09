@@ -60,6 +60,43 @@ fn click_on(output: &FrameOutput, name: &str) -> Vec<Event> {
     ]
 }
 
+#[test]
+fn security_and_agents_share_one_agent_access_switch() {
+    let mut app = NativeApp::new(Some(fixture_vault("agent-settings-switch", true)));
+    settings(&mut app);
+    let mut state = UiState::default();
+    let mut output = step(&mut app, &mut state, &[], 0.0);
+    let _ = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Security"),
+        1.0,
+    );
+    output = step(&mut app, &mut state, &[], 2.0);
+    let _ = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Allow the command line and AI agents"),
+        3.0,
+    );
+    assert!(app.settings.automation);
+
+    let _ = step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Agents"),
+        4.0,
+    );
+    output = step(&mut app, &mut state, &[], 5.0);
+    step(
+        &mut app,
+        &mut state,
+        &click_on(&output, "Allow the command line and AI agents"),
+        6.0,
+    );
+    assert!(!app.settings.automation, "the Agents copy edits the same value");
+}
+
 /// A right click on the zone named `name` in the last frame.
 fn right_click_on(output: &FrameOutput, name: &str) -> Vec<Event> {
     vec![

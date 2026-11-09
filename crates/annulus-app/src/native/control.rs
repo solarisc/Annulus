@@ -1,5 +1,5 @@
 //! The app's side of the control door (ADR-0020, F-AUTO): it is open while Settings →
-//! Security → Automation is on and the vault is unlocked, and [`handle`] answers what comes
+//! Agents → Access is on and the vault is unlocked, and [`handle`] answers what comes
 //! through it. Answers carry what a person sees in the window, never a secret.
 //!
 //! An agent opens tabs of its own, marked as its, and types only into those; the owner's
@@ -430,6 +430,7 @@ pub struct Running {
     call: Option<Pending>,
     tab: u64,
     command: String,
+    approval: Approval,
     /// The longest to wait for output.
     wait: Duration,
     /// When it was asked for; once typed, when it was typed.
@@ -449,12 +450,46 @@ pub struct Running {
     stale: bool,
 }
 
+/// Whether a command may move on to the terminal.
+enum Approval {
+    /// This run did not need a choice.
+    NotNeeded,
+    /// It is shown in the agent panel until the owner acts.
+    Waiting(u64),
+    /// The owner approved it.
+    Granted,
+}
+
+impl Approval {
+    fn waiting(&self) -> Option<u64> {
+        match self {
+            Self::Waiting(id) => Some(*id),
+            Self::NotNeeded | Self::Granted => None,
+        }
+    }
+}
+
+/// One command held for the owner's choice in an agent panel.
+#[derive(Clone)]
+pub struct PendingApproval {
+    pub id: u64,
+    pub command: String,
+}
+
 impl Running {
-    fn new(call: Pending, tab: u64, command: String, wait: Duration, now: Instant) -> Self {
+    fn new(
+        call: Pending,
+        tab: u64,
+        command: String,
+        wait: Duration,
+        now: Instant,
+        approval: Option<u64>,
+    ) -> Self {
         Self {
             call: Some(call),
             tab,
             command,
+            approval: approval.map_or(Approval::NotNeeded, Approval::Waiting),
             wait,
             asked: now,
             until: now + wait,
@@ -531,7 +566,24 @@ impl NativeApp {
                 Request::Run { tab, command, wait } => {
                     let (tab, command, wait) = (*tab, command.clone(), waited(*wait));
                     match agent_tab(self, tab) {
-                        Ok(_) => self.runs.push(Running::new(call, tab, command, wait, now)),
+                        Ok(_) => {
+                            let approval = self.settings.approve_commands.then(|| {
+                                let id = self.next_approval;
+                                self.next_approval = self.next_approval.wrapping_add(1).max(1);
+                                id
+                            });
+                            if approval.is_some()
+                                && let Some(index) =
+                                    self.tabs.iter().position(|open| open.uid == tab)
+                            {
+                                self.active = index;
+                                if let Some(log) = self.tabs[index].agent.as_mut() {
+                                    log.folded = false;
+                                }
+                            }
+                            self.runs
+                                .push(Running::new(call, tab, command, wait, now, approval));
+                        }
                         Err(why) => call.answer(Err(why)),
                     }
                 }
@@ -545,17 +597,83 @@ impl NativeApp {
                 }
             }
         }
+        if !self.settings.approve_commands {
+            self.grant_waiting_approvals(now);
+        }
         self.move_runs(now);
         if self.settings.closes_ended_agent_tabs() {
             self.close_ended_agent_tabs();
         }
-        self.runs
+        self.runs.iter().any(|run| {
+            (run.call.is_some() && run.approval.waiting().is_none())
+                || now.duration_since(run.output.1) < QUIET * 2
+        })
+    }
+
+    /// The first command in `tab` waiting for a choice.
+    pub(super) fn pending_approval(&self, tab: u64) -> Option<PendingApproval> {
+        self.runs.iter().find_map(|run| {
+            if run.tab != tab {
+                return None;
+            }
+            Some(PendingApproval {
+                id: run.approval.waiting()?,
+                command: run.command.clone(),
+            })
+        })
+    }
+
+    /// Applies the owner's choice. A denial answers the blocked caller without typing.
+    pub(super) fn decide_approval(&mut self, id: u64, approved: bool) {
+        let Some(index) = self
+            .runs
             .iter()
-            .any(|run| run.call.is_some() || now.duration_since(run.output.1) < QUIET * 2)
+            .position(|run| run.approval.waiting() == Some(id))
+        else {
+            return;
+        };
+        if approved {
+            self.runs[index].approval = Approval::Granted;
+            self.runs[index].asked = Instant::now();
+        } else {
+            let mut run = self.runs.remove(index);
+            run.answer(Err("the owner denied this command".into()));
+        }
+    }
+
+    /// Adds a held command without a caller, for the approval scene.
+    #[cfg(test)]
+    pub(super) fn preview_approval(&mut self, tab: u64, command: &str) {
+        let now = Instant::now();
+        self.runs.push(Running {
+            call: None,
+            tab,
+            command: command.to_owned(),
+            approval: Approval::Waiting(1),
+            wait: Duration::from_secs(WAIT_DEFAULT),
+            asked: now,
+            until: now + Duration::from_secs(WAIT_DEFAULT),
+            typed: None,
+            entry: 0,
+            output: (0, now),
+            base: 0,
+            after: After::default(),
+            stale: true,
+        });
+    }
+
+    /// Turning approval off releases commands already held by it.
+    fn grant_waiting_approvals(&mut self, now: Instant) {
+        for run in &mut self.runs {
+            if run.approval.waiting().is_some() {
+                run.approval = Approval::Granted;
+                run.asked = now;
+            }
+        }
     }
 
     /// Closes agents' tabs whose shells have all ended, once no answer waits on them
-    /// (Settings > Security > Automation, F-AUTO-006, and only while agents may close tabs).
+    /// (Settings > Agents, F-AUTO-006, and only while agents may close tabs).
     fn close_ended_agent_tabs(&mut self) {
         let ended: Vec<usize> = self
             .tabs
@@ -640,7 +758,12 @@ impl NativeApp {
     /// Types `run`'s command once its terminal has started, its prompt has settled and no
     /// command before it in the tab still waits for its answer; gives it up when that takes
     /// too long.
+    #[allow(clippy::too_many_lines)] // One state path from approval through terminal readiness.
     fn start_run(&mut self, mut run: Running, now: Instant) {
+        if run.approval.waiting().is_some() {
+            self.runs.push(run);
+            return;
+        }
         // One command at a time per tab: a second one queues behind the first.
         let queued = self
             .runs
@@ -970,8 +1093,8 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             agent_tab(app, *tab)?;
             if app.settings.stop_agents_closing_tabs {
                 return Err(format!(
-                    "tab {tab} stays open: agents may not close tabs (Settings > Security > \
-                     Automation), so the owner can read what was done there"
+                    "tab {tab} stays open: agents may not close tabs (Settings > Agents), so \
+                     the owner can read what was done there"
                 ));
             }
             if let Some(index) = app.tabs.iter().position(|open| open.uid == *tab) {
@@ -1018,7 +1141,7 @@ fn read(app: &mut NativeApp, tab: u64, lines: Option<usize>) -> Result<Response,
     if mine_only && found.as_ref().is_some_and(|open| open.agent.is_none()) {
         return Err(format!(
             "tab {tab} is not an agent's, and reading the owner's tabs is switched off \
-             (Settings > Security > Automation)"
+             (Settings > Agents)"
         ));
     }
     let text = match found.and_then(|open| open.terminal.as_mut()) {
@@ -1337,10 +1460,7 @@ mod tests {
         };
         assert!(app.settings.stop_agents_closing_tabs, "on by default");
         let refused = handle(&mut app, &Request::Close { tab: opened.id }).unwrap_err();
-        assert!(
-            refused.contains("Settings > Security > Automation"),
-            "{refused}"
-        );
+        assert!(refused.contains("Settings > Agents"), "{refused}");
         assert!(
             app.tabs.iter().any(|tab| tab.uid == opened.id),
             "the tab stays for the owner"

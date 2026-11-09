@@ -10,7 +10,7 @@ use annulus_ui::icons;
 use annulus_ui::kit::{FOCUS_REACH, Id, Role, Ui};
 use annulus_ui::widgets::{BODY_MEDIUM, CONTROL, Kind, SMALL, Tone, button_width};
 
-use super::{AgentCommand, AgentLog, READ_MAX, Ran};
+use super::{AgentCommand, AgentLog, PendingApproval, READ_MAX, Ran};
 use crate::terminal_view::TabStatus;
 /// How wide the panel beside an agent's terminal is, open and folded.
 const PANEL_W: f32 = 320.0;
@@ -23,7 +23,7 @@ pub fn panel_width(log: &AgentLog) -> f32 {
 }
 
 /// What the panel beside an agent's terminal asks of the window.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelAction {
     /// Stop all agents: automation goes off and every agent is cut off.
     Stop,
@@ -33,6 +33,10 @@ pub enum PanelAction {
     Show(usize),
     /// Back to the newest output (the picked command was let go).
     Newest,
+    /// Let the held command run.
+    Approve(u64),
+    /// Refuse the held command without typing it.
+    Deny(u64),
 }
 
 /// Commands in the panel: monospace, a touch smaller than the terminal's.
@@ -57,8 +61,12 @@ pub fn agent_panel(
     rect: Rect,
     log: &mut AgentLog,
     (title, status, allowed): (&str, Option<TabStatus>, bool),
+    approval: Option<&PendingApproval>,
 ) -> Option<PanelAction> {
     let t = ui.theme;
+    if approval.is_some() {
+        log.folded = false;
+    }
     if log.folded {
         return rail(ui, rect, log, allowed);
     }
@@ -81,7 +89,7 @@ pub fn agent_panel(
             "Allow again",
             icons::PLAY,
             Kind::Secondary,
-            "Let agents use Annulus again (Settings > Security > Automation)",
+            "Let agents use Annulus again (Settings > Agents)",
             PanelAction::Allow,
         )
     };
@@ -172,7 +180,18 @@ pub fn agent_panel(
         0.0,
         t.line,
     );
-    let list = Rect::new(rect.x + 1.0, column.y + 1.0, rect.w - 2.0, column.h - 1.0);
+    let mut list = Rect::new(rect.x + 1.0, column.y + 1.0, rect.w - 2.0, column.h - 1.0);
+    if let Some(approval) = approval {
+        let prompt = list.take_top(126.0);
+        if let Some(choice) = approval_prompt(ui, prompt, approval) {
+            action = Some(choice);
+        }
+        ui.gfx.fill_rect(
+            Rect::new(list.x + space::M, list.y, list.w - space::M, 1.0),
+            0.0,
+            t.line,
+        );
+    }
     if log.commands.is_empty() {
         let mut empty = list.inset(space::M, space::M);
         ui.gfx.text(
@@ -195,6 +214,67 @@ pub fn agent_panel(
         action = Some(picked);
     }
     action
+}
+
+/// The next held command, with an explicit choice before any bytes reach the terminal.
+fn approval_prompt(ui: &mut Ui<'_>, rect: Rect, approval: &PendingApproval) -> Option<PanelAction> {
+    let t = ui.theme;
+    let mut inner = rect.inset(space::M, space::S);
+    ui.gfx.text(
+        inner.take_top(20.0),
+        "Approve this command?",
+        BODY_MEDIUM,
+        t.text,
+        Align::Start,
+    );
+    let char_w = ui.gfx.measure("M", MONO_SMALL).width.max(1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let per_line = (inner.w / char_w).floor().max(8.0) as usize;
+    let command_rect = Rect::new(inner.x, inner.y, inner.w, COMMAND_LINE * 2.0);
+    let command_id = Id::new(("agent.approval.command", approval.id));
+    ui.zone(
+        command_id,
+        command_rect,
+        Role::Backdrop,
+        &format!("Command: {}", approval.command),
+    );
+    for line in wrap_command(&approval.command, per_line, 2) {
+        ui.gfx.text(
+            inner.take_top(COMMAND_LINE),
+            &line,
+            MONO_SMALL,
+            t.text2,
+            Align::Start,
+        );
+    }
+    ui.tooltip(command_id.with("full"), command_rect, &approval.command);
+    let mut buttons = inner.take_bottom(CONTROL);
+    let approve_w = button_width(&mut ui.gfx, "Approve", Some(icons::CHECK));
+    let deny_w = button_width(&mut ui.gfx, "Deny", Some(icons::CLOSE));
+    let approve = buttons.take_right(approve_w);
+    buttons.take_right(space::S);
+    let deny = buttons.take_right(deny_w);
+    if ui
+        .button(
+            Id::new(("agent.deny", approval.id)),
+            deny,
+            "Deny",
+            Some(icons::CLOSE),
+            Kind::Secondary,
+        )
+        .clicked
+    {
+        return Some(PanelAction::Deny(approval.id));
+    }
+    ui.button(
+        Id::new(("agent.approve", approval.id)),
+        approve,
+        "Approve",
+        Some(icons::CHECK),
+        Kind::Primary,
+    )
+    .clicked
+    .then_some(PanelAction::Approve(approval.id))
 }
 
 /// The commands of `log` in `list`, scrolled to the newest when one arrives. Returns what

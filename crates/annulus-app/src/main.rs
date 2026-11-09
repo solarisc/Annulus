@@ -7,6 +7,7 @@
 // A release build is a window app: no console window next to it on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_skill;
 mod command_palette;
 mod connect;
 mod forwards_screen;

@@ -131,7 +131,7 @@ pub(super) fn settings(app: &mut NativeApp) {
     section(app, Section::Settings);
 }
 
-/// Settings with agents allowed to close their tabs, so the Automation card has its sixth row.
+/// Settings with agents allowed to close their tabs, so Tab behavior has its fifth row.
 pub(super) fn settings_agents_may_close(app: &mut NativeApp) {
     settings(app);
     app.settings.stop_agents_closing_tabs = false;
@@ -250,6 +250,14 @@ pub(super) fn agent_tab_folded(app: &mut NativeApp) {
     if let Some(log) = app.tabs[crate::native::FIXED_TABS].agent.as_mut() {
         log.folded = true;
     }
+}
+
+/// An agent command waiting for the owner's choice before it reaches the terminal.
+pub(super) fn agent_command_approval(app: &mut NativeApp) {
+    agent_tab(app);
+    app.settings.approve_commands = true;
+    let tab = app.tabs[crate::native::FIXED_TABS].uid;
+    app.preview_approval(tab, "sudo systemctl restart nginx");
 }
 
 /// The window and the terminal in two different dark community schemes.
@@ -1269,7 +1277,7 @@ pub(super) const SCENES: &[Scene] = &[
         setup: settings,
         acts: &[Act::Click("Terminal")],
     },
-    // The vault's lock and the Automation card with the agent settings (F-AUTO-006).
+    // The vault's lock and the shared switch that opens the agent door.
     Scene {
         name: "settings-security",
         width: 1100,
@@ -1279,16 +1287,25 @@ pub(super) const SCENES: &[Scene] = &[
         setup: settings,
         acts: &[Act::Click("Security")],
     },
-    // With agents allowed to close their tabs, the sixth row ("close when its shell ends")
-    // shows.
+    // Agent access, approval, tab behavior and the skill installer.
     Scene {
-        name: "settings-security-agents-may-close",
+        name: "settings-agents",
         width: 1100,
-        height: 860,
+        height: 900,
+        scale: 1.0,
+        populated: true,
+        setup: settings,
+        acts: &[Act::Click("Agents")],
+    },
+    // With agents allowed to close their tabs, "close when its shell ends" shows.
+    Scene {
+        name: "settings-agents-may-close",
+        width: 1100,
+        height: 960,
         scale: 1.0,
         populated: true,
         setup: settings_agents_may_close,
-        acts: &[Act::Click("Security")],
+        acts: &[Act::Click("Agents")],
     },
     Scene {
         name: "settings-shortcuts",
@@ -1451,6 +1468,15 @@ pub(super) const SCENES: &[Scene] = &[
         scale: 1.0,
         populated: true,
         setup: agent_tab_folded,
+        acts: &[],
+    },
+    Scene {
+        name: "agent-command-approval",
+        width: 1100,
+        height: 720,
+        scale: 1.0,
+        populated: true,
+        setup: agent_command_approval,
         acts: &[],
     },
     Scene {
