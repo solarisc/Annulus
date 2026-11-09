@@ -1132,6 +1132,7 @@ impl NativeApp {
             self.lock.error = Some("This preview has no vault file.".into());
             return;
         };
+        self.lock.start_working(ui.time());
         let pace = FramePace::new(ui, self.waker.clone());
         self.lock.working = Some(crate::job::Job::start(&pace, move || match action {
             lock::LockAction::Create(password) => {
@@ -1175,6 +1176,7 @@ impl NativeApp {
             crate::job::Poll::Lost => Err(annulus_vault::vault::VaultError::WrongPassword),
         };
         self.lock.working = None;
+        self.lock.finish_working();
         match result {
             // A new vault shows its recovery key first; it opens once that is confirmed.
             Ok((vault, Some(key))) => self.lock.show_recovery(vault, key),
@@ -1729,7 +1731,7 @@ impl NativeApp {
     /// The lock screen on its way out, over the vault coming in.
     fn lock_leaving(&mut self, ui: &mut Ui<'_>, content: Rect) {
         /// How long the lock takes to open and leave, in seconds.
-        const LEAVES: f64 = 0.28;
+        const LEAVES: f64 = 0.84;
         let Some(since) = self.lock_left else { return };
         #[allow(clippy::cast_possible_truncation)] // A share for drawing.
         let share = ((ui.time() - since) / LEAVES) as f32;
@@ -1811,7 +1813,7 @@ impl NativeApp {
         // Each section fades and rises a little into place when chosen, just after what was
         // there has mostly gone, so their words are never read over each other.
         let wait = if self.lock_left.is_some() {
-            AFTER_THE_LOCK
+            0
         } else {
             motion::EXIT / 2
         };
@@ -2052,8 +2054,6 @@ fn panel_shape(rect: Rect) -> Rect {
 const FLIGHT: f64 = 0.44;
 /// How far through its flight, 0.0 to 1.0, a host starts to melt into its tab.
 const LANDS_AT: f32 = 0.62;
-/// How long the vault waits to come in while the lock leaves, in milliseconds.
-const AFTER_THE_LOCK: u32 = 150;
 /// The space between the content panel and the window's right and bottom edges.
 const PANEL_GAP: f32 = 8.0;
 /// The content panel's corner radius.

@@ -67,6 +67,8 @@ pub struct LockView {
     pub error: Option<String>,
     /// Creating or unlocking, on another thread.
     pub working: Option<crate::job::Job<Opened>>,
+    /// When the current password check began, on the window clock.
+    working_since: Option<f64>,
     /// A new vault, waiting for its recovery key to be confirmed.
     pending: Option<Box<annulus_vault::vault::Vault>>,
     key: Zeroizing<String>,
@@ -99,6 +101,7 @@ impl LockView {
             recovery: false,
             error: None,
             working: None,
+            working_since: None,
             pending: None,
             key: Zeroizing::new(String::new()),
             typed: String::new(),
@@ -111,19 +114,69 @@ impl LockView {
 
     /// `why` the last try failed: said under the field, and the field shakes.
     pub fn refuse(&mut self, why: String) {
+        self.working_since = None;
         self.error = Some(why);
         self.refusals += 1;
     }
 
+    /// Starts the visual state used while the vault works on a password.
+    pub fn start_working(&mut self, now: f64) {
+        self.working_since = Some(now);
+        self.error = None;
+    }
+
+    /// Ends the password-check state before success or an error takes over.
+    pub fn finish_working(&mut self) {
+        self.working_since = None;
+    }
+
     /// Draws the screen on its way out, `t` (0.0 to 1.0) of the way: the shackle lifts, then
-    /// everything fades up and away before the vault comes in. It takes no input.
+    /// the lock fades while a soft band opens from its center to show the vault below. It takes
+    /// no input.
     pub fn draw_leaving(&mut self, ui: &mut Ui<'_>, rect: Rect, t: f32) {
-        self.opened = Curve::Overshoot.at((t / 0.5).min(1.0));
-        let fade = 1.0 - Curve::Out.at(((t - 0.4) / 0.45).clamp(0.0, 1.0));
+        let t = t.clamp(0.0, 1.0);
+        self.opened = Curve::Overshoot.at((t / 0.34).min(1.0)).max(0.001);
+        let reveal = Curve::Emphasized.at(((t - 0.04) / 0.9).clamp(0.0, 1.0));
+        let half = rect.h * 0.5 * reveal;
+        let top_h = (rect.center().y - half - rect.y).max(0.0);
+        let bottom_y = rect.center().y + half;
+        let bottom_h = (rect.b() - bottom_y).max(0.0);
+        ui.gfx
+            .fill_rect(Rect::new(rect.x, rect.y, rect.w, top_h), 0.0, ui.theme.bg);
+        ui.gfx.fill_rect(
+            Rect::new(rect.x, bottom_y, rect.w, bottom_h),
+            0.0,
+            ui.theme.bg,
+        );
+
+        // A low light at each moving edge keeps the reveal clear on both light and dark themes.
+        if reveal > 0.0 && reveal < 1.0 {
+            let edge = ui
+                .theme
+                .accent
+                .alpha(0.14 * (std::f32::consts::PI * reveal).sin());
+            let top_y = rect.center().y - half;
+            ui.gfx.fill_gradient(
+                Rect::new(rect.x, top_y, rect.w, 18.0),
+                0.0,
+                edge,
+                edge.alpha(0.0),
+                false,
+            );
+            ui.gfx.fill_gradient(
+                Rect::new(rect.x, bottom_y - 18.0, rect.w, 18.0),
+                0.0,
+                edge.alpha(0.0),
+                edge,
+                false,
+            );
+        }
+
+        let fade = 1.0 - Curve::Out.at((t / 0.42).clamp(0.0, 1.0));
         ui.push_inert();
         ui.push_layer(
             Layer::fade(fade)
-                .scaled(rect.center(), 1.0 + 0.02 * t)
+                .scaled(rect.center(), 1.0 + 0.014 * t)
                 .grouped(rect),
         );
         let _ = self.draw(ui, rect);
@@ -133,6 +186,7 @@ impl LockView {
 
     /// Shows `key` for the new `vault`, which opens once the key is confirmed.
     pub fn show_recovery(&mut self, vault: annulus_vault::vault::Vault, key: Zeroizing<String>) {
+        self.finish_working();
         self.mode = Mode::Recovery;
         self.pending = Some(Box::new(vault));
         self.key = key;
@@ -286,6 +340,7 @@ impl LockView {
                 "Unlock",
             ),
         };
+        let busy = self.working_since.is_some() || self.working.is_some() || self.opened > 0.0;
         let fields = if setup { 2.0 } else { 1.0 };
         let meter_h = if setup { space::S + METER_H } else { 0.0 };
         // A problem takes the place of the line under the title, so nothing moves for it.
@@ -314,6 +369,10 @@ impl LockView {
             ui.gfx
                 .icon(icons::SHIELD, mark.centered(32.0, 32.0), t.text);
         } else {
+            if busy && self.opened <= 0.0 {
+                let since = self.working_since.unwrap_or_else(|| ui.time());
+                working_mark(ui, mark.center(), (ui.time() - since).max(0.0));
+            }
             lock_mark(ui, mark, self.opened);
         }
         column.take_top(space::M);
@@ -329,9 +388,26 @@ impl LockView {
         column.take_top(2.0);
         let saying = column.take_top(20.0);
         if says < 1.0 {
-            ui.push_layer(Layer::fade((1.0 - says) * words));
-            ui.strict_text(saying, detail, BODY, t.text2, Align::Center);
-            ui.pop_layer();
+            let checking = ui.animate(
+                Id::new("lock.checking.words"),
+                if busy { 1.0 } else { 0.0 },
+                Motion::BASE,
+            );
+            if checking < 1.0 {
+                ui.push_layer(Layer::fade((1.0 - says) * words * (1.0 - checking)));
+                ui.strict_text(saying, detail, BODY, t.text2, Align::Center);
+                ui.pop_layer();
+            }
+            if checking > 0.0 {
+                let progress = if setup {
+                    "Encrypting your new vault\u{2026}"
+                } else {
+                    "Checking and opening saved hosts\u{2026}"
+                };
+                ui.push_layer(Layer::fade((1.0 - says) * words * checking));
+                ui.strict_text(saying, progress, BODY, t.accent, Align::Center);
+                ui.pop_layer();
+            }
         }
         if let Some(error) = &self.error {
             ui.push_layer(Layer::fade(says));
@@ -353,6 +429,16 @@ impl LockView {
         if std::mem::take(&mut self.fresh) {
             ui.state.set_focus(Some(Id::new("lock.password")), false);
         }
+        // Nothing typed during the password check can change the value being checked.
+        if busy {
+            ui.push_inert();
+        }
+        let controls = ui.animate(
+            Id::new("lock.controls.ready"),
+            if busy { 0.38 } else { 1.0 },
+            Motion::BASE,
+        );
+        ui.push_layer(Layer::fade(controls));
         // Refused, the field says no the way a head shakes.
         let shake = if self.refusals > 0 {
             let id = Id::new(("lock.shake", self.refusals));
@@ -402,9 +488,12 @@ impl LockView {
             }
         }
         ui.pop_layer();
+        ui.pop_layer();
+        if busy {
+            ui.pop_inert();
+        }
         column.take_top(space::M);
         let go = column.take_top(SEARCH);
-        let busy = self.working.is_some() || self.opened > 0.0;
         let label = if busy {
             if setup {
                 "Creating the vault\u{2026}"
@@ -453,10 +542,18 @@ impl LockView {
             let width = annulus_ui::widgets::button_width(&mut ui.gfx, link, None);
             let row = column.take_top(CONTROL);
             let at = row.centered(width.min(row.w), CONTROL);
+            if busy {
+                ui.push_inert();
+                ui.push_layer(Layer::fade(0.38));
+            }
             if quiet_link(ui, Id::new("lock.recovery"), at, link) {
                 self.recovery = !self.recovery;
                 self.error = None;
                 self.password = Zeroizing::new(String::new());
+            }
+            if busy {
+                ui.pop_layer();
+                ui.pop_inert();
             }
         }
         if ui.key(Key::Escape, Modifiers::NONE) {
@@ -493,6 +590,36 @@ fn quiet_link(ui: &mut Ui<'_>, id: Id, rect: Rect, label: &str) -> bool {
         ui.set_cursor(annulus_ui::kit::Cursor::Pointer);
     }
     response.clicked
+}
+
+/// A quiet loop around the lock while password work has no known end time.
+fn working_mark(ui: &mut Ui<'_>, center: Point, elapsed: f64) {
+    const PERIOD: f64 = 1.8;
+    let accent = ui.theme.accent;
+    if ui.state.reduce_motion {
+        ui.gfx.stroke_circle(center, 25.0, 1.5, accent.alpha(0.34));
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation)] // A repeating visual phase.
+    let phase = ((elapsed % PERIOD) / PERIOD) as f32;
+    for step in 0..3_u8 {
+        let wave = (phase + f32::from(step) / 3.0) % 1.0;
+        let gone = Curve::Out.at(wave);
+        ui.gfx.stroke_circle(
+            center,
+            22.0 + 17.0 * gone,
+            1.25,
+            accent.alpha(0.24 * (1.0 - gone)),
+        );
+    }
+    let angle = phase * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+    for step in 0..3_u8 {
+        let at = angle + f32::from(step) * std::f32::consts::TAU / 3.0;
+        let point = Point::new(center.x + 25.0 * at.cos(), center.y + 25.0 * at.sin());
+        ui.gfx
+            .fill_circle(point, 2.25, accent.alpha(0.5 + f32::from(step) * 0.16));
+    }
+    ui.request_repaint();
 }
 
 /// The lock, drawn in `rect` with its shackle swung `opened` (0.0 to 1.0, a little past when it

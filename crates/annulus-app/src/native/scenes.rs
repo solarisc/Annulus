@@ -2438,7 +2438,96 @@ fn the_vault_opens_as_the_lock_leaves_and_the_leaving_lock_takes_nothing() {
         assert!(!output.zones.iter().any(|zone| zone.label == "Unlock"));
     }
     assert!(outputs[0].repaint, "it asks for frames while it leaves");
+    assert!(
+        outputs[5].repaint,
+        "the reveal is still moving half a second after success"
+    );
     assert!(app.lock_left.is_none(), "and it is over");
+}
+
+#[test]
+fn password_work_has_a_live_inert_unlock_state() {
+    let mut app = NativeApp::new(None);
+    app.lock.start_working(0.0);
+    let outputs = photographed(
+        &mut app,
+        "motion-unlock-working",
+        &[0.05, 0.35, 0.75, 1.15],
+        &[],
+    );
+    for output in &outputs {
+        assert!(output.repaint, "the processing motion keeps drawing");
+        assert!(
+            output
+                .zones
+                .iter()
+                .any(|zone| zone.label == "Unlocking\u{2026}"),
+            "the current state is named"
+        );
+        assert!(
+            !output
+                .zones
+                .iter()
+                .any(|zone| zone.label == "Master password"),
+            "the password cannot change during the check"
+        );
+    }
+}
+
+#[test]
+fn password_work_renders_in_each_theme_and_renderer() {
+    let dir = out_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    for appearance in [Appearance::Dark, Appearance::Light] {
+        for mut renderer in renderers() {
+            let suffix = renderer.suffix();
+            let look = match appearance {
+                Appearance::Dark => "dark",
+                Appearance::Light => "light",
+            };
+            let mut app = NativeApp::new(None);
+            app.lock.start_working(0.0);
+            let mut state = UiState::default();
+            let viewport = Rect::new(0.0, 0.0, 1100.0, 720.0);
+            let _ = renderer.frame((1100, 720, 1.0), false, &mut |canvas| {
+                state.begin_frame(&[], 0.0);
+                let mut ui = Ui::new(canvas, Theme::new(appearance), &mut state, viewport);
+                app.frame(&mut ui);
+                let _ = state.end_frame();
+            });
+            let mut output = FrameOutput::default();
+            let png = renderer
+                .frame((1100, 720, 1.0), true, &mut |canvas| {
+                    state.begin_frame(&[], 0.35);
+                    let mut ui = Ui::new(canvas, Theme::new(appearance), &mut state, viewport);
+                    app.frame(&mut ui);
+                    output = state.end_frame();
+                })
+                .unwrap();
+            assert!(output.repaint);
+            assert!(
+                output
+                    .zones
+                    .iter()
+                    .any(|zone| zone.label == "Unlocking\u{2026}")
+            );
+            std::fs::write(dir.join(format!("lock-unlocking-{look}{suffix}.png")), png).unwrap();
+        }
+    }
+}
+
+#[test]
+fn reduced_motion_keeps_password_work_still() {
+    let mut app = NativeApp::new(None);
+    app.settings.reduce_motion = true;
+    app.lock.start_working(0.0);
+    let mut state = UiState::default();
+    let _ = step(&mut app, &mut state, &[], 0.0);
+    let settled = step(&mut app, &mut state, &[], 0.35);
+    assert!(
+        !settled.repaint,
+        "the still state needs no animation frames"
+    );
 }
 
 #[test]
