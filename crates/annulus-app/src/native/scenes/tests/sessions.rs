@@ -92,6 +92,30 @@ fn an_agent_runs_a_command_through_the_door_in_its_own_tab_and_gets_its_output()
 }
 
 #[test]
+fn transfer_approval_buttons_and_stop_control_the_copy() {
+    let mut app = NativeApp::new(Some(fixture_vault("scp-buttons", true)));
+    app.preview_transfer();
+    let uid = app.tabs[app.active].uid;
+    let mut state = UiState::default();
+    let output = step(&mut app, &mut state, &[], 0.0);
+    assert!(app.pending_approval(uid).is_some());
+    let output = step(&mut app, &mut state, &click_on(&output, "Deny"), 1.0);
+    assert!(app.pending_approval(uid).is_none());
+    assert!(app.transfers.is_empty());
+    assert!(app.tabs[app.active].sftp.as_ref().unwrap().tab.transfers.is_empty());
+    step(&mut app, &mut state, &click_on(&output, "Stop"), 2.0);
+    assert!(!app.settings.automation);
+
+    app.preview_transfer();
+    let uid = app.tabs[app.active].uid;
+    let output = step(&mut app, &mut state, &[], 3.0);
+    step(&mut app, &mut state, &click_on(&output, "Approve"), 4.0);
+    step(&mut app, &mut state, &[], 5.0);
+    assert!(app.pending_approval(uid).is_none());
+    assert_eq!(app.tabs[app.active].sftp.as_ref().unwrap().tab.transfers.len(), 1);
+}
+
+#[test]
 fn command_approval_holds_the_agent_exe_until_the_owner_approves_or_denies() {
     use annulus_control::client::Client;
     let _timed = timing_a_shell();

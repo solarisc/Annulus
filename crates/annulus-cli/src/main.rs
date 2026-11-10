@@ -9,6 +9,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod mcp;
+mod scp;
 
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -25,6 +26,11 @@ Usage: annulus-agent [--json] <command>
 Commands:
   status                        Annulus's version and state
   hosts                         the saved hosts (never their passwords or keys)
+  scp [-r] [--overwrite] <source> <destination>
+                                copy a file, or with -r a directory, over SFTP
+                                one path is <host-id>:<path>; the other is local
+                                use a trailing / for a destination folder
+                                existing files stay unless --overwrite is set
   notes <host> [--set <text...>] print saved host <host>'s notes, or replace them (2,000
                                 characters at most; --set alone clears them)
   tabs                          the open tabs (AI marks the ones an agent opened)
@@ -57,6 +63,7 @@ enum Command {
     Help,
     Status,
     Hosts,
+    Scp(annulus_control::protocol::TransferRequest),
     Notes {
         host: u64,
         /// The notes to save; `None` prints them.
@@ -100,6 +107,23 @@ fn host_id(word: &str) -> Result<u64, String> {
 
 /// Reads the arguments after the program's name: the command, and whether to print JSON.
 fn parse(args: &[String]) -> Result<(Command, bool), String> {
+    let start = usize::from(args.first().is_some_and(|arg| arg == "--json"));
+    if args.get(start).is_some_and(|arg| arg == "scp") {
+        let mut json = start == 1;
+        let mut options = true;
+        let mut words = Vec::new();
+        for arg in &args[start + 1..] {
+            if options && arg == "--json" {
+                json = true;
+            } else {
+                if arg == "--" {
+                    options = false;
+                }
+                words.push(arg.as_str());
+            }
+        }
+        return Ok((Command::Scp(scp::parse(&words)?), json));
+    }
     let json = args.iter().any(|arg| arg == "--json");
     let words: Vec<&str> = args
         .iter()
@@ -244,6 +268,10 @@ fn run(command: Command, json: bool) -> Result<Printed, ClientError> {
     let printed =
         |value: serde_json::Value| serde_json::to_string_pretty(&value).unwrap_or_default() + "\n";
     let out = match command {
+        Command::Scp(transfer) => {
+            let answer = client.scp(transfer).map_err(scp::failed)?;
+            scp::printed(&answer, json)
+        }
         Command::Run { tab, command, wait } => {
             return Ok(ran(&client.run(tab, &command, wait)?, json));
         }

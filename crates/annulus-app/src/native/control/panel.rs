@@ -62,6 +62,7 @@ pub fn agent_panel(
     log: &mut AgentLog,
     (title, status, allowed): (&str, Option<TabStatus>, bool),
     approval: Option<&PendingApproval>,
+    files: bool,
 ) -> Option<PanelAction> {
     let t = ui.theme;
     if approval.is_some() {
@@ -120,7 +121,9 @@ pub fn agent_panel(
         if allowed { t.accent } else { t.text3 },
     );
     head.take_left(chip + space::S);
-    let heading = if allowed {
+    let heading = if allowed && files {
+        "Agent transfers"
+    } else if allowed {
         "Agent session"
     } else {
         "Agents stopped"
@@ -161,7 +164,11 @@ pub fn agent_panel(
     foot.take_left(18.0);
     ui.gfx.text(
         foot,
-        "Types only in this tab. Yours are read-only to it.",
+        if files {
+            "Copies files through this saved host."
+        } else {
+            "Types only in this tab. Yours are read-only to it."
+        },
         SMALL,
         t.text3,
         Align::Start,
@@ -196,14 +203,22 @@ pub fn agent_panel(
         let mut empty = list.inset(space::M, space::M);
         ui.gfx.text(
             empty.take_top(20.0),
-            "Nothing typed yet",
+            if files {
+                "No transfers yet"
+            } else {
+                "Nothing typed yet"
+            },
             BODY_MEDIUM,
             t.text2,
             Align::Start,
         );
         ui.gfx.text(
             empty.take_top(18.0),
-            "Each command the agent runs shows here.",
+            if files {
+                "Each copy shows in the transfer list."
+            } else {
+                "Each command the agent runs shows here."
+            },
             SMALL,
             t.text3,
             Align::Start,
