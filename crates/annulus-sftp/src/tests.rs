@@ -234,6 +234,222 @@ fn no_progress() -> impl FnMut(u64, u64) -> bool + Send {
 }
 
 #[tokio::test]
+async fn cancelled_empty_files_and_directories_never_finish_a_copy() {
+    let remote = temp_dir("empty-cancel-remote");
+    let local = temp_dir("empty-cancel-local");
+    let empty = local.join("empty");
+    let folder = local.join("folder");
+    fs::write(&empty, b"").unwrap();
+    fs::create_dir(&folder).unwrap();
+    fs::write(remote.join("empty"), b"").unwrap();
+    fs::create_dir(remote.join("folder")).unwrap();
+    let sftp = client(remote.clone()).await;
+    assert!(matches!(
+        sftp.upload_as(&empty, "/", "cancelled", Conflict::Refuse, &mut |_, _| {
+            false
+        })
+        .await,
+        Err(SftpError::Cancelled)
+    ));
+    assert!(matches!(
+        sftp.download_as(
+            "/empty",
+            &local,
+            "cancelled",
+            Conflict::Refuse,
+            &mut |_, _| false
+        )
+        .await,
+        Err(SftpError::Cancelled)
+    ));
+    assert!(matches!(
+        sftp.upload_tree_as(&folder, "/", "cancelled", Conflict::Refuse, &mut |_, _| {
+            false
+        })
+        .await,
+        Err(SftpError::Cancelled)
+    ));
+    assert!(matches!(
+        sftp.download_tree_as(
+            "/folder",
+            &local,
+            "cancelled",
+            Conflict::Refuse,
+            &mut |_, _| false
+        )
+        .await,
+        Err(SftpError::Cancelled)
+    ));
+    assert_eq!(fs::read_dir(remote).unwrap().count(), 2);
+    assert_eq!(fs::read_dir(local).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn agent_copies_keep_exact_names_bytes_and_existing_files() {
+    let remote = temp_dir("agent-copy-remote");
+    let local = temp_dir("agent-copy-local");
+    let content: Vec<u8> = (0..CHUNK + 17)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
+    let source = local.join("source file.bin");
+    fs::write(&source, &content).unwrap();
+    let sftp = client(remote.clone()).await;
+    sftp.upload_as(
+        &source,
+        "/",
+        "remote file.bin",
+        Conflict::Refuse,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(remote.join("remote file.bin")).unwrap(), content);
+    sftp.download_as(
+        "/remote file.bin",
+        &local,
+        "copy file.bin",
+        Conflict::Refuse,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(local.join("copy file.bin")).unwrap(), content);
+    fs::write(&source, b"new bytes").unwrap();
+    assert!(matches!(
+        sftp.upload_as(
+            &source,
+            "/",
+            "remote file.bin",
+            Conflict::Refuse,
+            &mut no_progress()
+        )
+        .await,
+        Err(SftpError::Exists(_))
+    ));
+    assert!(matches!(
+        sftp.download_as(
+            "/remote file.bin",
+            &local,
+            "copy file.bin",
+            Conflict::Refuse,
+            &mut no_progress()
+        )
+        .await,
+        Err(SftpError::Exists(_))
+    ));
+    assert_eq!(fs::read(remote.join("remote file.bin")).unwrap(), content);
+    assert_eq!(fs::read(local.join("copy file.bin")).unwrap(), content);
+    sftp.upload_as(
+        &source,
+        "/",
+        "remote file.bin",
+        Conflict::Overwrite,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(remote.join("remote file.bin")).unwrap(),
+        b"new bytes"
+    );
+    assert_eq!(fs::read(&source).unwrap(), b"new bytes", "the source stays");
+    assert_eq!(
+        fs::read_dir(&remote).unwrap().count(),
+        1,
+        "no part file after success"
+    );
+    assert_eq!(fs::read_dir(&local).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn agent_directory_copies_refuse_existing_targets_in_both_directions() {
+    let remote = temp_dir("agent-tree-remote");
+    let local = temp_dir("agent-tree-local");
+    let source = local.join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file.txt"), b"tree bytes").unwrap();
+    let sftp = client(remote.clone()).await;
+    sftp.upload_tree_as(&source, "/", "tree", Conflict::Refuse, &mut no_progress())
+        .await
+        .unwrap();
+    sftp.download_tree_as(
+        "/tree",
+        &local,
+        "copy",
+        Conflict::Refuse,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(local.join("copy/file.txt")).unwrap(),
+        b"tree bytes"
+    );
+    assert!(matches!(
+        sftp.upload_tree_as(&source, "/", "tree", Conflict::Refuse, &mut no_progress())
+            .await,
+        Err(SftpError::Exists(_))
+    ));
+    assert!(matches!(
+        sftp.download_tree_as(
+            "/tree",
+            &local,
+            "copy",
+            Conflict::Refuse,
+            &mut no_progress()
+        )
+        .await,
+        Err(SftpError::Exists(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_refused_download_keeps_a_file_created_during_the_copy() {
+    let remote = temp_dir("agent-race-remote");
+    let local = temp_dir("agent-race-local");
+    fs::write(remote.join("file.txt"), b"server bytes").unwrap();
+    let sftp = client(remote).await;
+    let target = local.join("file.txt");
+    let result = sftp
+        .download("/file.txt", &local, Conflict::Refuse, &mut |_, _| {
+            fs::write(&target, b"someone else's file").unwrap();
+            true
+        })
+        .await;
+    assert!(matches!(result, Err(SftpError::Exists(_))));
+    assert_eq!(fs::read(target).unwrap(), b"someone else's file");
+    assert_eq!(
+        fs::read_dir(local).unwrap().count(),
+        1,
+        "the owned part file is gone"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_upload_removes_its_part_and_keeps_a_file_created_during_the_copy() {
+    let remote = temp_dir("agent-up-race-remote");
+    let local = temp_dir("agent-up-race-local");
+    let source = local.join("file.txt");
+    fs::write(&source, b"upload bytes").unwrap();
+    let sftp = client(remote.clone()).await;
+    let target = remote.join("file.txt");
+    let result = sftp
+        .upload(&source, "/", Conflict::Refuse, &mut |_, _| {
+            fs::write(&target, b"someone else's file").unwrap();
+            true
+        })
+        .await;
+    assert!(matches!(result, Err(SftpError::Exists(_))));
+    assert_eq!(fs::read(target).unwrap(), b"someone else's file");
+    assert_eq!(
+        fs::read_dir(remote).unwrap().count(),
+        1,
+        "only the owned part file goes"
+    );
+    assert_eq!(fs::read(source).unwrap(), b"upload bytes");
+}
+
+#[tokio::test]
 async fn listing_puts_directories_first_and_reports_sizes() {
     let root = temp_dir("list");
     fs::write(root.join("b.txt"), b"hello").unwrap();

@@ -1480,6 +1480,15 @@ pub(super) const SCENES: &[Scene] = &[
         acts: &[],
     },
     Scene {
+        name: "agent-transfer-approval",
+        width: 1300,
+        height: 800,
+        scale: 1.0,
+        populated: true,
+        setup: NativeApp::preview_transfer,
+        acts: &[],
+    },
+    Scene {
         name: "agent-tab-stopped",
         width: 1100,
         height: 720,

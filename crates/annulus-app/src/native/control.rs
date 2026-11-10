@@ -20,6 +20,9 @@ use super::live::AgentMarks;
 use super::{NativeApp, Tab, TabKind, TermView};
 use crate::terminal_view::TabStatus;
 
+mod transfers;
+pub use transfers::TransferCall;
+
 /// What an agent typed into its tab, newest last, and how its panel stands (F-AUTO-004). In
 /// memory only: it can hold secrets.
 pub struct AgentLog {
@@ -563,6 +566,10 @@ impl NativeApp {
         let calls = self.door.as_ref().map(Door::take_calls).unwrap_or_default();
         for call in calls {
             match &call.request {
+                Request::Scp(request) => {
+                    let request = request.clone();
+                    self.queue_transfer(call, &request);
+                }
                 Request::Run { tab, command, wait } => {
                     let (tab, command, wait) = (*tab, command.clone(), waited(*wait));
                     match agent_tab(self, tab) {
@@ -601,6 +608,7 @@ impl NativeApp {
             self.grant_waiting_approvals(now);
         }
         self.move_runs(now);
+        self.move_transfers();
         if self.settings.closes_ended_agent_tabs() {
             self.close_ended_agent_tabs();
         }
@@ -612,19 +620,22 @@ impl NativeApp {
 
     /// The first command in `tab` waiting for a choice.
     pub(super) fn pending_approval(&self, tab: u64) -> Option<PendingApproval> {
-        self.runs.iter().find_map(|run| {
-            if run.tab != tab {
-                return None;
-            }
-            Some(PendingApproval {
-                id: run.approval.waiting()?,
-                command: run.command.clone(),
+        self.transfer_approval(tab).or_else(|| {
+            self.runs.iter().find_map(|run| {
+                if run.tab != tab {
+                    return None;
+                }
+                Some(PendingApproval {
+                    id: run.approval.waiting()?,
+                    command: run.command.clone(),
+                })
             })
         })
     }
 
     /// Applies the owner's choice. A denial answers the blocked caller without typing.
     pub(super) fn decide_approval(&mut self, id: u64, approved: bool) {
+        self.decide_transfer(id, approved);
         let Some(index) = self
             .runs
             .iter()
@@ -725,6 +736,7 @@ impl NativeApp {
     /// Drops every command on its way, as the door closes: the ones already typed are marked
     /// cut off in their panels, so none shows as running forever.
     pub(super) fn cut_runs(&mut self, now: Instant) {
+        self.cut_transfers();
         for run in std::mem::take(&mut self.runs) {
             if run.typed.is_none() {
                 continue;
@@ -1043,6 +1055,7 @@ pub fn handle(app: &mut NativeApp, request: &Request) -> Result<Response, String
             tabs: app.tabs.len(),
         })),
         Request::Hosts => Ok(Response::Hosts(hosts(vault))),
+        Request::Scp(_) => Err("transfers must run through the control connection".into()),
         Request::Tabs => Ok(Response::Tabs(
             app.tabs
                 .iter()

@@ -37,6 +37,8 @@ pub enum Request {
     Status,
     /// The saved hosts.
     Hosts,
+    /// Copies a file or directory between this computer and a saved host over SFTP.
+    Scp(TransferRequest),
     /// The open tabs.
     Tabs,
     /// The text of terminal tab `tab` (by uid): its last `lines` lines, or all it holds.
@@ -126,6 +128,7 @@ impl Outcome {
             Ok(Response::Tabs(tabs)) => Self::ok(&tabs),
             Ok(Response::Text(text)) => Self::Ok(serde_json::Value::String(text)),
             Ok(Response::Ran(ran)) => Self::ok(&ran),
+            Ok(Response::Transferred(transfer)) => Self::ok(&transfer),
             Ok(Response::Tab(tab)) => Self::ok(&tab),
             Ok(Response::Done) => Self::Ok(serde_json::Value::Null),
             Err(error) => Self::Error(error),
@@ -152,6 +155,8 @@ pub enum Response {
     Text(String),
     /// What a command printed and how far it got, for [`Request::Run`] and [`Request::Wait`].
     Ran(RunOutput),
+    /// A completed SCP transfer.
+    Transferred(TransferOutput),
     /// The tab [`Request::Open`] opened.
     Tab(TabInfo),
     /// Done, with nothing to say ([`Request::Close`]).
@@ -167,6 +172,42 @@ pub struct Status {
     pub unlocked: bool,
     /// How many tabs are open, the fixed ones included.
     pub tabs: usize,
+}
+
+/// A copy between this computer and a saved host. Destinations name the exact file or
+/// directory to create, not its parent. No shell interprets either path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferRequest {
+    /// A saved host id.
+    pub host: u64,
+    /// True to upload, false to download.
+    pub upload: bool,
+    /// Absolute path on the computer running Annulus.
+    pub local: String,
+    /// Path on the host; relative paths start in the login folder.
+    pub remote: String,
+    /// Copy a directory and its contents.
+    #[serde(default)]
+    pub recursive: bool,
+    /// Replace existing files; otherwise an existing target fails the call.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// Advice returned to agents after transfers, including failed transfers.
+pub const TRANSFER_CLEANUP: &str = "Try to clean up safely after this task: remove only temporary files you created, on this computer and the host, once you have checked the transfer and no longer need them. Keep source files, final outputs and files owned by others. Check exact paths before deleting; do not use broad wildcards. A failed transfer may leave a partial file for retry; remove it only if you know this task created it and no transfer still uses it.";
+
+/// A completed transfer and safe cleanup guidance for the caller.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferOutput {
+    /// The visible SFTP tab that records the transfer.
+    pub tab: u64,
+    /// The destination path.
+    pub to: String,
+    /// Bytes copied, including bytes kept from an earlier attempt.
+    pub bytes: u64,
+    /// Guidance for removing temporary files safely.
+    pub cleanup: String,
 }
 
 /// A saved host, as a person sees it in the list. Never a credential.

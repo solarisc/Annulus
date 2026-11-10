@@ -711,7 +711,11 @@ impl SftpTab {
                     let mut upload = None;
                     if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) {
                         transfer.state = match result {
-                            Ok(Outcome::Done { to, .. }) => TransferState::Done(to),
+                            Ok(Outcome::Done { to, bytes }) => {
+                                transfer.done = bytes;
+                                transfer.total = bytes;
+                                TransferState::Done(to)
+                            }
                             Ok(Outcome::Skipped) => TransferState::Skipped,
                             Err(message) => TransferState::Failed(message),
                         };
@@ -735,7 +739,7 @@ impl SftpTab {
         }
     }
 
-    fn start_transfer(&mut self, label: String, recipe: Recipe) {
+    pub(crate) fn start_transfer(&mut self, label: String, recipe: Recipe) {
         self.next_id += 1;
         let cancel = Arc::new(AtomicBool::new(false));
         let command = recipe.command(self.next_id, cancel.clone());
@@ -942,6 +946,7 @@ pub(crate) const ASK_NAME: &str = "Existing files: ask";
 
 pub(crate) fn conflict_name(conflict: Conflict) -> &'static str {
     match conflict {
+        Conflict::Refuse => "Existing files: refuse",
         Conflict::KeepBoth => "Existing files: keep both",
         Conflict::Overwrite => "Existing files: overwrite",
         Conflict::Skip => "Existing files: skip",

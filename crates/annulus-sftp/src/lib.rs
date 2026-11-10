@@ -47,6 +47,9 @@ pub enum SftpError {
     /// The progress callback asked to stop. The partial file was removed.
     #[error("cancelled")]
     Cancelled,
+    /// The caller required a new destination, but the path exists.
+    #[error("the destination already exists: {0}")]
+    Exists(String),
 }
 
 impl From<ProtocolError> for SftpError {
@@ -145,6 +148,8 @@ fn is_plain_remote_name(name: &str) -> bool {
 /// What to do when the target of a transfer already exists (F-SFTP-005).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Conflict {
+    /// Fail if the target exists, including any file in a directory copy.
+    Refuse,
     /// Replace it.
     Overwrite,
     /// Leave it and do not transfer.
@@ -373,10 +378,12 @@ impl Sftp {
         if !is_safe_local_name(name) {
             return Err(SftpError::UnsafeName(name.to_owned()));
         }
-        let free = |path: &Path| !path.exists();
+        let free =
+            |path: &Path| !path.try_exists().unwrap_or(true) && path.symlink_metadata().is_err();
         let Some(target) = place(conflict, local_dir.join(name), &free, |n| {
             local_dir.join(keep_both_name(name, n))
-        }) else {
+        })?
+        else {
             return Ok(Outcome::Skipped);
         };
         let local_error = |path: &Path| {
@@ -403,13 +410,31 @@ impl Sftp {
         let failure = match (copied, flushed) {
             (Ok(bytes), Ok(())) => {
                 // Another file may have taken the name during the copy.
-                let Some(target) = place(conflict, target, &free, |n| {
+                let target = match place(conflict, target, &free, |n| {
                     local_dir.join(keep_both_name(name, n))
-                }) else {
+                }) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        let _ = tokio::fs::remove_file(&part).await;
+                        return Err(error);
+                    }
+                };
+                let Some(target) = target else {
                     let _ = tokio::fs::remove_file(&part).await;
                     return Ok(Outcome::Skipped);
                 };
-                match tokio::fs::rename(&part, &target).await {
+                // A no-replace copy must also refuse a file created after the last check.
+                // Linking a sibling part file claims the name without replacing it.
+                let saved = if conflict == Conflict::Refuse {
+                    let result = tokio::fs::hard_link(&part, &target).await;
+                    if result.is_ok() {
+                        let _ = tokio::fs::remove_file(&part).await;
+                    }
+                    result
+                } else {
+                    tokio::fs::rename(&part, &target).await
+                };
+                match saved {
                     Ok(()) => {
                         return Ok(Outcome::Done {
                             to: target.display().to_string(),
@@ -539,7 +564,14 @@ impl Sftp {
         let failure = match (copied, closed) {
             (Ok(bytes), Ok(())) => {
                 // Another file may have taken the name during the copy.
-                let Some(target) = self.place_remote(conflict, remote_dir, name).await? else {
+                let target = match self.place_remote(conflict, remote_dir, name).await {
+                    Ok(target) => target,
+                    Err(error) => {
+                        let _ = self.session.remove_file(part.as_str()).await;
+                        return Err(error);
+                    }
+                };
+                let Some(target) = target else {
                     let _ = self.session.remove_file(part.as_str()).await;
                     return Ok(Outcome::Skipped);
                 };
@@ -602,9 +634,15 @@ impl Sftp {
             return Err(SftpError::UnsafeName(name.to_owned()));
         }
         let top = local_dir.join(name);
+        if conflict == Conflict::Refuse && tokio::fs::symlink_metadata(&top).await.is_ok() {
+            return Err(SftpError::Exists(top.display().to_string()));
+        }
         let (mut folders, mut files) = (Vec::new(), Vec::new());
         let mut stack = vec![(remote.to_owned(), top.clone())];
         while let Some((dir, local)) = stack.pop() {
+            if !progress(0, 0) {
+                return Err(SftpError::Cancelled);
+            }
             for entry in self.list(&dir).await? {
                 if !is_safe_local_name(&entry.name) {
                     return Err(SftpError::UnsafeName(entry.name));
@@ -618,6 +656,9 @@ impl Sftp {
             folders.push(local);
         }
         for folder in &folders {
+            if !progress(0, 0) {
+                return Err(SftpError::Cancelled);
+            }
             tokio::fs::create_dir_all(folder)
                 .await
                 .map_err(|source| SftpError::Local {
@@ -681,11 +722,17 @@ impl Sftp {
             return Err(SftpError::UnsafeName(name.to_owned()));
         }
         let top = join(remote_dir, name);
+        if conflict == Conflict::Refuse && self.session.try_exists(top.as_str()).await? {
+            return Err(SftpError::Exists(top));
+        }
         // Everything is found first, so progress has a total; folders come before what is
         // in them.
         let (mut folders, mut files) = (Vec::new(), Vec::new());
         let mut stack = vec![(local.to_path_buf(), top.clone())];
         while let Some((dir, remote)) = stack.pop() {
+            if !progress(0, 0) {
+                return Err(SftpError::Cancelled);
+            }
             let read_error = |source| SftpError::Local {
                 path: dir.clone(),
                 source,
@@ -708,6 +755,9 @@ impl Sftp {
         }
         folders.sort_by_key(|folder| folder.matches('/').count());
         for folder in &folders {
+            if !progress(0, 0) {
+                return Err(SftpError::Cancelled);
+            }
             if !self.session.try_exists(folder.as_str()).await? {
                 self.session.create_dir(folder.as_str()).await?;
             }
@@ -782,6 +832,7 @@ impl Sftp {
             return Ok(Some(target));
         }
         Ok(match conflict {
+            Conflict::Refuse => return Err(SftpError::Exists(target)),
             Conflict::Skip => None,
             Conflict::Overwrite => Some(target),
             Conflict::KeepBoth => {
@@ -806,15 +857,16 @@ fn place(
     target: PathBuf,
     free: &dyn Fn(&Path) -> bool,
     candidate: impl Fn(u32) -> PathBuf,
-) -> Option<PathBuf> {
+) -> Result<Option<PathBuf>, SftpError> {
     if free(&target) {
-        return Some(target);
+        return Ok(Some(target));
     }
-    match conflict {
+    Ok(match conflict {
+        Conflict::Refuse => return Err(SftpError::Exists(target.display().to_string())),
         Conflict::Skip => None,
         Conflict::Overwrite => Some(target),
         Conflict::KeepBoth => (1..KEEP_BOTH_TRIES).map(candidate).find(|path| free(path)),
-    }
+    })
 }
 
 /// The hidden name a transfer of `name` writes to until it is complete. `stamp` is the
@@ -851,7 +903,11 @@ where
     loop {
         let read = source.read(&mut buffer).await.map_err(Copy::Read)?;
         if read == 0 {
-            return Ok(done);
+            return if progress(done, total.max(done)) {
+                Ok(done)
+            } else {
+                Err(Copy::Cancelled)
+            };
         }
         sink.write_all(&buffer[..read]).await.map_err(Copy::Write)?;
         done += read as u64;

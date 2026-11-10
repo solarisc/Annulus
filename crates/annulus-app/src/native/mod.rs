@@ -330,6 +330,8 @@ pub struct NativeApp {
     door_failed: bool,
     /// Agents' commands waiting to be typed or for their output to settle.
     runs: Vec<control::Running>,
+    /// Agent file copies waiting for approval, a connection or completion.
+    transfers: Vec<control::TransferCall>,
     /// The next in-memory id for a command approval prompt.
     next_approval: u64,
     /// What agents changed, to show as toasts this frame (a host's notes).
@@ -406,6 +408,7 @@ impl NativeApp {
             door: None,
             door_failed: false,
             runs: Vec::new(),
+            transfers: Vec::new(),
             next_approval: 1,
             agent_news: Vec::new(),
             settings_errors: Vec::new(),
@@ -1537,6 +1540,10 @@ impl NativeApp {
             && tab.sftp.is_some()
         {
             area.take_left(PANEL_GAP);
+            let strip = tab
+                .agent
+                .as_deref()
+                .map(|log| panel(ui, area.take_right(control::panel_width(log) + PANEL_GAP)));
             let mut content = panel(ui, area);
             // The SFTP tab goes back to its host picker; another SFTP tab is closed instead.
             if tab.kind == TabKind::Files {
@@ -1557,7 +1564,42 @@ impl NativeApp {
                 if let Some((local, remote)) = view.take_columns() {
                     self.settings.sftp_local_columns = local;
                     self.settings.sftp_remote_columns = remote;
-                    self.save_settings();
+                    Self::persist_settings(
+                        &self.settings,
+                        self.settings_path.as_deref(),
+                        &mut self.settings_errors,
+                    );
+                }
+            }
+            if let (Some(rect), Some(log)) = (strip, tab.agent.as_deref_mut()) {
+                match control::agent_panel(
+                    ui,
+                    rect,
+                    log,
+                    (&tab.title, tab.status, self.settings.automation),
+                    active_approval.as_ref(),
+                    true,
+                ) {
+                    Some(control::PanelAction::Approve(id)) => approval_choice = Some((id, true)),
+                    Some(control::PanelAction::Deny(id)) => approval_choice = Some((id, false)),
+                    Some(control::PanelAction::Stop) => {
+                        self.settings.automation = false;
+                        self.door = None;
+                        Self::persist_settings(
+                            &self.settings,
+                            self.settings_path.as_deref(),
+                            &mut self.settings_errors,
+                        );
+                    }
+                    Some(control::PanelAction::Allow) => {
+                        self.settings.automation = true;
+                        Self::persist_settings(
+                            &self.settings,
+                            self.settings_path.as_deref(),
+                            &mut self.settings_errors,
+                        );
+                    }
+                    _ => {}
                 }
             }
         } else if let Some(tab) = self.tabs.get_mut(self.active)
@@ -1598,6 +1640,7 @@ impl NativeApp {
                     log,
                     (&tab.title, tab.status, allowed),
                     active_approval.as_ref(),
+                    false,
                 ),
                 _ => None,
             };

@@ -946,6 +946,7 @@ fn window_size(size: Size, cell_width: u16, cell_height: u16) -> WindowSize {
     }
 }
 
+#[allow(clippy::needless_update)] // Options has an extra escape_args field on Windows.
 fn local_options(program: &Program) -> tty::Options {
     let shell = match program {
         Program::Command { program, args } => Some(tty::Shell::new(program.clone(), args.clone())),
@@ -964,6 +965,7 @@ fn local_options(program: &Program) -> tty::Options {
         working_directory,
         drain_on_exit: true,
         env,
+        ..tty::Options::default()
     }
 }
 

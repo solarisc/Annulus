@@ -135,7 +135,7 @@ struct CopyNews {
 /// The SFTP tab's view state around the engine.
 #[allow(clippy::struct_excessive_bools)] // Separate switches of one view.
 pub struct SftpView {
-    tab: SftpTab,
+    pub(super) tab: SftpTab,
     ask: Option<Ask>,
     /// A rename or new folder being typed, and in which pane.
     edit: Option<(Side, Edit)>,

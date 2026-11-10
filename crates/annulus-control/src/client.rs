@@ -61,6 +61,17 @@ pub struct Client {
 }
 
 impl Client {
+    /// Copies through Annulus's saved SSH login and waits for completion or failure.
+    ///
+    /// # Errors
+    /// As [`Self::call`], or when a path or transfer fails.
+    pub fn scp(
+        &mut self,
+        transfer: crate::protocol::TransferRequest,
+    ) -> Result<crate::protocol::TransferOutput, ClientError> {
+        self.call(Request::Scp(transfer))
+    }
+
     /// Connects through the door of the data folder `dir`.
     ///
     /// # Errors
