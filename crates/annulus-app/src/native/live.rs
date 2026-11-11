@@ -14,6 +14,7 @@ use annulus_session::{Program, Session, SessionEvent};
 use annulus_term::alacritty_terminal::term::TermMode;
 use annulus_term::find::Find;
 use annulus_term::keys::{self, Mods};
+use annulus_term::mouse;
 use annulus_term::select::SelectionKind;
 use annulus_term::{Palette, Size};
 use annulus_ui::gfx::Canvas as _;
@@ -47,6 +48,8 @@ pub struct LiveTerminal {
     selecting: Option<(usize, usize)>,
     /// Wheel movement not yet a whole line.
     wheel: f32,
+    /// What a program that asked for the mouse was last told.
+    reported: MouseReports,
     find: Option<FindBar>,
     /// What the keyboard sent this frame, for broadcast to other panes.
     pub sent: Vec<Vec<u8>>,
@@ -252,6 +255,7 @@ impl LiveTerminal {
             unread: Arc::new(AtomicBool::new(false)),
             selecting: None,
             wheel: 0.0,
+            reported: MouseReports::default(),
             find: None,
             sent: Vec::new(),
             reconnect: Reconnect::default(),
@@ -528,8 +532,15 @@ impl LiveTerminal {
     }
 
     /// The wheel scrolls back through history; in a full-screen program (vim, less) it
-    /// sends arrow keys instead, as xterm does.
-    fn scroll(&mut self, ui: &mut Ui<'_>, session: &Session, inner: Rect, cell_h: f32) {
+    /// sends arrow keys instead, as xterm does, and to a program that asked for the mouse
+    /// (htop, btop) wheel buttons at `cell`, the one under the pointer.
+    fn scroll(
+        &mut self,
+        ui: &mut Ui<'_>,
+        session: &Session,
+        inner: Rect,
+        (cell_h, cell): (f32, (usize, usize)),
+    ) {
         let wheel = ui.take_wheel(inner);
         if wheel == 0.0 {
             return;
@@ -543,7 +554,21 @@ impl LiveTerminal {
         #[allow(clippy::cast_possible_truncation)] // A few lines per frame.
         let lines = lines as i32;
         let mode = session.mode();
-        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        let modifiers = ui.modifiers();
+        if reports_mouse(mode, modifiers) {
+            let button = if lines > 0 {
+                mouse::Button::WheelUp
+            } else {
+                mouse::Button::WheelDown
+            };
+            if let Some(bytes) =
+                mouse::encode(mouse::Action::Press(button), cell, mods(modifiers), mode)
+            {
+                for _ in 0..lines.unsigned_abs() {
+                    session.write(bytes.clone());
+                }
+            }
+        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             let key = if lines > 0 {
                 keys::Key::Up
             } else {
@@ -560,7 +585,8 @@ impl LiveTerminal {
     }
 
     /// Drag selects, a double click selects a word, Ctrl+click (Cmd+click on a Mac) opens a
-    /// link ([`super::shortcuts::OPEN_LINK`]).
+    /// link ([`super::shortcuts::OPEN_LINK`]). A program that asked for the mouse gets it
+    /// instead, unless Shift is held.
     fn mouse(
         &mut self,
         ui: &mut Ui<'_>,
@@ -569,6 +595,21 @@ impl LiveTerminal {
         id: Id,
         cell_at: impl Fn(annulus_ui::gfx::Point) -> (usize, usize),
     ) {
+        if reports_mouse(session.mode(), ui.modifiers()) {
+            self.selecting = None;
+            if response.hovered {
+                ui.set_cursor(annulus_ui::kit::Cursor::Default);
+            }
+            let cell = ui.pointer().map(&cell_at);
+            for bytes in self
+                .reported
+                .reports(ui, session.mode(), (response.hovered, id), cell)
+            {
+                session.write(bytes);
+            }
+            return;
+        }
+        self.reported = MouseReports::default();
         let Some(pointer) = ui.pointer() else { return };
         let (row, column) = cell_at(pointer);
         let held = super::shortcuts::OPEN_LINK.held_by(ui.modifiers());
@@ -940,7 +981,8 @@ impl LiveTerminal {
             )
         };
         if let Some(session) = self.session.take() {
-            self.scroll(ui, &session, inner, cell_h);
+            let under = ui.pointer().map_or((0, 0), cell_at);
+            self.scroll(ui, &session, inner, (cell_h, under));
             self.mouse(ui, &session, &response, id, cell_at);
             self.session = Some(session);
         }
@@ -1394,6 +1436,69 @@ impl LiveTerminal {
             self.reconnect.stop();
             self.restart();
         }
+    }
+}
+
+/// The mouse as reported to a program that asked for it (btop's buttons, htop's columns,
+/// vim's `mouse=a`), as xterm does: the button held and the cell last sent, so a move is
+/// sent once per cell.
+#[derive(Debug, Default)]
+struct MouseReports {
+    held: Option<mouse::Button>,
+    cell: Option<(usize, usize)>,
+}
+
+impl MouseReports {
+    /// The reports of this frame's presses, releases and moves on zone `id`, the pointer over
+    /// `cell` (`None` off the window), for a program in `mode`.
+    fn reports(
+        &mut self,
+        ui: &Ui<'_>,
+        mode: TermMode,
+        (hovered, id): (bool, Id),
+        cell: Option<(usize, usize)>,
+    ) -> Vec<Vec<u8>> {
+        let held = mods(ui.modifiers());
+        let mut out = Vec::new();
+        let mut send = |action, at| out.extend(mouse::encode(action, at, held, mode));
+        let Some(cell) = cell else { return out };
+        for (button, down) in ui.button_events(id) {
+            let button = match button {
+                annulus_ui::kit::Button::Primary => mouse::Button::Left,
+                annulus_ui::kit::Button::Middle => mouse::Button::Middle,
+                annulus_ui::kit::Button::Secondary => mouse::Button::Right,
+            };
+            if down {
+                self.held = Some(button);
+                send(mouse::Action::Press(button), cell);
+            } else {
+                if self.held == Some(button) {
+                    self.held = None;
+                }
+                send(mouse::Action::Release(button), cell);
+            }
+            self.cell = Some(cell);
+        }
+        if (hovered || self.held.is_some()) && self.cell != Some(cell) {
+            self.cell = Some(cell);
+            send(mouse::Action::Motion(self.held), cell);
+        }
+        out
+    }
+}
+
+/// Whether the mouse goes to the program: it asked for it, and Shift is not held (Shift
+/// keeps selecting text, as in xterm).
+fn reports_mouse(mode: TermMode, modifiers: Modifiers) -> bool {
+    mouse::reporting(mode) && !modifiers.shift
+}
+
+/// The modifiers the terminal's encoders know.
+fn mods(modifiers: Modifiers) -> Mods {
+    Mods {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        ctrl: modifiers.ctrl,
     }
 }
 
@@ -1997,5 +2102,145 @@ mod tests {
             ),
             Some(b"\x1b[200~x; reboot\x1b[201~".to_vec())
         );
+    }
+
+    /// One frame of a terminal zone over (0, 0)–(100, 100) with `events`: what `reports`
+    /// sends a program in `mode`, the pointer at cell `cell`.
+    #[allow(clippy::unwrap_used)]
+    fn mouse_frame(
+        reports: &mut MouseReports,
+        state: &mut UiState,
+        events: &[Event],
+        (mode, cell): (TermMode, (usize, usize)),
+    ) -> Vec<String> {
+        let mut canvas = CpuCanvas::new(100, 100, 1.0, TextEngine::new()).unwrap();
+        state.begin_frame(events, 0.0);
+        let area = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let mut ui = Ui::new(&mut canvas, Theme::new(Appearance::Dark), state, area);
+        let id = Id::new("mouse-test");
+        let response = ui.zone(id, area, Role::Terminal, "Terminal");
+        let sent = reports.reports(&ui, mode, (response.hovered, id), Some(cell));
+        state.end_frame();
+        sent.into_iter()
+            .map(|bytes| String::from_utf8(bytes).unwrap())
+            .collect()
+    }
+
+    const NOTHING: [&str; 0] = [];
+
+    #[test]
+    fn a_program_that_asked_for_the_mouse_gets_clicks_drags_and_releases() {
+        let mut reports = MouseReports::default();
+        let mut state = UiState::default();
+        let clicks = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        let at = Event::PointerMoved(Point::new(50.0, 50.0));
+        mouse_frame(
+            &mut reports,
+            &mut state,
+            std::slice::from_ref(&at),
+            (clicks, (2, 4)),
+        );
+        // A quick click, down and up within one frame: both are reported.
+        let quick = [
+            at.clone(),
+            Event::PointerDown(annulus_ui::kit::Button::Primary),
+            Event::PointerUp(annulus_ui::kit::Button::Primary),
+        ];
+        assert_eq!(
+            mouse_frame(&mut reports, &mut state, &quick, (clicks, (2, 4))),
+            ["\x1b[<0;5;3M", "\x1b[<0;5;3m"]
+        );
+        // Moving without asking for motion sends nothing.
+        assert_eq!(
+            mouse_frame(&mut reports, &mut state, &[], (clicks, (3, 4))),
+            NOTHING
+        );
+        // A right-button drag, reported once per cell, where the program asked for drags.
+        let drags = clicks | TermMode::MOUSE_DRAG;
+        let down = [Event::PointerDown(annulus_ui::kit::Button::Secondary)];
+        assert_eq!(
+            mouse_frame(&mut reports, &mut state, &down, (drags, (3, 4))),
+            ["\x1b[<2;5;4M"]
+        );
+        assert_eq!(
+            mouse_frame(&mut reports, &mut state, &[], (drags, (3, 6))),
+            ["\x1b[<34;7;4M"]
+        );
+        assert_eq!(
+            mouse_frame(&mut reports, &mut state, &[], (drags, (3, 6))),
+            NOTHING
+        );
+        let up = [Event::PointerUp(annulus_ui::kit::Button::Secondary)];
+        assert_eq!(
+            mouse_frame(&mut reports, &mut state, &up, (drags, (3, 6))),
+            ["\x1b[<2;7;4m"]
+        );
+    }
+
+    #[test]
+    fn shift_keeps_the_mouse_for_selecting_text() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        assert!(reports_mouse(mode, Modifiers::NONE));
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert!(!reports_mouse(mode, shift));
+        assert!(!reports_mouse(TermMode::empty(), Modifiers::NONE));
+    }
+
+    /// A real program turns on the mouse, and a click on the terminal reaches it as xterm's
+    /// report. Unix only: Windows' console turns mouse reports into its own input records for
+    /// a local program, while over SSH (where btop runs) the bytes go through as they are.
+    #[cfg(unix)]
+    #[test]
+    fn a_click_reaches_a_program_that_turned_on_the_mouse() {
+        let mut live = LiveTerminal::new(Program::Command {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; \
+                 head -c 9 | od -An -tx1; sleep 30"
+                    .into(),
+            ],
+        });
+        let mut state = UiState::default();
+        let started = std::time::Instant::now();
+        let mut time = 0.0;
+        let mut clicked = false;
+        let mut seen = String::new();
+        // The top left cell of the terminal, inside its margins.
+        let corner = Point::new(space::L + 2.0, space::M + 2.0);
+        while started.elapsed() < std::time::Duration::from_secs(20) {
+            time += 0.5;
+            let asked = live
+                .session
+                .as_ref()
+                .is_some_and(|session| session.mode().contains(TermMode::SGR_MOUSE));
+            let events = if asked && !clicked {
+                clicked = true;
+                vec![
+                    Event::PointerMoved(corner),
+                    Event::PointerDown(annulus_ui::kit::Button::Primary),
+                ]
+            } else {
+                vec![Event::PointerMoved(corner)]
+            };
+            frame(&mut live, &mut state, &events, time);
+            if let Some(session) = &live.session {
+                seen = session
+                    .screen()
+                    .rows
+                    .iter()
+                    .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if seen.contains("1b 5b 3c 30 3b 31 3b 31 4d") {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        unreachable!("the program never got the click; screen:\n{seen}");
     }
 }

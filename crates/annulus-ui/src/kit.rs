@@ -522,6 +522,9 @@ pub struct UiState {
     /// Files dragged from the OS over the window now, and where when the OS says.
     hovered_files: Option<(Vec<std::path::PathBuf>, Option<Point>)>,
     clicks: Vec<(Id, Button)>,
+    /// Each button that went down (`true`) or came up (`false`) this frame, in order, with
+    /// the zone it went down on.
+    buttons: Vec<(Id, Button, bool)>,
     double_clicks: Vec<Id>,
     last_click: Option<(Id, f64)>,
     focus: Option<Id>,
@@ -581,6 +584,7 @@ impl UiState {
         self.prev_time = self.time;
         self.time = time;
         self.clicks.clear();
+        self.buttons.clear();
         self.double_clicks.clear();
         self.drag_end = None;
         self.dropped.clear();
@@ -623,15 +627,7 @@ impl UiState {
                     self.pointer = None;
                     self.hovered = None;
                 }
-                Event::PointerDown(button) => {
-                    self.pressed = self.hovered.map(|id| (id, *button));
-                    self.pressed_at = self.pointer;
-                    if *button == Button::Primary {
-                        let target = self.hovered.and_then(|id| self.zone(id));
-                        self.focus = target.filter(|z| z.role.focusable()).map(|z| z.id);
-                        self.focus_ring = false;
-                    }
-                }
+                Event::PointerDown(button) => self.press(*button),
                 Event::PointerUp(button) => self.release(*button, time),
                 Event::Wheel { x, y } => {
                     self.wheel.0 += x;
@@ -689,6 +685,20 @@ impl UiState {
         self.focus = Some(id);
     }
 
+    /// A button went down on the zone under the pointer, which takes focus on a primary press.
+    fn press(&mut self, button: Button) {
+        self.pressed = self.hovered.map(|id| (id, button));
+        if let Some(id) = self.hovered {
+            self.buttons.push((id, button, true));
+        }
+        self.pressed_at = self.pointer;
+        if button == Button::Primary {
+            let target = self.hovered.and_then(|id| self.zone(id));
+            self.focus = target.filter(|z| z.role.focusable()).map(|z| z.id);
+            self.focus_ring = false;
+        }
+    }
+
     /// A button came up: a click on the zone it went down on, unless the pointer was dragged
     /// away (then the drag ends there), and a double click when it is the second one.
     fn release(&mut self, button: Button, time: f64) {
@@ -699,6 +709,7 @@ impl UiState {
         if pressed != button {
             return;
         }
+        self.buttons.push((id, button, false));
         if let Some(at) = dragged {
             self.drag_end = Some((id, at));
             return;
@@ -1131,6 +1142,16 @@ impl<'a> Ui<'a> {
         self.state.modifiers
     }
 
+    /// The buttons that went down on `id` (`true`) or came up after going down on it
+    /// (`false`) this frame, in order: a press and its release within one frame both show.
+    pub fn button_events(&self, id: Id) -> impl Iterator<Item = (Button, bool)> + '_ {
+        self.state
+            .buttons
+            .iter()
+            .filter(move |(on, ..)| *on == id && self.state.inert == 0)
+            .map(|&(_, button, down)| (button, down))
+    }
+
     /// Whether the primary button is held down on `id` (a drag in progress).
     #[must_use]
     pub fn dragging(&self, id: Id) -> bool {
@@ -1516,6 +1537,39 @@ mod tests {
             ui.zone(Id::new("a"), A, Role::Button, "A"),
             ui.zone(Id::new("b"), B, Role::Button, "B"),
         )
+    }
+
+    #[test]
+    fn button_events_show_each_press_and_release_even_within_one_frame() {
+        let mut state = UiState::default();
+        let pad = Id::new("pad");
+        let mut seen = Vec::new();
+        let mut run = |state: &mut UiState, events: &[Event]| {
+            frame(state, events, 0.0, |ui| {
+                ui.zone(pad, A, Role::Terminal, "pad");
+                seen = ui.button_events(pad).collect::<Vec<_>>();
+            });
+            seen.clone()
+        };
+        run(&mut state, &[]);
+        let quick = [
+            Event::PointerMoved(Point::new(10.0, 10.0)),
+            Event::PointerDown(Button::Secondary),
+            Event::PointerUp(Button::Secondary),
+        ];
+        assert_eq!(
+            run(&mut state, &quick),
+            [(Button::Secondary, true), (Button::Secondary, false)]
+        );
+        assert_eq!(run(&mut state, &[]), []);
+        // Let go far away, the release still belongs to where it went down.
+        let down = [Event::PointerDown(Button::Primary)];
+        assert_eq!(run(&mut state, &down), [(Button::Primary, true)]);
+        let away = [
+            Event::PointerMoved(Point::new(900.0, 900.0)),
+            Event::PointerUp(Button::Primary),
+        ];
+        assert_eq!(run(&mut state, &away), [(Button::Primary, false)]);
     }
 
     #[test]
