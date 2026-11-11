@@ -126,7 +126,7 @@ Last verified: 2026-11-11 @ d3bf51b
 
 | ID | Feature | Status | Crate | Tests |
 |---|---|---|---|---|
-| F-TERM-001 | VT/xterm emulation per ADR-0016: alt screen, scroll regions, mouse modes, bracketed paste, focus events, synchronized output | Planned | term | — |
+| F-TERM-001 | VT/xterm emulation per ADR-0016: alt screen, scroll regions, mouse modes, bracketed paste, focus events, synchronized output. Mouse reports (clicks, drags, motion, wheel; SGR, UTF-8 and the original encoding) reach programs that ask for them; Shift keeps the mouse for selection | In progress | term, ui, app | `sgr_reports_one_based_cells_and_names_the_released_button`, `the_old_encoding_sends_offset_bytes_and_release_as_button_three`, `utf8_mode_writes_wide_coordinates_as_characters`, `the_wheel_presses_buttons_64_and_65_and_never_releases`, `motion_is_reported_only_in_the_modes_that_ask_for_it`, `button_events_show_each_press_and_release_even_within_one_frame`, `a_program_that_asked_for_the_mouse_gets_clicks_drags_and_releases`, `shift_keeps_the_mouse_for_selecting_text`, `a_click_reaches_a_program_that_turned_on_the_mouse` |
 | F-TERM-002 | Truecolor, 256 colors, underline styles and colors | Planned | term | — |
 | F-TERM-003 | Unicode: wide characters, emoji, combining marks, grapheme clusters. IME input | Planned | term, ui | — |
 | F-TERM-004 | Scrollback: configurable (default 10,000 lines), with a memory cap | In progress | term, session, config, app | `the_scrollback_keeps_as_many_lines_as_asked_and_a_smaller_number_drops_the_oldest`, `settings_round_trip_and_bad_files_fall_back_to_defaults` |
